@@ -26,7 +26,8 @@ use anyhow::{anyhow, Context, Result};
 use bytes::Bytes;
 use clap::Parser;
 use config::Config;
-use net::control::ControlClient;
+use proto::voiceplatform::v1 as pb;
+use net::dispatcher::{ControlDispatcher, PushEvent};
 use net::voice_datagram::{make_voice_datagram, VOICE_HDR_LEN, VOICE_VERSION};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -207,20 +208,84 @@ async fn connect_and_run_session(
     let _ = tx_event.send(UiEvent::SetConnected(true)).await;
     let _ = tx_event.send(UiEvent::AppendLog("[net] connected".into())).await;
 
-    // Control stream
-    let (send, recv) = conn.open_bi().await.context("open control stream")?;
-    let mut ctl = ControlClient::new(send, recv);
+    // Control stream -> dispatcher (request correlation + server push)
+let (send, recv) = conn.open_bi().await.context("open control stream")?;
+let dispatcher = ControlDispatcher::start(send, recv, shutdown_rx.clone());
 
-    ctl.hello_and_auth(&cfg.alpn, &cfg.dev_token)
-        .await
-        .context("hello/auth")?;
+dispatcher
+    .hello_auth(&cfg.alpn, &cfg.dev_token)
+    .await
+    .context("hello/auth")?;
+
+// Server push consumer -> UI log for now
+let mut push_rx = dispatcher.take_push_receiver().await;
+{
+    let tx_event = tx_event.clone();
+    tokio::spawn(async move {
+        while let Some(ev) = push_rx.recv().await {
+            match ev {
+                PushEvent::Chat(c) => {
+                    // ChatEvent is a oneof wrapper around message_* events
+                    if let Some(kind) = c.kind {
+                        match kind {
+                            pb::chat_event::Kind::MessagePosted(mp) => {
+                                let author = mp.author_user_id.map(|u| u.value).unwrap_or_else(|| "unknown".into());
+                                let _ = tx_event
+                                    .send(UiEvent::AppendLog(format!("[chat] {author}: {}", mp.text)))
+                                    .await;
+                            }
+                            pb::chat_event::Kind::MessageEdited(me) => {
+                                let _ = tx_event
+                                    .send(UiEvent::AppendLog(format!("[chat] edited {} -> {}", me.message_id.map(|m| m.value).unwrap_or_default(), me.new_text)))
+                                    .await;
+                            }
+                            pb::chat_event::Kind::MessageDeleted(md) => {
+                                let _ = tx_event
+                                    .send(UiEvent::AppendLog(format!("[chat] deleted {}", md.message_id.map(|m| m.value).unwrap_or_default())))
+                                    .await;
+                            }
+                        }
+                    }
+                }
+                PushEvent::Presence(p) => {
+                    let _ = tx_event
+                        .send(UiEvent::AppendLog(format!("[presence] {:?}", p.kind)))
+                        .await;
+                }
+                PushEvent::Moderation(m) => {
+                    let _ = tx_event
+                        .send(UiEvent::AppendLog(format!("[moderation] {:?}", m)))
+                        .await;
+                }
+                PushEvent::ServerHint(h) => {
+                    let mut parts = vec![];
+                    if h.receiver_report_interval_ms != 0 {
+                        parts.push(format!("rr={}ms", h.receiver_report_interval_ms));
+                    }
+                    if h.max_stream_bitrate_bps != 0 {
+                        parts.push(format!("stream_cap={}bps", h.max_stream_bitrate_bps));
+                    }
+                    if h.max_voice_bitrate_bps != 0 {
+                        parts.push(format!("voice_cap={}bps", h.max_voice_bitrate_bps));
+                    }
+                    let msg = if parts.is_empty() { "server_hint".into() } else { format!("server_hint {}", parts.join(" ")) };
+                    let _ = tx_event.send(UiEvent::AppendLog(format!("[hint] {msg}"))).await;
+                }
+                PushEvent::Unknown(_) => {
+                    // drop unknown pushes quietly
+                }
+            }
+        }
+    });
+}
+
 
     let _ = tx_event.send(UiEvent::SetAuthed(true)).await;
     let _ = tx_event.send(UiEvent::AppendLog("[net] authed".into())).await;
 
     if let Some(ch) = cfg.channel_id.as_deref() {
         // If server hasn't implemented JoinChannel yet, this may fail; treat as non-fatal for now
-        match ctl.join_channel(ch).await {
+        match dispatcher.join_channel(ch).await {
             Ok(()) => {
                 let _ = tx_event.send(UiEvent::SetChannelName(ch.to_string())).await;
                 let _ = tx_event.send(UiEvent::AppendLog(format!("[ctl] joined channel {ch}"))).await;
@@ -253,15 +318,17 @@ async fn connect_and_run_session(
     ));
 
     // Control keepalive task
-    let ctl_keepalive = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(10));
-        loop {
-            interval.tick().await;
-            if let Err(e) = ctl.ping().await {
-                return Err::<(), anyhow::Error>(e);
-            }
+let disp_keepalive = dispatcher.clone();
+let ctl_keepalive = tokio::spawn(async move {
+    let mut interval = tokio::time::interval(Duration::from_secs(10));
+    loop {
+        interval.tick().await;
+        if let Err(e) = disp_keepalive.ping().await {
+            return Err::<(), anyhow::Error>(e);
         }
-    });
+    }
+});
+
 
     // Intent handling loop; for now we just handle Quit / PTT toggle / log chat.
     loop {
@@ -274,15 +341,26 @@ async fn connect_and_run_session(
                         match intent {
                             UiIntent::Quit => return Ok(()),
                             UiIntent::TogglePtt => {
-                                // UI already toggled model; we just reflect in capture gating
-                                let cur = ptt_active.load(Ordering::Relaxed);
-                                let _ = tx_event.send(UiEvent::AppendLog(format!("[ptt] {}", if cur { "ON" } else { "OFF" }))).await;
-                            }
+    // Keep the audio gate in sync with UI toggles.
+    let new = !ptt_active.load(Ordering::Relaxed);
+    ptt_active.store(new, Ordering::Relaxed);
+    let _ = tx_event
+        .send(UiEvent::AppendLog(format!(
+            "[ptt] {}",
+            if new { "ON" } else { "OFF" }
+        )))
+        .await;
+}
                             UiIntent::SendChat { text } => {
-                                // If server chat isn't wired yet, just local log.
-                                let _ = tx_event.send(UiEvent::AppendLog(format!("[me] {text}"))).await;
-                                // TODO: send pb::SendMessageRequest via ControlClient once server implements.
-                            }
+    let _ = tx_event.send(UiEvent::AppendLog(format!("[me] {text}"))).await;
+    if let Some(ch) = cfg.channel_id.as_deref() {
+        if let Err(e) = dispatcher.send_chat(ch, &text).await {
+            let _ = tx_event.send(UiEvent::AppendLog(format!("[ctl] send_chat failed: {e:#}"))).await;
+        }
+    } else {
+        let _ = tx_event.send(UiEvent::AppendLog("[ctl] no --channel-id set; chat not sent".into())).await;
+    }
+}
                             UiIntent::SelectNextChannel | UiIntent::SelectPrevChannel => {
                                 // TODO: implement channel list and JoinChannel intent.
                             }
