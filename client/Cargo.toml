@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-ring = "0.17"
 async-trait = "0.1"
 ratatui = "0.28"
 crossterm = "0.28"
@@ -21,6 +20,8 @@ uuid = { version = "1.10", features = ["v4"] }
 
 quinn = "0.11"
 rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
+ring = "0.17"
+
 
 # Audio
 cpal = "0.15"
