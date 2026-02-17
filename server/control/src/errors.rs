@@ -10,12 +10,18 @@ pub enum ControlError {
     #[error("already exists: {0}")]
     AlreadyExists(&'static str),
 
-    #[error("permission denied: {0}")]
-    PermissionDenied(&'static str),
-
     #[error("invalid argument: {0}")]
     InvalidArgument(&'static str),
 
+    #[error("permission denied: {0}")]
+    PermissionDenied(&'static str),
+
+    #[error("resource exhausted: {0}")]
+    ResourceExhausted(&'static str),
+
     #[error("failed precondition: {0}")]
     FailedPrecondition(&'static str),
+
+    #[error("db error")]
+    Db(#[from] sqlx::Error),
 }
