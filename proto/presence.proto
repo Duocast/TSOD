@@ -1,0 +1,35 @@
+syntax = "proto3";
+
+package voiceplatform.v1;
+
+import "common.proto";
+import "channel.proto";
+
+option go_package = "github.com/yourorg/voiceplatform/proto/gen/go/voiceplatform/v1;voiceplatformv1";
+
+message PresenceEvent {
+  Timestamp at = 1;
+
+  oneof kind {
+    MemberJoined member_joined = 10;
+    MemberLeft member_left = 11;
+    MemberVoiceStateChanged member_voice_state_changed = 12;
+  }
+}
+
+message MemberJoined {
+  ChannelId channel_id = 1;
+  ChannelMember member = 2;
+}
+
+message MemberLeft {
+  ChannelId channel_id = 1;
+  UserId user_id = 2;
+}
+
+message MemberVoiceStateChanged {
+  ChannelId channel_id = 1;
+  UserId user_id = 2;
+  bool muted = 3;
+  bool deafened = 4;
+}
