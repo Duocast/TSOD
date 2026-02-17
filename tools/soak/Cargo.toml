@@ -1,0 +1,21 @@
+[package]
+name = "vp-soak"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0"
+bytes = "1.6"
+clap = { version = "4.5", features = ["derive"] }
+prost = "0.13"
+rand = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.37", features = ["rt-multi-thread", "macros", "time", "signal"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+uuid = { version = "1.10", features = ["v4"] }
+
+quinn = "0.11"
+rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
+ring = "0.17"
