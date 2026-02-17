@@ -1,0 +1,69 @@
+syntax = "proto3";
+
+package voiceplatform.v1;
+
+import "common.proto";
+
+option go_package = "github.com/yourorg/voiceplatform/proto/gen/go/voiceplatform/v1;voiceplatformv1";
+
+message CapabilityHash {
+  // Optional, used for caching decisions server-side.
+  bytes sha256 = 1;
+}
+
+message FeatureCaps {
+  bool supports_quic_datagrams = 1;
+  bool supports_voice_fec = 2;
+  bool supports_streaming = 3;
+  bool supports_drag_drop_upload = 4;
+  bool supports_relay_mode = 5;
+}
+
+message AudioCaps {
+  enum Codec {
+    CODEC_UNSPECIFIED = 0;
+    OPUS = 1;
+  }
+
+  Codec codec = 1;
+  uint32 sample_rate_hz = 2; // 48000
+  bool stereo = 3;
+
+  // Preferred frame sizes in milliseconds (e.g., 20, 10, 5).
+  repeated uint32 frame_ms_preference = 4;
+
+  // Max encoder bitrate this client can send for voice.
+  uint32 max_bitrate_bps = 5;
+
+  // Whether client can decode multiple simultaneous talkers locally.
+  uint32 max_simultaneous_decodes = 6;
+}
+
+message VideoCaps {
+  enum Codec {
+    VCODEC_UNSPECIFIED = 0;
+    H264 = 1;
+    VP9 = 2;
+    AV1 = 3;
+  }
+
+  repeated Codec codecs = 1;
+
+  uint32 max_width = 2;
+  uint32 max_height = 3;
+  uint32 max_fps = 4;
+
+  // Max outbound bitrate the encoder can sustain.
+  uint32 max_bitrate_bps = 5;
+
+  // True if hardware encoding is available for the chosen baseline codec.
+  bool hw_encode_available = 6;
+}
+
+message ClientCaps {
+  BuildInfo build = 1;
+  FeatureCaps features = 2;
+  AudioCaps voice_audio = 3;
+  VideoCaps screen_video = 4;
+  CapabilityHash caps_hash = 5;
+}
