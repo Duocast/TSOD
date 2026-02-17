@@ -1,0 +1,85 @@
+syntax = "proto3";
+
+package voiceplatform.v1;
+
+import "common.proto";
+import "auth.proto";
+import "channel.proto";
+import "presence.proto";
+import "chat.proto";
+import "moderation.proto";
+import "telemetry.proto";
+
+option go_package = "github.com/yourorg/voiceplatform/proto/gen/go/voiceplatform/v1;voiceplatformv1";
+
+message ClientToServer {
+  RequestId request_id = 1;
+  SessionId session_id = 2;     // optional pre-auth; required post-auth
+  Timestamp sent_at = 3;
+
+  oneof payload {
+    // Auth / session
+    Hello hello = 10;
+    AuthRequest auth_request = 11;
+    ResumeSessionRequest resume_session_request = 12;
+
+    // Channel ops
+    JoinChannelRequest join_channel_request = 20;
+    LeaveChannelRequest leave_channel_request = 21;
+    CreateChannelRequest create_channel_request = 22;
+
+    // Chat
+    SendMessageRequest send_message_request = 30;
+
+    // Moderation/admin
+    ModerationActionRequest moderation_action_request = 40;
+
+    // Telemetry/control keepalive
+    Ping ping = 50;
+
+    // Receiver reports / feedback (sent on control stream for simplicity)
+    VoiceReceiverReport voice_receiver_report = 60;
+    StreamReceiverReport stream_receiver_report = 61;
+  }
+}
+
+message ServerToClient {
+  RequestId request_id = 1;      // mirrors request_id for responses; 0 for server push
+  SessionId session_id = 2;      // may be set on hello/auth responses
+  Timestamp sent_at = 3;
+  Error error = 4;               // set for failed responses; unset for success/push
+
+  oneof payload {
+    // Auth / session
+    HelloAck hello_ack = 10;
+    AuthResponse auth_response = 11;
+    ResumeSessionResponse resume_session_response = 12;
+
+    // Channel ops
+    JoinChannelResponse join_channel_response = 20;
+    LeaveChannelResponse leave_channel_response = 21;
+    CreateChannelResponse create_channel_response = 22;
+
+    // Server push events
+    PresenceEvent presence_event = 30;
+    ChatEvent chat_event = 31;
+    ModerationEvent moderation_event = 32;
+
+    // Telemetry
+    Pong pong = 50;
+
+    // Optional server-side guidance (e.g., CC hints, policy changes)
+    ServerHint server_hint = 70;
+  }
+}
+
+message ServerHint {
+  // Suggested receiver report cadence (ms). Server may clamp to policy.
+  uint32 receiver_report_interval_ms = 1;
+
+  // If set, tells client to reduce stream bitrate target immediately.
+  uint32 max_stream_bitrate_bps = 2;
+
+  // If set, tells client to reduce voice bitrate cap (rare, policy).
+  uint32 max_voice_bitrate_bps = 3;
+}
