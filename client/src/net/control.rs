@@ -117,6 +117,11 @@ fn default_caps(alpn: &str) -> pb::ClientCaps {
             max_simultaneous_decodes: 8,
         }),
         screen_video: None,
-        caps_hash: Some(pb::CapabilityHash { sha256: blake3::hash(alpn.as_bytes()).as_bytes().to_vec() }),
+        caps_hash: Some(pb::CapabilityHash { sha256: sha256_bytes(alpn.as_bytes()) }),
     }
+}
+
+fn sha256_bytes(data: &[u8]) -> Vec<u8> {
+    let d = ring::digest::digest(&ring::digest::SHA256, data);
+    d.as_ref().to_vec()
 }
