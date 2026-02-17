@@ -1,0 +1,85 @@
+syntax = "proto3";
+
+package voiceplatform.v1;
+
+option go_package = "github.com/yourorg/voiceplatform/proto/gen/go/voiceplatform/v1;voiceplatformv1";
+option java_multiple_files = true;
+option java_package = "com.yourorg.voiceplatform.v1";
+
+message Error {
+  enum Code {
+    CODE_UNSPECIFIED = 0;
+
+    // Auth
+    UNAUTHENTICATED = 100;
+    PERMISSION_DENIED = 101;
+
+    // Requests
+    INVALID_ARGUMENT = 200;
+    NOT_FOUND = 201;
+    ALREADY_EXISTS = 202;
+    FAILED_PRECONDITION = 203;
+    RESOURCE_EXHAUSTED = 204;
+    ABORTED = 205;
+
+    // Transport / session
+    SESSION_EXPIRED = 300;
+    RATE_LIMITED = 301;
+
+    // Server
+    INTERNAL = 500;
+    UNAVAILABLE = 503;
+  }
+
+  Code code = 1;
+  string message = 2;
+  string detail = 3; // optional developer string; do not rely on it
+}
+
+message Timestamp {
+  // unix time in milliseconds
+  int64 unix_millis = 1;
+}
+
+message UserId {
+  // Stable logical user id (account or device-based depending on deployment).
+  string value = 1;
+}
+
+message DeviceId {
+  // Stable device id (e.g., key fingerprint). Not necessarily globally unique across deployments.
+  string value = 1;
+}
+
+message ServerId {
+  string value = 1;
+}
+
+message ChannelId {
+  string value = 1;
+}
+
+message MessageId {
+  string value = 1;
+}
+
+message AssetId {
+  string value = 1;
+}
+
+message RequestId {
+  // Unique per request on a control stream.
+  uint64 value = 1;
+}
+
+message SessionId {
+  // Issued by server after Hello/Auth; used to correlate reconnect/resume.
+  string value = 1;
+}
+
+message BuildInfo {
+  string client_name = 1;    // e.g. "vp-desktop"
+  string client_version = 2; // semver
+  string platform = 3;       // e.g. "win-x64", "linux-x64"
+  string git_sha = 4;
+}
