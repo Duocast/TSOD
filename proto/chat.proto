@@ -1,0 +1,54 @@
+syntax = "proto3";
+
+package voiceplatform.v1;
+
+import "common.proto";
+
+option go_package = "github.com/yourorg/voiceplatform/proto/gen/go/voiceplatform/v1;voiceplatformv1";
+
+message AttachmentRef {
+  AssetId asset_id = 1;
+  string filename = 2;
+  string mime_type = 3;
+  uint64 size_bytes = 4;
+
+  // Optional preview metadata.
+  uint32 width = 5;
+  uint32 height = 6;
+  uint64 duration_ms = 7; // for audio/video
+}
+
+message SendMessageRequest {
+  ChannelId channel_id = 1;
+  string text = 2;
+  repeated AttachmentRef attachments = 3;
+}
+
+message ChatEvent {
+  Timestamp at = 1;
+
+  oneof kind {
+    MessagePosted message_posted = 10;
+    MessageEdited message_edited = 11;
+    MessageDeleted message_deleted = 12;
+  }
+}
+
+message MessagePosted {
+  MessageId message_id = 1;
+  ChannelId channel_id = 2;
+  UserId author_user_id = 3;
+  string text = 4;
+  repeated AttachmentRef attachments = 5;
+}
+
+message MessageEdited {
+  MessageId message_id = 1;
+  ChannelId channel_id = 2;
+  string new_text = 3;
+}
+
+message MessageDeleted {
+  MessageId message_id = 1;
+  ChannelId channel_id = 2;
+}
