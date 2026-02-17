@@ -1,0 +1,80 @@
+syntax = "proto3";
+
+package voiceplatform.v1;
+
+import "common.proto";
+
+option go_package = "github.com/yourorg/voiceplatform/proto/gen/go/voiceplatform/v1;voiceplatformv1";
+
+message ModerationActionRequest {
+  ChannelId channel_id = 1;
+  UserId target_user_id = 2;
+
+  oneof action {
+    MuteUser mute = 10;
+    DeafenUser deafen = 11;
+    KickUser kick = 12;
+    BanUser ban = 13;
+  }
+}
+
+message MuteUser {
+  bool muted = 1;
+  uint32 duration_seconds = 2; // 0 = until unmuted
+}
+
+message DeafenUser {
+  bool deafened = 1;
+  uint32 duration_seconds = 2;
+}
+
+message KickUser {
+  string reason = 1;
+}
+
+message BanUser {
+  string reason = 1;
+  uint32 duration_seconds = 2; // 0 = permanent
+}
+
+message ModerationEvent {
+  Timestamp at = 1;
+
+  oneof kind {
+    UserMuted user_muted = 10;
+    UserDeafened user_deafened = 11;
+    UserKicked user_kicked = 12;
+    UserBanned user_banned = 13;
+  }
+}
+
+message UserMuted {
+  ChannelId channel_id = 1;
+  UserId target_user_id = 2;
+  bool muted = 3;
+  uint32 duration_seconds = 4;
+  UserId actor_user_id = 5;
+}
+
+message UserDeafened {
+  ChannelId channel_id = 1;
+  UserId target_user_id = 2;
+  bool deafened = 3;
+  uint32 duration_seconds = 4;
+  UserId actor_user_id = 5;
+}
+
+message UserKicked {
+  ChannelId channel_id = 1;
+  UserId target_user_id = 2;
+  string reason = 3;
+  UserId actor_user_id = 4;
+}
+
+message UserBanned {
+  ChannelId channel_id = 1;
+  UserId target_user_id = 2;
+  string reason = 3;
+  uint32 duration_seconds = 4;
+  UserId actor_user_id = 5;
+}
