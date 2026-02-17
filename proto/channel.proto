@@ -1,0 +1,47 @@
+syntax = "proto3";
+
+package voiceplatform.v1;
+
+import "common.proto";
+
+option go_package = "github.com/yourorg/voiceplatform/proto/gen/go/voiceplatform/v1;voiceplatformv1";
+
+message ChannelMember {
+  UserId user_id = 1;
+  string display_name = 2;
+
+  // Voice state flags (server authority for moderation).
+  bool muted = 3;
+  bool deafened = 4;
+}
+
+message ChannelState {
+  ChannelId channel_id = 1;
+  string name = 2;
+  repeated ChannelMember members = 3;
+}
+
+message JoinChannelRequest {
+  ChannelId channel_id = 1;
+}
+
+message JoinChannelResponse {
+  ChannelState state = 1;
+}
+
+message LeaveChannelRequest {
+  ChannelId channel_id = 1;
+}
+
+message LeaveChannelResponse {
+  ChannelId channel_id = 1;
+}
+
+message CreateChannelRequest {
+  string name = 1;
+  ChannelId parent_channel_id = 2; // optional
+}
+
+message CreateChannelResponse {
+  ChannelState state = 1;
+}
