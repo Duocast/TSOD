@@ -1,0 +1,62 @@
+syntax = "proto3";
+
+package voiceplatform.v1;
+
+import "common.proto";
+import "caps.proto";
+
+option go_package = "github.com/yourorg/voiceplatform/proto/gen/go/voiceplatform/v1;voiceplatformv1";
+
+message Hello {
+  ClientCaps caps = 1;
+
+  // Optional pre-auth info for logging/abuse controls.
+  DeviceId device_id = 2;
+}
+
+message HelloAck {
+  // Server-assigned session id (used for resume).
+  SessionId session_id = 1;
+
+  // Policy/config knobs the client should respect.
+  uint32 max_message_size_bytes = 2;
+  uint32 max_upload_size_bytes = 3;
+
+  // Control-plane keepalive policy.
+  uint32 ping_interval_ms = 4;
+}
+
+message AuthRequest {
+  oneof method {
+    DevTokenAuth dev_token = 1;
+    OidcTokenAuth oidc_token = 2;
+  }
+}
+
+message DevTokenAuth {
+  string token = 1;
+}
+
+message OidcTokenAuth {
+  string id_token = 1;
+}
+
+message AuthResponse {
+  UserId user_id = 1;
+  ServerId server_id = 2;
+
+  // True if this user is a server admin (coarse flag; permissions are elsewhere).
+  bool is_admin = 3;
+}
+
+message ResumeSessionRequest {
+  SessionId session_id = 1;
+
+  // Optional: last seen sequence numbers for event replay (if you implement it later).
+  uint64 last_event_seq = 2;
+}
+
+message ResumeSessionResponse {
+  bool resumed = 1;
+  uint64 current_event_seq = 2;
+}
