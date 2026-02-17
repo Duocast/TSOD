@@ -1,0 +1,54 @@
+syntax = "proto3";
+
+package voiceplatform.v1;
+
+import "common.proto";
+
+option go_package = "github.com/yourorg/voiceplatform/proto/gen/go/voiceplatform/v1;voiceplatformv1";
+
+message Ping {
+  uint64 nonce = 1;
+}
+
+message Pong {
+  uint64 nonce = 1;
+  // Server time for rough clock alignment.
+  Timestamp server_time = 2;
+}
+
+// Receiver reports are sent over control stream (reliable) at policy cadence.
+// They are used for CC/pacing decisions and for diagnostics.
+
+message VoiceReceiverReport {
+  ChannelId channel_id = 1;
+
+  // Aggregate metrics over the last interval.
+  float loss_rate = 2;          // 0.0..1.0
+  uint32 rtt_ms = 3;
+  uint32 jitter_ms = 4;
+
+  // Receiver-estimated goodput for voice class (bps).
+  uint32 goodput_bps = 5;
+
+  // Playout buffer delay (ms).
+  uint32 playout_delay_ms = 6;
+}
+
+message StreamReceiverReport {
+  ChannelId channel_id = 1;
+
+  // Identifies the stream (e.g., screen share id) and layer.
+  string stream_id = 2;
+  uint32 layer_id = 3;
+
+  float loss_rate = 4;          // 0.0..1.0
+  uint32 rtt_ms = 5;
+  uint32 jitter_ms = 6;
+
+  uint32 goodput_bps = 7;
+
+  // Decoder/render stats (optional but useful).
+  uint32 frames_decoded = 8;
+  uint32 frames_dropped = 9;
+  uint32 freeze_events = 10;
+}
