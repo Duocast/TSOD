@@ -5,11 +5,13 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0"
-dashmap = "6.0"
 thiserror = "2.0"
-uuid = { version = "1.10", features = ["v4"] }
-parking_lot = "0.12"
 tracing = "0.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.37", features = ["rt-multi-thread", "macros", "time"] }
+uuid = { version = "1.10", features = ["v4", "serde"] }
+ulid = { version = "1.1", features = ["serde"] }
+chrono = { version = "0.4", features = ["serde"] }
 
-# Optional: if you want proto mapping inside control (recommended later)
-prost = "0.13"
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json"] }
