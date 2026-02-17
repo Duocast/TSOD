@@ -1,0 +1,15 @@
+[package]
+name = "vp-control"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0"
+dashmap = "6.0"
+thiserror = "2.0"
+uuid = { version = "1.10", features = ["v4"] }
+parking_lot = "0.12"
+tracing = "0.1"
+
+# Optional: if you want proto mapping inside control (recommended later)
+prost = "0.13"
