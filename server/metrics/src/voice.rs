@@ -33,7 +33,7 @@ impl VoiceMetricsImpl {
     pub fn drop_reason(&self, reason: &'static str) {
         counter!(
             format!("{}_voice_drops_total", self.ns),
-            "reason" => self.policy.reason(reason).as_str().to_string()
+            "reason" => crate::labels::LabelPolicy::reason(reason).as_str().to_string()
         )
         .increment(1);
     }
