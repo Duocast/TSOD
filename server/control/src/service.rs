@@ -221,7 +221,7 @@ impl ControlService {
         self.require_allowed(&mut tx, ctx, Capability::MuteVoice, Some(channel_id), Some(target_user))
             .await?;
 
-        let mut m = self
+        let mut m: Member = self
             .repo
             .get_member(&mut tx, ctx.server_id, channel_id, target_user)
             .await?
@@ -296,7 +296,7 @@ impl ControlService {
         }
 
         // Must be channel member
-        let _ = self
+        let _member: Member = self
             .repo
             .get_member(&mut tx, ctx.server_id, req.channel_id, ctx.user_id)
             .await?
