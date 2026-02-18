@@ -4,8 +4,9 @@ use crate::proto::voiceplatform::v1 as pb;
 
 #[derive(Debug, Clone)]
 pub struct AuthedIdentity {
-    pub user_id: String,
-    pub server_id: String,
+    pub user_id: String,      // UUID string
+    pub server_id: String,    // UUID string
+    pub display_name: String, // user-visible name
     pub is_admin: bool,
 }
 
@@ -24,6 +25,7 @@ impl AuthProvider for DevAuthProvider {
                     Ok(AuthedIdentity {
                         user_id: "00000000-0000-0000-0000-000000000001".to_string(),
                         server_id: "00000000-0000-0000-0000-0000000000aa".to_string(),
+                        display_name: "dev".to_string(),
                         is_admin: true,
                     })
                 } else {
