@@ -51,16 +51,14 @@ impl ControlService {
         self.repo.create_channel(&mut tx, ch.clone()).await?;
 
         // audit
-        self.audit.write(
-            &self.repo,
-            &mut tx,
+        self.repo.insert_audit(&mut tx, &AuditEntry::new(
             ctx.server_id,
             Some(ctx.user_id),
-            "channel.create",
-            "channel",
-            &ch.id.0.to_string(),
-            json!({"name": ch.name, "parent_id": ch.parent_id.map(|p| p.0)}),
-        ).await?;
+            "some.action",
+            "target_type",
+            target_id_string,
+            serde_json::json!({ /* context */ }),
+        )).await?;
 
         // outbox event
         self.repo.insert_outbox(
@@ -105,16 +103,14 @@ impl ControlService {
 
         self.repo.upsert_member(&mut tx, m.clone()).await?;
 
-        self.audit.write(
-            &self.repo,
-            &mut tx,
+        self.repo.insert_audit(&mut tx, &AuditEntry::new(
             ctx.server_id,
             Some(ctx.user_id),
-            "member.join",
-            "channel",
-            &join.channel_id.0.to_string(),
-            json!({"user_id": ctx.user_id.0}),
-        ).await?;
+            "some.action",
+            "target_type",
+            target_id_string,
+            serde_json::json!({ /* context */ }),
+        )).await?;
 
         self.repo.insert_outbox(
             &mut tx,
@@ -162,16 +158,14 @@ impl ControlService {
 
         self.repo.insert_chat_message(&mut tx, rec.clone()).await?;
 
-        self.audit.write(
-            &self.repo,
-            &mut tx,
+        self.repo.insert_audit(&mut tx, &AuditEntry::new(
             ctx.server_id,
             Some(ctx.user_id),
-            "chat.message",
-            "channel",
-            &msg.channel_id.0.to_string(),
-            json!({"message_id": rec.id.0, "text_len": rec.text.len()}),
-        ).await?;
+            "some.action",
+            "target_type",
+            target_id_string,
+            serde_json::json!({ /* context */ }),
+        )).await?;
 
         self.repo.insert_outbox(
             &mut tx,
@@ -198,16 +192,14 @@ pub async fn leave_channel(&self, ctx: &RequestContext, channel_id: ChannelId) -
 
         self.repo.delete_member(&mut tx, channel_id, ctx.user_id).await?;
 
-        self.audit.write(
-            &self.repo,
-            &mut tx,
+        self.repo.insert_audit(&mut tx, &AuditEntry::new(
             ctx.server_id,
             Some(ctx.user_id),
-            "member.leave",
-            "channel",
-            &channel_id.0.to_string(),
-            json!({"user_id": ctx.user_id.0}),
-        ).await?;
+            "some.action",
+            "target_type",
+            target_id_string,
+            serde_json::json!({ /* context */ }),
+        )).await?;
 
         self.repo.insert_outbox(
             &mut tx,
@@ -235,18 +227,16 @@ pub async fn leave_channel(&self, ctx: &RequestContext, channel_id: ChannelId) -
 
         let mut member = self.repo.get_member(&mut tx, channel_id, target).await?;
         member.muted = muted;
-        self.repo.upsert_member(&mut tx, member.clone()).await?;
+        self.repo.upsert_member(&mut tx, ctx.server_id, &member).await?;
 
-        self.audit.write(
-            &self.repo,
-            &mut tx,
+        self.repo.insert_audit(&mut tx, &AuditEntry::new(
             ctx.server_id,
             Some(ctx.user_id),
-            "member.mute",
-            "user",
-            &target.0.to_string(),
-            json!({"channel_id": channel_id.0, "muted": muted}),
-        ).await?;
+            "some.action",
+            "target_type",
+            target_id_string,
+            serde_json::json!({ /* context */ }),
+        )).await?;
 
         self.repo.insert_outbox(
             &mut tx,
