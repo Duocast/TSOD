@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use serde_json::Value as Json;
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
+use sqlx::Row;
 
 use crate::{
     error::{ControlError, ControlResult},
