@@ -1,48 +1,42 @@
 use anyhow::Context;
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use serde_json::Value as Json;
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
-use sqlx::Row;
 
 use crate::{
     error::{ControlError, ControlResult},
     ids::{ChannelId, MessageId, OutboxId, ServerId, UserId},
     model::{
-        AuditEntry, Channel, ChannelCreate, ChannelListItem, ChatMessage, JoinChannel,
-        Member, MemberUpdate, OutboxEvent, OutboxEventRow, SendMessage,
+        AuditEntry, Channel, ChannelListItem, ChatMessage, Member, OutboxEvent, OutboxEventRow,
+        PermissionRequest,
     },
-    perms::{Capability, Decision, PermissionRequest},
+    perms::{Capability, Decision},
 };
 
-/// Repository trait used by ControlService.
-///
-/// NOTE: This trait is used with *static dispatch* (generic R: ControlRepo),
-/// but we also provide PgControlRepo as the default implementation.
-///
-/// Avoid `dyn ControlRepo` if possible; async traits + trait objects are painful.
-/// Where you need polymorphism, prefer `R: ControlRepo`.
+/// Repo trait (static dispatch preferred)
 #[async_trait]
 pub trait ControlRepo: Send + Sync {
-    // ---- Channel ----
+    // Channels
     async fn create_channel(&self, tx: &mut Transaction<'_, Postgres>, ch: &Channel) -> ControlResult<()>;
     async fn get_channel(&self, tx: &mut Transaction<'_, Postgres>, server: ServerId, id: ChannelId) -> ControlResult<Option<Channel>>;
     async fn list_channels(&self, tx: &mut Transaction<'_, Postgres>, server: ServerId) -> ControlResult<Vec<ChannelListItem>>;
 
-    // ---- Membership ----
-    async fn upsert_member(&self, tx: &mut Transaction<'_, Postgres>, m: &Member) -> ControlResult<()>;
+    // Members (NOTE: Member has NO server_id field in your codebase)
+    async fn upsert_member(&self, tx: &mut Transaction<'_, Postgres>, server: ServerId, m: &Member) -> ControlResult<()>;
     async fn delete_member(&self, tx: &mut Transaction<'_, Postgres>, server: ServerId, channel: ChannelId, user: UserId) -> ControlResult<()>;
     async fn get_member(&self, tx: &mut Transaction<'_, Postgres>, server: ServerId, channel: ChannelId, user: UserId) -> ControlResult<Option<Member>>;
     async fn list_members(&self, tx: &mut Transaction<'_, Postgres>, server: ServerId, channel: ChannelId) -> ControlResult<Vec<Member>>;
 
-    // ---- Permissions ----
+    // Permissions
     async fn decide_permission(&self, tx: &mut Transaction<'_, Postgres>, req: &PermissionRequest) -> ControlResult<Decision>;
 
-    // ---- Chat ----
+    // Chat (NOTE: ChatMessage uses author_user_id, not user_id)
     async fn insert_chat_message(&self, tx: &mut Transaction<'_, Postgres>, msg: &ChatMessage) -> ControlResult<()>;
     async fn get_chat_message(&self, tx: &mut Transaction<'_, Postgres>, server: ServerId, id: MessageId) -> ControlResult<Option<ChatMessage>>;
 
-    // ---- Outbox ----
+    // Outbox
     async fn insert_outbox(&self, tx: &mut Transaction<'_, Postgres>, ev: &OutboxEvent) -> ControlResult<()>;
     async fn claim_outbox_batch(
         &self,
@@ -58,11 +52,10 @@ pub trait ControlRepo: Send + Sync {
         claim_token: Uuid,
     ) -> ControlResult<()>;
 
-    // ---- Audit ----
+    // Audit
     async fn insert_audit(&self, tx: &mut Transaction<'_, Postgres>, entry: &AuditEntry) -> ControlResult<()>;
 }
 
-/// Postgres implementation.
 #[derive(Clone)]
 pub struct PgControlRepo {
     pool: PgPool,
@@ -73,19 +66,21 @@ impl PgControlRepo {
         Self { pool }
     }
 
+    pub fn pool(&self) -> &PgPool {
+        &self.pool
+    }
+
     /// Begin a transaction (used by ControlService).
     pub async fn tx(&self) -> ControlResult<Transaction<'_, Postgres>> {
         Ok(self.pool.begin().await?)
-    }
-
-    pub fn pool(&self) -> &PgPool {
-        &self.pool
     }
 }
 
 #[async_trait]
 impl ControlRepo for PgControlRepo {
-    // ---- Channel ----
+    // -------------------------
+    // Channels
+    // -------------------------
 
     async fn create_channel(&self, tx: &mut Transaction<'_, Postgres>, ch: &Channel) -> ControlResult<()> {
         sqlx::query(
@@ -98,20 +93,15 @@ impl ControlRepo for PgControlRepo {
         .bind(ch.server_id.0)
         .bind(&ch.name)
         .bind(ch.parent_id.map(|p| p.0))
-        .bind(ch.max_members.map(|v| v as i32))
-        .bind(ch.max_talkers.map(|v| v as i32))
+        .bind(ch.max_members) // keep as Option<i32> if that’s what your Channel uses
+        .bind(ch.max_talkers) // FIX: Option<i32> (per your compiler)
         .execute(&mut **tx)
         .await
         .context("insert channels")?;
         Ok(())
     }
 
-    async fn get_channel(
-        &self,
-        tx: &mut Transaction<'_, Postgres>,
-        server: ServerId,
-        id: ChannelId,
-    ) -> ControlResult<Option<Channel>> {
+    async fn get_channel(&self, tx: &mut Transaction<'_, Postgres>, server: ServerId, id: ChannelId) -> ControlResult<Option<Channel>> {
         let row = sqlx::query(
             r#"
             SELECT id, server_id, name, parent_id, max_members, max_talkers
@@ -123,15 +113,15 @@ impl ControlRepo for PgControlRepo {
         .bind(id.0)
         .fetch_optional(&mut **tx)
         .await
-        .context("select channels")?;
+        .context("get channel")?;
 
         Ok(row.map(|r| Channel {
             id: ChannelId(r.get::<Uuid, _>("id")),
             server_id: ServerId(r.get::<Uuid, _>("server_id")),
             name: r.get::<String, _>("name"),
             parent_id: r.get::<Option<Uuid>, _>("parent_id").map(ChannelId),
-            max_members: r.get::<Option<i32>, _>("max_members").map(|v| v as u32),
-            max_talkers: r.get::<Option<i32>, _>("max_talkers").map(|v| v as u32),
+            max_members: r.get::<Option<i32>, _>("max_members"),
+            max_talkers: r.get::<Option<i32>, _>("max_talkers"), // FIX: no u32 mapping
         }))
     }
 
@@ -155,29 +145,31 @@ impl ControlRepo for PgControlRepo {
                 id: ChannelId(r.get::<Uuid, _>("id")),
                 name: r.get::<String, _>("name"),
                 parent_id: r.get::<Option<Uuid>, _>("parent_id").map(ChannelId),
-                max_members: r.get::<Option<i32>, _>("max_members").map(|v| v as u32),
-                max_talkers: r.get::<Option<i32>, _>("max_talkers").map(|v| v as u32),
+                max_members: r.get::<Option<i32>, _>("max_members"),
+                max_talkers: r.get::<Option<i32>, _>("max_talkers"),
             });
         }
         Ok(out)
     }
 
-    // ---- Membership ----
+    // -------------------------
+    // Members (no server_id field on Member)
+    // -------------------------
 
-    async fn upsert_member(&self, tx: &mut Transaction<'_, Postgres>, m: &Member) -> ControlResult<()> {
+    async fn upsert_member(&self, tx: &mut Transaction<'_, Postgres>, server: ServerId, m: &Member) -> ControlResult<()> {
         sqlx::query(
             r#"
             INSERT INTO members (server_id, channel_id, user_id, display_name, muted, deafened, joined_at, updated_at)
             VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
             ON CONFLICT (server_id, channel_id, user_id)
             DO UPDATE SET
-                display_name = EXCLUDED.display_name,
-                muted = EXCLUDED.muted,
-                deafened = EXCLUDED.deafened,
-                updated_at = NOW()
+              display_name = EXCLUDED.display_name,
+              muted = EXCLUDED.muted,
+              deafened = EXCLUDED.deafened,
+              updated_at = NOW()
             "#,
         )
-        .bind(m.server_id.0)
+        .bind(server.0)
         .bind(m.channel_id.0)
         .bind(m.user_id.0)
         .bind(&m.display_name)
@@ -185,17 +177,11 @@ impl ControlRepo for PgControlRepo {
         .bind(m.deafened)
         .execute(&mut **tx)
         .await
-        .context("upsert members")?;
+        .context("upsert member")?;
         Ok(())
     }
 
-    async fn delete_member(
-        &self,
-        tx: &mut Transaction<'_, Postgres>,
-        server: ServerId,
-        channel: ChannelId,
-        user: UserId,
-    ) -> ControlResult<()> {
+    async fn delete_member(&self, tx: &mut Transaction<'_, Postgres>, server: ServerId, channel: ChannelId, user: UserId) -> ControlResult<()> {
         sqlx::query(
             r#"
             DELETE FROM members
@@ -220,7 +206,7 @@ impl ControlRepo for PgControlRepo {
     ) -> ControlResult<Option<Member>> {
         let row = sqlx::query(
             r#"
-            SELECT server_id, channel_id, user_id, display_name, muted, deafened
+            SELECT channel_id, user_id, display_name, muted, deafened, joined_at
             FROM members
             WHERE server_id = $1 AND channel_id = $2 AND user_id = $3
             "#,
@@ -233,24 +219,19 @@ impl ControlRepo for PgControlRepo {
         .context("get member")?;
 
         Ok(row.map(|r| Member {
-            server_id: ServerId(r.get::<Uuid, _>("server_id")),
             channel_id: ChannelId(r.get::<Uuid, _>("channel_id")),
             user_id: UserId(r.get::<Uuid, _>("user_id")),
             display_name: r.get::<String, _>("display_name"),
             muted: r.get::<bool, _>("muted"),
             deafened: r.get::<bool, _>("deafened"),
+            joined_at: r.get::<DateTime<Utc>, _>("joined_at"),
         }))
     }
 
-    async fn list_members(
-        &self,
-        tx: &mut Transaction<'_, Postgres>,
-        server: ServerId,
-        channel: ChannelId,
-    ) -> ControlResult<Vec<Member>> {
+    async fn list_members(&self, tx: &mut Transaction<'_, Postgres>, server: ServerId, channel: ChannelId) -> ControlResult<Vec<Member>> {
         let rows = sqlx::query(
             r#"
-            SELECT server_id, channel_id, user_id, display_name, muted, deafened
+            SELECT channel_id, user_id, display_name, muted, deafened, joined_at
             FROM members
             WHERE server_id = $1 AND channel_id = $2
             ORDER BY joined_at ASC
@@ -265,48 +246,55 @@ impl ControlRepo for PgControlRepo {
         let mut out = Vec::with_capacity(rows.len());
         for r in rows {
             out.push(Member {
-                server_id: ServerId(r.get::<Uuid, _>("server_id")),
                 channel_id: ChannelId(r.get::<Uuid, _>("channel_id")),
                 user_id: UserId(r.get::<Uuid, _>("user_id")),
                 display_name: r.get::<String, _>("display_name"),
                 muted: r.get::<bool, _>("muted"),
                 deafened: r.get::<bool, _>("deafened"),
+                joined_at: r.get::<DateTime<Utc>, _>("joined_at"),
             });
         }
         Ok(out)
     }
 
-    // ---- Permissions ----
-    //
-    // This is intentionally minimal: admin bypass; otherwise allow basic capabilities.
-    // You can harden this later (roles, ACL tables, etc.).
+    // -------------------------
+    // Permissions
+    // -------------------------
+
     async fn decide_permission(&self, _tx: &mut Transaction<'_, Postgres>, req: &PermissionRequest) -> ControlResult<Decision> {
         if req.is_admin {
             return Ok(Decision::Allow);
         }
 
-        // Simple policy: allow join + send message by default; restrict moderation.
+        // FIX: don't reference non-existent Capability variants.
+        // Allow only safe baseline caps. Deny everything else by default.
         match req.capability {
             Capability::JoinChannel => Ok(Decision::Allow),
             Capability::SendMessage => Ok(Decision::Allow),
-            Capability::MuteMember => Ok(Decision::Deny),
             Capability::CreateChannel => Ok(Decision::Deny),
+            _ => Ok(Decision::Deny),
         }
     }
 
-    // ---- Chat ----
+    // -------------------------
+    // Chat (author_user_id)
+    // -------------------------
 
     async fn insert_chat_message(&self, tx: &mut Transaction<'_, Postgres>, msg: &ChatMessage) -> ControlResult<()> {
+        // NOTE: This matches the fields your compiler revealed:
+        // id, server_id, channel_id, author_user_id, text (+ attachments, created_at... managed by DB)
+        //
+        // If your schema requires attachments not null, update this insert accordingly.
         sqlx::query(
             r#"
-            INSERT INTO chat_messages (id, server_id, channel_id, user_id, text, created_at)
+            INSERT INTO chat_messages (id, server_id, channel_id, author_user_id, text, created_at)
             VALUES ($1, $2, $3, $4, $5, NOW())
             "#,
         )
         .bind(msg.id.0)
         .bind(msg.server_id.0)
         .bind(msg.channel_id.0)
-        .bind(msg.user_id.0)
+        .bind(msg.author_user_id.0) // FIX
         .bind(&msg.text)
         .execute(&mut **tx)
         .await
@@ -314,15 +302,10 @@ impl ControlRepo for PgControlRepo {
         Ok(())
     }
 
-    async fn get_chat_message(
-        &self,
-        tx: &mut Transaction<'_, Postgres>,
-        server: ServerId,
-        id: MessageId,
-    ) -> ControlResult<Option<ChatMessage>> {
+    async fn get_chat_message(&self, tx: &mut Transaction<'_, Postgres>, server: ServerId, id: MessageId) -> ControlResult<Option<ChatMessage>> {
         let row = sqlx::query(
             r#"
-            SELECT id, server_id, channel_id, user_id, text
+            SELECT id, server_id, channel_id, author_user_id, text, created_at
             FROM chat_messages
             WHERE server_id = $1 AND id = $2
             "#,
@@ -337,12 +320,17 @@ impl ControlRepo for PgControlRepo {
             id: MessageId(r.get::<Uuid, _>("id")),
             server_id: ServerId(r.get::<Uuid, _>("server_id")),
             channel_id: ChannelId(r.get::<Uuid, _>("channel_id")),
-            user_id: UserId(r.get::<Uuid, _>("user_id")),
+            author_user_id: UserId(r.get::<Uuid, _>("author_user_id")), // FIX
             text: r.get::<String, _>("text"),
+            // If your ChatMessage struct has more required fields (attachments, etc.),
+            // you must fill them here. If they're Option/Vec with defaults, this compiles.
+            ..Default::default()
         }))
     }
 
-    // ---- Outbox ----
+    // -------------------------
+    // Outbox
+    // -------------------------
 
     async fn insert_outbox(&self, tx: &mut Transaction<'_, Postgres>, ev: &OutboxEvent) -> ControlResult<()> {
         sqlx::query(
@@ -357,7 +345,7 @@ impl ControlRepo for PgControlRepo {
         .bind(&ev.payload_json)
         .execute(&mut **tx)
         .await
-        .context("insert outbox_events")?;
+        .context("insert outbox")?;
         Ok(())
     }
 
@@ -368,10 +356,6 @@ impl ControlRepo for PgControlRepo {
         claim_token: Uuid,
         limit: i64,
     ) -> ControlResult<Vec<OutboxEventRow>> {
-        // Requires migration adding claim_token/claimed_at columns.
-        //
-        // Claim rows by setting claim_token where not already published and not already claimed.
-        // Use SKIP LOCKED so multiple gateways can poll concurrently.
         let rows = sqlx::query(
             r#"
             WITH cte AS (
@@ -396,7 +380,7 @@ impl ControlRepo for PgControlRepo {
         .bind(claim_token)
         .fetch_all(&mut **tx)
         .await
-        .context("claim outbox batch")?;
+        .context("claim outbox")?;
 
         let mut out = Vec::with_capacity(rows.len());
         for r in rows {
@@ -410,13 +394,7 @@ impl ControlRepo for PgControlRepo {
         Ok(out)
     }
 
-    async fn ack_outbox_published(
-        &self,
-        tx: &mut Transaction<'_, Postgres>,
-        ids: &[OutboxId],
-        claim_token: Uuid,
-    ) -> ControlResult<()> {
-        // Mark published only if claim_token matches (prevents double publish).
+    async fn ack_outbox_published(&self, tx: &mut Transaction<'_, Postgres>, ids: &[OutboxId], claim_token: Uuid) -> ControlResult<()> {
         let uuids: Vec<Uuid> = ids.iter().map(|id| id.0).collect();
 
         sqlx::query(
@@ -431,12 +409,14 @@ impl ControlRepo for PgControlRepo {
         .bind(claim_token)
         .execute(&mut **tx)
         .await
-        .context("ack outbox published")?;
+        .context("ack outbox")?;
 
         Ok(())
     }
 
-    // ---- Audit ----
+    // -------------------------
+    // Audit
+    // -------------------------
 
     async fn insert_audit(&self, tx: &mut Transaction<'_, Postgres>, entry: &AuditEntry) -> ControlResult<()> {
         sqlx::query(
@@ -454,7 +434,7 @@ impl ControlRepo for PgControlRepo {
         .bind(&entry.context_json)
         .execute(&mut **tx)
         .await
-        .context("insert audit_log")?;
+        .context("insert audit")?;
         Ok(())
     }
 }
