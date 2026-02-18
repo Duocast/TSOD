@@ -11,6 +11,7 @@ pub enum Capability {
     ManageChannel,
     ModerateMembers,
     ManageRoles,
+    MuteVoice,
 }
 
 impl Capability {
