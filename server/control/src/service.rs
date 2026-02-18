@@ -70,7 +70,7 @@ impl<R: ControlRepo> ControlService<R> {
             ctx.server_id,
             "channel",
             &ch.id.0.to_string(),
-            json!({"type":"channel.created","channel_id": ch.id.0, "name": ch.name}),
+            json!({"type":"channel.created","channel_id": ch.id.0, "name": ch.name, "max_talkers": ch.max_talkers, "max_members": ch.max_members}),
         ).await?;
 
         tx.commit().await?;
@@ -123,7 +123,7 @@ impl<R: ControlRepo> ControlService<R> {
             ctx.server_id,
             "presence",
             &join.channel_id.0.to_string(),
-            json!({"type":"presence.member_joined","channel_id": join.channel_id.0, "user_id": ctx.user_id.0, "display_name": m.display_name}),
+            json!({"type":"presence.member_joined","channel_id": join.channel_id.0, "user_id": ctx.user_id.0, "display_name": m.display_name, "muted": m.muted, "deafened": m.deafened}),
         ).await?;
 
         let members = self.repo.list_members(&mut tx, join.channel_id).await?;
@@ -131,7 +131,70 @@ impl<R: ControlRepo> ControlService<R> {
         Ok(members)
     }
 
-    pub async fn leave_channel(&self, ctx: &RequestContext, channel_id: ChannelId) -> ControlResult<()> {
+    
+    pub async fn get_channel(&self, ctx: &RequestContext, channel_id: ChannelId) -> ControlResult<Channel> {
+        let mut tx = self.repo.tx().await?;
+        self.require(&mut tx, ctx, Some(channel_id), Capability::JoinChannel).await?;
+        let ch = self.repo.get_channel(&mut tx, ctx.server_id, channel_id).await?;
+        tx.commit().await?;
+        Ok(ch)
+    }
+
+    pub async fn send_message(&self, ctx: &RequestContext, msg: SendMessage) -> ControlResult<ChatMessage> {
+        if msg.text.trim().is_empty() {
+            return Err(ControlError::InvalidArgument("message text empty"));
+        }
+
+        let mut tx = self.repo.tx().await?;
+        self.require(&mut tx, ctx, Some(msg.channel_id), Capability::SendMessage).await?;
+        // Ensure member exists
+        let _m = self.repo.get_member(&mut tx, msg.channel_id, ctx.user_id).await?;
+
+        let now = Utc::now();
+        let rec = ChatMessage {
+            id: MessageId::new(),
+            server_id: ctx.server_id,
+            channel_id: msg.channel_id,
+            author_user_id: ctx.user_id,
+            text: msg.text,
+            attachments: msg.attachments,
+            created_at: now,
+        };
+
+        self.repo.insert_chat_message(&mut tx, rec.clone()).await?;
+
+        self.audit.write(
+            &self.repo,
+            &mut tx,
+            ctx.server_id,
+            Some(ctx.user_id),
+            "chat.message",
+            "channel",
+            &msg.channel_id.0.to_string(),
+            json!({"message_id": rec.id.0, "text_len": rec.text.len()}),
+        ).await?;
+
+        self.repo.insert_outbox(
+            &mut tx,
+            Ulid::new().to_string(),
+            ctx.server_id,
+            "chat",
+            &msg.channel_id.0.to_string(),
+            json!({
+                "type":"chat.message_posted",
+                "message_id": rec.id.0,
+                "channel_id": rec.channel_id.0,
+                "author_user_id": rec.author_user_id.0,
+                "text": rec.text,
+                "attachments": rec.attachments,
+            }),
+        ).await?;
+
+        tx.commit().await?;
+        Ok(rec)
+    }
+
+pub async fn leave_channel(&self, ctx: &RequestContext, channel_id: ChannelId) -> ControlResult<()> {
         let mut tx = self.repo.tx().await?;
 
         self.repo.delete_member(&mut tx, channel_id, ctx.user_id).await?;
@@ -193,6 +256,15 @@ impl<R: ControlRepo> ControlService<R> {
             "presence",
             &channel_id.0.to_string(),
             json!({"type":"presence.voice_state_changed","channel_id": channel_id.0, "user_id": target.0, "muted": muted, "deafened": member.deafened}),
+        ).await?;
+
+        self.repo.insert_outbox(
+            &mut tx,
+            Ulid::new().to_string(),
+            ctx.server_id,
+            "moderation",
+            &channel_id.0.to_string(),
+            json!({"type":"moderation.user_muted", "channel_id": channel_id.0, "target_user_id": target.0, "muted": muted, "duration_seconds": 0, "actor_user_id": ctx.user_id.0}),
         ).await?;
 
         tx.commit().await?;
