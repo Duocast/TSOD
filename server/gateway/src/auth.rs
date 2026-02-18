@@ -22,8 +22,8 @@ impl AuthProvider for DevAuthProvider {
             Some(pb::auth_request::Method::DevToken(m)) => {
                 if m.token == "dev" {
                     Ok(AuthedIdentity {
-                        user_id: "dev-user".to_string(),
-                        server_id: "dev-server".to_string(),
+                        user_id: "00000000-0000-0000-0000-000000000001".to_string(),
+                        server_id: "00000000-0000-0000-0000-0000000000aa".to_string(),
                         is_admin: true,
                     })
                 } else {
