@@ -170,7 +170,7 @@ impl ControlService {
             .repo
             .get_member(&mut tx, ctx.server_id, channel_id, ctx.user_id)
             .await?
-            .ok_or_else(|| not_found("not a channel member"))?;
+            .ok_or_else(|| forbidden("not a member of channel"))?;
 
         self.repo
             .delete_member(&mut tx, ctx.server_id, channel_id, ctx.user_id)
