@@ -1,3 +1,5 @@
+// server/control/src/service.rs
+
 use chrono::Utc;
 use serde_json::json;
 use uuid::Uuid;
@@ -5,7 +7,10 @@ use uuid::Uuid;
 use crate::{
     error::{ControlError, ControlResult},
     ids::{ChannelId, MessageId, OutboxId, ServerId, UserId},
-    model::{AuditEntry, Channel, ChannelCreate, ChatMessage, JoinChannel, Member, OutboxEvent, OutboxEventRow, PermissionRequest, SendMessage},
+    model::{
+        AuditEntry, Channel, ChannelCreate, ChatMessage, JoinChannel, Member, OutboxEvent,
+        OutboxEventRow, PermissionRequest, SendMessage,
+    },
     perms::{Capability, Decision},
     repo::{ControlRepo, PgControlRepo},
 };
@@ -31,9 +36,9 @@ impl ControlService {
         &self.repo
     }
 
-    // -------------------------
+    // -------------------------------------------------------------------------
     // Channels
-    // -------------------------
+    // -------------------------------------------------------------------------
 
     pub async fn create_channel(&self, ctx: &RequestContext, req: ChannelCreate) -> ControlResult<Channel> {
         let mut tx = self.repo.tx().await?;
@@ -56,18 +61,21 @@ impl ControlService {
         self.repo.create_channel(&mut tx, &ch).await?;
 
         self.repo
-            .insert_outbox(&mut tx, &OutboxEvent {
-                id: OutboxId(Uuid::new_v4()),
-                server_id: ctx.server_id,
-                topic: "channel.created".to_string(),
-                payload_json: json!({
-                    "channel_id": ch.id.0.to_string(),
-                    "name": ch.name,
-                    "parent_id": ch.parent_id.map(|p| p.0.to_string()),
-                    "max_members": ch.max_members,
-                    "max_talkers": ch.max_talkers,
-                }),
-            })
+            .insert_outbox(
+                &mut tx,
+                &OutboxEvent {
+                    id: OutboxId(Uuid::new_v4()),
+                    server_id: ctx.server_id,
+                    topic: "channel.created".to_string(),
+                    payload_json: json!({
+                        "channel_id": ch.id.0.to_string(),
+                        "name": ch.name,
+                        "parent_id": ch.parent_id.map(|p| p.0.to_string()),
+                        "max_members": ch.max_members,
+                        "max_talkers": ch.max_talkers,
+                    }),
+                },
+            )
             .await?;
 
         self.repo
@@ -90,7 +98,7 @@ impl ControlService {
 
     pub async fn get_channel(&self, ctx: &RequestContext, id: ChannelId) -> ControlResult<Channel> {
         let mut tx = self.repo.tx().await?;
-        let ch = self
+        let ch: Channel = self
             .repo
             .get_channel(&mut tx, ctx.server_id, id)
             .await?
@@ -99,9 +107,9 @@ impl ControlService {
         Ok(ch)
     }
 
-    // -------------------------
+    // -------------------------------------------------------------------------
     // Membership
-    // -------------------------
+    // -------------------------------------------------------------------------
 
     pub async fn join_channel(&self, ctx: &RequestContext, req: JoinChannel) -> ControlResult<Vec<Member>> {
         let mut tx = self.repo.tx().await?;
@@ -109,7 +117,7 @@ impl ControlService {
         self.require_allowed(&mut tx, ctx, Capability::JoinChannel, Some(req.channel_id), None)
             .await?;
 
-        // Ensure channel exists
+        // Ensure channel exists (and force type inference by unwrapping Option<Channel>)
         let _ch: Channel = self
             .repo
             .get_channel(&mut tx, ctx.server_id, req.channel_id)
@@ -125,22 +133,25 @@ impl ControlService {
             joined_at: Utc::now(),
         };
 
-        // NOTE: repo signature is (tx, server_id, &Member)
+        // Repo signature: (tx, server_id, &Member)
         self.repo.upsert_member(&mut tx, ctx.server_id, &member).await?;
 
         self.repo
-            .insert_outbox(&mut tx, &OutboxEvent {
-                id: OutboxId(Uuid::new_v4()),
-                server_id: ctx.server_id,
-                topic: "presence.member_joined".to_string(),
-                payload_json: json!({
-                    "channel_id": member.channel_id.0.to_string(),
-                    "user_id": member.user_id.0.to_string(),
-                    "display_name": member.display_name,
-                    "muted": member.muted,
-                    "deafened": member.deafened
-                }),
-            })
+            .insert_outbox(
+                &mut tx,
+                &OutboxEvent {
+                    id: OutboxId(Uuid::new_v4()),
+                    server_id: ctx.server_id,
+                    topic: "presence.member_joined".to_string(),
+                    payload_json: json!({
+                        "channel_id": member.channel_id.0.to_string(),
+                        "user_id": member.user_id.0.to_string(),
+                        "display_name": member.display_name,
+                        "muted": member.muted,
+                        "deafened": member.deafened
+                    }),
+                },
+            )
             .await?;
 
         self.repo
@@ -157,7 +168,11 @@ impl ControlService {
             )
             .await?;
 
-        let members = self.repo.list_members(&mut tx, ctx.server_id, req.channel_id).await?;
+        let members = self
+            .repo
+            .list_members(&mut tx, ctx.server_id, req.channel_id)
+            .await?;
+
         tx.commit().await?;
         Ok(members)
     }
@@ -165,27 +180,30 @@ impl ControlService {
     pub async fn leave_channel(&self, ctx: &RequestContext, channel_id: ChannelId) -> ControlResult<()> {
         let mut tx = self.repo.tx().await?;
 
-        // Must exist as member
+        // Must be a member (unwrap Option<Member> to force inference)
         let _member: Member = self
             .repo
             .get_member(&mut tx, ctx.server_id, channel_id, ctx.user_id)
             .await?
-            .ok_or_else(|| forbidden("not a member of channel"))?;
+            .ok_or_else(|| not_found("not a channel member"))?;
 
         self.repo
             .delete_member(&mut tx, ctx.server_id, channel_id, ctx.user_id)
             .await?;
 
         self.repo
-            .insert_outbox(&mut tx, &OutboxEvent {
-                id: OutboxId(Uuid::new_v4()),
-                server_id: ctx.server_id,
-                topic: "presence.member_left".to_string(),
-                payload_json: json!({
-                    "channel_id": channel_id.0.to_string(),
-                    "user_id": ctx.user_id.0.to_string()
-                }),
-            })
+            .insert_outbox(
+                &mut tx,
+                &OutboxEvent {
+                    id: OutboxId(Uuid::new_v4()),
+                    server_id: ctx.server_id,
+                    topic: "presence.member_left".to_string(),
+                    payload_json: json!({
+                        "channel_id": channel_id.0.to_string(),
+                        "user_id": ctx.user_id.0.to_string()
+                    }),
+                },
+            )
             .await?;
 
         self.repo
@@ -216,11 +234,16 @@ impl ControlService {
     ) -> ControlResult<Member> {
         let mut tx = self.repo.tx().await?;
 
-        // We reference Capability::MuteVoice here; if your perms enum names it differently,
-        // rename this variant in perms.rs or update this callsite.
-        self.require_allowed(&mut tx, ctx, Capability::MuteVoice, Some(channel_id), Some(target_user))
-            .await?;
+        self.require_allowed(
+            &mut tx,
+            ctx,
+            Capability::MuteVoice,
+            Some(channel_id),
+            Some(target_user),
+        )
+        .await?;
 
+        // Must exist (unwrap Option<Member>)
         let mut m: Member = self
             .repo
             .get_member(&mut tx, ctx.server_id, channel_id, target_user)
@@ -228,35 +251,42 @@ impl ControlService {
             .ok_or_else(|| not_found("target not a member"))?;
 
         m.muted = muted;
+
         self.repo.upsert_member(&mut tx, ctx.server_id, &m).await?;
 
         self.repo
-            .insert_outbox(&mut tx, &OutboxEvent {
-                id: OutboxId(Uuid::new_v4()),
-                server_id: ctx.server_id,
-                topic: "presence.voice_state_changed".to_string(),
-                payload_json: json!({
-                    "channel_id": channel_id.0.to_string(),
-                    "user_id": target_user.0.to_string(),
-                    "muted": muted,
-                    "deafened": m.deafened
-                }),
-            })
+            .insert_outbox(
+                &mut tx,
+                &OutboxEvent {
+                    id: OutboxId(Uuid::new_v4()),
+                    server_id: ctx.server_id,
+                    topic: "presence.voice_state_changed".to_string(),
+                    payload_json: json!({
+                        "channel_id": channel_id.0.to_string(),
+                        "user_id": target_user.0.to_string(),
+                        "muted": muted,
+                        "deafened": m.deafened
+                    }),
+                },
+            )
             .await?;
 
         self.repo
-            .insert_outbox(&mut tx, &OutboxEvent {
-                id: OutboxId(Uuid::new_v4()),
-                server_id: ctx.server_id,
-                topic: "moderation.user_muted".to_string(),
-                payload_json: json!({
-                    "channel_id": channel_id.0.to_string(),
-                    "target_user_id": target_user.0.to_string(),
-                    "actor_user_id": ctx.user_id.0.to_string(),
-                    "muted": muted,
-                    "reason": reason
-                }),
-            })
+            .insert_outbox(
+                &mut tx,
+                &OutboxEvent {
+                    id: OutboxId(Uuid::new_v4()),
+                    server_id: ctx.server_id,
+                    topic: "moderation.user_muted".to_string(),
+                    payload_json: json!({
+                        "channel_id": channel_id.0.to_string(),
+                        "target_user_id": target_user.0.to_string(),
+                        "actor_user_id": ctx.user_id.0.to_string(),
+                        "muted": muted,
+                        "reason": reason
+                    }),
+                },
+            )
             .await?;
 
         self.repo
@@ -277,9 +307,9 @@ impl ControlService {
         Ok(m)
     }
 
-    // -------------------------
+    // -------------------------------------------------------------------------
     // Chat
-    // -------------------------
+    // -------------------------------------------------------------------------
 
     pub async fn send_message(&self, ctx: &RequestContext, req: SendMessage) -> ControlResult<ChatMessage> {
         let mut tx = self.repo.tx().await?;
@@ -295,7 +325,7 @@ impl ControlService {
             return Err(invalid("message too long"));
         }
 
-        // Must be channel member
+        // Must be a member (unwrap Option<Member> to force inference)
         let _member: Member = self
             .repo
             .get_member(&mut tx, ctx.server_id, req.channel_id, ctx.user_id)
@@ -315,19 +345,22 @@ impl ControlService {
         self.repo.insert_chat_message(&mut tx, &msg).await?;
 
         self.repo
-            .insert_outbox(&mut tx, &OutboxEvent {
-                id: OutboxId(Uuid::new_v4()),
-                server_id: ctx.server_id,
-                topic: "chat.message_posted".to_string(),
-                payload_json: json!({
-                    "message_id": msg.id.0.to_string(),
-                    "channel_id": msg.channel_id.0.to_string(),
-                    "author_user_id": msg.author_user_id.0.to_string(),
-                    "text": msg.text,
-                    "attachments": msg.attachments,
-                    "created_at": msg.created_at,
-                }),
-            })
+            .insert_outbox(
+                &mut tx,
+                &OutboxEvent {
+                    id: OutboxId(Uuid::new_v4()),
+                    server_id: ctx.server_id,
+                    topic: "chat.message_posted".to_string(),
+                    payload_json: json!({
+                        "message_id": msg.id.0.to_string(),
+                        "channel_id": msg.channel_id.0.to_string(),
+                        "author_user_id": msg.author_user_id.0.to_string(),
+                        "text": msg.text,
+                        "attachments": msg.attachments,
+                        "created_at": msg.created_at,
+                    }),
+                },
+            )
             .await?;
 
         self.repo
@@ -348,14 +381,18 @@ impl ControlService {
         Ok(msg)
     }
 
-    // -------------------------
-    // Outbox (used by gateway poller)
-    // -------------------------
+    // -------------------------------------------------------------------------
+    // Outbox (gateway poller)
+    // -------------------------------------------------------------------------
 
+    /// Returns (claim_token, rows).
     pub async fn claim_outbox_batch(&self, server: ServerId, limit: i64) -> ControlResult<(Uuid, Vec<OutboxEventRow>)> {
         let mut tx = self.repo.tx().await?;
         let token = Uuid::new_v4();
-        let rows = self.repo.claim_outbox_batch(&mut tx, server, token, limit).await?;
+        let rows = self
+            .repo
+            .claim_outbox_batch(&mut tx, server, token, limit)
+            .await?;
         tx.commit().await?;
         Ok((token, rows))
     }
@@ -367,9 +404,9 @@ impl ControlService {
         Ok(())
     }
 
-    // -------------------------
+    // -------------------------------------------------------------------------
     // Internal
-    // -------------------------
+    // -------------------------------------------------------------------------
 
     async fn require_allowed(
         &self,
@@ -395,7 +432,9 @@ impl ControlService {
     }
 }
 
-// --- Error helpers (adjust here if your ControlError API differs) ---
+// -----------------------------------------------------------------------------
+// Error helpers (adjust here if your ControlError API differs)
+// -----------------------------------------------------------------------------
 
 fn forbidden(msg: &str) -> ControlError {
     ControlError::forbidden(msg)
