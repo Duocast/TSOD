@@ -10,6 +10,9 @@ pub struct UserId(pub Uuid);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ChannelId(pub Uuid);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct MessageId(pub Uuid);
+
 impl ServerId {
     pub fn new() -> Self { Self(Uuid::new_v4()) }
 }
@@ -17,5 +20,9 @@ impl UserId {
     pub fn new() -> Self { Self(Uuid::new_v4()) }
 }
 impl ChannelId {
+    pub fn new() -> Self { Self(Uuid::new_v4()) }
+}
+
+impl MessageId {
     pub fn new() -> Self { Self(Uuid::new_v4()) }
 }
