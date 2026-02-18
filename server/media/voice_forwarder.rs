@@ -35,13 +35,7 @@ use bytes::Bytes;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, warn};
 
-/// ---- Project-facing types you should adapt ----
-/// Use your real IDs (UUID/ULID). Keep them `Copy`/cheap.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct UserId(pub uuid::Uuid);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct ChannelId(pub uuid::Uuid);
+use vp_control::ids::{ChannelId, UserId};
 
 /// Sender/receiver datagram output handle. This should send a datagram to a QUIC Connection.
 #[async_trait::async_trait]
