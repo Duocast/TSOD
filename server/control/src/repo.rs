@@ -2,6 +2,7 @@ use crate::{
     errors::{ControlError, ControlResult},
     ids::*,
     model::*,
+    outbox::OutboxRecord,
     perms::{Capability, Effect, PermissionDecision},
 };
 use async_trait::async_trait;
@@ -34,6 +35,28 @@ pub trait ControlRepo: Send + Sync {
         user: UserId,
         cap: Capability,
     ) -> ControlResult<PermissionDecision>;
+
+    // Chat
+    async fn insert_chat_message(&self, tx: &mut Transaction<'_, Postgres>, msg: ChatMessage) -> ControlResult<()>;
+    async fn get_chat_message(&self, tx: &mut Transaction<'_, Postgres>, server: ServerId, id: MessageId) -> ControlResult<ChatMessage>;
+
+    // Outbox claiming for multi-gateway
+    async fn claim_outbox_batch(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        server: ServerId,
+        limit: i64,
+        claim_token: &str,
+        claim_ttl_seconds: i64,
+    ) -> ControlResult<Vec<OutboxRecord>>;
+
+    async fn ack_outbox_published(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        id: &str,
+        claim_token: &str,
+    ) -> ControlResult<()>;
+
 
     // Outbox + audit
     async fn insert_outbox(
@@ -290,6 +313,110 @@ impl ControlRepo for PgControlRepo {
         }
 
         Ok(PermissionDecision::Deny)
+    }
+
+
+    async fn insert_chat_message(&self, tx: &mut Transaction<'_, Postgres>, msg: ChatMessage) -> ControlResult<()> {
+        sqlx::query!(
+            r#"INSERT INTO chat_messages (id, server_id, channel_id, author_user_id, text, attachments)
+               VALUES ($1,$2,$3,$4,$5,$6)"#,
+            msg.id.0,
+            msg.server_id.0,
+            msg.channel_id.0,
+            msg.author_user_id.0,
+            msg.text,
+            msg.attachments
+        )
+        .execute(&mut **tx)
+        .await?;
+        Ok(())
+    }
+
+    async fn get_chat_message(&self, tx: &mut Transaction<'_, Postgres>, server: ServerId, id: MessageId) -> ControlResult<ChatMessage> {
+        let r = sqlx::query!(
+            r#"SELECT id, server_id, channel_id, author_user_id, text, attachments, created_at
+               FROM chat_messages WHERE server_id=$1 AND id=$2"#,
+            server.0,
+            id.0
+        )
+        .fetch_optional(&mut **tx)
+        .await?;
+        let r = r.ok_or(ControlError::NotFound("chat_message"))?;
+        Ok(ChatMessage {
+            id: MessageId(r.id),
+            server_id: ServerId(r.server_id),
+            channel_id: ChannelId(r.channel_id),
+            author_user_id: UserId(r.author_user_id),
+            text: r.text,
+            attachments: r.attachments,
+            created_at: r.created_at,
+        })
+    }
+
+    async fn claim_outbox_batch(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        server: ServerId,
+        limit: i64,
+        claim_token: &str,
+        claim_ttl_seconds: i64,
+    ) -> ControlResult<Vec<OutboxRecord>> {
+        let rows = sqlx::query!(
+            r#"WITH claim AS (
+                SELECT id FROM outbox_events
+                WHERE server_id=$1
+                  AND published_at IS NULL
+                  AND (claimed_at IS NULL OR claimed_at < (now() - (make_interval(secs => $4))))
+                ORDER BY created_at ASC
+                LIMIT $2
+                FOR UPDATE SKIP LOCKED
+            )
+            UPDATE outbox_events o
+               SET claimed_at = now(),
+                   claim_token = $3
+            FROM claim
+            WHERE o.id = claim.id
+            RETURNING o.id, o.server_id, o.topic, o.key, o.payload, o.created_at"#,
+            server.0,
+            limit,
+            claim_token,
+            claim_ttl_seconds as i64,
+        )
+        .fetch_all(&mut **tx)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| OutboxRecord {
+                id: r.id,
+                server_id: r.server_id,
+                topic: r.topic,
+                key: r.key,
+                payload: r.payload,
+                created_at: r.created_at,
+            })
+            .collect())
+    }
+
+    async fn ack_outbox_published(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        id: &str,
+        claim_token: &str,
+    ) -> ControlResult<()> {
+        let res = sqlx::query!(
+            r#"UPDATE outbox_events
+               SET published_at = now()
+               WHERE id=$1 AND claim_token=$2 AND published_at IS NULL"#,
+            id,
+            claim_token
+        )
+        .execute(&mut **tx)
+        .await?;
+        if res.rows_affected() != 1 {
+            return Err(ControlError::Conflict("outbox ack failed"));
+        }
+        Ok(())
     }
 
     async fn insert_outbox(
