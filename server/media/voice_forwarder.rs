@@ -35,7 +35,9 @@ use bytes::Bytes;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, warn};
 
+/// ---- Project-facing types ----
 use vp_control::ids::{ChannelId, UserId};
+
 
 /// Sender/receiver datagram output handle. This should send a datagram to a QUIC Connection.
 #[async_trait::async_trait]
