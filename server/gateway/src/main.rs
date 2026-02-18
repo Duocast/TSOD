@@ -3,6 +3,7 @@ mod config;
 mod frame;
 mod gateway;
 mod tls;
+mod state;
 
 pub mod proto;
 
@@ -34,7 +35,9 @@ async fn main() -> Result<()> {
         .with_single_cert(certs, key)?;
     rustls.alpn_protocols = vec![cfg.alpn.as_bytes().to_vec()];
 
-    let mut server_config = ServerConfig::with_crypto(Arc::new(quinn::crypto::rustls::QuicServerConfig::try_from(rustls)?));
+    let mut server_config = ServerConfig::with_crypto(Arc::new(
+        quinn::crypto::rustls::QuicServerConfig::try_from(rustls)?
+    ));
 
     let mut transport = TransportConfig::default();
     transport.max_concurrent_bidi_streams(64u32.into());
@@ -42,8 +45,13 @@ async fn main() -> Result<()> {
     transport.datagram_receive_buffer_size(Some(1024 * 1024));
     transport.datagram_send_buffer_size(1024 * 1024);
     transport.keep_alive_interval(Some(std::time::Duration::from_secs(10)));
-
     server_config.transport_config(Arc::new(transport));
+
+    // ---- Control plane (Postgres) ----
+    let pool = sqlx::PgPool::connect(&cfg.database_url).await?;
+    let repo = vp_control::repo::PgControlRepo::new(pool);
+    let control = vp_control::service::ControlService::new(repo);
+    let state = Arc::new(crate::state::GatewayState::new(control));
 
     let endpoint = Endpoint::server(server_config, addr)?;
     info!("listening on {}", endpoint.local_addr()?);
@@ -51,16 +59,13 @@ async fn main() -> Result<()> {
     let auth_provider: Arc<dyn auth::AuthProvider> = if cfg.dev_mode {
         Arc::new(DevAuthProvider)
     } else {
-        // Plug in real OIDC/JWT later
         Arc::new(DevAuthProvider)
     };
 
-    let gw = Gateway::new(auth_provider, cfg.alpn);
+    let gw = Gateway::new(auth_provider, cfg.alpn, state);
     tokio::select! {
         r = gw.serve(endpoint) => r?,
-        _ = tokio::signal::ctrl_c() => {
-            info!("shutdown");
-        }
+        _ = tokio::signal::ctrl_c() => info!("shutdown"),
     }
 
     Ok(())
