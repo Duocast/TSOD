@@ -110,7 +110,7 @@ impl ControlService {
             .await?;
 
         // Ensure channel exists
-        let _ch = self
+        let _ch: Channel = self
             .repo
             .get_channel(&mut tx, ctx.server_id, req.channel_id)
             .await?
@@ -166,7 +166,7 @@ impl ControlService {
         let mut tx = self.repo.tx().await?;
 
         // Must exist as member
-        let _ = self
+        let _member: Member = self
             .repo
             .get_member(&mut tx, ctx.server_id, channel_id, ctx.user_id)
             .await?
