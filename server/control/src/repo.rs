@@ -1,4 +1,3 @@
-use anyhow::Context;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde_json::Value as Json;
@@ -6,17 +5,20 @@ use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
 use crate::{
-    error::ControlResult,
+    errors::ControlResult,
     ids::{AuditId, ChannelId, MessageId, OutboxId, ServerId, UserId},
     model::{
         AuditEntry, Channel, ChannelListItem, ChatMessage, Member, OutboxEvent, OutboxEventRow,
         PermissionRequest,
     },
-    perms::{Capability, Decision},
+    perms::{Capability, PermissionDecision},
 };
 
 #[async_trait]
 pub trait ControlRepo: Send + Sync {
+    // Transactions
+    async fn tx(&self) -> ControlResult<Transaction<'_, Postgres>>;
+
     // Channels
     async fn create_channel(&self, tx: &mut Transaction<'_, Postgres>, ch: &Channel) -> ControlResult<()>;
     async fn get_channel(&self, tx: &mut Transaction<'_, Postgres>, server: ServerId, id: ChannelId) -> ControlResult<Option<Channel>>;
@@ -27,9 +29,10 @@ pub trait ControlRepo: Send + Sync {
     async fn delete_member(&self, tx: &mut Transaction<'_, Postgres>, server: ServerId, channel: ChannelId, user: UserId) -> ControlResult<()>;
     async fn get_member(&self, tx: &mut Transaction<'_, Postgres>, server: ServerId, channel: ChannelId, user: UserId) -> ControlResult<Option<Member>>;
     async fn list_members(&self, tx: &mut Transaction<'_, Postgres>, server: ServerId, channel: ChannelId) -> ControlResult<Vec<Member>>;
+    async fn count_members(&self, tx: &mut Transaction<'_, Postgres>, server: ServerId, channel: ChannelId) -> ControlResult<i64>;
 
     // Permissions
-    async fn decide_permission(&self, tx: &mut Transaction<'_, Postgres>, req: &PermissionRequest) -> ControlResult<Decision>;
+    async fn decide_permission(&self, tx: &mut Transaction<'_, Postgres>, req: &PermissionRequest) -> ControlResult<PermissionDecision>;
 
     // Chat (ChatMessage uses author_user_id; no Default)
     async fn insert_chat_message(&self, tx: &mut Transaction<'_, Postgres>, msg: &ChatMessage) -> ControlResult<()>;
@@ -68,15 +71,14 @@ impl PgControlRepo {
     pub fn pool(&self) -> &PgPool {
         &self.pool
     }
-
-    /// Begin a transaction (used by ControlService).
-    pub async fn tx(&self) -> ControlResult<Transaction<'_, Postgres>> {
-        Ok(self.pool.begin().await?)
-    }
 }
 
 #[async_trait]
 impl ControlRepo for PgControlRepo {
+    async fn tx(&self) -> ControlResult<Transaction<'_, Postgres>> {
+        Ok(self.pool.begin().await?)
+    }
+
     // -------------------------
     // Channels
     // -------------------------
@@ -95,8 +97,7 @@ impl ControlRepo for PgControlRepo {
         .bind(ch.max_members)
         .bind(ch.max_talkers)
         .execute(&mut **tx)
-        .await
-        .context("insert channels")?;
+        .await?;
         Ok(())
     }
 
@@ -111,8 +112,7 @@ impl ControlRepo for PgControlRepo {
         .bind(server.0)
         .bind(id.0)
         .fetch_optional(&mut **tx)
-        .await
-        .context("get channel")?;
+        .await?;
 
         Ok(row.map(|r| Channel {
             id: ChannelId(r.get::<Uuid, _>("id")),
@@ -137,8 +137,7 @@ impl ControlRepo for PgControlRepo {
         )
         .bind(server.0)
         .fetch_all(&mut **tx)
-        .await
-        .context("list channels")?;
+        .await?;
 
         let mut out = Vec::with_capacity(rows.len());
         for r in rows {
@@ -178,8 +177,7 @@ impl ControlRepo for PgControlRepo {
         .bind(m.deafened)
         .bind(Some(m.joined_at))
         .execute(&mut **tx)
-        .await
-        .context("upsert member")?;
+        .await?;
         Ok(())
     }
 
@@ -194,8 +192,7 @@ impl ControlRepo for PgControlRepo {
         .bind(channel.0)
         .bind(user.0)
         .execute(&mut **tx)
-        .await
-        .context("delete member")?;
+        .await?;
         Ok(())
     }
 
@@ -217,8 +214,7 @@ impl ControlRepo for PgControlRepo {
         .bind(channel.0)
         .bind(user.0)
         .fetch_optional(&mut **tx)
-        .await
-        .context("get member")?;
+        .await?;
 
         Ok(row.map(|r| Member {
             channel_id: ChannelId(r.get::<Uuid, _>("channel_id")),
@@ -242,8 +238,7 @@ impl ControlRepo for PgControlRepo {
         .bind(server.0)
         .bind(channel.0)
         .fetch_all(&mut **tx)
-        .await
-        .context("list members")?;
+        .await?;
 
         let mut out = Vec::with_capacity(rows.len());
         for r in rows {
@@ -259,21 +254,35 @@ impl ControlRepo for PgControlRepo {
         Ok(out)
     }
 
+    async fn count_members(&self, tx: &mut Transaction<'_, Postgres>, server: ServerId, channel: ChannelId) -> ControlResult<i64> {
+        let row = sqlx::query(
+            r#"
+            SELECT COUNT(*) as cnt
+            FROM members
+            WHERE server_id = $1 AND channel_id = $2
+            "#,
+        )
+        .bind(server.0)
+        .bind(channel.0)
+        .fetch_one(&mut **tx)
+        .await?;
+        Ok(row.get::<i64, _>("cnt"))
+    }
+
     // -------------------------
     // Permissions
     // -------------------------
 
-    async fn decide_permission(&self, _tx: &mut Transaction<'_, Postgres>, req: &PermissionRequest) -> ControlResult<Decision> {
+    async fn decide_permission(&self, _tx: &mut Transaction<'_, Postgres>, req: &PermissionRequest) -> ControlResult<PermissionDecision> {
         if req.is_admin {
-            return Ok(Decision::Allow);
+            return Ok(PermissionDecision::Allow);
         }
 
-        // Safe baseline allow-list; deny by default (avoids referencing unknown Capability variants).
         match req.capability {
-            Capability::JoinChannel => Ok(Decision::Allow),
-            Capability::SendMessage => Ok(Decision::Allow),
-            Capability::CreateChannel => Ok(Decision::Deny),
-            _ => Ok(Decision::Deny),
+            Capability::JoinChannel => Ok(PermissionDecision::Allow),
+            Capability::SendMessage => Ok(PermissionDecision::Allow),
+            Capability::CreateChannel => Ok(PermissionDecision::Deny),
+            _ => Ok(PermissionDecision::Deny),
         }
     }
 
@@ -296,8 +305,7 @@ impl ControlRepo for PgControlRepo {
         .bind(&msg.attachments)
         .bind(msg.created_at)
         .execute(&mut **tx)
-        .await
-        .context("insert chat_messages")?;
+        .await?;
         Ok(())
     }
 
@@ -312,8 +320,7 @@ impl ControlRepo for PgControlRepo {
         .bind(server.0)
         .bind(id.0)
         .fetch_optional(&mut **tx)
-        .await
-        .context("get chat message")?;
+        .await?;
 
         Ok(row.map(|r| ChatMessage {
             id: MessageId(r.get::<Uuid, _>("id")),
@@ -342,8 +349,7 @@ impl ControlRepo for PgControlRepo {
         .bind(&ev.topic)
         .bind(&ev.payload_json)
         .execute(&mut **tx)
-        .await
-        .context("insert outbox")?;
+        .await?;
         Ok(())
     }
 
@@ -354,7 +360,6 @@ impl ControlRepo for PgControlRepo {
         claim_token: Uuid,
         limit: i64,
     ) -> ControlResult<Vec<OutboxEventRow>> {
-        // Requires your migration adding claim_token/claimed_at columns.
         let rows = sqlx::query(
             r#"
             WITH cte AS (
@@ -378,8 +383,7 @@ impl ControlRepo for PgControlRepo {
         .bind(limit)
         .bind(claim_token)
         .fetch_all(&mut **tx)
-        .await
-        .context("claim outbox")?;
+        .await?;
 
         let mut out = Vec::with_capacity(rows.len());
         for r in rows {
@@ -407,8 +411,7 @@ impl ControlRepo for PgControlRepo {
         .bind(&uuids)
         .bind(claim_token)
         .execute(&mut **tx)
-        .await
-        .context("ack outbox")?;
+        .await?;
         Ok(())
     }
 
@@ -432,8 +435,7 @@ impl ControlRepo for PgControlRepo {
         .bind(&entry.context_json)
         .bind(entry.created_at)
         .execute(&mut **tx)
-        .await
-        .context("insert audit")?;
+        .await?;
         Ok(())
     }
 }
