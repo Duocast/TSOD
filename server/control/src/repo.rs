@@ -104,7 +104,7 @@ impl ControlRepo for PgControlRepo {
     async fn get_channel(&self, tx: &mut Transaction<'_, Postgres>, server: ServerId, id: ChannelId) -> ControlResult<Option<Channel>> {
         let row = sqlx::query(
             r#"
-            SELECT id, server_id, name, parent_id, max_members, max_talkers
+            SELECT id, server_id, name, parent_id, max_members, max_talkers, created_at, updated_at
             FROM channels
             WHERE server_id = $1 AND id = $2
             "#,
