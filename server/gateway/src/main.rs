@@ -2,8 +2,10 @@ mod auth;
 mod config;
 mod frame;
 mod gateway;
-mod tls;
+mod metrics_adapter;
+mod outbox_dispatch;
 mod state;
+mod tls;
 
 pub mod proto;
 
@@ -13,11 +15,16 @@ use config::Config;
 use gateway::Gateway;
 use quinn::{Endpoint, ServerConfig, TransportConfig};
 use rustls::ServerConfig as RustlsServerConfig;
+use sqlx::postgres::PgPoolOptions;
 use std::{net::SocketAddr, sync::Arc};
 use tracing::{info, Level};
 use tracing_subscriber::EnvFilter;
+use vp_metrics::{MetricsConfig, MetricsServer};
 
 use crate::auth::DevAuthProvider;
+use crate::metrics_adapter::voice_metrics;
+use crate::outbox_dispatch::{OutboxDispatchConfig, run_outbox_dispatcher};
+use crate::state::{MembershipCache, PushHub, Sessions};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -28,6 +35,55 @@ async fn main() -> Result<()> {
     let cfg = Config::parse();
     let addr: SocketAddr = cfg.listen.parse()?;
 
+    // Metrics
+    let ms = MetricsServer::install(MetricsConfig {
+        listen: cfg.metrics_listen.clone(),
+        namespace: "vp",
+    })?;
+    tokio::spawn(async move {
+        let _ = ms.serve().await;
+    });
+
+    // Postgres
+    let pool = PgPoolOptions::new()
+        .max_connections(32)
+        .connect(&cfg.database_url)
+        .await?;
+
+    // Migrations (control-plane schema)
+    sqlx::migrate!("../control/migrations").run(&pool).await?;
+
+    let repo = vp_control::PgControlRepo::new(pool.clone());
+    let control = vp_control::ControlService::new(repo.clone());
+
+    // Shared runtime state
+    let push = PushHub::new();
+    let sessions = Sessions::new();
+    let membership = MembershipCache::new();
+
+    // Media forwarder
+    let forwarder = Arc::new(vp_media::voice_forwarder::VoiceForwarder::new(
+        vp_media::voice_forwarder::VoiceForwarderConfig::default(),
+        sessions.clone(),
+        membership.clone(),
+        voice_metrics(),
+    ));
+
+    // Outbox dispatcher (push fanout)
+    let server_id = vp_control::ids::ServerId(uuid::Uuid::parse_str(&cfg.default_server_id)?);
+    tokio::spawn(run_outbox_dispatcher(
+        repo.clone(),
+        server_id,
+        push.clone(),
+        membership.clone(),
+        OutboxDispatchConfig {
+            poll_interval: std::time::Duration::from_millis(cfg.outbox_poll_ms),
+            batch: cfg.outbox_batch,
+            claim_ttl_seconds: cfg.outbox_claim_ttl_s,
+        },
+    ));
+
+    // QUIC listener
     let (certs, key) = tls::load_or_generate_tls(cfg.tls_cert_pem.as_deref(), cfg.tls_key_pem.as_deref())?;
 
     let mut rustls = RustlsServerConfig::builder()
@@ -36,7 +92,7 @@ async fn main() -> Result<()> {
     rustls.alpn_protocols = vec![cfg.alpn.as_bytes().to_vec()];
 
     let mut server_config = ServerConfig::with_crypto(Arc::new(
-        quinn::crypto::rustls::QuicServerConfig::try_from(rustls)?
+        quinn::crypto::rustls::QuicServerConfig::try_from(rustls)?,
     ));
 
     let mut transport = TransportConfig::default();
@@ -47,12 +103,6 @@ async fn main() -> Result<()> {
     transport.keep_alive_interval(Some(std::time::Duration::from_secs(10)));
     server_config.transport_config(Arc::new(transport));
 
-    // ---- Control plane (Postgres) ----
-    let pool = sqlx::PgPool::connect(&cfg.database_url).await?;
-    let repo = vp_control::repo::PgControlRepo::new(pool);
-    let control = vp_control::service::ControlService::new(repo);
-    let state = Arc::new(crate::state::GatewayState::new(control));
-
     let endpoint = Endpoint::server(server_config, addr)?;
     info!("listening on {}", endpoint.local_addr()?);
 
@@ -62,10 +112,13 @@ async fn main() -> Result<()> {
         Arc::new(DevAuthProvider)
     };
 
-    let gw = Gateway::new(auth_provider, cfg.alpn, state);
+    let gw = Gateway::new(auth_provider, cfg.alpn, control, push, sessions, membership, forwarder);
+
     tokio::select! {
         r = gw.serve(endpoint) => r?,
-        _ = tokio::signal::ctrl_c() => info!("shutdown"),
+        _ = tokio::signal::ctrl_c() => {
+            info!("shutdown");
+        }
     }
 
     Ok(())
