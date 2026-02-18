@@ -26,6 +26,7 @@ impl Capability {
             Capability::ManageChannel => "manage_channel",
             Capability::ModerateMembers => "moderate_members",
             Capability::ManageRoles => "manage_roles",
+            Capability::MuteVoice => "mute_voice",
         }
     }
     pub fn from_str(s: &str) -> Option<Self> {
