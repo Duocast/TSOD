@@ -6,9 +6,9 @@ use ulid::Ulid;
 pub struct AuditWriter;
 
 impl AuditWriter {
-    pub async fn write(
+    pub async fn write<R: ControlRepo + ?Sized>(
         &self,
-        repo: &dyn ControlRepo,
+        repo: &R,
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         server: ServerId,
         actor: Option<UserId>,
