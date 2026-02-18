@@ -1,238 +1,167 @@
-use anyhow::{anyhow, Result};
-use bytes::Bytes;
-use std::{collections::{HashMap, HashSet}, sync::Arc};
-use tokio::sync::{mpsc, RwLock};
-
-use vp_control::{
-    ids::{ChannelId, ServerId, UserId},
-    model::{ChannelCreate, JoinChannel},
-    repo::PgControlRepo,
-    service::{ControlService, RequestContext},
+use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
+    sync::Arc,
 };
 
-use vp_media::voice_forwarder as vf;
+use anyhow::Result;
+use bytes::Bytes;
+use dashmap::DashMap;
+use tokio::sync::mpsc;
 
-pub struct GatewayState {
-    pub control: ControlService<PgControlRepo>,
-    pub sessions: Arc<SessionRegistryImpl>,
-    pub pushes: Arc<PushHub>,
-    pub membership: Arc<MembershipCache>,
-    pub voice: Arc<vf::VoiceForwarder>,
-}
+use crate::proto::voiceplatform::v1 as pb;
 
-impl GatewayState {
-    pub fn new(control: ControlService<PgControlRepo>) -> Self {
-        let sessions = Arc::new(SessionRegistryImpl::default());
-        let pushes = Arc::new(PushHub::default());
-        let membership = Arc::new(MembershipCache::default());
+use vp_control::ids::{ChannelId, UserId};
+use vp_media::voice_forwarder::{DatagramTx, MembershipProvider, SessionRegistry};
 
-        let voice_cfg = vf::VoiceForwarderConfig {
-            max_datagram_bytes: 1400,
-            min_datagram_bytes: vf::VOICE_HEADER_LEN,
-            sender_pps_limit: 200,
-            sender_bps_limit: 200_000,
-            per_receiver_queue: 64,
-            talker_activity_window: std::time::Duration::from_millis(600),
-            max_ts_skew_ms: 5_000,
-            vad_required_for_talker: false,
-        };
-
-        let voice = Arc::new(vf::VoiceForwarder::new(
-            voice_cfg,
-            sessions.clone(),
-            membership.clone(),
-            Arc::new(vf::NoopMetrics),
-        ));
-
-        Self { control, sessions, pushes, membership, voice }
-    }
-}
-
-/// Control-stream push hub.
-/// IMPORTANT: one writer per conn owns SendStream; we enqueue to that writer via mpsc.
-#[derive(Default)]
+#[derive(Clone)]
 pub struct PushHub {
-    inner: RwLock<HashMap<UserId, mpsc::Sender<crate::proto::voiceplatform::v1::ServerToClient>>>,
+    inner: Arc<DashMap<UserId, mpsc::Sender<pb::ServerToClient>>>,
 }
 
 impl PushHub {
-    pub async fn register(
-        &self,
-        user: UserId,
-        tx: mpsc::Sender<crate::proto::voiceplatform::v1::ServerToClient>,
-    ) {
-        self.inner.write().await.insert(user, tx);
+    pub fn new() -> Self {
+        Self { inner: Arc::new(DashMap::new()) }
     }
 
-    pub async fn unregister(&self, user: UserId) {
-        self.inner.write().await.remove(&user);
+    pub fn register(&self, user: UserId, tx: mpsc::Sender<pb::ServerToClient>) {
+        self.inner.insert(user, tx);
     }
 
-    pub async fn send_to(
-        &self,
-        user: UserId,
-        msg: crate::proto::voiceplatform::v1::ServerToClient,
-    ) {
-        if let Some(tx) = self.inner.read().await.get(&user) {
-            let _ = tx.try_send(msg); // drop if backpressured
+    pub fn unregister(&self, user: UserId) {
+        self.inner.remove(&user);
+    }
+
+    pub async fn send_to(&self, user: UserId, msg: pb::ServerToClient) {
+        if let Some(entry) = self.inner.get(&user) {
+            let _ = entry.send(msg).await;
+        }
+    }
+
+    pub async fn broadcast(&self, users: &[UserId], msg: &pb::ServerToClient) {
+        for u in users {
+            self.send_to(*u, msg.clone()).await;
         }
     }
 }
 
-/// QUIC datagram tx for voice_forwarder
+pub fn channel_route_key(channel_id: ChannelId) -> u32 {
+    let mut h = DefaultHasher::new();
+    channel_id.0.hash(&mut h);
+    (h.finish() & 0xFFFF_FFFF) as u32
+}
+
+#[derive(Clone)]
 pub struct QuinnDatagramTx {
     conn: quinn::Connection,
 }
+
+impl QuinnDatagramTx {
+    pub fn new(conn: quinn::Connection) -> Self { Self { conn } }
+}
+
 #[async_trait::async_trait]
-impl vf::DatagramTx for QuinnDatagramTx {
+impl DatagramTx for QuinnDatagramTx {
     async fn send(&self, bytes: Bytes) -> Result<()> {
-        self.conn.send_datagram(bytes).map_err(|e| anyhow!("send_datagram: {e}"))
+        self.conn.send_datagram(bytes)?;
+        Ok(())
     }
 }
 
-#[derive(Default)]
-pub struct SessionRegistryImpl {
-    inner: RwLock<HashMap<UserId, Arc<dyn vf::DatagramTx>>>,
+#[derive(Clone)]
+pub struct SessionMap {
+    inner: Arc<DashMap<UserId, Arc<dyn DatagramTx>>>,
 }
 
-impl SessionRegistryImpl {
-    pub async fn register(&self, user: UserId, tx: Arc<dyn vf::DatagramTx>) {
-        self.inner.write().await.insert(user, tx);
+impl SessionMap {
+    pub fn new() -> Self {
+        Self { inner: Arc::new(DashMap::new()) }
     }
-    pub async fn unregister(&self, user: UserId) {
-        self.inner.write().await.remove(&user);
+
+    pub fn register(&self, user: UserId, tx: Arc<dyn DatagramTx>) {
+        self.inner.insert(user, tx);
+    }
+
+    pub fn unregister(&self, user: UserId) {
+        self.inner.remove(&user);
     }
 }
 
 #[async_trait::async_trait]
-impl vf::SessionRegistry for SessionRegistryImpl {
-    async fn get_datagram_tx(&self, user: UserId) -> Option<Arc<dyn vf::DatagramTx>> {
-        self.inner.read().await.get(&user).cloned()
+impl SessionRegistry for SessionMap {
+    async fn get_datagram_tx(&self, user: UserId) -> Option<Arc<dyn DatagramTx>> {
+        self.inner.get(&user).map(|e| e.value().clone())
     }
-}
-
-/// Membership cache used for both fast fanout and voice-forwarder decisions.
-/// Source of truth is vp-control; cache is updated on join/leave/mute actions.
-#[derive(Default)]
-pub struct MembershipCache {
-    user_channel: RwLock<HashMap<UserId, ChannelId>>,
-    channel_members: RwLock<HashMap<ChannelId, HashMap<UserId, MemberState>>>,
-    channel_max_talkers: RwLock<HashMap<ChannelId, usize>>,
 }
 
 #[derive(Clone, Debug)]
-pub struct MemberState {
-    pub display_name: String,
-    pub muted: bool,
-    pub deafened: bool,
+struct UserPresence {
+    channel: ChannelId,
+    route: u32,
+    muted: bool,
+}
+
+#[derive(Clone, Debug)]
+struct ChannelRuntime {
+    max_talkers: usize,
+    members: Vec<UserId>,
+}
+
+#[derive(Clone)]
+pub struct MembershipCache {
+    users: Arc<DashMap<UserId, UserPresence>>,
+    channels: Arc<DashMap<ChannelId, ChannelRuntime>>,
 }
 
 impl MembershipCache {
-    pub async fn set_channel_state(
-        &self,
-        channel: ChannelId,
-        members: Vec<(UserId, MemberState)>,
-        max_talkers: usize,
-    ) {
-        let mut map = HashMap::new();
-        for (uid, st) in members {
-            self.user_channel.write().await.insert(uid, channel);
-            map.insert(uid, st);
-        }
-        self.channel_members.write().await.insert(channel, map);
-        self.channel_max_talkers.write().await.insert(channel, max_talkers);
-    }
-
-    pub async fn remove_member(&self, channel: ChannelId, user: UserId) {
-        self.user_channel.write().await.remove(&user);
-        if let Some(ch) = self.channel_members.write().await.get_mut(&channel) {
-            ch.remove(&user);
+    pub fn new() -> Self {
+        Self {
+            users: Arc::new(DashMap::new()),
+            channels: Arc::new(DashMap::new()),
         }
     }
 
-    pub async fn members(&self, channel: ChannelId) -> Vec<UserId> {
-        self.channel_members
-            .read()
-            .await
-            .get(&channel)
-            .map(|m| m.keys().cloned().collect())
-            .unwrap_or_default()
+    pub fn set_channel(&self, channel: ChannelId, max_talkers: usize, members: Vec<UserId>) {
+        self.channels.insert(channel, ChannelRuntime { max_talkers, members });
     }
 
-    pub async fn member_state(&self, channel: ChannelId, user: UserId) -> Option<MemberState> {
-        self.channel_members
-            .read()
-            .await
-            .get(&channel)
-            .and_then(|m| m.get(&user).cloned())
+    pub fn set_user(&self, user: UserId, channel: ChannelId, muted: bool) {
+        self.users.insert(user, UserPresence { channel, route: channel_route_key(channel), muted });
     }
 
-    pub async fn channel_for_user(&self, user: UserId) -> Option<ChannelId> {
-        self.user_channel.read().await.get(&user).cloned()
+    pub fn remove_user(&self, user: UserId) {
+        self.users.remove(&user);
+    }
+
+    pub fn update_mute(&self, user: UserId, channel: ChannelId, muted: bool) {
+        self.users.insert(user, UserPresence { channel, route: channel_route_key(channel), muted });
+    }
+
+    pub fn members_of(&self, channel: ChannelId) -> Option<Vec<UserId>> {
+        self.channels.get(&channel).map(|e| e.members.clone())
+    }
+
+    pub fn max_talkers_of(&self, channel: ChannelId) -> Option<usize> {
+        self.channels.get(&channel).map(|e| e.max_talkers)
     }
 }
 
 #[async_trait::async_trait]
-impl vf::MembershipProvider for MembershipCache {
+impl MembershipProvider for MembershipCache {
     async fn resolve_channel_for_sender(&self, sender: UserId, route_key: u32) -> Option<ChannelId> {
-        let ch = self.channel_for_user(sender).await?;
-        let expected = channel_route_hash(&ch);
-        if expected == route_key { Some(ch) } else { None }
+        let u = self.users.get(&sender)?;
+        if u.route == route_key { Some(u.channel) } else { None }
     }
 
     async fn list_members(&self, channel: ChannelId) -> Vec<UserId> {
-        self.members(channel).await
+        self.channels.get(&channel).map(|e| e.members.clone()).unwrap_or_default()
     }
 
-    async fn is_muted(&self, channel: ChannelId, sender: UserId) -> bool {
-        self.member_state(channel, sender).await.map(|s| s.muted).unwrap_or(true)
+    async fn is_muted(&self, _channel: ChannelId, sender: UserId) -> bool {
+        self.users.get(&sender).map(|e| e.muted).unwrap_or(false)
     }
 
     async fn max_talkers(&self, channel: ChannelId) -> usize {
-        self.channel_max_talkers.read().await.get(&channel).cloned().unwrap_or(4)
+        self.channels.get(&channel).map(|e| e.max_talkers).unwrap_or(4)
     }
-}
-
-/// MUST match client hashing if you route by hash.
-pub fn channel_route_hash(ch: &ChannelId) -> u32 {
-    // FNV-1a 32-bit over UUID string bytes
-    const OFF: u32 = 0x811C9DC5;
-    const PRIME: u32 = 0x0100_0193;
-    let s = ch.0.to_string();
-    let mut h = OFF;
-    for &b in s.as_bytes() {
-        h ^= b as u32;
-        h = h.wrapping_mul(PRIME);
-    }
-    h
-}
-
-/// Helper to build RequestContext
-pub fn mk_ctx(server: ServerId, user: UserId, is_admin: bool) -> RequestContext {
-    RequestContext { server_id: server, user_id: user, is_admin }
-}
-
-/// Control helpers used by gateway
-pub async fn control_join(
-    control: &ControlService<PgControlRepo>,
-    ctx: &RequestContext,
-    channel: ChannelId,
-    display_name: String,
-) -> Result<Vec<vp_control::model::Member>> {
-    let join = JoinChannel { channel_id: channel, display_name };
-    Ok(control.join_channel(ctx, join).await?)
-}
-
-pub async fn control_create_channel(
-    control: &ControlService<PgControlRepo>,
-    ctx: &RequestContext,
-    name: String,
-    parent: Option<ChannelId>,
-) -> Result<vp_control::model::Channel> {
-    Ok(control.create_channel(ctx, ChannelCreate {
-        name,
-        parent_id: parent,
-        max_members: None,
-        max_talkers: Some(4),
-    }).await?)
 }
