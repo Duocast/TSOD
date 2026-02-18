@@ -26,7 +26,7 @@ impl ControlService {
     pub fn new(repo: crate::repo::PgControlRepo) -> Self {
         Self { repo }
     }
-}
+    
     pub async fn create_channel(&self, ctx: &RequestContext, create: ChannelCreate) -> ControlResult<Channel> {
         if create.name.trim().is_empty() {
             return Err(ControlError::InvalidArgument("channel name empty"));
