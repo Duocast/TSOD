@@ -13,6 +13,12 @@ pub struct ChannelId(pub Uuid);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MessageId(pub Uuid);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct AuditId(pub Uuid);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct OutboxId(pub Uuid);
+
 impl ServerId {
     pub fn new() -> Self { Self(Uuid::new_v4()) }
 }
