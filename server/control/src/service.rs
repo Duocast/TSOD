@@ -18,16 +18,15 @@ pub struct RequestContext {
 }
 
 #[derive(Clone)]
-pub struct ControlService<R: ControlRepo> {
-    repo: R,
-    audit: AuditWriter,
+pub struct ControlService {
+    repo: crate::repo::PgControlRepo,
 }
 
-impl<R: ControlRepo> ControlService<R> {
-    pub fn new(repo: R) -> Self {
-        Self { repo, audit: AuditWriter }
+impl ControlService {
+    pub fn new(repo: crate::repo::PgControlRepo) -> Self {
+        Self { repo }
     }
-
+}
     pub async fn create_channel(&self, ctx: &RequestContext, create: ChannelCreate) -> ControlResult<Channel> {
         if create.name.trim().is_empty() {
             return Err(ControlError::InvalidArgument("channel name empty"));
