@@ -10,6 +10,7 @@ use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Postgres, Transaction};
 use ulid::Ulid;
 use async_trait::async_trait;
+use sqlx::{Postgres, Transaction};
 
 #[async_trait]
 pub trait ControlRepo: Send + Sync {
@@ -95,8 +96,8 @@ impl PgControlRepo {
 }
 
 #[async_trait]
-impl ControlRepo for PgControlRepo {
-    async fn create_channel(&self, tx: &mut Transaction<'_, Postgres>, ...) -> ControlResult<...> {
+pub trait ControlRepo: Send + Sync {
+    async fn tx(&self) -> ControlResult<Transaction<'static, Postgres>>;
         Ok(self.pool.begin().await?)
     }
 
