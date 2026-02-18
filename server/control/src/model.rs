@@ -37,3 +37,22 @@ pub struct JoinChannel {
     pub channel_id: ChannelId,
     pub display_name: String,
 }
+
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ChatMessage {
+    pub id: MessageId,
+    pub server_id: ServerId,
+    pub channel_id: ChannelId,
+    pub author_user_id: UserId,
+    pub text: String,
+    pub attachments: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SendMessage {
+    pub channel_id: ChannelId,
+    pub text: String,
+    pub attachments: serde_json::Value,
+}
