@@ -1,29 +1,55 @@
 use anyhow::{anyhow, Context, Result};
 use bytes::Bytes;
-use std::{sync::Arc};
-use tokio::{sync::mpsc, time::{timeout, Duration}};
+use std::sync::Arc;
+use tokio::sync::mpsc;
+use tokio::time::{timeout, Duration};
 use tracing::{info, warn};
 
 use crate::{
     auth::{AuthProvider, AuthedIdentity},
-    frame::read_delimited,
+    frame::{read_delimited, write_delimited},
     proto::voiceplatform::v1 as pb,
-    state::{GatewayState, QuinnDatagramTx, MemberState, mk_ctx, control_join, control_create_channel},
+    state::{MembershipCache, PushHub, QuinnDatagramTx, Sessions, channel_route_key},
 };
 
-const CONTROL_STREAM_MAX_MSG: usize = 256 * 1024;
+use vp_control::{PgControlRepo, ControlService, RequestContext};
+use vp_control::ids::{ChannelId, ServerId, UserId};
+use vp_control::model::{ChannelCreate, JoinChannel, SendMessage};
+use vp_media::voice_forwarder::VoiceForwarder;
+
+const CONTROL_STREAM_MAX_MSG: usize = 256 * 1024; // 256KB
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone)]
 pub struct Gateway {
     auth: Arc<dyn AuthProvider>,
     alpn: Vec<u8>,
-    state: Arc<GatewayState>,
+    control: Arc<ControlService<PgControlRepo>>,
+    sessions: Sessions,
+    membership: MembershipCache,
+    push: PushHub,
+    voice: Arc<VoiceForwarder>,
 }
 
 impl Gateway {
-    pub fn new(auth: Arc<dyn AuthProvider>, alpn: String, state: Arc<GatewayState>) -> Self {
-        Self { auth, alpn: alpn.into_bytes(), state }
+    pub fn new(
+        auth: Arc<dyn AuthProvider>,
+        alpn: String,
+        control: Arc<ControlService<PgControlRepo>>,
+        sessions: Sessions,
+        membership: MembershipCache,
+        push: PushHub,
+        voice: Arc<VoiceForwarder>,
+    ) -> Self {
+        Self {
+            auth,
+            alpn: alpn.into_bytes(),
+            control,
+            sessions,
+            membership,
+            push,
+            voice,
+        }
     }
 
     pub async fn serve(self, endpoint: quinn::Endpoint) -> Result<()> {
@@ -31,6 +57,7 @@ impl Gateway {
         loop {
             let incoming = endpoint.accept().await.ok_or_else(|| anyhow!("endpoint closed"))?;
             let gw = self.clone();
+
             tokio::spawn(async move {
                 if let Err(e) = gw.handle_conn(incoming).await {
                     warn!("conn ended with error: {:#}", e);
@@ -42,6 +69,7 @@ impl Gateway {
     async fn handle_conn(&self, incoming: quinn::Incoming) -> Result<()> {
         let conn = incoming.await.context("accept quic connection")?;
 
+        // ALPN check (defense-in-depth).
         let negotiated = conn
             .handshake_data()
             .and_then(|d| d.downcast::<quinn::crypto::rustls::HandshakeData>().ok())
@@ -54,218 +82,184 @@ impl Gateway {
         let remote = conn.remote_address();
         info!(%remote, "connected");
 
-        let (send, mut recv) = timeout(HANDSHAKE_TIMEOUT, conn.accept_bi())
+        // Expect client to open the first bi-directional stream as the control stream.
+        let (mut send, mut recv) = timeout(HANDSHAKE_TIMEOUT, conn.accept_bi())
             .await
             .context("control accept_bi timeout")?
             .context("accept_bi failed")?;
 
-        // Single writer task for this connection’s SendStream
-        let (tx_out, mut rx_out) = mpsc::channel::<pb::ServerToClient>(512);
-        let mut send_stream = send;
+        let (session_id, _hello_caps) = self.do_hello(&mut send, &mut recv).await?;
+        let identity = self.do_auth(&mut send, &mut recv, &session_id).await?;
+
+        let user_id = UserId(uuid::Uuid::parse_str(&identity.user_id).context("invalid user_id uuid")?);
+        let server_id = ServerId(uuid::Uuid::parse_str(&identity.server_id).context("invalid server_id uuid")?);
+
+        info!(%remote, session_id=%session_id, user_id=%identity.user_id, "authenticated");
+
+        // Control stream writer task
+        let (tx, mut rxq) = mpsc::channel::<pb::ServerToClient>(256);
+        let mut send2 = send.clone();
         tokio::spawn(async move {
-            while let Some(msg) = rx_out.recv().await {
-                if let Err(e) = crate::frame::write_delimited(&mut send_stream, &msg).await {
-                    warn!("control writer failed: {e:#}");
+            while let Some(m) = rxq.recv().await {
+                if let Err(e) = write_delimited(&mut send2, &m).await {
+                    warn!("control write failed: {:#}", e);
                     break;
                 }
             }
         });
 
-        // Hello + Auth
-        let (session_id, _caps) = self.do_hello(&tx_out, &mut recv).await?;
-        let identity = self.do_auth(&tx_out, &mut recv, &session_id).await?;
+        // Register push + datagram
+        self.push.register(user_id, tx.clone());
+        self.sessions.register(user_id, Arc::new(QuinnDatagramTx::new(conn.clone())));
 
-        let user_uuid = identity.user_id.parse::<uuid::Uuid>().context("user_id must be UUID")?;
-        let server_uuid = identity.server_id.parse::<uuid::Uuid>().context("server_id must be UUID")?;
-        let user_id = vp_control::ids::UserId(user_uuid);
-        let server_id = vp_control::ids::ServerId(server_uuid);
-
-        // Register push + voice tx
-        self.state.pushes.register(user_id, tx_out.clone()).await;
-        self.state.sessions.register(user_id, Arc::new(QuinnDatagramTx { conn: conn.clone() })).await;
-
-        info!(%remote, session_id=%session_id, user=%identity.user_id, "authenticated");
-
-        // Start datagram read loop -> voice forwarder
-        let vf = self.state.voice.clone();
+        // Datagram recv loop (voice)
+        let voice = self.voice.clone();
+        let user_for_voice = user_id;
         tokio::spawn(async move {
             loop {
                 match conn.read_datagram().await {
-                    Ok(d) => vf.handle_incoming(user_id, d).await,
+                    Ok(d) => {
+                        voice.handle_incoming(user_for_voice, d).await;
+                    }
                     Err(_) => break,
                 }
             }
         });
 
-        // Control loop: join/leave/create/ping/chat
-        let ctx = mk_ctx(server_id, user_id, identity.is_admin);
-
+        // Request loop
         loop {
-            let msg: pb::ClientToServer = match read_delimited(&mut recv, CONTROL_STREAM_MAX_MSG).await {
-                Ok(m) => m,
-                Err(e) => return Err(e),
-            };
+            let msg: pb::ClientToServer = read_delimited(&mut recv, CONTROL_STREAM_MAX_MSG).await?;
 
-            let rid = msg.request_id.clone();
-            let base = pb::ServerToClient {
-                request_id: rid.clone(),
-                session_id: Some(pb::SessionId { value: session_id.clone() }),
-                sent_at: Some(now_ts()),
-                error: None,
-                payload: None,
-            };
+            // Ping
+            if let Some(pb::client_to_server::Payload::Ping(p)) = msg.payload {
+                let resp = pb::ServerToClient {
+                    request_id: msg.request_id,
+                    session_id: Some(pb::SessionId { value: session_id.clone() }),
+                    sent_at: Some(now_ts()),
+                    error: None,
+                    payload: Some(pb::server_to_client::Payload::Pong(pb::Pong {
+                        nonce: p.nonce,
+                        server_time: Some(now_ts()),
+                    })),
+                };
+                let _ = tx.send(resp).await;
+                continue;
+            }
+
+            let ctx = RequestContext { server_id, user_id, is_admin: identity.is_admin };
+            let req_id = msg.request_id.clone();
 
             match msg.payload {
-                Some(pb::client_to_server::Payload::Ping(p)) => {
-                    let resp = pb::ServerToClient {
-                        payload: Some(pb::server_to_client::Payload::Pong(pb::Pong {
-                            nonce: p.nonce,
-                            server_time: Some(now_ts()),
-                        })),
-                        ..base
-                    };
-                    let _ = tx_out.send(resp).await;
-                }
+                Some(pb::client_to_server::Payload::JoinChannelRequest(r)) => {
+                    let ch = parse_channel_id(r.channel_id.as_ref())?;
+                    let members = self.control.join_channel(&ctx, JoinChannel { channel_id: ch, display_name: identity.display_name.clone() }).await?;
+                    let chan = self.control.get_channel(&ctx, ch).await?;
 
-                Some(pb::client_to_server::Payload::JoinChannelRequest(req)) => {
-                    let ch = vp_control::ids::ChannelId(req.channel_id.value.parse::<uuid::Uuid>()?);
-
-                    // Call control plane (perms + DB)
-                    let members = control_join(&self.state.control, &ctx, ch, identity.user_id.clone()).await?;
-
-                    // Convert members -> cache + response
-                    let mut cache_members = vec![];
-                    let mut pb_members = vec![];
-
+                    // Update membership cache
+                    let member_ids = members.iter().map(|m| m.user_id).collect::<Vec<_>>();
+                    self.membership.set_channel_state(ch, chan.max_talkers.map(|v| v as usize).unwrap_or(4), member_ids.clone());
                     for m in &members {
-                        cache_members.push((m.user_id, MemberState {
-                            display_name: m.display_name.clone(),
-                            muted: m.muted,
-                            deafened: m.deafened,
-                        }));
-                        pb_members.push(pb::ChannelMember {
+                        self.membership.set_user(m.user_id, ch, m.muted);
+                    }
+
+                    let state = pb::ChannelState {
+                        channel_id: Some(pb::ChannelId { value: ch.0.to_string() }),
+                        name: chan.name,
+                        members: members.into_iter().map(|m| pb::ChannelMember {
                             user_id: Some(pb::UserId { value: m.user_id.0.to_string() }),
-                            display_name: m.display_name.clone(),
+                            display_name: m.display_name,
                             muted: m.muted,
                             deafened: m.deafened,
-                        });
-                    }
-
-                    let max_talkers = 4; // TODO: read from channel row (extend repo/model if needed)
-                    self.state.membership.set_channel_state(ch, cache_members, max_talkers).await;
-
-                    // Response
-                    let resp = pb::ServerToClient {
-                        payload: Some(pb::server_to_client::Payload::JoinChannelResponse(
-                            pb::JoinChannelResponse {
-                                state: Some(pb::ChannelState {
-                                    channel_id: Some(pb::ChannelId { value: ch.0.to_string() }),
-                                    name: "(server)".into(), // TODO: fetch channel name via repo
-                                    members: pb_members.clone(),
-                                }),
-                            }
-                        )),
-                        ..base
+                        }).collect(),
                     };
-                    let _ = tx_out.send(resp).await;
 
-                    // Server push PresenceEvent to other members
-                    let pres = pb::ServerToClient {
-                        request_id: Some(pb::RequestId { value: 0 }),
+                    let resp = pb::ServerToClient {
+                        request_id: req_id,
                         session_id: Some(pb::SessionId { value: session_id.clone() }),
                         sent_at: Some(now_ts()),
                         error: None,
-                        payload: Some(pb::server_to_client::Payload::PresenceEvent(pb::PresenceEvent {
-                            at: Some(now_ts()),
-                            kind: Some(pb::presence_event::Kind::MemberJoined(pb::MemberJoined {
-                                channel_id: Some(pb::ChannelId { value: ch.0.to_string() }),
-                                member: Some(pb::ChannelMember {
-                                    user_id: Some(pb::UserId { value: user_id.0.to_string() }),
-                                    display_name: identity.user_id.clone(),
-                                    muted: false,
-                                    deafened: false,
-                                }),
-                            })),
-                        })),
+                        payload: Some(pb::server_to_client::Payload::JoinChannelResponse(pb::JoinChannelResponse { state: Some(state) })),
                     };
-
-                    let members_uids = self.state.membership.members(ch).await;
-                    for u in members_uids {
-                        if u != user_id {
-                            self.state.pushes.send_to(u, pres.clone()).await;
-                        }
-                    }
+                    let _ = tx.send(resp).await;
                 }
+                Some(pb::client_to_server::Payload::LeaveChannelRequest(r)) => {
+                    let ch = parse_channel_id(r.channel_id.as_ref())?;
+                    self.control.leave_channel(&ctx, ch).await?;
 
-                Some(pb::client_to_server::Payload::LeaveChannelRequest(req)) => {
-                    let ch = vp_control::ids::ChannelId(req.channel_id.value.parse::<uuid::Uuid>()?);
-                    // TODO: call control.leave_channel(ctx, ch) (exists in vp-control)
-                    self.state.membership.remove_member(ch, user_id).await;
+                    self.membership.remove_user(user_id);
+                    // best effort update channel member list
+                    if let Some(mut cur) = self.membership.members_of(ch) {
+                        cur.retain(|u| *u != user_id);
+                        let max = self.membership.max_talkers_of(ch).unwrap_or(4);
+                        self.membership.set_channel_state(ch, max, cur);
+                    }
 
                     let resp = pb::ServerToClient {
-                        payload: Some(pb::server_to_client::Payload::LeaveChannelResponse(
-                            pb::LeaveChannelResponse { channel_id: Some(pb::ChannelId { value: ch.0.to_string() }) }
-                        )),
-                        ..base
-                    };
-                    let _ = tx_out.send(resp).await;
-
-                    // push MemberLeft
-                    let pres = pb::ServerToClient {
-                        request_id: Some(pb::RequestId { value: 0 }),
+                        request_id: req_id,
                         session_id: Some(pb::SessionId { value: session_id.clone() }),
                         sent_at: Some(now_ts()),
                         error: None,
-                        payload: Some(pb::server_to_client::Payload::PresenceEvent(pb::PresenceEvent {
-                            at: Some(now_ts()),
-                            kind: Some(pb::presence_event::Kind::MemberLeft(pb::MemberLeft {
-                                channel_id: Some(pb::ChannelId { value: ch.0.to_string() }),
-                                user_id: Some(pb::UserId { value: user_id.0.to_string() }),
-                            })),
+                        payload: Some(pb::server_to_client::Payload::LeaveChannelResponse(pb::LeaveChannelResponse {
+                            channel_id: Some(pb::ChannelId { value: ch.0.to_string() }),
                         })),
                     };
-
-                    let members_uids = self.state.membership.members(ch).await;
-                    for u in members_uids {
-                        if u != user_id {
-                            self.state.pushes.send_to(u, pres.clone()).await;
-                        }
-                    }
+                    let _ = tx.send(resp).await;
                 }
+                Some(pb::client_to_server::Payload::CreateChannelRequest(r)) => {
+                    let parent = r.parent_channel_id.as_ref().map(|pid| ChannelId(uuid::Uuid::parse_str(&pid.value).ok()?));
+                    let created = self.control.create_channel(&ctx, ChannelCreate { name: r.name, parent_id: parent, max_members: None, max_talkers: None }).await?;
 
-                Some(pb::client_to_server::Payload::CreateChannelRequest(req)) => {
-                    let parent = if req.parent_channel_id.value.is_empty() {
-                        None
-                    } else {
-                        Some(vp_control::ids::ChannelId(req.parent_channel_id.value.parse::<uuid::Uuid>()?))
+                    let state = pb::ChannelState {
+                        channel_id: Some(pb::ChannelId { value: created.id.0.to_string() }),
+                        name: created.name,
+                        members: vec![],
                     };
-
-                    let ch = control_create_channel(&self.state.control, &ctx, req.name.clone(), parent).await?;
 
                     let resp = pb::ServerToClient {
-                        payload: Some(pb::server_to_client::Payload::CreateChannelResponse(
-                            pb::CreateChannelResponse {
-                                state: Some(pb::ChannelState {
-                                    channel_id: Some(pb::ChannelId { value: ch.id.0.to_string() }),
-                                    name: ch.name,
-                                    members: vec![],
-                                }),
-                            }
-                        )),
-                        ..base
+                        request_id: req_id,
+                        session_id: Some(pb::SessionId { value: session_id.clone() }),
+                        sent_at: Some(now_ts()),
+                        error: None,
+                        payload: Some(pb::server_to_client::Payload::CreateChannelResponse(pb::CreateChannelResponse { state: Some(state) })),
                     };
-                    let _ = tx_out.send(resp).await;
+                    let _ = tx.send(resp).await;
                 }
+                Some(pb::client_to_server::Payload::SendMessageRequest(r)) => {
+                    let ch = parse_channel_id(r.channel_id.as_ref())?;
+                    let attachments = serde_json::to_value(r.attachments).unwrap_or_else(|_| serde_json::json!([]));
+                    let _posted = self.control.send_message(&ctx, SendMessage { channel_id: ch, text: r.text, attachments }).await?;
 
+                    // Ack only; the actual delivery is via outbox push.
+                    let resp = pb::ServerToClient {
+                        request_id: req_id,
+                        session_id: Some(pb::SessionId { value: session_id.clone() }),
+                        sent_at: Some(now_ts()),
+                        error: None,
+                        payload: None,
+                    };
+                    let _ = tx.send(resp).await;
+                }
+                Some(pb::client_to_server::Payload::ModerationActionRequest(r)) => {
+                    let ch = parse_channel_id(r.channel_id.as_ref())?;
+                    let target = r.target_user_id.as_ref().ok_or_else(|| anyhow!("target_user_id missing"))?;
+                    let target = UserId(uuid::Uuid::parse_str(&target.value).context("invalid target_user_id")?);
+
+                    if let Some(pb::moderation_action_request::Action::Mute(m)) = r.action {
+                        let _ = self.control.set_mute(&ctx, ch, target, m.muted).await?;
+                        self.membership.update_mute(target, ch, m.muted);
+                    }
+
+                    let resp = pb::ServerToClient {
+                        request_id: req_id,
+                        session_id: Some(pb::SessionId { value: session_id.clone() }),
+                        sent_at: Some(now_ts()),
+                        error: None,
+                        payload: None,
+                    };
+                    let _ = tx.send(resp).await;
+                }
                 _ => {
-                    // Unknown/unsupported request: reply INVALID_ARGUMENT
-                    let err = pb::Error {
-                        code: pb::error::Code::InvalidArgument as i32,
-                        message: "unsupported request".into(),
-                        detail: "".into(),
-                    };
-                    let resp = pb::ServerToClient { error: Some(err), ..base };
-                    let _ = tx_out.send(resp).await;
+                    // Ignore other messages for now.
                 }
             }
         }
@@ -273,11 +267,10 @@ impl Gateway {
 
     async fn do_hello(
         &self,
-        tx_out: &mpsc::Sender<pb::ServerToClient>,
+        send: &mut quinn::SendStream,
         recv: &mut quinn::RecvStream,
     ) -> Result<(String, Option<pb::ClientCaps>)> {
-        let req: pb::ClientToServer =
-            crate::frame::read_delimited(recv, CONTROL_STREAM_MAX_MSG).await.context("read Hello envelope")?;
+        let req: pb::ClientToServer = read_delimited(recv, CONTROL_STREAM_MAX_MSG).await.context("read Hello envelope")?;
 
         let hello = match req.payload {
             Some(pb::client_to_server::Payload::Hello(h)) => h,
@@ -285,6 +278,7 @@ impl Gateway {
         };
 
         let session_id = uuid::Uuid::new_v4().to_string();
+
         let ack = pb::HelloAck {
             session_id: Some(pb::SessionId { value: session_id.clone() }),
             max_message_size_bytes: 64 * 1024,
@@ -300,18 +294,17 @@ impl Gateway {
             payload: Some(pb::server_to_client::Payload::HelloAck(ack)),
         };
 
-        let _ = tx_out.send(resp).await;
+        write_delimited(send, &resp).await.context("write HelloAck")?;
         Ok((session_id, hello.caps))
     }
 
     async fn do_auth(
         &self,
-        tx_out: &mpsc::Sender<pb::ServerToClient>,
+        send: &mut quinn::SendStream,
         recv: &mut quinn::RecvStream,
         session_id: &str,
     ) -> Result<AuthedIdentity> {
-        let req: pb::ClientToServer =
-            crate::frame::read_delimited(recv, CONTROL_STREAM_MAX_MSG).await.context("read Auth envelope")?;
+        let req: pb::ClientToServer = read_delimited(recv, CONTROL_STREAM_MAX_MSG).await.context("read Auth envelope")?;
 
         let auth_req = match req.payload {
             Some(pb::client_to_server::Payload::AuthRequest(a)) => a,
@@ -334,9 +327,14 @@ impl Gateway {
             payload: Some(pb::server_to_client::Payload::AuthResponse(auth_resp)),
         };
 
-        let _ = tx_out.send(resp).await;
+        write_delimited(send, &resp).await.context("write AuthResponse")?;
         Ok(identity)
     }
+}
+
+fn parse_channel_id(ch: Option<&pb::ChannelId>) -> Result<ChannelId> {
+    let ch = ch.ok_or_else(|| anyhow!("channel_id missing"))?;
+    Ok(ChannelId(uuid::Uuid::parse_str(&ch.value).context("invalid channel_id")?))
 }
 
 fn now_ts() -> pb::Timestamp {
