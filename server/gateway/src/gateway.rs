@@ -49,6 +49,8 @@ impl Gateway {
 
     pub async fn serve(self, endpoint: quinn::Endpoint) -> Result<()> {
         info!("gateway listening");
+
+        loop {
             let incoming = endpoint
                 .accept()
                 .await
