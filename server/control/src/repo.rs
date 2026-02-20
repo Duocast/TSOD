@@ -6,8 +6,8 @@ use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
 use crate::{
-    error::ControlResult,
-    ids::{AuditId, ChannelId, MessageId, OutboxId, ServerId, UserId},
+    errors::ControlResult,
+    ids::{ChannelId, MessageId, OutboxId, ServerId, UserId},
     model::{
         AuditEntry, Channel, ChannelListItem, ChatMessage, Member, OutboxEvent, OutboxEventRow,
         PermissionRequest,
@@ -17,26 +17,85 @@ use crate::{
 
 #[async_trait]
 pub trait ControlRepo: Send + Sync {
+    async fn tx(&self) -> ControlResult<Transaction<'_, Postgres>>;
     // Channels
-    async fn create_channel(&self, tx: &mut Transaction<'_, Postgres>, ch: &Channel) -> ControlResult<()>;
-    async fn get_channel(&self, tx: &mut Transaction<'_, Postgres>, server: ServerId, id: ChannelId) -> ControlResult<Option<Channel>>;
-    async fn list_channels(&self, tx: &mut Transaction<'_, Postgres>, server: ServerId) -> ControlResult<Vec<ChannelListItem>>;
+   async fn create_channel(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        ch: &Channel,
+    ) -> ControlResult<()>;
+    async fn get_channel(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        server: ServerId,
+        id: ChannelId,
+    ) -> ControlResult<Option<Channel>>;
+    async fn list_channels(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        server: ServerId,
+    ) -> ControlResult<Vec<ChannelListItem>>;
 
     // Members (Member has NO server_id)
-    async fn upsert_member(&self, tx: &mut Transaction<'_, Postgres>, server: ServerId, m: &Member) -> ControlResult<()>;
-    async fn delete_member(&self, tx: &mut Transaction<'_, Postgres>, server: ServerId, channel: ChannelId, user: UserId) -> ControlResult<()>;
-    async fn get_member(&self, tx: &mut Transaction<'_, Postgres>, server: ServerId, channel: ChannelId, user: UserId) -> ControlResult<Option<Member>>;
-    async fn list_members(&self, tx: &mut Transaction<'_, Postgres>, server: ServerId, channel: ChannelId) -> ControlResult<Vec<Member>>;
+    async fn upsert_member(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        server: ServerId,
+        m: &Member,
+    ) -> ControlResult<()>;
+    async fn delete_member(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        server: ServerId,
+        channel: ChannelId,
+        user: UserId,
+    ) -> ControlResult<()>;
+    async fn get_member(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        server: ServerId,
+        channel: ChannelId,
+        user: UserId,
+    ) -> ControlResult<Option<Member>>;
+    async fn list_members(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        server: ServerId,
+        channel: ChannelId,
+    ) -> ControlResult<Vec<Member>>;
+    async fn count_members(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        server: ServerId,
+        channel: ChannelId,
+    ) -> ControlResult<i64>;
 
     // Permissions
-    async fn decide_permission(&self, tx: &mut Transaction<'_, Postgres>, req: &PermissionRequest) -> ControlResult<Decision>;
+    async fn decide_permission(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        req: &PermissionRequest,
+    ) -> ControlResult<Decision>;
 
     // Chat (ChatMessage uses author_user_id; no Default)
-    async fn insert_chat_message(&self, tx: &mut Transaction<'_, Postgres>, msg: &ChatMessage) -> ControlResult<()>;
-    async fn get_chat_message(&self, tx: &mut Transaction<'_, Postgres>, server: ServerId, id: MessageId) -> ControlResult<Option<ChatMessage>>;
+    async fn insert_chat_message(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        msg: &ChatMessage,
+    ) -> ControlResult<()>;
+    async fn get_chat_message(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        server: ServerId,
+        id: MessageId,
+    ) -> ControlResult<Option<ChatMessage>>;
 
     // Outbox
-    async fn insert_outbox(&self, tx: &mut Transaction<'_, Postgres>, ev: &OutboxEvent) -> ControlResult<()>;
+    async fn insert_outbox(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        ev: &OutboxEvent,
+    ) -> ControlResult<()>;
     async fn claim_outbox_batch(
         &self,
         tx: &mut Transaction<'_, Postgres>,
@@ -52,7 +111,11 @@ pub trait ControlRepo: Send + Sync {
     ) -> ControlResult<()>;
 
     // Audit
-    async fn insert_audit(&self, tx: &mut Transaction<'_, Postgres>, entry: &AuditEntry) -> ControlResult<()>;
+    async fn insert_audit(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        entry: &AuditEntry,
+    ) -> ControlResult<()>;
 }
 
 #[derive(Clone)]
@@ -77,11 +140,19 @@ impl PgControlRepo {
 
 #[async_trait]
 impl ControlRepo for PgControlRepo {
+    async fn tx(&self) -> ControlResult<Transaction<'_, Postgres>> {
+    Ok(self.pool.begin().await?)
+}
+
     // -------------------------
     // Channels
     // -------------------------
 
-    async fn create_channel(&self, tx: &mut Transaction<'_, Postgres>, ch: &Channel) -> ControlResult<()> {
+    async fn create_channel(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        ch: &Channel,
+    ) -> ControlResult<()> {
         sqlx::query(
             r#"
             INSERT INTO channels (id, server_id, name, parent_id, max_members, max_talkers, created_at, updated_at)
@@ -100,7 +171,12 @@ impl ControlRepo for PgControlRepo {
         Ok(())
     }
 
-    async fn get_channel(&self, tx: &mut Transaction<'_, Postgres>, server: ServerId, id: ChannelId) -> ControlResult<Option<Channel>> {
+    async fn get_channel(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        server: ServerId,
+        id: ChannelId,
+    ) -> ControlResult<Option<Channel>> {
         let row = sqlx::query(
             r#"
             SELECT id, server_id, name, parent_id, max_members, max_talkers, created_at, updated_at
@@ -126,7 +202,11 @@ impl ControlRepo for PgControlRepo {
         }))
     }
 
-    async fn list_channels(&self, tx: &mut Transaction<'_, Postgres>, server: ServerId) -> ControlResult<Vec<ChannelListItem>> {
+    async fn list_channels(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        server: ServerId,
+    ) -> ControlResult<Vec<ChannelListItem>> {
         let rows = sqlx::query(
             r#"
             SELECT id, name, parent_id, max_members, max_talkers
@@ -157,7 +237,12 @@ impl ControlRepo for PgControlRepo {
     // Members
     // -------------------------
 
-    async fn upsert_member(&self, tx: &mut Transaction<'_, Postgres>, server: ServerId, m: &Member) -> ControlResult<()> {
+    async fn upsert_member(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        server: ServerId,
+        m: &Member,
+    ) -> ControlResult<()> {
         sqlx::query(
             r#"
             INSERT INTO members (server_id, channel_id, user_id, display_name, muted, deafened, joined_at, updated_at)
@@ -183,7 +268,13 @@ impl ControlRepo for PgControlRepo {
         Ok(())
     }
 
-    async fn delete_member(&self, tx: &mut Transaction<'_, Postgres>, server: ServerId, channel: ChannelId, user: UserId) -> ControlResult<()> {
+    async fn delete_member(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        server: ServerId,
+        channel: ChannelId,
+        user: UserId,
+    ) -> ControlResult<()> {
         sqlx::query(
             r#"
             DELETE FROM members
@@ -230,7 +321,12 @@ impl ControlRepo for PgControlRepo {
         }))
     }
 
-    async fn list_members(&self, tx: &mut Transaction<'_, Postgres>, server: ServerId, channel: ChannelId) -> ControlResult<Vec<Member>> {
+    async fn list_members(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        server: ServerId,
+        channel: ChannelId,
+    ) -> ControlResult<Vec<Member>> {
         let rows = sqlx::query(
             r#"
             SELECT channel_id, user_id, display_name, muted, deafened, joined_at
@@ -259,11 +355,37 @@ impl ControlRepo for PgControlRepo {
         Ok(out)
     }
 
+        async fn count_members(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        server: ServerId,
+        channel: ChannelId,
+    ) -> ControlResult<i64> {
+        let n: i64 = sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*)::bigint
+            FROM members
+            WHERE server_id = $1 AND channel_id = $2
+            "#,
+        )
+        .bind(server.0)
+        .bind(channel.0)
+        .fetch_one(&mut **tx)
+        .await
+        .context("count members")?;
+
+        Ok(n)
+    }
+    
     // -------------------------
     // Permissions
     // -------------------------
 
-    async fn decide_permission(&self, _tx: &mut Transaction<'_, Postgres>, req: &PermissionRequest) -> ControlResult<Decision> {
+    async fn decide_permission(
+        &self,
+        _tx: &mut Transaction<'_, Postgres>,
+        req: &PermissionRequest,
+    ) -> ControlResult<Decision> {
         if req.is_admin {
             return Ok(Decision::Allow);
         }
@@ -281,7 +403,11 @@ impl ControlRepo for PgControlRepo {
     // Chat
     // -------------------------
 
-    async fn insert_chat_message(&self, tx: &mut Transaction<'_, Postgres>, msg: &ChatMessage) -> ControlResult<()> {
+    async fn insert_chat_message(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        msg: &ChatMessage,
+    ) -> ControlResult<()> {
         sqlx::query(
             r#"
             INSERT INTO chat_messages (id, server_id, channel_id, author_user_id, text, attachments, created_at)
@@ -301,7 +427,12 @@ impl ControlRepo for PgControlRepo {
         Ok(())
     }
 
-    async fn get_chat_message(&self, tx: &mut Transaction<'_, Postgres>, server: ServerId, id: MessageId) -> ControlResult<Option<ChatMessage>> {
+    async fn get_chat_message(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        server: ServerId,
+        id: MessageId,
+    ) -> ControlResult<Option<ChatMessage>> {
         let row = sqlx::query(
             r#"
             SELECT id, server_id, channel_id, author_user_id, text, attachments, created_at
@@ -330,7 +461,11 @@ impl ControlRepo for PgControlRepo {
     // Outbox
     // -------------------------
 
-    async fn insert_outbox(&self, tx: &mut Transaction<'_, Postgres>, ev: &OutboxEvent) -> ControlResult<()> {
+    async fn insert_outbox(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        ev: &OutboxEvent,
+    ) -> ControlResult<()> {
         sqlx::query(
             r#"
             INSERT INTO outbox_events (id, server_id, topic, payload_json, created_at)
@@ -393,7 +528,12 @@ impl ControlRepo for PgControlRepo {
         Ok(out)
     }
 
-    async fn ack_outbox_published(&self, tx: &mut Transaction<'_, Postgres>, ids: &[OutboxId], claim_token: Uuid) -> ControlResult<()> {
+    async fn ack_outbox_published(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        ids: &[OutboxId],
+        claim_token: Uuid,
+    ) -> ControlResult<()> {
         let uuids: Vec<Uuid> = ids.iter().map(|id| id.0).collect();
 
         sqlx::query(
@@ -416,7 +556,11 @@ impl ControlRepo for PgControlRepo {
     // Audit
     // -------------------------
 
-    async fn insert_audit(&self, tx: &mut Transaction<'_, Postgres>, entry: &AuditEntry) -> ControlResult<()> {
+    async fn insert_audit(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        entry: &AuditEntry,
+    ) -> ControlResult<()> {
         sqlx::query(
             r#"
             INSERT INTO audit_log (id, server_id, actor_user_id, action, target_type, target_id, context_json, created_at)
