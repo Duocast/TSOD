@@ -24,4 +24,7 @@ pub enum ControlError {
 
     #[error("db error")]
     Db(#[from] sqlx::Error),
+    
+    #[error("internal error: {0}")]
+    Anyhow(#[from] anyhow::Error),
 }
