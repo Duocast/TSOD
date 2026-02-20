@@ -7,7 +7,7 @@ use crate::{
     auth::{AuthProvider, AuthedIdentity},
     frame::{read_delimited, write_delimited},
     proto::voiceplatform::v1 as pb,
-state::{MembershipCache, PushHub, QuinnDatagramTx, Sessions},
+state::{MembershipCache, QuinnDatagramTx, Sessions},
 };
 
 use vp_control::ids::{ChannelId, ServerId, UserId};
