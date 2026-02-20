@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use tokio::time::{timeout, Duration};
 use tracing::{info, warn};
+use std::sync::Arc;
 
 use crate::{
     auth::{AuthProvider, AuthedIdentity},
