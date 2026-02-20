@@ -21,7 +21,9 @@ pub struct PushHub {
 
 impl PushHub {
     pub fn new() -> Self {
-        Self { inner: Arc::new(DashMap::new()) }
+        Self {
+            inner: Arc::new(DashMap::new()),
+        }
     }
 
     pub fn register(&self, user: UserId, tx: mpsc::Sender<pb::ServerToClient>) {
@@ -36,6 +38,10 @@ impl PushHub {
         if let Some(entry) = self.inner.get(&user) {
             let _ = entry.send(msg).await;
         }
+    }
+    
+    pub async fn send(&self, user: UserId, msg: pb::ServerToClient) {
+        self.send_to(user, msg).await;
     }
 
     pub async fn broadcast(&self, users: &[UserId], msg: &pb::ServerToClient) {
@@ -57,7 +63,9 @@ pub struct QuinnDatagramTx {
 }
 
 impl QuinnDatagramTx {
-    pub fn new(conn: quinn::Connection) -> Self { Self { conn } }
+    pub fn new(conn: quinn::Connection) -> Self {
+        Self { conn }
+    }
 }
 
 #[async_trait::async_trait]
@@ -75,7 +83,9 @@ pub struct SessionMap {
 
 impl SessionMap {
     pub fn new() -> Self {
-        Self { inner: Arc::new(DashMap::new()) }
+        Self {
+            inner: Arc::new(DashMap::new()),
+        }}
     }
 
     pub fn register(&self, user: UserId, tx: Arc<dyn DatagramTx>) {
@@ -122,11 +132,28 @@ impl MembershipCache {
     }
 
     pub fn set_channel(&self, channel: ChannelId, max_talkers: usize, members: Vec<UserId>) {
-        self.channels.insert(channel, ChannelRuntime { max_talkers, members });
+        self.channels.insert(
+            channel,
+            ChannelRuntime {
+                max_talkers,
+                members,
+            },
+        );
+    }
+
+    pub fn set_channel_state(&self, channel: ChannelId, max_talkers: usize, members: Vec<UserId>) {
+        self.set_channel(channel, max_talkers, members);
     }
 
     pub fn set_user(&self, user: UserId, channel: ChannelId, muted: bool) {
-        self.users.insert(user, UserPresence { channel, route: channel_route_key(channel), muted });
+        self.users.insert(
+            user,
+            UserPresence {
+                channel,
+                route: channel_route_key(channel),
+                muted,
+            },
+        );
     }
 
     pub fn remove_user(&self, user: UserId) {
@@ -134,7 +161,14 @@ impl MembershipCache {
     }
 
     pub fn update_mute(&self, user: UserId, channel: ChannelId, muted: bool) {
-        self.users.insert(user, UserPresence { channel, route: channel_route_key(channel), muted });
+        self.users.insert(
+            user,
+            UserPresence {
+                channel,
+                route: channel_route_key(channel),
+                muted,
+            },
+        );
     }
 
     pub fn members_of(&self, channel: ChannelId) -> Option<Vec<UserId>> {
@@ -148,13 +182,24 @@ impl MembershipCache {
 
 #[async_trait::async_trait]
 impl MembershipProvider for MembershipCache {
-    async fn resolve_channel_for_sender(&self, sender: UserId, route_key: u32) -> Option<ChannelId> {
+    async fn resolve_channel_for_sender(
+        &self,
+        sender: UserId,
+        route_key: u32,
+    ) -> Option<ChannelId> {
         let u = self.users.get(&sender)?;
-        if u.route == route_key { Some(u.channel) } else { None }
+        if u.route == route_key {
+            Some(u.channel)
+        } else {
+            None
+        }
     }
 
     async fn list_members(&self, channel: ChannelId) -> Vec<UserId> {
-        self.channels.get(&channel).map(|e| e.members.clone()).unwrap_or_default()
+        self.channels
+            .get(&channel)
+            .map(|e| e.members.clone())
+            .unwrap_or_default()
     }
 
     async fn is_muted(&self, _channel: ChannelId, sender: UserId) -> bool {
@@ -162,6 +207,11 @@ impl MembershipProvider for MembershipCache {
     }
 
     async fn max_talkers(&self, channel: ChannelId) -> usize {
-        self.channels.get(&channel).map(|e| e.max_talkers).unwrap_or(4)
+        self.channels
+            .get(&channel)
+            .map(|e| e.max_talkers)
+            .unwrap_or(4)
     }
 }
+
+pub type Sessions = SessionMap;
