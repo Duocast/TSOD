@@ -6,5 +6,7 @@ pub struct Db {
 }
 
 impl Db {
-    pub fn new(pool: PgPool) -> Self { Self { pool } }
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
 }
