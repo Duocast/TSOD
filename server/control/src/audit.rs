@@ -1,6 +1,5 @@
-use crate::{errors::ControlResult, ids::*, repo::ControlRepo};
+use crate::{errors::ControlResult, ids::*, model::AuditEntry, repo::ControlRepo};
 use serde_json::json;
-use ulid::Ulid;
 
 #[derive(Clone)]
 pub struct AuditWriter;
@@ -19,13 +18,7 @@ impl AuditWriter {
     ) -> ControlResult<()> {
         repo.insert_audit(
             tx,
-            Ulid::new().to_string(),
-            server,
-            actor,
-            action,
-            target_type,
-            target_id,
-            context,
+            &AuditEntry::new(server, actor, action, target_type, target_id, context),
         )
         .await
     }
