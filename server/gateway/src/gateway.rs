@@ -7,7 +7,7 @@ use crate::{
     auth::{AuthProvider, AuthedIdentity},
     frame::{read_delimited, write_delimited},
     proto::voiceplatform::v1 as pb,
-state::{MembershipCache, PushHub, QuinnDatagramTx, Sessions},
+state::{MembershipCache, QuinnDatagramTx, Sessions},
 };
 
 use vp_control::ids::{ChannelId, ServerId, UserId};
@@ -141,7 +141,7 @@ impl Gateway {
                 };
                 if let Err(e) = write_delimited(&mut send, &resp).await {
                     warn!("control write failed: {:#}", e);
-                    break;
+                    break Ok(());
                 }
                 continue;
             }
@@ -206,7 +206,7 @@ impl Gateway {
                     };
                     if let Err(e) = write_delimited(&mut send, &resp).await {
                         warn!("control write failed: {:#}", e);
-                        break;
+                        break Ok(());
                     }
                 }
                 Some(pb::client_to_server::Payload::LeaveChannelRequest(r)) => {
@@ -236,7 +236,7 @@ impl Gateway {
                     };
                     if let Err(e) = write_delimited(&mut send, &resp).await {
                         warn!("control write failed: {:#}", e);
-                        break;
+                        break Ok(());
                     }
                 }
                 Some(pb::client_to_server::Payload::CreateChannelRequest(r)) => {
@@ -279,7 +279,7 @@ impl Gateway {
                     };
                     if let Err(e) = write_delimited(&mut send, &resp).await {
                         warn!("control write failed: {:#}", e);
-                        break;
+                        break Ok(());
                     }
                 }
                 Some(pb::client_to_server::Payload::SendMessageRequest(r)) => {
@@ -324,7 +324,7 @@ impl Gateway {
                     };
                     if let Err(e) = write_delimited(&mut send, &resp).await {
                         warn!("control write failed: {:#}", e);
-                        break;
+                        break Ok(());
                     }
                 }
                 Some(pb::client_to_server::Payload::ModerationActionRequest(r)) => {
@@ -333,7 +333,7 @@ impl Gateway {
                     let target = UserId(uuid::Uuid::parse_str(&target.value).context("invalid target_user_id")?);
 
                     if let Some(pb::moderation_action_request::Action::Mute(m)) = r.action {
-                        let _ = self.control.set_mute(&ctx, ch, target, m.muted).await?;
+                        let _ = self.control.set_voice_mute(&ctx, ch, target, m.muted, None).await?;
                         self.membership.update_mute(target, ch, m.muted);
                     }
 
@@ -346,7 +346,7 @@ impl Gateway {
                     };
                     if let Err(e) = write_delimited(&mut send, &resp).await {
                         warn!("control write failed: {:#}", e);
-                        break;
+                        break Ok(());
                     }
                 }
                 _ => {
