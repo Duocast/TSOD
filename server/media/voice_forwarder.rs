@@ -33,11 +33,10 @@ use std::{
 use anyhow::{anyhow, Result};
 use bytes::Bytes;
 use tokio::sync::{mpsc, RwLock};
-use tracing::{debug, warn};
+use tracing::debug;
 
 /// ---- Project-facing types ----
 use vp_control::ids::{ChannelId, UserId};
-
 
 /// Sender/receiver datagram output handle. This should send a datagram to a QUIC Connection.
 #[async_trait::async_trait]
@@ -56,7 +55,8 @@ pub trait SessionRegistry: Send + Sync {
 pub trait MembershipProvider: Send + Sync {
     /// Resolve the authoritative ChannelId for an incoming packet.
     /// Given (sender, route_key/hash) return (channel_id) if sender is in some channel matching this key.
-    async fn resolve_channel_for_sender(&self, sender: UserId, route_key: u32) -> Option<ChannelId>;
+    async fn resolve_channel_for_sender(&self, sender: UserId, route_key: u32)
+        -> Option<ChannelId>;
 
     /// Return the channel members (including sender). Fast path should be cached in memory at your fanout layer.
     async fn list_members(&self, channel: ChannelId) -> Vec<UserId>;
@@ -312,9 +312,6 @@ impl VoiceForwarder {
 /// Parsed voice packet header view.
 #[derive(Clone, Copy, Debug)]
 struct VoicePacket {
-    version: u8,
-    flags: u8,
-    header_len: u16,
     channel_route: u32,
     _ssrc: u32,
     _seq: u32,
@@ -344,9 +341,6 @@ impl VoicePacket {
 
         let vad = (flags & 0x01) != 0;
         Ok(Self {
-            version,
-            flags,
-            header_len,
             channel_route,
             _ssrc: ssrc,
             _seq: seq,
