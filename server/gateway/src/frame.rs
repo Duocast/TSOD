@@ -3,8 +3,10 @@ use bytes::BytesMut;
 use prost::Message;
 use tokio::io::AsyncWriteExt;
 
-/// Read a single length-delimited protobuf message.
-pub async fn write_delimited<M: Message>(send: &mut quinn::SendStream, msg: &M) -> Result<()> {
+pub async fn read_delimited<M: Message + Default>(
+    recv: &mut quinn::RecvStream,
+    max_size: usize,
+) -> Result<M> {
     let len = read_varint_u64(recv).await? as usize;
     if len == 0 {
         return Err(anyhow!("zero-length message"));
@@ -18,7 +20,6 @@ pub async fn write_delimited<M: Message>(send: &mut quinn::SendStream, msg: &M) 
     Ok(M::decode(&buf[..])?)
 }
 
-/// Write a single length-delimited protobuf message.
 pub async fn write_delimited<M: Message>(
     send: &mut quinn::SendStream,
     msg: &M,
