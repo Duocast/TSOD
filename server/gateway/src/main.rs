@@ -23,7 +23,7 @@ use vp_metrics::{MetricsConfig, MetricsServer};
 
 use crate::auth::DevAuthProvider;
 use crate::metrics_adapter::voice_metrics;
-use crate::outbox_dispatch::{OutboxDispatchConfig, run_outbox_dispatcher};
+use crate::outbox_dispatch::{run_outbox_dispatcher, OutboxDispatcherConfig};
 use crate::state::{MembershipCache, PushHub, Sessions};
 
 #[tokio::main]
@@ -54,7 +54,7 @@ async fn main() -> Result<()> {
     sqlx::migrate!("../control/migrations").run(&pool).await?;
 
     let repo = vp_control::PgControlRepo::new(pool.clone());
-    let control = vp_control::ControlService::new(repo.clone());
+    let control = Arc::new(vp_control::ControlService::new(repo.clone()));
 
     // Shared runtime state
     let push = PushHub::new();
@@ -64,8 +64,8 @@ async fn main() -> Result<()> {
     // Media forwarder
     let forwarder = Arc::new(vp_media::voice_forwarder::VoiceForwarder::new(
         vp_media::voice_forwarder::VoiceForwarderConfig::default(),
-        sessions.clone(),
-        membership.clone(),
+        Arc::new(sessions.clone()),
+        Arc::new(membership.clone()),
         voice_metrics(),
     ));
 
@@ -73,18 +73,19 @@ async fn main() -> Result<()> {
     let server_id = vp_control::ids::ServerId(uuid::Uuid::parse_str(&cfg.default_server_id)?);
     tokio::spawn(run_outbox_dispatcher(
         repo.clone(),
-        server_id,
         push.clone(),
         membership.clone(),
-        OutboxDispatchConfig {
+        OutboxDispatcherConfig {
+            server_id,
             poll_interval: std::time::Duration::from_millis(cfg.outbox_poll_ms),
-            batch: cfg.outbox_batch,
+            batch_size: cfg.outbox_batch,
             claim_ttl_seconds: cfg.outbox_claim_ttl_s,
         },
     ));
 
     // QUIC listener
-    let (certs, key) = tls::load_or_generate_tls(cfg.tls_cert_pem.as_deref(), cfg.tls_key_pem.as_deref())?;
+    let (certs, key) =
+        tls::load_or_generate_tls(cfg.tls_cert_pem.as_deref(), cfg.tls_key_pem.as_deref())?;
 
     let mut rustls = RustlsServerConfig::builder()
         .with_no_client_auth()
@@ -112,7 +113,14 @@ async fn main() -> Result<()> {
         Arc::new(DevAuthProvider)
     };
 
-    let gw = Gateway::new(auth_provider, cfg.alpn, control, push, sessions, membership, forwarder);
+    let gw = Gateway::new(
+        auth_provider,
+        cfg.alpn,
+        control,
+        sessions,
+        membership,
+        forwarder,
+    );
 
     tokio::select! {
         r = gw.serve(endpoint) => r?,
