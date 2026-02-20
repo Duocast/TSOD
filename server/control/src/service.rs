@@ -1,5 +1,5 @@
 use chrono::Utc;
-use serde_json::{json, Value as JsonValue};
+use serde_json::json;
 use uuid::Uuid;
 
 use crate::{
@@ -39,17 +39,22 @@ impl<R: ControlRepo> ControlService<R> {
     // Channels
     // -------------------------------------------------------------------------
 
-    pub async fn create_channel(&self, ctx: &RequestContext, req: ChannelCreate) -> ControlResult<Channel> {
+    pub async fn create_channel(
+        &self,
+        ctx: &RequestContext,
+        req: ChannelCreate,
+    ) -> ControlResult<Channel> {
         let name = req.name.trim();
         if name.is_empty() {
-            return Err(ControlError::invalid_argument("channel name empty"));
+            return Err(ControlError::InvalidArgument("channel name empty"));
         }
         if name.len() > 64 {
-            return Err(ControlError::invalid_argument("channel name too long"));
+            return Err(ControlError::InvalidArgument("channel name too long"));
         }
 
         let mut tx = <R as ControlRepo>::tx(&self.repo).await?;
-        self.require(&mut tx, ctx, None, None, Capability::CreateChannel).await?;
+        self.require(&mut tx, ctx, None, None, Capability::CreateChannel)
+            .await?;
 
         let now = Utc::now();
         let ch = Channel {
@@ -63,13 +68,13 @@ impl<R: ControlRepo> ControlService<R> {
             updated_at: now,
         };
 
-        <R as ControlRepo>::create_channel(&self.repo, &mut tx, ch.clone()).await?;
+        <R as ControlRepo>::create_channel(&self.repo, &mut tx, &ch).await?;
 
         // audit
         <R as ControlRepo>::insert_audit(
             &self.repo,
             &mut tx,
-            AuditEntry::new(
+            &AuditEntry::new(
                 ctx.server_id,
                 Some(ctx.user_id),
                 "channel.create",
@@ -84,7 +89,7 @@ impl<R: ControlRepo> ControlService<R> {
         <R as ControlRepo>::insert_outbox(
             &self.repo,
             &mut tx,
-            OutboxEvent {
+            &OutboxEvent {
                 id: OutboxId(Uuid::new_v4()),
                 server_id: ctx.server_id,
                 topic: "channel.created".to_string(),
@@ -103,11 +108,24 @@ impl<R: ControlRepo> ControlService<R> {
         Ok(ch)
     }
 
-    pub async fn get_channel(&self, ctx: &RequestContext, channel_id: ChannelId) -> ControlResult<Channel> {
+    pub async fn get_channel(
+        &self,
+        ctx: &RequestContext,
+        channel_id: ChannelId,
+    ) -> ControlResult<Channel> {
         let mut tx = <R as ControlRepo>::tx(&self.repo).await?;
-        self.require(&mut tx, ctx, Some(channel_id), None, Capability::JoinChannel).await?;
+        self.require(
+            &mut tx,
+            ctx,
+            Some(channel_id),
+            None,
+            Capability::JoinChannel,
+        )
+        .await?;
 
-        let ch = <R as ControlRepo>::get_channel(&self.repo, &mut tx, ctx.server_id, channel_id).await?;
+        let ch = <R as ControlRepo>::get_channel(&self.repo, &mut tx, ctx.server_id, channel_id)
+            .await?
+            .ok_or(ControlError::NotFound("channel"))?;
         tx.commit().await?;
         Ok(ch)
     }
@@ -116,26 +134,46 @@ impl<R: ControlRepo> ControlService<R> {
     // Membership
     // -------------------------------------------------------------------------
 
-    pub async fn join_channel(&self, ctx: &RequestContext, req: JoinChannel) -> ControlResult<Vec<Member>> {
+    pub async fn join_channel(
+        &self,
+        ctx: &RequestContext,
+        req: JoinChannel,
+    ) -> ControlResult<Vec<Member>> {
         let dn = req.display_name.trim();
         if dn.is_empty() {
-            return Err(ControlError::invalid_argument("display name empty"));
+            return Err(ControlError::InvalidArgument("display name empty"));
         }
         if dn.len() > 64 {
-            return Err(ControlError::invalid_argument("display name too long"));
+            return Err(ControlError::InvalidArgument("display name too long"));
         }
 
         let mut tx = <R as ControlRepo>::tx(&self.repo).await?;
-        self.require(&mut tx, ctx, Some(req.channel_id), None, Capability::JoinChannel).await?;
+        self.require(
+            &mut tx,
+            ctx,
+            Some(req.channel_id),
+            None,
+            Capability::JoinChannel,
+        )
+        .await?;
 
         // Ensure channel exists
-        let ch = <R as ControlRepo>::get_channel(&self.repo, &mut tx, ctx.server_id, req.channel_id).await?;
+        let ch =
+            <R as ControlRepo>::get_channel(&self.repo, &mut tx, ctx.server_id, req.channel_id)
+                .await?
+                .ok_or(ControlError::NotFound("channel"))?;
 
         // Optional capacity check (if your repo supports count_members)
         if let Some(max) = ch.max_members {
-            let cur = <R as ControlRepo>::count_members(&self.repo, &mut tx, ctx.server_id, req.channel_id).await?;
+            let cur = <R as ControlRepo>::count_members(
+                &self.repo,
+                &mut tx,
+                ctx.server_id,
+                req.channel_id,
+            )
+            .await?;
             if cur >= max as i64 {
-                return Err(ControlError::resource_exhausted("channel full"));
+                return Err(ControlError::ResourceExhausted("channel full"));
             }
         }
 
@@ -153,7 +191,7 @@ impl<R: ControlRepo> ControlService<R> {
         <R as ControlRepo>::insert_audit(
             &self.repo,
             &mut tx,
-            AuditEntry::new(
+            &AuditEntry::new(
                 ctx.server_id,
                 Some(ctx.user_id),
                 "member.join",
@@ -167,7 +205,7 @@ impl<R: ControlRepo> ControlService<R> {
         <R as ControlRepo>::insert_outbox(
             &self.repo,
             &mut tx,
-            OutboxEvent {
+            &OutboxEvent {
                 id: OutboxId(Uuid::new_v4()),
                 server_id: ctx.server_id,
                 topic: "presence.member_joined".to_string(),
@@ -182,24 +220,52 @@ impl<R: ControlRepo> ControlService<R> {
         )
         .await?;
 
-        let members = <R as ControlRepo>::list_members(&self.repo, &mut tx, ctx.server_id, req.channel_id).await?;
+        let members =
+            <R as ControlRepo>::list_members(&self.repo, &mut tx, ctx.server_id, req.channel_id)
+                .await?;
         tx.commit().await?;
         Ok(members)
     }
 
-    pub async fn leave_channel(&self, ctx: &RequestContext, channel_id: ChannelId) -> ControlResult<()> {
+    pub async fn leave_channel(
+        &self,
+        ctx: &RequestContext,
+        channel_id: ChannelId,
+    ) -> ControlResult<()> {
         let mut tx = <R as ControlRepo>::tx(&self.repo).await?;
 
         // Ensure member exists (and enforce permission)
-        self.require(&mut tx, ctx, Some(channel_id), None, Capability::JoinChannel).await?;
-        let _m = <R as ControlRepo>::get_member(&self.repo, &mut tx, ctx.server_id, channel_id, ctx.user_id).await?;
+        self.require(
+            &mut tx,
+            ctx,
+            Some(channel_id),
+            None,
+            Capability::JoinChannel,
+        )
+        .await?;
+        let _m = <R as ControlRepo>::get_member(
+            &self.repo,
+            &mut tx,
+            ctx.server_id,
+            channel_id,
+            ctx.user_id,
+        )
+        .await?
+        .ok_or(ControlError::NotFound("member"))?;
 
-        <R as ControlRepo>::delete_member(&self.repo, &mut tx, ctx.server_id, channel_id, ctx.user_id).await?;
+        <R as ControlRepo>::delete_member(
+            &self.repo,
+            &mut tx,
+            ctx.server_id,
+            channel_id,
+            ctx.user_id,
+        )
+        .await?;
 
         <R as ControlRepo>::insert_audit(
             &self.repo,
             &mut tx,
-            AuditEntry::new(
+            &AuditEntry::new(
                 ctx.server_id,
                 Some(ctx.user_id),
                 "member.leave",
@@ -213,7 +279,7 @@ impl<R: ControlRepo> ControlService<R> {
         <R as ControlRepo>::insert_outbox(
             &self.repo,
             &mut tx,
-            OutboxEvent {
+            &OutboxEvent {
                 id: OutboxId(Uuid::new_v4()),
                 server_id: ctx.server_id,
                 topic: "presence.member_left".to_string(),
@@ -247,7 +313,15 @@ impl<R: ControlRepo> ControlService<R> {
         )
         .await?;
 
-        let mut m = <R as ControlRepo>::get_member(&self.repo, &mut tx, ctx.server_id, channel_id, target_user).await?;
+        let mut m = <R as ControlRepo>::get_member(
+            &self.repo,
+            &mut tx,
+            ctx.server_id,
+            channel_id,
+            target_user,
+        )
+        .await?
+        .ok_or(ControlError::NotFound("member"))?;
         m.muted = muted;
 
         <R as ControlRepo>::upsert_member(&self.repo, &mut tx, ctx.server_id, &m).await?;
@@ -255,10 +329,14 @@ impl<R: ControlRepo> ControlService<R> {
         <R as ControlRepo>::insert_audit(
             &self.repo,
             &mut tx,
-            AuditEntry::new(
+            &AuditEntry::new(
                 ctx.server_id,
                 Some(ctx.user_id),
-                if muted { "moderation.mute" } else { "moderation.unmute" },
+                if muted {
+                    "moderation.mute"
+                } else {
+                    "moderation.unmute"
+                },
                 "user",
                 target_user.0.to_string(),
                 json!({ "channel_id": channel_id.0, "muted": muted, "reason": reason }),
@@ -269,7 +347,7 @@ impl<R: ControlRepo> ControlService<R> {
         <R as ControlRepo>::insert_outbox(
             &self.repo,
             &mut tx,
-            OutboxEvent {
+            &OutboxEvent {
                 id: OutboxId(Uuid::new_v4()),
                 server_id: ctx.server_id,
                 topic: "presence.voice_state_changed".to_string(),
@@ -286,7 +364,7 @@ impl<R: ControlRepo> ControlService<R> {
         <R as ControlRepo>::insert_outbox(
             &self.repo,
             &mut tx,
-            OutboxEvent {
+            &OutboxEvent {
                 id: OutboxId(Uuid::new_v4()),
                 server_id: ctx.server_id,
                 topic: "moderation.user_muted".to_string(),
@@ -309,20 +387,39 @@ impl<R: ControlRepo> ControlService<R> {
     // Chat
     // -------------------------------------------------------------------------
 
-    pub async fn send_message(&self, ctx: &RequestContext, msg: SendMessage) -> ControlResult<ChatMessage> {
+    pub async fn send_message(
+        &self,
+        ctx: &RequestContext,
+        msg: SendMessage,
+    ) -> ControlResult<ChatMessage> {
         let text = msg.text.trim();
         if text.is_empty() {
-            return Err(ControlError::invalid_argument("message text empty"));
+            return Err(ControlError::InvalidArgument("message text empty"));
         }
         if text.len() > 2000 {
-            return Err(ControlError::invalid_argument("message too long"));
+            return Err(ControlError::InvalidArgument("message too long"));
         }
 
         let mut tx = <R as ControlRepo>::tx(&self.repo).await?;
-        self.require(&mut tx, ctx, Some(msg.channel_id), None, Capability::SendMessage).await?;
+        self.require(
+            &mut tx,
+            ctx,
+            Some(msg.channel_id),
+            None,
+            Capability::SendMessage,
+        )
+        .await?;
 
         // Ensure member exists
-        let _m = <R as ControlRepo>::get_member(&self.repo, &mut tx, ctx.server_id, msg.channel_id, ctx.user_id).await?;
+        let _m = <R as ControlRepo>::get_member(
+            &self.repo,
+            &mut tx,
+            ctx.server_id,
+            msg.channel_id,
+            ctx.user_id,
+        )
+        .await?
+        .ok_or(ControlError::NotFound("member"))?;
 
         let rec = ChatMessage {
             id: MessageId(Uuid::new_v4()),
@@ -340,7 +437,7 @@ impl<R: ControlRepo> ControlService<R> {
         <R as ControlRepo>::insert_audit(
             &self.repo,
             &mut tx,
-            AuditEntry::new(
+            &AuditEntry::new(
                 ctx.server_id,
                 Some(ctx.user_id),
                 "chat.message",
@@ -354,7 +451,7 @@ impl<R: ControlRepo> ControlService<R> {
         <R as ControlRepo>::insert_outbox(
             &self.repo,
             &mut tx,
-            OutboxEvent {
+            &OutboxEvent {
                 id: OutboxId(Uuid::new_v4()),
                 server_id: ctx.server_id,
                 topic: "chat.message_posted".to_string(),
@@ -378,10 +475,16 @@ impl<R: ControlRepo> ControlService<R> {
     // Outbox helpers (optional – if your gateway uses these)
     // -------------------------------------------------------------------------
 
-    pub async fn claim_outbox_batch(&self, server: ServerId, limit: i64) -> ControlResult<(Uuid, Vec<OutboxEventRow>)> {
+    pub async fn claim_outbox_batch(
+        &self,
+        server: ServerId,
+        limit: i64,
+    ) -> ControlResult<(Uuid, Vec<OutboxEventRow>)> {
         let mut tx = <R as ControlRepo>::tx(&self.repo).await?;
         let token = Uuid::new_v4();
-        let rows = <R as ControlRepo>::claim_outbox_batch(&self.repo, &mut tx, server, token, limit).await?;
+        let rows =
+            <R as ControlRepo>::claim_outbox_batch(&self.repo, &mut tx, server, token, limit)
+                .await?;
         tx.commit().await?;
         Ok((token, rows))
     }
@@ -416,7 +519,7 @@ impl<R: ControlRepo> ControlService<R> {
 
         match <R as ControlRepo>::decide_permission(&self.repo, tx, &req).await? {
             Decision::Allow => Ok(()),
-            Decision::Deny => Err(ControlError::forbidden("permission denied")),
+            Decision::Deny => Err(ControlError::PermissionDenied("permission denied")),
         }
     }
 }
