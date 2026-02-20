@@ -44,29 +44,22 @@ impl Gateway {
             sessions,
             membership,
             voice,
-        };
-
-        Ok(())
+        }
     }
 
     pub async fn serve(self, endpoint: quinn::Endpoint) -> Result<()> {
         info!("gateway listening");
-
+    
         loop {
-            let incoming = endpoint
-                .accept()
-                .await
-                .ok_or_else(|| anyhow!("endpoint closed"))?;
+            let incoming = endpoint.accept().await.ok_or_else(|| anyhow!("endpoint closed"))?;
             let gw = self.clone();
-
+    
             tokio::spawn(async move {
                 if let Err(e) = gw.handle_conn(incoming).await {
                     warn!("conn ended with error: {:#}", e);
                 }
             });
-        };
-
-        Ok(())
+        }
     }
 
     async fn handle_conn(&self, incoming: quinn::Incoming) -> Result<()> {
