@@ -43,7 +43,9 @@ impl Gateway {
             sessions,
             membership,
             voice,
-        }
+        };
+
+        Ok(())
     }
 
     pub async fn serve(self, endpoint: quinn::Endpoint) -> Result<()> {
@@ -61,7 +63,9 @@ impl Gateway {
                     warn!("conn ended with error: {:#}", e);
                 }
             });
-        }
+        };
+
+        Ok(())
     }
 
     async fn handle_conn(&self, incoming: quinn::Incoming) -> Result<()> {
@@ -332,7 +336,7 @@ impl Gateway {
                     let target = UserId(uuid::Uuid::parse_str(&target.value).context("invalid target_user_id")?);
 
                     if let Some(pb::moderation_action_request::Action::Mute(m)) = r.action {
-                        let _ = self.control.set_mute(&ctx, ch, target, m.muted).await?;
+                        let _ = self.control.set_voice_mute(&ctx, ch, target, m.muted, None).await?;
                         self.membership.update_mute(target, ch, m.muted);
                     }
 
@@ -352,7 +356,9 @@ impl Gateway {
                     // Ignore other messages for now.
                 }
             }
-        }
+        };
+
+        Ok(())
     }
 
     async fn do_hello(
