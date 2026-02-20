@@ -85,7 +85,7 @@ impl SessionMap {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(DashMap::new()),
-        }}
+        }
     }
 
     pub fn register(&self, user: UserId, tx: Arc<dyn DatagramTx>) {
