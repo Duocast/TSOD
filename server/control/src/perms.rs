@@ -68,6 +68,11 @@ impl Effect {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Decision {
+    Allow,
+    Deny,
+}
+
 pub enum PermissionDecision {
     Allow,
     Deny,
