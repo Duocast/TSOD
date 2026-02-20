@@ -226,11 +226,11 @@ impl Gateway {
                         }),
                         sent_at: Some(now_ts()),
                         error: None,
-                        payload: Some(pb::server_to_client::Payload::JoinChannelResponse(
-                            pb::JoinChannelResponse { state: Some(state) },
+                        payload: Some(pb::server_to_client::Payload::LeaveChannelResponse(
+                            pb::LeaveChannelResponse {
+                                channel_id: Some(pb::ChannelId { value: ch.0.to_string() }),
+                            },
                         )),
-                            channel_id: Some(pb::ChannelId { value: ch.0.to_string() }),
-                        })),
                     };
                     if let Err(e) = write_delimited(&mut send, &resp).await {
                         warn!("control write failed: {:#}", e);
@@ -271,12 +271,8 @@ impl Gateway {
                         }),
                         sent_at: Some(now_ts()),
                         error: None,
-                        payload: Some(pb::server_to_client::Payload::LeaveChannelResponse(
-                            pb::LeaveChannelResponse {
-                                channel_id: Some(pb::ChannelId {
-                                    value: ch.0.to_string(),
-                                }),
-                            },
+                        payload: Some(pb::server_to_client::Payload::JoinChannelResponse(
+                            pb::JoinChannelResponse { state: Some(state) },
                         )),
                     };
                     if let Err(e) = write_delimited(&mut send, &resp).await {
