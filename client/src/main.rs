@@ -196,11 +196,11 @@ async fn connect_and_run_session(
     let _ = tx_event.send(UiEvent::SetConnected(false)).await;
     let _ = tx_event.send(UiEvent::SetAuthed(false)).await;
 
-    let endpoint = make_endpoint_with_optional_pinning()?;
+    let endpoint = make_endpoint_with_optional_pinning(&cfg)?;
     let addr = cfg.server.parse().context("parse server addr")?;
 
     let conn = endpoint
-        .connect(addr, net::quic::server_name())
+        .connect(addr, net::quic::server_name(&cfg.server_name))
         .context("connect start")?
         .await
         .context("connect await")?;
