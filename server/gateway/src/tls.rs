@@ -7,9 +7,25 @@ pub fn load_or_generate_tls(
     key_pem: Option<&str>,
 ) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
     match (cert_pem, key_pem) {
-        (Some(_), Some(_)) => Err(anyhow!(
-            "PEM loading is not wired in this build; run without --tls-cert-pem/--tls-key-pem for dev self-signed certs"
-        )),
+        (Some(cert_path), Some(key_path)) => {
+            let cert_data = std::fs::read(cert_path).context("read cert PEM")?;
+            let key_data = std::fs::read(key_path).context("read key PEM")?;
+
+            let certs: Vec<CertificateDer<'static>> =
+                rustls_pemfile::certs(&mut &cert_data[..])
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .context("parse cert PEM")?;
+
+            if certs.is_empty() {
+                return Err(anyhow!("no certificates found in {}", cert_path));
+            }
+
+            let key = rustls_pemfile::private_key(&mut &key_data[..])
+                .context("parse key PEM")?
+                .ok_or_else(|| anyhow!("no private key found in {}", key_path))?;
+
+            Ok((certs, key))
+        }
         (None, None) => {
             let cert = generate_simple_self_signed(vec!["localhost".into()])
                 .context("failed generating self-signed cert")?;

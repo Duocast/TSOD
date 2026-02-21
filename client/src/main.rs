@@ -196,11 +196,11 @@ async fn connect_and_run_session(
     let _ = tx_event.send(UiEvent::SetConnected(false)).await;
     let _ = tx_event.send(UiEvent::SetAuthed(false)).await;
 
-    let endpoint = make_endpoint_with_optional_pinning()?;
+    let endpoint = make_endpoint_with_optional_pinning(&cfg)?;
     let addr = cfg.server.parse().context("parse server addr")?;
 
     let conn = endpoint
-        .connect(addr, net::quic::server_name())
+        .connect(addr, net::quic::server_name(&cfg.server_name))
         .context("connect start")?
         .await
         .context("connect await")?;
@@ -571,10 +571,14 @@ impl Backoff {
 
 /// If env var VP_TLS_PIN_SHA256_HEX is set, install a QUIC endpoint with cert pinning.
 /// Otherwise fall back to your existing net::quic::make_endpoint() (which may be insecure in dev).
-fn make_endpoint_with_optional_pinning() -> Result<quinn::Endpoint> {
+fn make_endpoint_with_optional_pinning(cfg: &Config) -> Result<quinn::Endpoint> {
     if let Ok(pin_hex) = std::env::var("VP_TLS_PIN_SHA256_HEX") {
         let pin = hex_to_32(&pin_hex).context("bad VP_TLS_PIN_SHA256_HEX (need 64 hex chars)")?;
         return make_pinned_endpoint(pin);
+    }
+
+    if let Some(ref ca_path) = cfg.ca_cert_pem {
+        return net::quic::make_ca_endpoint(ca_path);
     }
 
     // Fallback: use existing helper (may accept any cert depending on your net/quic.rs).

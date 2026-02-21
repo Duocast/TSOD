@@ -19,4 +19,13 @@ pub struct Config {
     /// Push-to-talk (spacebar in TUI later). For now toggles capture on/off.
     #[arg(long, default_value_t = true)]
     pub push_to_talk: bool,
+
+    /// TLS server name (SNI). Defaults to "localhost".
+    #[arg(long, default_value = "localhost")]
+    pub server_name: String,
+
+    /// Path to CA certificate PEM for server validation.
+    /// If unset, uses insecure dev mode (accept any cert).
+    #[arg(long)]
+    pub ca_cert_pem: Option<String>,
 }
