@@ -571,13 +571,15 @@ impl Backoff {
 
 /// If env var VP_TLS_PIN_SHA256_HEX is set, install a QUIC endpoint with cert pinning.
 /// Otherwise fall back to your existing net::quic::make_endpoint() (which may be insecure in dev).
-fn make_endpoint_with_optional_pinning() -> Result<quinn::Endpoint> {
+fn make_endpoint_with_optional_pinning(cfg: &Config) -> Result<quinn::Endpoint> {
+    // Priority: 1) cert pinning, 2) CA cert, 3) insecure dev
     if let Ok(pin_hex) = std::env::var("VP_TLS_PIN_SHA256_HEX") {
-        let pin = hex_to_32(&pin_hex).context("bad VP_TLS_PIN_SHA256_HEX (need 64 hex chars)")?;
+        let pin = hex_to_32(&pin_hex)?;
         return make_pinned_endpoint(pin);
     }
-
-    // Fallback: use existing helper (may accept any cert depending on your net/quic.rs).
+    if let Some(ref ca_path) = cfg.ca_cert_pem {
+        return net::quic::make_ca_endpoint(ca_path);
+    }
     net::quic::make_endpoint()
 }
 
