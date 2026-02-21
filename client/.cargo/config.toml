@@ -1,0 +1,4 @@
+# Work around CMake 3.31+ removing compatibility with cmake_minimum_required < 3.5.
+# The audiopus_sys crate bundles an Opus CMakeLists.txt that triggers this.
+[env]
+CMAKE_POLICY_VERSION_MINIMUM = "3.5"
