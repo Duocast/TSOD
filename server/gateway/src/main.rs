@@ -32,6 +32,10 @@ async fn main() -> Result<()> {
         .with_env_filter(EnvFilter::from_default_env().add_directive(Level::INFO.into()))
         .init();
 
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install rustls crypto provider");
+
     let cfg = Config::parse();
     let addr: SocketAddr = cfg.listen.parse()?;
 
