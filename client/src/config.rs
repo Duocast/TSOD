@@ -23,6 +23,9 @@ pub struct Config {
     /// TLS server name (SNI). Defaults to "localhost".
     #[arg(long, default_value = "localhost")]
     pub server_name: String,
+
+    /// Path to CA certificate PEM for server validation.
+    /// If unset, uses insecure dev mode (accept any cert).
     
     /// Path to CA certificate PEM for server validation (optional; if unset, uses insecure dev mode)
     #[arg(long)]

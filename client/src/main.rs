@@ -577,6 +577,12 @@ fn make_endpoint_with_optional_pinning(cfg: &Config) -> Result<quinn::Endpoint> 
         let pin = hex_to_32(&pin_hex)?;
         return make_pinned_endpoint(pin);
     }
+
+    if let Some(ref ca_path) = cfg.ca_cert_pem {
+        return net::quic::make_ca_endpoint(ca_path);
+    }
+
+    // Fallback: use existing helper (may accept any cert depending on your net/quic.rs).
     if let Some(ref ca_path) = cfg.ca_cert_pem {
         return net::quic::make_ca_endpoint(ca_path);
     }
