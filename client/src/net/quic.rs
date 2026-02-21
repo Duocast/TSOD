@@ -21,8 +21,8 @@ fn make_client_config() -> Result<ClientConfig> {
     )?)))
 }
 
-pub fn server_name() -> ServerName<'static> {
-    ServerName::try_from("localhost").unwrap()
+pub fn server_name(name: &str) -> ServerName<'static> {
+    ServerName::try_from(name.to_string()).expect("valid server name")
 }
 
 struct AcceptAnyCert;
