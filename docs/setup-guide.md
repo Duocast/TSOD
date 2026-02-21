@@ -688,6 +688,15 @@ openssl s_client -connect 127.0.0.1:4433 -CAfile /etc/tsod/tls/ca.crt 2>/dev/nul
 
 - **"protoc not found"**: Ensure `protoc` is on your PATH. On Windows, open a
   new terminal after modifying PATH
+- **CMake "Compatibility with CMake < 3.5 has been removed" (Windows)**: CMake
+  3.31+ (bundled with VS 2026) rejects the old `cmake_minimum_required` in the
+  bundled Opus source. The repo includes a `client/.cargo/config.toml` that sets
+  `CMAKE_POLICY_VERSION_MINIMUM=3.5` automatically. If you still hit this, set
+  the variable manually:
+  ```powershell
+  set CMAKE_POLICY_VERSION_MINIMUM=3.5
+  cargo build --release
+  ```
 - **Opus linking errors (Windows)**: Verify `VCPKG_ROOT` is set and
   `vcpkg install opus:x64-windows` completed successfully. Try setting
   `VCPKGRS_DYNAMIC=1`
