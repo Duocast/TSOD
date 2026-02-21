@@ -24,18 +24,6 @@ pub fn load_or_generate_tls(
                 .context("parse key PEM")?
                 .ok_or_else(|| anyhow!("no private key found in {}", key_path))?;
 
-        (Some(cert_path), Some(key_path)) => {
-            let cert_pem = std::fs::read(cert_path).context("read cert PEM")?;
-            let key_pem = std::fs::read(key_path).context("read key PEM")?;
-        
-            let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut &cert_pem[..])
-                .collect::<Result<Vec<_>, _>>()
-                .context("parse cert PEM")?;
-        
-            let key = rustls_pemfile::private_key(&mut &key_pem[..])
-                .context("parse key PEM")?
-                .ok_or_else(|| anyhow!("no private key found in PEM"))?;
-        
             Ok((certs, key))
         }
         (None, None) => {
