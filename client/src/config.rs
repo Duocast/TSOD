@@ -26,6 +26,8 @@ pub struct Config {
 
     /// Path to CA certificate PEM for server validation.
     /// If unset, uses insecure dev mode (accept any cert).
+    
+    /// Path to CA certificate PEM for server validation (optional; if unset, uses insecure dev mode)
     #[arg(long)]
     pub ca_cert_pem: Option<String>,
 }
