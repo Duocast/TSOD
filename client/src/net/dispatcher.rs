@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use std::{
     collections::HashMap,
     sync::Arc,
@@ -8,7 +8,7 @@ use tokio::{
     sync::{mpsc, oneshot, Mutex, RwLock, watch},
     time::timeout,
 };
-use tracing::{debug, warn};
+use tracing::warn;
 
 use crate::{
     net::frame::{read_delimited, write_delimited},
@@ -21,8 +21,8 @@ const MAX_CTRL_MSG: usize = 256 * 1024;
 /// Keep this fairly low-level; app layer can transform into UI state.
 #[derive(Clone, Debug)]
 pub enum PushEvent {
-    Presence(pb::PresenceEvent), // adjust to your proto
-    Chat(pb::ChatEvent),         // adjust to your proto
+    Presence(pb::PresenceEvent),
+    Chat(pb::ChatEvent),
     Moderation(pb::ModerationEvent),
     ServerHint(pb::ServerHint),
     Unknown(pb::ServerToClient),
@@ -34,6 +34,7 @@ enum Command {
     Send {
         payload: pb::client_to_server::Payload,
         resp_tx: oneshot::Sender<Result<pb::ServerToClient>>,
+        #[allow(dead_code)]
         timeout: Duration,
     },
     Shutdown,
@@ -47,17 +48,18 @@ pub struct ControlDispatcher {
 
 struct Inner {
     cmd_tx: mpsc::Sender<Command>,
-    push_tx: mpsc::Sender<PushEvent>,     // internal fanout root
-    push_rx: Mutex<Option<mpsc::Receiver<PushEvent>>>, // single consumer by default
+    #[allow(dead_code)]
+    push_tx: mpsc::Sender<PushEvent>,
+    push_rx: Mutex<Option<mpsc::Receiver<PushEvent>>>,
     session_id: RwLock<Option<pb::SessionId>>,
 }
 
 impl ControlDispatcher {
-    /// Start the dispatcher. Owns the control stream.
+    /// Start the dispatcher. Takes ownership of the control stream.
     /// - `shutdown_rx`: when true, dispatcher exits.
     pub fn start(
-        mut send: quinn::SendStream,
-        mut recv: quinn::RecvStream,
+        send: quinn::SendStream,
+        recv: quinn::RecvStream,
         shutdown_rx: watch::Receiver<bool>,
     ) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::channel::<Command>(256);
@@ -72,8 +74,8 @@ impl ControlDispatcher {
 
         tokio::spawn(dispatcher_task(
             inner.clone(),
-            &mut send,
-            &mut recv,
+            send,
+            recv,
             cmd_rx,
             shutdown_rx,
         ));
@@ -82,7 +84,6 @@ impl ControlDispatcher {
     }
 
     /// Take the push event receiver (single consumer).
-    /// If you need multiple consumers, replace with broadcast channel.
     pub async fn take_push_receiver(&self) -> mpsc::Receiver<PushEvent> {
         self.inner
             .push_rx
@@ -92,10 +93,7 @@ impl ControlDispatcher {
             .expect("push receiver already taken")
     }
 
-    /// ---- High level API ----
-
     pub async fn hello_auth(&self, alpn: &str, dev_token: &str) -> Result<()> {
-        // Hello
         let hello = pb::Hello {
             caps: Some(default_caps(alpn)),
             device_id: Some(pb::DeviceId {
@@ -115,7 +113,6 @@ impl ControlDispatcher {
             _ => return Err(anyhow!("expected HelloAck")),
         }
 
-        // Auth
         let auth = pb::AuthRequest {
             method: Some(pb::auth_request::Method::DevToken(pb::DevTokenAuth {
                 token: dev_token.into(),
@@ -173,11 +170,11 @@ impl ControlDispatcher {
         }
     }
 
-    /// Example: send chat (requires you to have this proto).
     pub async fn send_chat(&self, channel_id: &str, text: &str) -> Result<()> {
         let req = pb::SendMessageRequest {
             channel_id: Some(pb::ChannelId { value: channel_id.into() }),
             text: text.into(),
+            attachments: vec![],
         };
         let resp = self
             .send_request(
@@ -220,33 +217,28 @@ impl ControlDispatcher {
     }
 }
 
-/// Dispatcher task:
-/// - Serializes outgoing requests on a single stream (ordered)
-/// - Reads incoming responses/push concurrently
+/// Dispatcher task: owns send/recv streams.
 async fn dispatcher_task(
     inner: Arc<Inner>,
-    send: &mut quinn::SendStream,
-    recv: &mut quinn::RecvStream,
+    mut send: quinn::SendStream,
+    mut recv: quinn::RecvStream,
     mut cmd_rx: mpsc::Receiver<Command>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
-    // pending request map: request_id -> oneshot
     let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<pb::ServerToClient>>>>> =
         Arc::new(Mutex::new(HashMap::new()));
     let next_req: Arc<Mutex<u64>> = Arc::new(Mutex::new(1));
 
-    // Spawn reader
+    // Spawn reader task
     let reader_pending = pending.clone();
     let reader_inner = inner.clone();
-    let mut recv_stream = recv.clone();
     let reader = tokio::spawn(async move {
         loop {
-            let msg: pb::ServerToClient = match read_delimited(&mut recv_stream, MAX_CTRL_MSG).await {
+            let msg: pb::ServerToClient = match read_delimited(&mut recv, MAX_CTRL_MSG).await {
                 Ok(m) => m,
                 Err(e) => return Err::<(), anyhow::Error>(e),
             };
 
-            // Correlated response?
             if let Some(rid) = msg.request_id.as_ref().map(|x| x.value) {
                 if let Some(tx) = reader_pending.lock().await.remove(&rid) {
                     let _ = tx.send(Ok(msg));
@@ -254,17 +246,15 @@ async fn dispatcher_task(
                 }
             }
 
-            // Otherwise treat as server push
             let ev = classify_push(msg);
-            // If push channel is full, drop oldest behavior is not built into mpsc;
-            // we choose to drop this push event to preserve responsiveness.
             if reader_inner.push_tx.try_send(ev).is_err() {
-                // keep quiet to avoid log spam
+                // drop if full
             }
         }
     });
 
     // Writer/command loop
+    tokio::pin!(reader);
     loop {
         tokio::select! {
             _ = shutdown_rx.changed() => {
@@ -275,7 +265,6 @@ async fn dispatcher_task(
                     None => break,
                     Some(Command::Shutdown) => break,
                     Some(Command::Send { payload, resp_tx, timeout: _ }) => {
-                        // Assign request id
                         let rid = {
                             let mut g = next_req.lock().await;
                             let v = *g;
@@ -283,7 +272,6 @@ async fn dispatcher_task(
                             v
                         };
 
-                        // Register pending before sending (avoid race)
                         pending.lock().await.insert(rid, resp_tx);
 
                         let session_id = inner.session_id.read().await.clone();
@@ -294,8 +282,7 @@ async fn dispatcher_task(
                             payload: Some(payload),
                         };
 
-                        if let Err(e) = write_delimited(send, &msg).await {
-                            // Fail all pending
+                        if let Err(e) = write_delimited(&mut send, &msg).await {
                             warn!("control send failed: {e:#}");
                             fail_all_pending(&pending).await;
                             break;
@@ -303,8 +290,7 @@ async fn dispatcher_task(
                     }
                 }
             }
-            r = &mut tokio::pin!(reader) => {
-                // reader ended
+            r = &mut reader => {
                 if let Err(e) = r {
                     warn!("control reader join error: {}", e);
                 }
@@ -314,7 +300,6 @@ async fn dispatcher_task(
         }
     }
 
-    // Shutdown: fail pending
     fail_all_pending(&pending).await;
 }
 
@@ -369,7 +354,6 @@ fn default_caps(alpn: &str) -> pb::ClientCaps {
             max_simultaneous_decodes: 8,
         }),
         screen_video: None,
-        // Replace with a real hash if you have caps hashing in your proto
         caps_hash: Some(pb::CapabilityHash {
             sha256: alpn.as_bytes().to_vec(),
         }),

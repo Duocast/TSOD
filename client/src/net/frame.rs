@@ -1,7 +1,6 @@
 use anyhow::{anyhow, Result};
-use bytes::{BufMut, BytesMut};
+use bytes::BytesMut;
 use prost::Message;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 pub async fn read_delimited<M: Message + Default>(
     recv: &mut quinn::RecvStream,
@@ -21,7 +20,6 @@ pub async fn write_delimited<M: Message>(send: &mut quinn::SendStream, msg: &M) 
     msg.encode(&mut body)?;
     write_varint_u64(send, body.len() as u64).await?;
     send.write_all(&body).await?;
-    send.flush().await?;
     Ok(())
 }
 

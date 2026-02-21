@@ -34,7 +34,7 @@ use std::sync::{
     Arc,
 };
 use tokio::sync::{mpsc, watch, Mutex};
-use tokio::time::{sleep, Duration, Instant};
+use tokio::time::{sleep, Duration};
 use tracing::{info, warn, Level};
 use tracing_subscriber::EnvFilter;
 use ui::{Tui, UiEvent, UiIntent, UiModel};
@@ -44,6 +44,10 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env().add_directive(Level::INFO.into()))
         .init();
+
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install rustls crypto provider");
 
     let cfg = Config::parse();
 
@@ -63,7 +67,7 @@ async fn main() -> Result<()> {
     // Spawn UI (blocking thread)
     let ui_running = running.clone();
     let ui_shutdown_tx = shutdown_tx.clone();
-    let ui_handle = tokio::task::spawn_blocking(move || -> Result<()> {
+    let mut ui_handle = tokio::task::spawn_blocking(move || -> Result<()> {
         let mut model = UiModel::default();
         model.title = "vp-client".into();
         model.ptt_enabled = cfg.push_to_talk;
@@ -79,10 +83,10 @@ async fn main() -> Result<()> {
     });
 
     // App task: handles intents, networking lifecycle, audio loops
-    let app_handle = tokio::spawn(app_task(
+    let mut app_handle = tokio::spawn(app_task(
         cfg.clone(),
         tx_event.clone(),
-        &mut rx_intent,
+        rx_intent,
         running.clone(),
         shutdown_rx,
         ptt_active.clone(),
@@ -90,13 +94,13 @@ async fn main() -> Result<()> {
 
     // Also exit on Ctrl-C
     tokio::select! {
-        r = ui_handle => {
+        r = &mut ui_handle => {
             // UI exited; propagate any errors
             if let Err(e) = r {
                 warn!("ui task join error: {}", e);
             }
         }
-        r = app_handle => {
+        r = &mut app_handle => {
             if let Err(e) = r {
                 warn!("app task join error: {}", e);
             }
@@ -108,17 +112,13 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Wait for tasks to finish cleanly
-    let _ = ui_handle.await;
-    let _ = app_handle.await;
-
     Ok(())
 }
 
 async fn app_task(
     cfg: Config,
     tx_event: mpsc::Sender<UiEvent>,
-    rx_intent: &mut mpsc::Receiver<UiIntent>,
+    mut rx_intent: mpsc::Receiver<UiIntent>,
     running: Arc<AtomicBool>,
     mut shutdown_rx: watch::Receiver<bool>,
     ptt_active: Arc<AtomicBool>,
@@ -162,7 +162,7 @@ async fn app_task(
             channel_route_hash,
             ptt_active.clone(),
             &mut shutdown_rx,
-            rx_intent,
+            &mut rx_intent,
         )
         .await
         {
@@ -200,7 +200,7 @@ async fn connect_and_run_session(
     let addr = cfg.server.parse().context("parse server addr")?;
 
     let conn = endpoint
-        .connect(addr, net::quic::server_name(&cfg.server_name))
+        .connect(addr, &cfg.server_name)
         .context("connect start")?
         .await
         .context("connect await")?;
@@ -331,6 +331,7 @@ let ctl_keepalive = tokio::spawn(async move {
 
 
     // Intent handling loop; for now we just handle Quit / PTT toggle / log chat.
+    tokio::pin!(ctl_keepalive);
     loop {
         tokio::select! {
             // UI intents
@@ -341,26 +342,25 @@ let ctl_keepalive = tokio::spawn(async move {
                         match intent {
                             UiIntent::Quit => return Ok(()),
                             UiIntent::TogglePtt => {
-    // Keep the audio gate in sync with UI toggles.
-    let new = !ptt_active.load(Ordering::Relaxed);
-    ptt_active.store(new, Ordering::Relaxed);
-    let _ = tx_event
-        .send(UiEvent::AppendLog(format!(
-            "[ptt] {}",
-            if new { "ON" } else { "OFF" }
-        )))
-        .await;
-}
+                                let new = !ptt_active.load(Ordering::Relaxed);
+                                ptt_active.store(new, Ordering::Relaxed);
+                                let _ = tx_event
+                                    .send(UiEvent::AppendLog(format!(
+                                        "[ptt] {}",
+                                        if new { "ON" } else { "OFF" }
+                                    )))
+                                    .await;
+                            }
                             UiIntent::SendChat { text } => {
-    let _ = tx_event.send(UiEvent::AppendLog(format!("[me] {text}"))).await;
-    if let Some(ch) = cfg.channel_id.as_deref() {
-        if let Err(e) = dispatcher.send_chat(ch, &text).await {
-            let _ = tx_event.send(UiEvent::AppendLog(format!("[ctl] send_chat failed: {e:#}"))).await;
-        }
-    } else {
-        let _ = tx_event.send(UiEvent::AppendLog("[ctl] no --channel-id set; chat not sent".into())).await;
-    }
-}
+                                let _ = tx_event.send(UiEvent::AppendLog(format!("[me] {text}"))).await;
+                                if let Some(ch) = cfg.channel_id.as_deref() {
+                                    if let Err(e) = dispatcher.send_chat(ch, &text).await {
+                                        let _ = tx_event.send(UiEvent::AppendLog(format!("[ctl] send_chat failed: {e:#}"))).await;
+                                    }
+                                } else {
+                                    let _ = tx_event.send(UiEvent::AppendLog("[ctl] no --channel-id set; chat not sent".into())).await;
+                                }
+                            }
                             UiIntent::SelectNextChannel | UiIntent::SelectPrevChannel => {
                                 // TODO: implement channel list and JoinChannel intent.
                             }
@@ -386,7 +386,7 @@ let ctl_keepalive = tokio::spawn(async move {
             }
 
             // Control keepalive died
-            r = &mut tokio::pin!(ctl_keepalive) => {
+            r = &mut ctl_keepalive => {
                 return Err(anyhow!("control keepalive ended: {:?}", r));
             }
         }
@@ -590,10 +590,12 @@ fn make_endpoint_with_optional_pinning(cfg: &Config) -> Result<quinn::Endpoint> 
 /// This is production-acceptable if you pin the server leaf cert hash out-of-band.
 fn make_pinned_endpoint(pin_sha256: [u8; 32]) -> Result<quinn::Endpoint> {
     use quinn::{ClientConfig, Endpoint};
-    use rustls::{client::danger::ServerCertVerifier, RootCertStore};
+    use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
     use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+    use rustls::{DigitallySignedStruct, SignatureScheme};
     use std::{net::SocketAddr, sync::Arc};
 
+    #[derive(Debug)]
     struct Pinner {
         pin: [u8; 32],
     }
@@ -606,21 +608,41 @@ fn make_pinned_endpoint(pin_sha256: [u8; 32]) -> Result<quinn::Endpoint> {
             _server_name: &ServerName<'_>,
             _ocsp_response: &[u8],
             _now: UnixTime,
-        ) -> std::result::Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-            // SHA-256 of DER
+        ) -> std::result::Result<ServerCertVerified, rustls::Error> {
             let digest = ring::digest::digest(&ring::digest::SHA256, end_entity.as_ref());
             if digest.as_ref() == self.pin {
-                Ok(rustls::client::danger::ServerCertVerified::assertion())
+                Ok(ServerCertVerified::assertion())
             } else {
                 Err(rustls::Error::General("cert pin mismatch".into()))
             }
         }
+
+        fn verify_tls12_signature(
+            &self,
+            _message: &[u8],
+            _cert: &CertificateDer<'_>,
+            _dss: &DigitallySignedStruct,
+        ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+            Ok(HandshakeSignatureValid::assertion())
+        }
+
+        fn verify_tls13_signature(
+            &self,
+            _message: &[u8],
+            _cert: &CertificateDer<'_>,
+            _dss: &DigitallySignedStruct,
+        ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+            Ok(HandshakeSignatureValid::assertion())
+        }
+
+        fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+            rustls::crypto::ring::default_provider()
+                .signature_verification_algorithms
+                .supported_schemes()
+        }
     }
 
-    // NOTE: We still use dangerous() because rustls doesn’t provide pinning via safe builder.
-    // In pinning mode, we intentionally bypass normal chain validation.
     let crypto = rustls::ClientConfig::builder()
-        .with_root_certificates(RootCertStore::empty())
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(Pinner { pin: pin_sha256 }))
         .with_no_client_auth();
