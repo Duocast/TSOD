@@ -151,21 +151,20 @@ every self-signed cert.
 
 ```bash
 sudo mkdir -p /etc/tsod/tls
-cd /etc/tsod/tls
 ```
 
 #### 1.5.2 Generate the CA key and certificate
 
 ```bash
 # CA private key (keep this secure)
-sudo openssl genrsa -out ca.key 4096
+sudo openssl genrsa -out /etc/tsod/tls/ca.key 4096
 
 # CA certificate (valid 10 years)
 sudo openssl req -x509 -new -nodes \
-  -key ca.key \
+  -key /etc/tsod/tls/ca.key \
   -sha256 \
   -days 3650 \
-  -out ca.crt \
+  -out /etc/tsod/tls/ca.crt \
   -subj "/CN=TSOD Internal CA/O=TSOD"
 ```
 
@@ -175,7 +174,7 @@ Create a config file with Subject Alternative Names. Replace the IP addresses
 and hostnames to match your environment:
 
 ```bash
-sudo tee server.cnf <<'EOF'
+sudo tee /etc/tsod/tls/server.cnf <<'EOF'
 [req]
 default_bits       = 2048
 distinguished_name = req_dn
@@ -206,32 +205,32 @@ EOF
 Generate the server key and certificate signing request:
 
 ```bash
-sudo openssl genrsa -out server.key 2048
+sudo openssl genrsa -out /etc/tsod/tls/server.key 2048
 sudo openssl req -new \
-  -key server.key \
-  -out server.csr \
-  -config server.cnf
+  -key /etc/tsod/tls/server.key \
+  -out /etc/tsod/tls/server.csr \
+  -config /etc/tsod/tls/server.cnf
 ```
 
 Sign with the CA:
 
 ```bash
 sudo openssl x509 -req \
-  -in server.csr \
-  -CA ca.crt \
-  -CAkey ca.key \
+  -in /etc/tsod/tls/server.csr \
+  -CA /etc/tsod/tls/ca.crt \
+  -CAkey /etc/tsod/tls/ca.key \
   -CAcreateserial \
-  -out server.crt \
+  -out /etc/tsod/tls/server.crt \
   -days 825 \
   -sha256 \
   -extensions v3_req \
-  -extfile server.cnf
+  -extfile /etc/tsod/tls/server.cnf
 ```
 
 Verify the certificate:
 
 ```bash
-openssl x509 -in server.crt -text -noout | grep -A2 "Subject Alternative Name"
+openssl x509 -in /etc/tsod/tls/server.crt -text -noout | grep -A2 "Subject Alternative Name"
 ```
 
 You should see your IP addresses and DNS names listed.
