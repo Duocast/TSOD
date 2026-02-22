@@ -1,0 +1,124 @@
+syntax = "proto3";
+
+package voiceplatform.v1;
+
+import "common.proto";
+import "caps.proto";
+import "screenshare.proto";
+
+option go_package = "github.com/yourorg/voiceplatform/proto/gen/go/voiceplatform/v1;voiceplatformv1";
+
+// ── Video calling (1:1 and small group via QUIC DATAGRAM) ─────────────
+//
+// Video calls reuse the screen share datagram format but with type=0x03.
+// 1:1 calls are initiated as DM video calls.
+// Group calls are initiated in a voice channel (max ~8 participants).
+
+message CallId {
+  string value = 1;
+}
+
+enum CallType {
+  CALL_TYPE_UNSPECIFIED = 0;
+  CALL_DIRECT = 1;        // 1:1 call
+  CALL_GROUP = 2;         // small group call in a channel
+}
+
+// ── Requests ───────────────────────────────────────────────────────────
+
+message StartCallRequest {
+  CallType call_type = 1;
+
+  // For CALL_DIRECT: who to call
+  UserId target_user_id = 2;
+
+  // For CALL_GROUP: which channel
+  ChannelId channel_id = 3;
+
+  // Video encoding params
+  VideoCaps.Codec codec = 4;
+  repeated SimulcastLayer layers = 5;
+}
+
+message StartCallResponse {
+  CallId call_id = 1;
+  StreamId video_stream_id = 2;
+}
+
+message AnswerCallRequest {
+  CallId call_id = 1;
+  VideoCaps.Codec codec = 2;
+  repeated SimulcastLayer layers = 3;
+}
+
+message AnswerCallResponse {
+  StreamId video_stream_id = 1;
+}
+
+message EndCallRequest {
+  CallId call_id = 1;
+}
+
+message EndCallResponse {}
+
+// Toggle own video on/off during a call
+message SetVideoEnabledRequest {
+  CallId call_id = 1;
+  bool enabled = 2;
+}
+
+message SetVideoEnabledResponse {}
+
+// ── Events ─────────────────────────────────────────────────────────────
+
+message VideoCallEvent {
+  Timestamp at = 1;
+
+  oneof kind {
+    CallIncoming incoming = 10;
+    CallStarted started = 11;
+    CallEnded ended = 12;
+    CallParticipantJoined participant_joined = 13;
+    CallParticipantLeft participant_left = 14;
+    CallVideoToggled video_toggled = 15;
+  }
+}
+
+message CallIncoming {
+  CallId call_id = 1;
+  CallType call_type = 2;
+  UserId from_user_id = 3;
+  ChannelId channel_id = 4;  // set for group calls
+}
+
+message CallStarted {
+  CallId call_id = 1;
+  repeated CallParticipant participants = 2;
+}
+
+message CallEnded {
+  CallId call_id = 1;
+  string reason = 2;
+}
+
+message CallParticipantJoined {
+  CallId call_id = 1;
+  CallParticipant participant = 2;
+}
+
+message CallParticipantLeft {
+  CallId call_id = 1;
+  UserId user_id = 2;
+}
+
+message CallVideoToggled {
+  CallId call_id = 1;
+  UserId user_id = 2;
+  bool video_enabled = 3;
+}
+
+message CallParticipant {
+  UserId user_id = 1;
+  StreamId video_stream_id = 2;
+  bool video_enabled = 3;
+}

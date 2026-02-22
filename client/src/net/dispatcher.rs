@@ -175,6 +175,8 @@ impl ControlDispatcher {
             channel_id: Some(pb::ChannelId { value: channel_id.into() }),
             text: text.into(),
             attachments: vec![],
+            reply_to_message_id: None,
+            mentions: vec![],
         };
         let resp = self
             .send_request(
@@ -342,8 +344,16 @@ fn default_caps(alpn: &str) -> pb::ClientCaps {
             supports_quic_datagrams: true,
             supports_voice_fec: false,
             supports_streaming: false,
-            supports_drag_drop_upload: false,
+            supports_drag_drop_upload: true,
             supports_relay_mode: false,
+            supports_screen_share: false,
+            supports_video_call: false,
+            supports_e2ee: false,
+            supports_spatial_audio: false,
+            supports_whisper: true,
+            supports_noise_suppression: true,
+            supports_echo_cancellation: false,
+            supports_agc: true,
         }),
         voice_audio: Some(pb::AudioCaps {
             codec: pb::audio_caps::Codec::Opus as i32,
@@ -357,5 +367,7 @@ fn default_caps(alpn: &str) -> pb::ClientCaps {
         caps_hash: Some(pb::CapabilityHash {
             sha256: alpn.as_bytes().to_vec(),
         }),
+        screen_share: None,
+        camera_video: None,
     }
 }

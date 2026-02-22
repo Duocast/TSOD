@@ -1,0 +1,104 @@
+syntax = "proto3";
+
+package voiceplatform.v1;
+
+import "common.proto";
+import "chat.proto";
+
+option go_package = "github.com/yourorg/voiceplatform/proto/gen/go/voiceplatform/v1;voiceplatformv1";
+
+// ── Direct messages ────────────────────────────────────────────────────
+//
+// DMs use the same ChatEvent/SendMessageRequest model as channels but
+// with a DM-specific channel ID. Group DMs are also supported.
+
+message DmChannelId {
+  string value = 1;
+}
+
+message DmChannel {
+  DmChannelId dm_channel_id = 1;
+  repeated UserId participants = 2;
+  string name = 3;                    // for group DMs (empty = auto-name)
+  Timestamp created_at = 4;
+  MessagePosted last_message = 5;     // most recent message for preview
+}
+
+// ── Requests ───────────────────────────────────────────────────────────
+
+message CreateDmChannelRequest {
+  repeated UserId participant_user_ids = 1;   // 1 = 1:1 DM, 2+ = group DM
+  string name = 2;                            // optional for group DMs
+}
+
+message CreateDmChannelResponse {
+  DmChannel channel = 1;
+}
+
+message GetDmChannelsRequest {
+  uint32 limit = 1;
+  string after_cursor = 2;
+}
+
+message GetDmChannelsResponse {
+  repeated DmChannel channels = 1;
+  string next_cursor = 2;
+}
+
+message SendDmRequest {
+  DmChannelId dm_channel_id = 1;
+  string text = 2;
+  repeated AttachmentRef attachments = 3;
+}
+
+message SendDmResponse {
+  MessagePosted message = 1;
+}
+
+message GetDmHistoryRequest {
+  DmChannelId dm_channel_id = 1;
+  uint32 limit = 2;
+  string before_message_id = 3;  // cursor
+}
+
+message GetDmHistoryResponse {
+  repeated MessagePosted messages = 1;
+}
+
+message CloseDmChannelRequest {
+  DmChannelId dm_channel_id = 1;
+}
+
+message CloseDmChannelResponse {}
+
+// ── Events ─────────────────────────────────────────────────────────────
+
+message DmEvent {
+  Timestamp at = 1;
+
+  oneof kind {
+    DmMessagePosted message_posted = 10;
+    DmMessageEdited message_edited = 11;
+    DmMessageDeleted message_deleted = 12;
+    DmChannelCreated channel_created = 13;
+  }
+}
+
+message DmMessagePosted {
+  DmChannelId dm_channel_id = 1;
+  MessagePosted message = 2;
+}
+
+message DmMessageEdited {
+  DmChannelId dm_channel_id = 1;
+  MessageEdited edit = 2;
+}
+
+message DmMessageDeleted {
+  DmChannelId dm_channel_id = 1;
+  MessageId message_id = 2;
+}
+
+message DmChannelCreated {
+  DmChannel channel = 1;
+}

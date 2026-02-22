@@ -15,6 +15,17 @@ fn main() {
         "chat.proto",
         "moderation.proto",
         "telemetry.proto",
+        "user.proto",
+        "permissions.proto",
+        "upload.proto",
+        "audit.proto",
+        "poke.proto",
+        "whisper.proto",
+        "spatial.proto",
+        "screenshare.proto",
+        "videocall.proto",
+        "encryption.proto",
+        "dm.proto",
         "control.proto",
     ];
 

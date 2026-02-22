@@ -4,6 +4,7 @@ package voiceplatform.v1;
 
 import "common.proto";
 import "channel.proto";
+import "user.proto";
 
 option go_package = "github.com/yourorg/voiceplatform/proto/gen/go/voiceplatform/v1;voiceplatformv1";
 
@@ -14,6 +15,7 @@ message PresenceEvent {
     MemberJoined member_joined = 10;
     MemberLeft member_left = 11;
     MemberVoiceStateChanged member_voice_state_changed = 12;
+    UserOnlineStatusChanged user_online_status_changed = 13;
   }
 }
 
@@ -32,4 +34,14 @@ message MemberVoiceStateChanged {
   UserId user_id = 2;
   bool muted = 3;
   bool deafened = 4;
+  bool self_muted = 5;
+  bool self_deafened = 6;
+  bool streaming = 7;
+  bool video_enabled = 8;
+}
+
+message UserOnlineStatusChanged {
+  UserId user_id = 1;
+  OnlineStatus status = 2;
+  string custom_status_text = 3;
 }

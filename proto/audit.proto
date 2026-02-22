@@ -1,0 +1,83 @@
+syntax = "proto3";
+
+package voiceplatform.v1;
+
+import "common.proto";
+
+option go_package = "github.com/yourorg/voiceplatform/proto/gen/go/voiceplatform/v1;voiceplatformv1";
+
+// ── Audit log ──────────────────────────────────────────────────────────
+
+enum AuditAction {
+  AUDIT_UNSPECIFIED = 0;
+
+  // Channel
+  CHANNEL_CREATED = 1;
+  CHANNEL_UPDATED = 2;
+  CHANNEL_DELETED = 3;
+
+  // Membership
+  MEMBER_JOINED = 10;
+  MEMBER_LEFT = 11;
+  MEMBER_KICKED = 12;
+  MEMBER_BANNED = 13;
+  MEMBER_UNBANNED = 14;
+  MEMBER_TIMED_OUT = 15;
+  MEMBER_MOVED = 16;
+
+  // Voice
+  MEMBER_MUTED = 20;
+  MEMBER_DEAFENED = 21;
+
+  // Roles
+  ROLE_CREATED = 30;
+  ROLE_UPDATED = 31;
+  ROLE_DELETED = 32;
+  ROLE_ASSIGNED = 33;
+  ROLE_REVOKED = 34;
+
+  // Permissions
+  PERMISSION_OVERRIDE_SET = 40;
+  PERMISSION_OVERRIDE_DELETED = 41;
+
+  // Chat
+  MESSAGE_DELETED_BY_MOD = 50;
+  MESSAGE_PINNED = 51;
+  MESSAGE_UNPINNED = 52;
+
+  // Privilege keys
+  PRIVILEGE_KEY_CREATED = 60;
+  PRIVILEGE_KEY_REDEEMED = 61;
+  PRIVILEGE_KEY_DELETED = 62;
+
+  // Server
+  SERVER_SETTINGS_UPDATED = 70;
+}
+
+message AuditLogEntry {
+  string entry_id = 1;
+  AuditAction action = 2;
+  UserId actor_user_id = 3;
+  Timestamp at = 4;
+
+  // Contextual IDs (set whichever apply)
+  ChannelId channel_id = 5;
+  UserId target_user_id = 6;
+  string target_id = 7;       // generic target (role_id, key_id, etc.)
+
+  string reason = 8;
+  map<string, string> changes = 9;  // key=field, value=new_value
+}
+
+// ── Requests ───────────────────────────────────────────────────────────
+
+message GetAuditLogRequest {
+  uint32 limit = 1;              // max entries to return (default 50)
+  string before_entry_id = 2;    // cursor for pagination
+  AuditAction filter_action = 3; // optional filter
+  UserId filter_actor = 4;       // optional filter
+}
+
+message GetAuditLogResponse {
+  repeated AuditLogEntry entries = 1;
+}

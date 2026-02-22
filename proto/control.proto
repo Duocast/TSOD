@@ -9,6 +9,17 @@ import "presence.proto";
 import "chat.proto";
 import "moderation.proto";
 import "telemetry.proto";
+import "user.proto";
+import "permissions.proto";
+import "upload.proto";
+import "audit.proto";
+import "poke.proto";
+import "whisper.proto";
+import "spatial.proto";
+import "screenshare.proto";
+import "videocall.proto";
+import "encryption.proto";
+import "dm.proto";
 
 option go_package = "github.com/yourorg/voiceplatform/proto/gen/go/voiceplatform/v1;voiceplatformv1";
 
@@ -27,19 +38,96 @@ message ClientToServer {
     JoinChannelRequest join_channel_request = 20;
     LeaveChannelRequest leave_channel_request = 21;
     CreateChannelRequest create_channel_request = 22;
+    UpdateChannelRequest update_channel_request = 23;
+    DeleteChannelRequest delete_channel_request = 24;
+    GetChannelListRequest get_channel_list_request = 25;
+    GetMessageHistoryRequest get_message_history_request = 26;
 
     // Chat
     SendMessageRequest send_message_request = 30;
+    EditMessageRequest edit_message_request = 31;
+    DeleteMessageRequest delete_message_request = 32;
+    AddReactionRequest add_reaction_request = 33;
+    RemoveReactionRequest remove_reaction_request = 34;
+    PinMessageRequest pin_message_request = 35;
+    UnpinMessageRequest unpin_message_request = 36;
+    SendTypingRequest send_typing_request = 37;
 
     // Moderation/admin
     ModerationActionRequest moderation_action_request = 40;
 
     // Telemetry/control keepalive
     Ping ping = 50;
-
-    // Receiver reports / feedback (sent on control stream for simplicity)
     VoiceReceiverReport voice_receiver_report = 60;
     StreamReceiverReport stream_receiver_report = 61;
+
+    // User profiles
+    GetUserProfileRequest get_user_profile_request = 70;
+    UpdateUserProfileRequest update_user_profile_request = 71;
+    SetAvatarRequest set_avatar_request = 72;
+
+    // Permissions & roles
+    GetRolesRequest get_roles_request = 80;
+    CreateRoleRequest create_role_request = 81;
+    UpdateRoleRequest update_role_request = 82;
+    DeleteRoleRequest delete_role_request = 83;
+    AssignRoleRequest assign_role_request = 84;
+    RevokeRoleRequest revoke_role_request = 85;
+    SetChannelPermissionOverrideRequest set_channel_permission_override_request = 86;
+    DeleteChannelPermissionOverrideRequest delete_channel_permission_override_request = 87;
+
+    // Privilege keys
+    CreatePrivilegeKeyRequest create_privilege_key_request = 90;
+    RedeemPrivilegeKeyRequest redeem_privilege_key_request = 91;
+    ListPrivilegeKeysRequest list_privilege_keys_request = 92;
+    DeletePrivilegeKeyRequest delete_privilege_key_request = 93;
+
+    // File upload
+    CreateUploadRequest create_upload_request = 100;
+    CompleteUploadRequest complete_upload_request = 101;
+    GetQuotaRequest get_quota_request = 102;
+
+    // Audit log
+    GetAuditLogRequest get_audit_log_request = 110;
+
+    // Poke
+    PokeRequest poke_request = 120;
+
+    // Whisper
+    SetWhisperTargetsRequest set_whisper_targets_request = 130;
+    CreateWhisperListRequest create_whisper_list_request = 131;
+    UpdateWhisperListRequest update_whisper_list_request = 132;
+    DeleteWhisperListRequest delete_whisper_list_request = 133;
+    GetWhisperListsRequest get_whisper_lists_request = 134;
+
+    // Spatial audio
+    UpdateSpatialPositionRequest update_spatial_position_request = 140;
+    SetChannelSpatialConfigRequest set_channel_spatial_config_request = 141;
+
+    // Screen sharing
+    StartScreenShareRequest start_screen_share_request = 150;
+    StopScreenShareRequest stop_screen_share_request = 151;
+    SelectScreenShareLayerRequest select_screen_share_layer_request = 152;
+    RequestKeyframeRequest request_keyframe_request = 153;
+
+    // Video calling
+    StartCallRequest start_call_request = 160;
+    AnswerCallRequest answer_call_request = 161;
+    EndCallRequest end_call_request = 162;
+    SetVideoEnabledRequest set_video_enabled_request = 163;
+
+    // E2EE (MLS)
+    UploadKeyPackagesRequest upload_key_packages_request = 170;
+    FetchKeyPackageRequest fetch_key_package_request = 171;
+    CreateE2eeGroupRequest create_e2ee_group_request = 172;
+    SendMlsMessageRequest send_mls_message_request = 173;
+
+    // DMs
+    CreateDmChannelRequest create_dm_channel_request = 180;
+    GetDmChannelsRequest get_dm_channels_request = 181;
+    SendDmRequest send_dm_request = 182;
+    GetDmHistoryRequest get_dm_history_request = 183;
+    CloseDmChannelRequest close_dm_channel_request = 184;
   }
 }
 
@@ -59,17 +147,106 @@ message ServerToClient {
     JoinChannelResponse join_channel_response = 20;
     LeaveChannelResponse leave_channel_response = 21;
     CreateChannelResponse create_channel_response = 22;
+    UpdateChannelResponse update_channel_response = 23;
+    DeleteChannelResponse delete_channel_response = 24;
+    GetChannelListResponse get_channel_list_response = 25;
+    GetMessageHistoryResponse get_message_history_response = 26;
+
+    // Chat responses
+    EditMessageResponse edit_message_response = 31;
+    DeleteMessageResponse delete_message_response = 32;
+    AddReactionResponse add_reaction_response = 33;
+    RemoveReactionResponse remove_reaction_response = 34;
+    PinMessageResponse pin_message_response = 35;
+    UnpinMessageResponse unpin_message_response = 36;
+    SendTypingResponse send_typing_response = 37;
 
     // Server push events
-    PresenceEvent presence_event = 30;
-    ChatEvent chat_event = 31;
-    ModerationEvent moderation_event = 32;
+    PresenceEvent presence_event = 40;
+    ChatEvent chat_event = 41;
+    ModerationEvent moderation_event = 42;
+    UserProfileEvent user_profile_event = 43;
+    PokeEvent poke_event = 44;
+    WhisperEvent whisper_event = 45;
+    SpatialEvent spatial_event = 46;
+    ScreenShareEvent screen_share_event = 47;
+    VideoCallEvent video_call_event = 48;
+    E2eeEvent e2ee_event = 49;
+    DmEvent dm_event = 50;
 
     // Telemetry
-    Pong pong = 50;
+    Pong pong = 55;
 
-    // Optional server-side guidance (e.g., CC hints, policy changes)
+    // Server-side guidance
     ServerHint server_hint = 70;
+
+    // User profile responses
+    GetUserProfileResponse get_user_profile_response = 75;
+    UpdateUserProfileResponse update_user_profile_response = 76;
+    SetAvatarResponse set_avatar_response = 77;
+
+    // Permission responses
+    GetRolesResponse get_roles_response = 80;
+    CreateRoleResponse create_role_response = 81;
+    UpdateRoleResponse update_role_response = 82;
+    DeleteRoleResponse delete_role_response = 83;
+    AssignRoleResponse assign_role_response = 84;
+    RevokeRoleResponse revoke_role_response = 85;
+    SetChannelPermissionOverrideResponse set_channel_permission_override_response = 86;
+    DeleteChannelPermissionOverrideResponse delete_channel_permission_override_response = 87;
+
+    // Privilege key responses
+    CreatePrivilegeKeyResponse create_privilege_key_response = 90;
+    RedeemPrivilegeKeyResponse redeem_privilege_key_response = 91;
+    ListPrivilegeKeysResponse list_privilege_keys_response = 92;
+    DeletePrivilegeKeyResponse delete_privilege_key_response = 93;
+
+    // Upload responses
+    CreateUploadResponse create_upload_response = 100;
+    CompleteUploadResponse complete_upload_response = 101;
+    GetQuotaResponse get_quota_response = 102;
+
+    // Audit log response
+    GetAuditLogResponse get_audit_log_response = 110;
+
+    // Poke response
+    PokeResponse poke_response = 120;
+
+    // Whisper responses
+    SetWhisperTargetsResponse set_whisper_targets_response = 130;
+    CreateWhisperListResponse create_whisper_list_response = 131;
+    UpdateWhisperListResponse update_whisper_list_response = 132;
+    DeleteWhisperListResponse delete_whisper_list_response = 133;
+    GetWhisperListsResponse get_whisper_lists_response = 134;
+
+    // Spatial audio responses
+    UpdateSpatialPositionResponse update_spatial_position_response = 140;
+    SetChannelSpatialConfigResponse set_channel_spatial_config_response = 141;
+
+    // Screen share responses
+    StartScreenShareResponse start_screen_share_response = 150;
+    StopScreenShareResponse stop_screen_share_response = 151;
+    SelectScreenShareLayerResponse select_screen_share_layer_response = 152;
+    RequestKeyframeResponse request_keyframe_response = 153;
+
+    // Video call responses
+    StartCallResponse start_call_response = 160;
+    AnswerCallResponse answer_call_response = 161;
+    EndCallResponse end_call_response = 162;
+    SetVideoEnabledResponse set_video_enabled_response = 163;
+
+    // E2EE responses
+    UploadKeyPackagesResponse upload_key_packages_response = 170;
+    FetchKeyPackageResponse fetch_key_package_response = 171;
+    CreateE2eeGroupResponse create_e2ee_group_response = 172;
+    SendMlsMessageResponse send_mls_message_response = 173;
+
+    // DM responses
+    CreateDmChannelResponse create_dm_channel_response = 180;
+    GetDmChannelsResponse get_dm_channels_response = 181;
+    SendDmResponse send_dm_response = 182;
+    GetDmHistoryResponse get_dm_history_response = 183;
+    CloseDmChannelResponse close_dm_channel_response = 184;
   }
 }
 

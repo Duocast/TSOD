@@ -3,8 +3,16 @@ syntax = "proto3";
 package voiceplatform.v1;
 
 import "common.proto";
+import "spatial.proto";
 
 option go_package = "github.com/yourorg/voiceplatform/proto/gen/go/voiceplatform/v1;voiceplatformv1";
+
+enum ChannelType {
+  CHANNEL_TYPE_UNSPECIFIED = 0;
+  TEXT = 1;
+  VOICE = 2;
+  CATEGORY = 3;      // grouping container, not joinable
+}
 
 message ChannelMember {
   UserId user_id = 1;
@@ -13,12 +21,35 @@ message ChannelMember {
   // Voice state flags (server authority for moderation).
   bool muted = 3;
   bool deafened = 4;
+
+  // Extended state
+  bool self_muted = 5;
+  bool self_deafened = 6;
+  bool streaming = 7;         // screen sharing
+  bool video_enabled = 8;
+  bool is_whispering = 9;
+}
+
+message ChannelInfo {
+  ChannelId channel_id = 1;
+  string name = 2;
+  ChannelType channel_type = 3;
+  string description = 4;          // channel topic/description
+  ChannelId parent_channel_id = 5; // parent category
+  uint32 position = 6;             // sort order within parent
+  uint32 user_limit = 7;           // 0 = unlimited (voice channels)
+  uint32 bitrate = 8;              // voice bitrate in bps
+  bool spatial_audio_enabled = 9;
+  SpatialConfig spatial_config = 10;
 }
 
 message ChannelState {
   ChannelId channel_id = 1;
   string name = 2;
   repeated ChannelMember members = 3;
+
+  // Full info (only sent on join/sync, not every event)
+  ChannelInfo info = 4;
 }
 
 message JoinChannelRequest {
@@ -40,8 +71,51 @@ message LeaveChannelResponse {
 message CreateChannelRequest {
   string name = 1;
   ChannelId parent_channel_id = 2; // optional
+  ChannelType channel_type = 3;
+  string description = 4;
+  uint32 user_limit = 5;
+  uint32 bitrate = 6;
 }
 
 message CreateChannelResponse {
   ChannelState state = 1;
+}
+
+message UpdateChannelRequest {
+  ChannelId channel_id = 1;
+  string name = 2;
+  string description = 3;
+  uint32 position = 4;
+  uint32 user_limit = 5;
+  uint32 bitrate = 6;
+  ChannelId parent_channel_id = 7;
+}
+
+message UpdateChannelResponse {
+  ChannelInfo info = 1;
+}
+
+message DeleteChannelRequest {
+  ChannelId channel_id = 1;
+}
+
+message DeleteChannelResponse {}
+
+message GetChannelListRequest {}
+
+message GetChannelListResponse {
+  repeated ChannelInfo channels = 1;
+}
+
+// ── Chat history ───────────────────────────────────────────────────────
+
+message GetMessageHistoryRequest {
+  ChannelId channel_id = 1;
+  uint32 limit = 2;
+  string before_message_id = 3; // cursor for pagination
+}
+
+message GetMessageHistoryResponse {
+  // Reuses MessagePosted from chat.proto
+  repeated bytes messages = 1; // serialized MessagePosted entries
 }

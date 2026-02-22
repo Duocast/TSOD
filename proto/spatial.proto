@@ -1,0 +1,65 @@
+syntax = "proto3";
+
+package voiceplatform.v1;
+
+import "common.proto";
+
+option go_package = "github.com/yourorg/voiceplatform/proto/gen/go/voiceplatform/v1;voiceplatformv1";
+
+// ── Spatial audio ──────────────────────────────────────────────────────
+//
+// Optional per-channel feature. When enabled, users have a 2D or 3D
+// position and voice is attenuated by distance. The client performs
+// HRTF/panning processing locally.
+
+message SpatialPosition {
+  float x = 1;
+  float y = 2;
+  float z = 3;    // optional; 0 for 2D mode
+}
+
+message SpatialConfig {
+  bool enabled = 1;
+  float max_distance = 2;        // beyond this, volume = 0
+  float min_distance = 3;        // within this, volume = 1 (no attenuation)
+  float rolloff_factor = 4;      // attenuation curve steepness (1.0 = linear)
+  bool use_3d = 5;               // true = 3D HRTF, false = 2D panning
+}
+
+// ── Requests ───────────────────────────────────────────────────────────
+
+message UpdateSpatialPositionRequest {
+  ChannelId channel_id = 1;
+  SpatialPosition position = 2;
+}
+
+message UpdateSpatialPositionResponse {}
+
+message SetChannelSpatialConfigRequest {
+  ChannelId channel_id = 1;
+  SpatialConfig config = 2;
+}
+
+message SetChannelSpatialConfigResponse {}
+
+// ── Events ─────────────────────────────────────────────────────────────
+
+message SpatialEvent {
+  Timestamp at = 1;
+
+  oneof kind {
+    UserPositionUpdated user_position_updated = 10;
+    ChannelSpatialConfigChanged channel_spatial_config_changed = 11;
+  }
+}
+
+message UserPositionUpdated {
+  ChannelId channel_id = 1;
+  UserId user_id = 2;
+  SpatialPosition position = 3;
+}
+
+message ChannelSpatialConfigChanged {
+  ChannelId channel_id = 1;
+  SpatialConfig config = 2;
+}
