@@ -103,7 +103,7 @@ impl eframe::App for VpApp {
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 // User panel (avatar, status, mute/deafen)
-                panels::user_panel::show(ui, &self.model, &self.tx_intent);
+                panels::user_panel::show(ui, &mut self.model, &self.tx_intent);
                 ui.separator();
                 ui.label(&self.model.status_line);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -184,6 +184,9 @@ impl eframe::App for VpApp {
                 self.model.show_telemetry = false;
             }
         }
+
+        // Create channel dialog (floating)
+        panels::server_tree::show_create_channel_dialog(ctx, &mut self.model, &self.tx_intent);
 
         // Central panel: chat messages + input
         egui::CentralPanel::default().show(ctx, |ui| {

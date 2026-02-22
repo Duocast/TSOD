@@ -124,6 +124,14 @@ async fn app_task(
     )));
     let _ = tx_event.send(UiEvent::SetNick(cfg.display_name.clone()));
 
+    // Enumerate and report audio devices to the UI
+    let input_devices = audio::capture::enumerate_input_devices();
+    let output_devices = audio::playout::enumerate_output_devices();
+    let _ = tx_event.send(UiEvent::SetAudioDevices {
+        input_devices,
+        output_devices,
+    });
+
     // Audio constants
     let sample_rate = 48_000u32;
     let channels = 1u16;
@@ -162,6 +170,10 @@ async fn app_task(
         0
     };
 
+    // Shared self-mute/deafen state for the audio pipeline
+    let self_muted = Arc::new(AtomicBool::new(false));
+    let self_deafened = Arc::new(AtomicBool::new(false));
+
     let mut backoff = Backoff::new(Duration::from_millis(250), Duration::from_secs(10));
 
     while running.load(Ordering::Relaxed) && !*shutdown_rx.borrow() {
@@ -176,6 +188,8 @@ async fn app_task(
             capture_dsp.clone(),
             channel_route_hash,
             ptt_active.clone(),
+            self_muted.clone(),
+            self_deafened.clone(),
             &mut shutdown_rx,
         )
         .await
@@ -205,6 +219,8 @@ async fn connect_and_run_session(
     capture_dsp: Option<Arc<Mutex<audio::dsp::CaptureDsp>>>,
     channel_route_hash: u32,
     ptt_active: Arc<AtomicBool>,
+    self_muted: Arc<AtomicBool>,
+    self_deafened: Arc<AtomicBool>,
     shutdown_rx: &mut watch::Receiver<bool>,
 ) -> Result<()> {
     let _ = tx_event.send(UiEvent::SetConnected(false));
@@ -362,7 +378,7 @@ async fn connect_and_run_session(
 
     let (voice_die_tx, mut voice_die_rx) = watch::channel::<bool>(false);
 
-    let voice_send = tokio::spawn(voice_send_loop(
+    let _voice_send = tokio::spawn(voice_send_loop(
         conn.clone(),
         codec.clone(),
         capture.clone(),
@@ -370,6 +386,7 @@ async fn connect_and_run_session(
         tx_event.clone(),
         channel_route_hash,
         ptt_active.clone(),
+        self_muted.clone(),
         cfg.push_to_talk,
         voice_die_tx.clone(),
     ));
@@ -379,6 +396,7 @@ async fn connect_and_run_session(
         codec.clone(),
         playout.clone(),
         jitter.clone(),
+        self_deafened.clone(),
         voice_die_tx.clone(),
     ));
 
@@ -392,6 +410,9 @@ async fn connect_and_run_session(
             }
         }
     });
+
+    // Track the active channel (for SendChat and other channel-scoped operations)
+    let mut active_channel: Option<String> = cfg.channel_id.clone();
 
     tokio::pin!(ctl_keepalive);
     loop {
@@ -411,24 +432,93 @@ async fn connect_and_run_session(
                         UiIntent::PttUp => {
                             ptt_active.store(false, Ordering::Relaxed);
                         }
+                        UiIntent::ToggleSelfMute => {
+                            let new = !self_muted.load(Ordering::Relaxed);
+                            self_muted.store(new, Ordering::Relaxed);
+                            let _ = tx_event.send(UiEvent::SetSelfMuted(new));
+                        }
+                        UiIntent::ToggleSelfDeafen => {
+                            let new = !self_deafened.load(Ordering::Relaxed);
+                            self_deafened.store(new, Ordering::Relaxed);
+                            let _ = tx_event.send(UiEvent::SetSelfDeafened(new));
+                        }
                         UiIntent::SendChat { text } => {
-                            let _ = tx_event.send(UiEvent::AppendLog(format!("[me] {text}")));
-                            if let Some(ch) = cfg.channel_id.as_deref() {
+                            if let Some(ref ch) = active_channel {
+                                // Optimistic local echo
+                                let now_ms = unix_ms() as i64;
+                                let _ = tx_event.send(UiEvent::MessageReceived(
+                                    ui::model::ChatMessage {
+                                        message_id: format!("local-{now_ms}"),
+                                        channel_id: ch.clone(),
+                                        author_id: cfg.display_name.clone(),
+                                        author_name: cfg.display_name.clone(),
+                                        text: text.clone(),
+                                        timestamp: now_ms,
+                                        attachments: Vec::new(),
+                                        reply_to: None,
+                                        reactions: Vec::new(),
+                                        pinned: false,
+                                        edited: false,
+                                    },
+                                ));
                                 if let Err(e) = dispatcher.send_chat(ch, &text).await {
                                     let _ = tx_event.send(UiEvent::AppendLog(
                                         format!("[ctl] send_chat failed: {e:#}"),
                                     ));
                                 }
+                            } else {
+                                let _ = tx_event.send(UiEvent::AppendLog(
+                                    "[ctl] no channel selected, cannot send message".into(),
+                                ));
                             }
                         }
                         UiIntent::JoinChannel { channel_id } => {
                             match dispatcher.join_channel(&channel_id).await {
                                 Ok(()) => {
-                                    let _ = tx_event.send(UiEvent::SetChannelName(channel_id));
+                                    active_channel = Some(channel_id.clone());
+                                    let _ = tx_event.send(UiEvent::SetChannelName(channel_id.clone()));
+                                    let _ = tx_event.send(UiEvent::AppendLog(
+                                        format!("[ctl] joined channel {channel_id}"),
+                                    ));
                                 }
                                 Err(e) => {
                                     let _ = tx_event.send(UiEvent::AppendLog(
                                         format!("[ctl] join failed: {e:#}"),
+                                    ));
+                                }
+                            }
+                        }
+                        UiIntent::LeaveChannel => {
+                            if let Some(ref ch) = active_channel {
+                                if let Err(e) = dispatcher.leave_channel(ch).await {
+                                    let _ = tx_event.send(UiEvent::AppendLog(
+                                        format!("[ctl] leave failed: {e:#}"),
+                                    ));
+                                }
+                            }
+                            active_channel = None;
+                        }
+                        UiIntent::CreateChannel { name, channel_type: _ } => {
+                            match dispatcher.create_channel(&name).await {
+                                Ok(ch_id) => {
+                                    let _ = tx_event.send(UiEvent::ChannelCreated(
+                                        ui::model::ChannelEntry {
+                                            id: ch_id.clone(),
+                                            name: name.clone(),
+                                            channel_type: ui::model::ChannelType::Voice,
+                                            parent_id: None,
+                                            position: 0,
+                                            member_count: 0,
+                                            user_limit: 0,
+                                        },
+                                    ));
+                                    let _ = tx_event.send(UiEvent::AppendLog(
+                                        format!("[ctl] created channel '{name}' ({ch_id})"),
+                                    ));
+                                }
+                                Err(e) => {
+                                    let _ = tx_event.send(UiEvent::AppendLog(
+                                        format!("[ctl] create_channel failed: {e:#}"),
                                     ));
                                 }
                             }
@@ -470,6 +560,7 @@ async fn voice_send_loop(
     tx_event: Sender<UiEvent>,
     channel_route_hash: u32,
     ptt_active: Arc<AtomicBool>,
+    self_muted: Arc<AtomicBool>,
     push_to_talk: bool,
     voice_die_tx: watch::Sender<bool>,
 ) {
@@ -489,6 +580,11 @@ async fn voice_send_loop(
 
     loop {
         tick.tick().await;
+
+        // Don't send voice when self-muted
+        if self_muted.load(Ordering::Relaxed) {
+            continue;
+        }
 
         if push_to_talk && !ptt_active.load(Ordering::Relaxed) {
             continue;
@@ -539,6 +635,7 @@ async fn voice_recv_loop(
     codec: Arc<Mutex<audio::opus::OpusCodec>>,
     playout: Arc<audio::playout::Playout>,
     jitter: Arc<Mutex<audio::jitter::JitterBuffer>>,
+    self_deafened: Arc<AtomicBool>,
     voice_die_tx: watch::Sender<bool>,
 ) {
     let sample_rate = 48_000u32;
@@ -556,6 +653,11 @@ async fn voice_recv_loop(
                 return;
             }
         };
+
+        // Skip playout when self-deafened (still receive to keep connection alive)
+        if self_deafened.load(Ordering::Relaxed) {
+            continue;
+        }
 
         let (seq, payload) = match parse_voice_payload(&d) {
             Some(v) => v,
