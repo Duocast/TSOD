@@ -15,6 +15,8 @@ message ModerationActionRequest {
     DeafenUser deafen = 11;
     KickUser kick = 12;
     BanUser ban = 13;
+    MoveUser move = 14;
+    TimeoutUser timeout = 15;
   }
 }
 
@@ -37,6 +39,15 @@ message BanUser {
   uint32 duration_seconds = 2; // 0 = permanent
 }
 
+message MoveUser {
+  ChannelId target_channel_id = 1;
+}
+
+message TimeoutUser {
+  uint32 duration_seconds = 1; // prevents chat and voice
+  string reason = 2;
+}
+
 message ModerationEvent {
   Timestamp at = 1;
 
@@ -45,6 +56,8 @@ message ModerationEvent {
     UserDeafened user_deafened = 11;
     UserKicked user_kicked = 12;
     UserBanned user_banned = 13;
+    UserMoved user_moved = 14;
+    UserTimedOut user_timed_out = 15;
   }
 }
 
@@ -76,5 +89,20 @@ message UserBanned {
   UserId target_user_id = 2;
   string reason = 3;
   uint32 duration_seconds = 4;
+  UserId actor_user_id = 5;
+}
+
+message UserMoved {
+  ChannelId from_channel_id = 1;
+  ChannelId to_channel_id = 2;
+  UserId target_user_id = 3;
+  UserId actor_user_id = 4;
+}
+
+message UserTimedOut {
+  ChannelId channel_id = 1;
+  UserId target_user_id = 2;
+  uint32 duration_seconds = 3;
+  string reason = 4;
   UserId actor_user_id = 5;
 }

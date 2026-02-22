@@ -1,0 +1,59 @@
+syntax = "proto3";
+
+package voiceplatform.v1;
+
+import "common.proto";
+
+option go_package = "github.com/yourorg/voiceplatform/proto/gen/go/voiceplatform/v1;voiceplatformv1";
+
+// ── File upload via pre-signed URLs ────────────────────────────────────
+//
+// Flow:
+// 1. Client requests an upload slot (CreateUploadRequest)
+// 2. Server validates quota, returns a pre-signed PUT URL + asset_id
+// 3. Client uploads directly to storage via HTTP PUT
+// 4. Client calls CompleteUpload to confirm and generate thumbnails
+// 5. Server returns download URL, thumbnail URL, and metadata
+
+message CreateUploadRequest {
+  string filename = 1;
+  string mime_type = 2;
+  uint64 size_bytes = 3;
+  ChannelId channel_id = 4;   // for quota tracking
+}
+
+message CreateUploadResponse {
+  AssetId asset_id = 1;
+  string upload_url = 2;         // pre-signed PUT URL
+  uint64 expires_in_seconds = 3; // URL expiration
+  map<string, string> required_headers = 4;  // headers client must include
+}
+
+message CompleteUploadRequest {
+  AssetId asset_id = 1;
+}
+
+message CompleteUploadResponse {
+  AssetId asset_id = 1;
+  string download_url = 2;
+  string thumbnail_url = 3;     // server-generated thumbnail (images/video)
+  uint64 size_bytes = 4;
+  string mime_type = 5;
+
+  // Image/video metadata extracted server-side
+  uint32 width = 6;
+  uint32 height = 7;
+  uint64 duration_ms = 8;       // for audio/video
+}
+
+// ── Quota ──────────────────────────────────────────────────────────────
+
+message GetQuotaRequest {}
+
+message GetQuotaResponse {
+  uint64 used_bytes = 1;
+  uint64 max_bytes = 2;
+  uint32 file_count = 3;
+  uint32 max_file_count = 4;
+  uint64 max_single_file_bytes = 5;
+}

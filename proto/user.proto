@@ -1,0 +1,90 @@
+syntax = "proto3";
+
+package voiceplatform.v1;
+
+import "common.proto";
+
+option go_package = "github.com/yourorg/voiceplatform/proto/gen/go/voiceplatform/v1;voiceplatformv1";
+
+// ── User profiles ──────────────────────────────────────────────────────
+
+enum OnlineStatus {
+  STATUS_UNSPECIFIED = 0;
+  ONLINE = 1;
+  IDLE = 2;
+  DO_NOT_DISTURB = 3;
+  INVISIBLE = 4;
+  OFFLINE = 5;
+}
+
+message Badge {
+  string id = 1;
+  string label = 2;       // e.g. "Staff", "Early Adopter"
+  string icon_url = 3;    // small icon asset URL
+  string tooltip = 4;
+}
+
+message UserProfile {
+  UserId user_id = 1;
+  string display_name = 2;
+  string avatar_asset_url = 3;     // URL or asset path to avatar image
+  AssetId avatar_asset_id = 4;     // asset ID if uploaded via our system
+  string description = 5;          // bio / about me (markdown)
+  OnlineStatus status = 6;
+  string custom_status_text = 7;   // e.g. "Playing Rust"
+  repeated Badge badges = 8;
+  Timestamp created_at = 9;
+  Timestamp last_seen_at = 10;
+}
+
+// ── Requests ───────────────────────────────────────────────────────────
+
+message GetUserProfileRequest {
+  UserId user_id = 1;
+}
+
+message GetUserProfileResponse {
+  UserProfile profile = 1;
+}
+
+message UpdateUserProfileRequest {
+  // Only set the fields you want to change.
+  string display_name = 1;
+  string description = 2;
+  OnlineStatus status = 3;
+  string custom_status_text = 4;
+}
+
+message UpdateUserProfileResponse {
+  UserProfile profile = 1;
+}
+
+message SetAvatarRequest {
+  AssetId asset_id = 1;    // must reference an already-uploaded asset
+}
+
+message SetAvatarResponse {
+  string avatar_asset_url = 1;
+}
+
+// ── Events ─────────────────────────────────────────────────────────────
+
+message UserProfileEvent {
+  Timestamp at = 1;
+
+  oneof kind {
+    UserStatusChanged user_status_changed = 10;
+    UserProfileUpdated user_profile_updated = 11;
+  }
+}
+
+message UserStatusChanged {
+  UserId user_id = 1;
+  OnlineStatus status = 2;
+  string custom_status_text = 3;
+}
+
+message UserProfileUpdated {
+  UserId user_id = 1;
+  UserProfile profile = 2;   // full updated profile
+}

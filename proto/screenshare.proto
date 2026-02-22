@@ -1,0 +1,112 @@
+syntax = "proto3";
+
+package voiceplatform.v1;
+
+import "common.proto";
+import "caps.proto";
+
+option go_package = "github.com/yourorg/voiceplatform/proto/gen/go/voiceplatform/v1;voiceplatformv1";
+
+// ── Screen sharing via QUIC DATAGRAM ──────────────────────────────────
+//
+// Screen share uses QUIC datagrams for low-latency frame delivery.
+// Simulcast layers allow adaptive bitrate: server forwards the best
+// layer each viewer can handle.
+
+message StreamId {
+  string value = 1;
+}
+
+// Simulcast layer configuration
+message SimulcastLayer {
+  uint32 layer_id = 1;
+  uint32 width = 2;
+  uint32 height = 3;
+  uint32 max_fps = 4;
+  uint32 max_bitrate_bps = 5;
+}
+
+// ── Requests ───────────────────────────────────────────────────────────
+
+message StartScreenShareRequest {
+  ChannelId channel_id = 1;
+
+  // Offered encoding params
+  VideoCaps.Codec codec = 2;
+  repeated SimulcastLayer layers = 3;
+
+  // Whether the share includes system audio
+  bool include_audio = 4;
+}
+
+message StartScreenShareResponse {
+  StreamId stream_id = 1;
+
+  // Server-selected layers to actually send
+  repeated uint32 accepted_layer_ids = 2;
+}
+
+message StopScreenShareRequest {
+  StreamId stream_id = 1;
+}
+
+message StopScreenShareResponse {}
+
+// Viewer requests a specific layer quality
+message SelectScreenShareLayerRequest {
+  StreamId stream_id = 1;
+  uint32 preferred_layer_id = 2;
+}
+
+message SelectScreenShareLayerResponse {
+  uint32 active_layer_id = 1;
+}
+
+// Request a keyframe (e.g., after packet loss or layer switch)
+message RequestKeyframeRequest {
+  StreamId stream_id = 1;
+  uint32 layer_id = 2;
+}
+
+message RequestKeyframeResponse {}
+
+// ── Events ─────────────────────────────────────────────────────────────
+
+message ScreenShareEvent {
+  Timestamp at = 1;
+
+  oneof kind {
+    ScreenShareStarted started = 10;
+    ScreenShareStopped stopped = 11;
+    ScreenShareLayerChanged layer_changed = 12;
+  }
+}
+
+message ScreenShareStarted {
+  ChannelId channel_id = 1;
+  UserId user_id = 2;
+  StreamId stream_id = 3;
+  VideoCaps.Codec codec = 4;
+  repeated SimulcastLayer layers = 5;
+  bool has_audio = 6;
+}
+
+message ScreenShareStopped {
+  ChannelId channel_id = 1;
+  UserId user_id = 2;
+  StreamId stream_id = 3;
+}
+
+message ScreenShareLayerChanged {
+  StreamId stream_id = 1;
+  uint32 active_layer_id = 2;
+}
+
+// ── Screen share datagram header (sent alongside voice datagrams) ─────
+//
+// Byte layout (24-byte header, followed by encoded frame fragment):
+//   [version(1)] [type=0x02(1)] [hdr_len(2)] [stream_id_hash(4)]
+//   [layer_id(1)] [flags(1)] [fragment_idx(2)] [fragment_total(2)]
+//   [frame_seq(4)] [ts_ms(4)] [payload_offset(2)]
+//
+// flags: 0x01 = keyframe, 0x02 = end_of_frame, 0x04 = has_audio_payload

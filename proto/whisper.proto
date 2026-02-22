@@ -1,0 +1,87 @@
+syntax = "proto3";
+
+package voiceplatform.v1;
+
+import "common.proto";
+
+option go_package = "github.com/yourorg/voiceplatform/proto/gen/go/voiceplatform/v1;voiceplatformv1";
+
+// ── Whisper system ─────────────────────────────────────────────────────
+//
+// Whisper allows a user to speak privately to specific users in the
+// same voice channel without others hearing. The server selectively
+// forwards voice datagrams only to whisper targets.
+
+message WhisperListId {
+  string value = 1;
+}
+
+// A named whisper list (persistent, like a contact group for whispering).
+message WhisperList {
+  WhisperListId list_id = 1;
+  string name = 2;
+  repeated UserId members = 3;
+  string hotkey = 4;           // client-side hotkey binding (e.g. "Ctrl+1")
+}
+
+// ── Requests ───────────────────────────────────────────────────────────
+
+// Set who you're currently whispering to (replaces previous targets).
+// Empty targets = stop whispering (resume normal voice).
+message SetWhisperTargetsRequest {
+  ChannelId channel_id = 1;
+  repeated UserId target_user_ids = 2;
+}
+
+message SetWhisperTargetsResponse {}
+
+// Manage persistent whisper lists
+message CreateWhisperListRequest {
+  string name = 1;
+  repeated UserId members = 2;
+  string hotkey = 3;
+}
+message CreateWhisperListResponse {
+  WhisperList list = 1;
+}
+
+message UpdateWhisperListRequest {
+  WhisperListId list_id = 1;
+  string name = 2;
+  repeated UserId members = 3;
+  string hotkey = 4;
+}
+message UpdateWhisperListResponse {
+  WhisperList list = 1;
+}
+
+message DeleteWhisperListRequest {
+  WhisperListId list_id = 1;
+}
+message DeleteWhisperListResponse {}
+
+message GetWhisperListsRequest {}
+message GetWhisperListsResponse {
+  repeated WhisperList lists = 1;
+}
+
+// ── Events ─────────────────────────────────────────────────────────────
+
+message WhisperEvent {
+  Timestamp at = 1;
+
+  oneof kind {
+    WhisperStarted whisper_started = 10;
+    WhisperStopped whisper_stopped = 11;
+  }
+}
+
+message WhisperStarted {
+  UserId from_user_id = 1;
+  ChannelId channel_id = 2;
+}
+
+message WhisperStopped {
+  UserId from_user_id = 1;
+  ChannelId channel_id = 2;
+}

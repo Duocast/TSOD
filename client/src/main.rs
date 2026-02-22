@@ -1,19 +1,10 @@
-//! vp-client main (production-shaped)
+//! vp-client main — egui/eframe GUI + QUIC voice
 //!
-//! What this does:
-//! - Starts metrics/logging
-//! - Starts TUI (blocking) and an async app loop
-//! - Connects to server over QUIC, runs Hello->Auth, optional Join
-//! - Runs voice send loop (capture->Opus->QUIC DATAGRAM) gated by PTT
-//! - Runs voice receive loop (DATAGRAM->jitter->Opus decode->playout)
-//! - Handles graceful shutdown + reconnect with backoff
-//!
-//! NOTE on TLS (important):
-//! - A truly production-ready client MUST validate the server certificate.
-//! - If your current net/quic.rs accepts any cert, that is NOT production.
-//! - This main.rs supports optional certificate pinning via env var VP_TLS_PIN_SHA256_HEX.
-//!   If unset, it falls back to your existing quic::make_endpoint() behavior.
-//!   Replace that path with OS roots / CA chain validation for real production.
+//! Architecture:
+//! - eframe runs the GUI event loop on the main thread
+//! - A tokio runtime runs in a background thread for networking + audio
+//! - crossbeam channels bridge the GUI ↔ backend boundary
+//! - DSP pipeline (RNNoise, AGC, VAD) processes audio before encoding
 
 mod app;
 mod audio;
@@ -26,21 +17,21 @@ use anyhow::{anyhow, Context, Result};
 use bytes::Bytes;
 use clap::Parser;
 use config::Config;
-use proto::voiceplatform::v1 as pb;
+use crossbeam_channel::{bounded, Receiver, Sender};
 use net::dispatcher::{ControlDispatcher, PushEvent};
 use net::voice_datagram::{make_voice_datagram, VOICE_HDR_LEN, VOICE_VERSION};
+use proto::voiceplatform::v1 as pb;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
-use tokio::sync::{mpsc, watch, Mutex};
+use tokio::sync::{watch, Mutex};
 use tokio::time::{sleep, Duration};
 use tracing::{info, warn, Level};
 use tracing_subscriber::EnvFilter;
-use ui::{Tui, UiEvent, UiIntent, UiModel};
+use ui::{UiEvent, UiIntent, VpApp};
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env().add_directive(Level::INFO.into()))
         .init();
@@ -51,95 +42,119 @@ async fn main() -> Result<()> {
 
     let cfg = Config::parse();
 
-    // UI channels:
-    // - UI -> app intents
-    // - app -> UI events
-    let (tx_intent, mut rx_intent) = mpsc::channel::<UiIntent>(256);
-    let (tx_event, rx_event) = mpsc::channel::<UiEvent>(1024);
+    // Channels between GUI and backend (crossbeam for sync/async bridging)
+    let (tx_intent, rx_intent) = bounded::<UiIntent>(256);
+    let (tx_event, rx_event) = bounded::<UiEvent>(1024);
 
     // Shared shutdown signal
     let running = Arc::new(AtomicBool::new(true));
     let (shutdown_tx, shutdown_rx) = watch::channel::<bool>(false);
 
-    // Shared PTT state (UI toggles)
+    // PTT state
     let ptt_active = Arc::new(AtomicBool::new(!cfg.push_to_talk));
 
-    // Spawn UI (blocking thread)
-    let ui_running = running.clone();
-    let ui_shutdown_tx = shutdown_tx.clone();
-    let mut ui_handle = tokio::task::spawn_blocking(move || -> Result<()> {
-        let mut model = UiModel::default();
-        model.title = "vp-client".into();
-        model.ptt_enabled = cfg.push_to_talk;
-        model.ptt_active = !cfg.push_to_talk;
+    // Start the tokio backend in a background thread
+    let backend_cfg = cfg.clone();
+    let backend_running = running.clone();
+    let backend_tx_event = tx_event.clone();
+    let backend_ptt = ptt_active.clone();
 
-        let tui = Tui::new(tx_intent, rx_event);
-        let r = tui.run_blocking(model);
+    let backend_thread = std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to create tokio runtime");
 
-        // Ensure app stops when UI exits
-        ui_running.store(false, Ordering::Relaxed);
-        let _ = ui_shutdown_tx.send(true);
-        r
+        rt.block_on(async {
+            if let Err(e) = app_task(
+                backend_cfg,
+                backend_tx_event,
+                rx_intent,
+                backend_running,
+                shutdown_rx,
+                backend_ptt,
+            )
+            .await
+            {
+                warn!("backend error: {e:#}");
+            }
+        });
     });
 
-    // App task: handles intents, networking lifecycle, audio loops
-    let mut app_handle = tokio::spawn(app_task(
-        cfg.clone(),
-        tx_event.clone(),
-        rx_intent,
-        running.clone(),
-        shutdown_rx,
-        ptt_active.clone(),
-    ));
+    // Run the eframe GUI on the main thread
+    let native_options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_title("TSOD")
+            .with_inner_size([1200.0, 800.0])
+            .with_min_inner_size([800.0, 500.0]),
+        ..Default::default()
+    };
 
-    // Also exit on Ctrl-C
-    tokio::select! {
-        r = &mut ui_handle => {
-            // UI exited; propagate any errors
-            if let Err(e) = r {
-                warn!("ui task join error: {}", e);
-            }
-        }
-        r = &mut app_handle => {
-            if let Err(e) = r {
-                warn!("app task join error: {}", e);
-            }
-        }
-        _ = tokio::signal::ctrl_c() => {
-            info!("ctrl-c");
-            running.store(false, Ordering::Relaxed);
-            let _ = shutdown_tx.send(true);
-        }
-    }
+    let gui_result = eframe::run_native(
+        "TSOD",
+        native_options,
+        Box::new(move |cc| {
+            Ok(Box::new(VpApp::new(cc, tx_intent, rx_event)))
+        }),
+    );
 
-    Ok(())
+    // GUI exited — signal backend to shut down
+    running.store(false, Ordering::Relaxed);
+    let _ = shutdown_tx.send(true);
+
+    // Wait for backend to finish
+    let _ = backend_thread.join();
+
+    gui_result.map_err(|e| anyhow!("eframe error: {e}"))
 }
+
+// ── Backend task ───────────────────────────────────────────────────────
 
 async fn app_task(
     cfg: Config,
-    tx_event: mpsc::Sender<UiEvent>,
-    mut rx_intent: mpsc::Receiver<UiIntent>,
+    tx_event: Sender<UiEvent>,
+    rx_intent: Receiver<UiIntent>,
     running: Arc<AtomicBool>,
     mut shutdown_rx: watch::Receiver<bool>,
     ptt_active: Arc<AtomicBool>,
 ) -> Result<()> {
-    let _ = tx_event.send(UiEvent::AppendLog(format!("[sys] starting, server={}", cfg.server))).await;
+    let _ = tx_event.send(UiEvent::AppendLog(format!(
+        "[sys] starting, server={}",
+        cfg.server
+    )));
+    let _ = tx_event.send(UiEvent::SetNick(cfg.display_name.clone()));
 
-    // Audio constants (match server expectations)
+    // Audio constants
     let sample_rate = 48_000u32;
     let channels = 1u16;
     let frame_ms = 20u32;
 
-    // Audio pipeline shared state
-    let codec = Arc::new(Mutex::new(audio::opus::OpusCodec::new(sample_rate, channels as u8)?));
-    let capture = Arc::new(audio::capture::Capture::start(sample_rate, channels, frame_ms)?);
+    // Audio pipeline
+    let codec = Arc::new(Mutex::new(audio::opus::OpusCodec::new(
+        sample_rate,
+        channels as u8,
+    )?));
+    let capture = Arc::new(audio::capture::Capture::start(
+        sample_rate, channels, frame_ms,
+    )?);
     let playout = Arc::new(audio::playout::Playout::start(sample_rate, channels)?);
-
-    // Voice rx jitter buffer (single stream for now)
     let jitter = Arc::new(Mutex::new(audio::jitter::JitterBuffer::new(64)));
 
-    // Determine channel route hash (must match server membership resolver strategy)
-    // If channel_id isn't set, we still can connect and auth; voice won't route meaningfully.
+    // DSP pipeline
+    let dsp_enabled = !cfg.no_noise_suppression;
+    let capture_dsp = if dsp_enabled {
+        Some(Arc::new(Mutex::new(
+            audio::dsp::CaptureDsp::new(sample_rate)?,
+        )))
+    } else {
+        None
+    };
+
+    if let Some(ref dsp) = capture_dsp {
+        let mut d = dsp.lock().await;
+        d.set_vad_threshold(cfg.vad_threshold);
+    }
+
     let channel_id_str = cfg.channel_id.clone().unwrap_or_default();
     let channel_route_hash = if !channel_id_str.is_empty() {
         stable_route_hash_u32(channel_id_str.as_bytes())
@@ -147,56 +162,55 @@ async fn app_task(
         0
     };
 
-    // Reconnect loop state
     let mut backoff = Backoff::new(Duration::from_millis(250), Duration::from_secs(10));
 
-    // Main lifecycle loop: connect -> run until disconnect/shutdown -> reconnect
     while running.load(Ordering::Relaxed) && !*shutdown_rx.borrow() {
         match connect_and_run_session(
             &cfg,
             &tx_event,
+            &rx_intent,
             codec.clone(),
             capture.clone(),
             playout.clone(),
             jitter.clone(),
+            capture_dsp.clone(),
             channel_route_hash,
             ptt_active.clone(),
             &mut shutdown_rx,
-            &mut rx_intent,
         )
         .await
         {
             Ok(()) => {
-                // clean disconnect
                 backoff.reset();
             }
             Err(e) => {
-                let _ = tx_event.send(UiEvent::AppendLog(format!("[net] disconnected: {e:#}"))).await;
+                let _ = tx_event.send(UiEvent::AppendLog(format!("[net] disconnected: {e:#}")));
                 backoff.sleep().await;
             }
         }
     }
 
-    let _ = tx_event.send(UiEvent::AppendLog("[sys] shutting down".into())).await;
+    let _ = tx_event.send(UiEvent::AppendLog("[sys] shutting down".into()));
     Ok(())
 }
 
 async fn connect_and_run_session(
     cfg: &Config,
-    tx_event: &mpsc::Sender<UiEvent>,
+    tx_event: &Sender<UiEvent>,
+    rx_intent: &Receiver<UiIntent>,
     codec: Arc<Mutex<audio::opus::OpusCodec>>,
     capture: Arc<audio::capture::Capture>,
     playout: Arc<audio::playout::Playout>,
     jitter: Arc<Mutex<audio::jitter::JitterBuffer>>,
+    capture_dsp: Option<Arc<Mutex<audio::dsp::CaptureDsp>>>,
     channel_route_hash: u32,
     ptt_active: Arc<AtomicBool>,
     shutdown_rx: &mut watch::Receiver<bool>,
-    rx_intent: &mut mpsc::Receiver<UiIntent>,
 ) -> Result<()> {
-    let _ = tx_event.send(UiEvent::SetConnected(false)).await;
-    let _ = tx_event.send(UiEvent::SetAuthed(false)).await;
+    let _ = tx_event.send(UiEvent::SetConnected(false));
+    let _ = tx_event.send(UiEvent::SetAuthed(false));
 
-    let endpoint = make_endpoint_with_optional_pinning(&cfg)?;
+    let endpoint = make_endpoint_with_optional_pinning(cfg)?;
     let addr = cfg.server.parse().context("parse server addr")?;
 
     let conn = endpoint
@@ -205,111 +219,162 @@ async fn connect_and_run_session(
         .await
         .context("connect await")?;
 
-    let _ = tx_event.send(UiEvent::SetConnected(true)).await;
-    let _ = tx_event.send(UiEvent::AppendLog("[net] connected".into())).await;
+    let _ = tx_event.send(UiEvent::SetConnected(true));
+    let _ = tx_event.send(UiEvent::AppendLog("[net] connected".into()));
 
-    // Control stream -> dispatcher (request correlation + server push)
-let (send, recv) = conn.open_bi().await.context("open control stream")?;
-let dispatcher = ControlDispatcher::start(send, recv, shutdown_rx.clone());
+    let (send, recv) = conn.open_bi().await.context("open control stream")?;
+    let dispatcher = ControlDispatcher::start(send, recv, shutdown_rx.clone());
 
-dispatcher
-    .hello_auth(&cfg.alpn, &cfg.dev_token)
-    .await
-    .context("hello/auth")?;
+    dispatcher
+        .hello_auth(&cfg.alpn, &cfg.dev_token)
+        .await
+        .context("hello/auth")?;
 
-// Server push consumer -> UI log for now
-let mut push_rx = dispatcher.take_push_receiver().await;
-{
-    let tx_event = tx_event.clone();
-    tokio::spawn(async move {
-        while let Some(ev) = push_rx.recv().await {
-            match ev {
-                PushEvent::Chat(c) => {
-                    // ChatEvent is a oneof wrapper around message_* events
-                    if let Some(kind) = c.kind {
-                        match kind {
-                            pb::chat_event::Kind::MessagePosted(mp) => {
-                                let author = mp.author_user_id.map(|u| u.value).unwrap_or_else(|| "unknown".into());
-                                let _ = tx_event
-                                    .send(UiEvent::AppendLog(format!("[chat] {author}: {}", mp.text)))
-                                    .await;
-                            }
-                            pb::chat_event::Kind::MessageEdited(me) => {
-                                let _ = tx_event
-                                    .send(UiEvent::AppendLog(format!("[chat] edited {} -> {}", me.message_id.map(|m| m.value).unwrap_or_default(), me.new_text)))
-                                    .await;
-                            }
-                            pb::chat_event::Kind::MessageDeleted(md) => {
-                                let _ = tx_event
-                                    .send(UiEvent::AppendLog(format!("[chat] deleted {}", md.message_id.map(|m| m.value).unwrap_or_default())))
-                                    .await;
+    // Server push consumer
+    let mut push_rx = dispatcher.take_push_receiver().await;
+    {
+        let tx_event = tx_event.clone();
+        tokio::spawn(async move {
+            while let Some(ev) = push_rx.recv().await {
+                match ev {
+                    PushEvent::Chat(c) => {
+                        if let Some(kind) = c.kind {
+                            match kind {
+                                pb::chat_event::Kind::MessagePosted(mp) => {
+                                    let author = mp
+                                        .author_user_id
+                                        .as_ref()
+                                        .map(|u| u.value.as_str())
+                                        .unwrap_or("unknown");
+                                    let _ = tx_event.send(UiEvent::MessageReceived(
+                                        ui::model::ChatMessage {
+                                            message_id: mp
+                                                .message_id
+                                                .map(|m| m.value)
+                                                .unwrap_or_default(),
+                                            channel_id: mp
+                                                .channel_id
+                                                .map(|c| c.value)
+                                                .unwrap_or_default(),
+                                            author_id: author.to_string(),
+                                            author_name: author.to_string(),
+                                            text: mp.text.clone(),
+                                            timestamp: mp
+                                                .edited_at
+                                                .as_ref()
+                                                .map(|t| t.unix_millis)
+                                                .unwrap_or(0),
+                                            attachments: Vec::new(),
+                                            reply_to: mp
+                                                .reply_to_message_id
+                                                .map(|r| r.value),
+                                            reactions: Vec::new(),
+                                            pinned: mp.pinned,
+                                            edited: mp.edited_at.is_some(),
+                                        },
+                                    ));
+                                }
+                                pb::chat_event::Kind::MessageEdited(me) => {
+                                    let _ = tx_event.send(UiEvent::MessageEdited {
+                                        channel_id: me
+                                            .channel_id
+                                            .map(|c| c.value)
+                                            .unwrap_or_default(),
+                                        message_id: me
+                                            .message_id
+                                            .map(|m| m.value)
+                                            .unwrap_or_default(),
+                                        new_text: me.new_text,
+                                    });
+                                }
+                                pb::chat_event::Kind::MessageDeleted(md) => {
+                                    let _ = tx_event.send(UiEvent::MessageDeleted {
+                                        channel_id: md
+                                            .channel_id
+                                            .map(|c| c.value)
+                                            .unwrap_or_default(),
+                                        message_id: md
+                                            .message_id
+                                            .map(|m| m.value)
+                                            .unwrap_or_default(),
+                                    });
+                                }
+                                _ => {}
                             }
                         }
                     }
-                }
-                PushEvent::Presence(p) => {
-                    let _ = tx_event
-                        .send(UiEvent::AppendLog(format!("[presence] {:?}", p.kind)))
-                        .await;
-                }
-                PushEvent::Moderation(m) => {
-                    let _ = tx_event
-                        .send(UiEvent::AppendLog(format!("[moderation] {:?}", m)))
-                        .await;
-                }
-                PushEvent::ServerHint(h) => {
-                    let mut parts = vec![];
-                    if h.receiver_report_interval_ms != 0 {
-                        parts.push(format!("rr={}ms", h.receiver_report_interval_ms));
+                    PushEvent::Presence(p) => {
+                        let _ = tx_event.send(UiEvent::AppendLog(format!(
+                            "[presence] {:?}",
+                            p.kind
+                        )));
                     }
-                    if h.max_stream_bitrate_bps != 0 {
-                        parts.push(format!("stream_cap={}bps", h.max_stream_bitrate_bps));
+                    PushEvent::Moderation(m) => {
+                        let _ = tx_event
+                            .send(UiEvent::AppendLog(format!("[moderation] {:?}", m)));
                     }
-                    if h.max_voice_bitrate_bps != 0 {
-                        parts.push(format!("voice_cap={}bps", h.max_voice_bitrate_bps));
+                    PushEvent::ServerHint(h) => {
+                        let mut parts = vec![];
+                        if h.receiver_report_interval_ms != 0 {
+                            parts.push(format!("rr={}ms", h.receiver_report_interval_ms));
+                        }
+                        if h.max_stream_bitrate_bps != 0 {
+                            parts.push(format!(
+                                "stream_cap={}bps",
+                                h.max_stream_bitrate_bps
+                            ));
+                        }
+                        if h.max_voice_bitrate_bps != 0 {
+                            parts.push(format!(
+                                "voice_cap={}bps",
+                                h.max_voice_bitrate_bps
+                            ));
+                        }
+                        let msg = if parts.is_empty() {
+                            "server_hint".into()
+                        } else {
+                            format!("server_hint {}", parts.join(" "))
+                        };
+                        let _ = tx_event.send(UiEvent::AppendLog(format!("[hint] {msg}")));
                     }
-                    let msg = if parts.is_empty() { "server_hint".into() } else { format!("server_hint {}", parts.join(" ")) };
-                    let _ = tx_event.send(UiEvent::AppendLog(format!("[hint] {msg}"))).await;
-                }
-                PushEvent::Unknown(_) => {
-                    // drop unknown pushes quietly
+                    PushEvent::Unknown(_) => {}
                 }
             }
-        }
-    });
-}
+        });
+    }
 
-
-    let _ = tx_event.send(UiEvent::SetAuthed(true)).await;
-    let _ = tx_event.send(UiEvent::AppendLog("[net] authed".into())).await;
+    let _ = tx_event.send(UiEvent::SetAuthed(true));
+    let _ = tx_event.send(UiEvent::AppendLog("[net] authed".into()));
 
     if let Some(ch) = cfg.channel_id.as_deref() {
-        // If server hasn't implemented JoinChannel yet, this may fail; treat as non-fatal for now
         match dispatcher.join_channel(ch).await {
             Ok(()) => {
-                let _ = tx_event.send(UiEvent::SetChannelName(ch.to_string())).await;
-                let _ = tx_event.send(UiEvent::AppendLog(format!("[ctl] joined channel {ch}"))).await;
+                let _ = tx_event.send(UiEvent::SetChannelName(ch.to_string()));
+                let _ = tx_event
+                    .send(UiEvent::AppendLog(format!("[ctl] joined channel {ch}")));
             }
             Err(e) => {
-                let _ = tx_event.send(UiEvent::AppendLog(format!("[ctl] join failed: {e:#}"))).await;
+                let _ = tx_event
+                    .send(UiEvent::AppendLog(format!("[ctl] join failed: {e:#}")));
             }
         }
     }
 
-    // Spawn voice send + receive tasks. If they die, session should be considered dead.
     let (voice_die_tx, mut voice_die_rx) = watch::channel::<bool>(false);
 
     let voice_send = tokio::spawn(voice_send_loop(
         conn.clone(),
         codec.clone(),
         capture.clone(),
+        capture_dsp.clone(),
+        tx_event.clone(),
         channel_route_hash,
         ptt_active.clone(),
         cfg.push_to_talk,
         voice_die_tx.clone(),
     ));
 
-    let voice_recv = tokio::spawn(voice_recv_loop(
+    let _voice_recv = tokio::spawn(voice_recv_loop(
         conn.clone(),
         codec.clone(),
         playout.clone(),
@@ -317,88 +382,83 @@ let mut push_rx = dispatcher.take_push_receiver().await;
         voice_die_tx.clone(),
     ));
 
-    // Control keepalive task
-let disp_keepalive = dispatcher.clone();
-let ctl_keepalive = tokio::spawn(async move {
-    let mut interval = tokio::time::interval(Duration::from_secs(10));
-    loop {
-        interval.tick().await;
-        if let Err(e) = disp_keepalive.ping().await {
-            return Err::<(), anyhow::Error>(e);
+    let disp_keepalive = dispatcher.clone();
+    let ctl_keepalive = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(10));
+        loop {
+            interval.tick().await;
+            if let Err(e) = disp_keepalive.ping().await {
+                return Err::<(), anyhow::Error>(e);
+            }
         }
-    }
-});
+    });
 
-
-    // Intent handling loop; for now we just handle Quit / PTT toggle / log chat.
     tokio::pin!(ctl_keepalive);
     loop {
         tokio::select! {
-            // UI intents
-            maybe_intent = rx_intent.recv() => {
-                match maybe_intent {
-                    None => return Ok(()), // UI ended
-                    Some(intent) => {
-                        match intent {
-                            UiIntent::Quit => return Ok(()),
-                            UiIntent::TogglePtt => {
-                                let new = !ptt_active.load(Ordering::Relaxed);
-                                ptt_active.store(new, Ordering::Relaxed);
-                                let _ = tx_event
-                                    .send(UiEvent::AppendLog(format!(
-                                        "[ptt] {}",
-                                        if new { "ON" } else { "OFF" }
-                                    )))
-                                    .await;
-                            }
-                            UiIntent::SendChat { text } => {
-                                let _ = tx_event.send(UiEvent::AppendLog(format!("[me] {text}"))).await;
-                                if let Some(ch) = cfg.channel_id.as_deref() {
-                                    if let Err(e) = dispatcher.send_chat(ch, &text).await {
-                                        let _ = tx_event.send(UiEvent::AppendLog(format!("[ctl] send_chat failed: {e:#}"))).await;
-                                    }
-                                } else {
-                                    let _ = tx_event.send(UiEvent::AppendLog("[ctl] no --channel-id set; chat not sent".into())).await;
+            // Check for UI intents (non-blocking poll from crossbeam)
+            _ = tokio::time::sleep(Duration::from_millis(10)) => {
+                while let Ok(intent) = rx_intent.try_recv() {
+                    match intent {
+                        UiIntent::Quit => return Ok(()),
+                        UiIntent::TogglePtt => {
+                            let new = !ptt_active.load(Ordering::Relaxed);
+                            ptt_active.store(new, Ordering::Relaxed);
+                        }
+                        UiIntent::PttDown => {
+                            ptt_active.store(true, Ordering::Relaxed);
+                        }
+                        UiIntent::PttUp => {
+                            ptt_active.store(false, Ordering::Relaxed);
+                        }
+                        UiIntent::SendChat { text } => {
+                            let _ = tx_event.send(UiEvent::AppendLog(format!("[me] {text}")));
+                            if let Some(ch) = cfg.channel_id.as_deref() {
+                                if let Err(e) = dispatcher.send_chat(ch, &text).await {
+                                    let _ = tx_event.send(UiEvent::AppendLog(
+                                        format!("[ctl] send_chat failed: {e:#}"),
+                                    ));
                                 }
                             }
-                            UiIntent::SelectNextChannel | UiIntent::SelectPrevChannel => {
-                                // TODO: implement channel list and JoinChannel intent.
+                        }
+                        UiIntent::JoinChannel { channel_id } => {
+                            match dispatcher.join_channel(&channel_id).await {
+                                Ok(()) => {
+                                    let _ = tx_event.send(UiEvent::SetChannelName(channel_id));
+                                }
+                                Err(e) => {
+                                    let _ = tx_event.send(UiEvent::AppendLog(
+                                        format!("[ctl] join failed: {e:#}"),
+                                    ));
+                                }
                             }
-                            UiIntent::Help => {
-                                let _ = tx_event.send(UiEvent::AppendLog("[help] q quit | Enter send | Space PTT | Up/Down select".into())).await;
-                            }
-                            _ => {}
+                        }
+                        UiIntent::Help => {
+                            let _ = tx_event.send(UiEvent::AppendLog(
+                                "[help] Space=PTT | Enter=Send | Settings for audio config".into(),
+                            ));
+                        }
+                        _ => {
+                            // Other intents will be handled as features are wired up
                         }
                     }
                 }
             }
 
-            // Shutdown
             _ = shutdown_rx.changed() => {
                 if *shutdown_rx.borrow() { return Ok(()); }
             }
 
-            // Voice tasks died
             _ = voice_die_rx.changed() => {
                 if *voice_die_rx.borrow() {
                     return Err(anyhow!("voice loop terminated"));
                 }
             }
 
-            // Control keepalive died
             r = &mut ctl_keepalive => {
                 return Err(anyhow!("control keepalive ended: {:?}", r));
             }
         }
-    }
-
-    // Cleanup is best-effort (tasks are tied to conn lifetime)
-    // We don't reach here.
-    #[allow(unreachable_code)]
-    {
-        let _ = voice_send.await;
-        let _ = voice_recv.await;
-        Ok(())
     }
 }
 
@@ -406,6 +466,8 @@ async fn voice_send_loop(
     conn: quinn::Connection,
     codec: Arc<Mutex<audio::opus::OpusCodec>>,
     capture: Arc<audio::capture::Capture>,
+    capture_dsp: Option<Arc<Mutex<audio::dsp::CaptureDsp>>>,
+    tx_event: Sender<UiEvent>,
     channel_route_hash: u32,
     ptt_active: Arc<AtomicBool>,
     push_to_talk: bool,
@@ -414,7 +476,6 @@ async fn voice_send_loop(
     let mut seq: u32 = 0;
     let ssrc: u32 = rand::random();
 
-    // 20ms @ 48k mono = 960 samples
     let sample_rate = 48_000u32;
     let channels = 1usize;
     let frame_ms = 20u32;
@@ -424,11 +485,11 @@ async fn voice_send_loop(
     let mut enc_out = vec![0u8; 4000];
 
     let mut tick = tokio::time::interval(Duration::from_millis(5));
+    let mut vad_report_counter = 0u32;
 
     loop {
         tick.tick().await;
 
-        // Gate capture by PTT if enabled
         if push_to_talk && !ptt_active.load(Ordering::Relaxed) {
             continue;
         }
@@ -437,7 +498,25 @@ async fn voice_send_loop(
             continue;
         }
 
-        // Encode
+        // Apply DSP pipeline (noise suppression + AGC + VAD)
+        let mut is_voice = true;
+        if let Some(ref dsp) = capture_dsp {
+            let mut d = dsp.lock().await;
+            d.process_frame(&mut pcm);
+            is_voice = d.is_voice_active();
+
+            // Report VAD level to GUI periodically
+            vad_report_counter += 1;
+            if vad_report_counter % 10 == 0 {
+                let _ = tx_event.send(UiEvent::VadLevel(d.last_vad_probability()));
+            }
+        }
+
+        // Skip sending if VAD says no voice (and not PTT mode)
+        if !push_to_talk && !is_voice {
+            continue;
+        }
+
         let n = match codec.lock().await.encode(&pcm, &mut enc_out) {
             Ok(n) => n,
             Err(_) => continue,
@@ -445,17 +524,10 @@ async fn voice_send_loop(
 
         let ts_ms = (unix_ms() & 0xFFFF_FFFF) as u32;
 
-        let d = make_voice_datagram(
-            channel_route_hash,
-            ssrc,
-            seq,
-            ts_ms,
-            true,
-            &enc_out[..n],
-        );
+        let d = make_voice_datagram(channel_route_hash, ssrc, seq, ts_ms, is_voice, &enc_out[..n]);
         seq = seq.wrapping_add(1);
 
-        if let Err(_e) = conn.send_datagram(d) {
+        if conn.send_datagram(d).is_err() {
             let _ = voice_die_tx.send(true);
             return;
         }
@@ -469,7 +541,6 @@ async fn voice_recv_loop(
     jitter: Arc<Mutex<audio::jitter::JitterBuffer>>,
     voice_die_tx: watch::Sender<bool>,
 ) {
-    // Decode buffer: 20ms @ 48k mono
     let sample_rate = 48_000u32;
     let channels = 1usize;
     let frame_ms = 20u32;
@@ -486,16 +557,13 @@ async fn voice_recv_loop(
             }
         };
 
-        // Parse header and extract payload
         let (seq, payload) = match parse_voice_payload(&d) {
             Some(v) => v,
             None => continue,
         };
 
-        // Push into jitter buffer
         jitter.lock().await.push(seq, payload.to_vec());
 
-        // Pop any ready frames and decode
         while let Some(frame) = jitter.lock().await.pop_ready() {
             let n = match codec.lock().await.decode(&frame, &mut pcm_out) {
                 Ok(n) => n,
@@ -509,8 +577,6 @@ async fn voice_recv_loop(
     }
 }
 
-/// Parse voice datagram used by server forwarder:
-/// returns (seq, payload_slice)
 fn parse_voice_payload(d: &Bytes) -> Option<(u32, &[u8])> {
     if d.len() < VOICE_HDR_LEN {
         return None;
@@ -522,12 +588,10 @@ fn parse_voice_payload(d: &Bytes) -> Option<(u32, &[u8])> {
     if hdr_len != VOICE_HDR_LEN || d.len() <= hdr_len {
         return None;
     }
-    // seq at bytes 12..16
     let seq = u32::from_be_bytes([d[12], d[13], d[14], d[15]]);
     Some((seq, &d[hdr_len..]))
 }
 
-/// Stable 32-bit route hash (FNV-1a) for channel routing key.
 fn stable_route_hash_u32(bytes: &[u8]) -> u32 {
     const FNV_OFFSET: u32 = 0x811C9DC5;
     const FNV_PRIME: u32 = 0x01000193;
@@ -548,7 +612,6 @@ fn unix_ms() -> u64 {
         .as_millis() as u64
 }
 
-/// Basic exponential backoff with jitter.
 struct Backoff {
     min: Duration,
     max: Duration,
@@ -569,10 +632,7 @@ impl Backoff {
     }
 }
 
-/// If env var VP_TLS_PIN_SHA256_HEX is set, install a QUIC endpoint with cert pinning.
-/// Otherwise fall back to your existing net::quic::make_endpoint() (which may be insecure in dev).
 fn make_endpoint_with_optional_pinning(cfg: &Config) -> Result<quinn::Endpoint> {
-    // Priority: 1) cert pinning, 2) CA cert, 3) insecure dev
     if let Ok(pin_hex) = std::env::var("VP_TLS_PIN_SHA256_HEX") {
         let pin = hex_to_32(&pin_hex)?;
         return make_pinned_endpoint(pin);
@@ -582,12 +642,9 @@ fn make_endpoint_with_optional_pinning(cfg: &Config) -> Result<quinn::Endpoint> 
         return net::quic::make_ca_endpoint(ca_path);
     }
 
-    // Fallback: use existing helper (accepts any cert in dev mode).
     net::quic::make_endpoint()
 }
 
-/// Pinned cert endpoint using rustls "dangerous" verifier.
-/// This is production-acceptable if you pin the server leaf cert hash out-of-band.
 fn make_pinned_endpoint(pin_sha256: [u8; 32]) -> Result<quinn::Endpoint> {
     use quinn::{ClientConfig, Endpoint};
     use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};

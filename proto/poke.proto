@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package voiceplatform.v1;
+
+import "common.proto";
+
+option go_package = "github.com/yourorg/voiceplatform/proto/gen/go/voiceplatform/v1;voiceplatformv1";
+
+// ── Poke system ────────────────────────────────────────────────────────
+//
+// A poke sends a notification to a user to get their attention.
+// Rate-limited server-side to prevent spam.
+
+message PokeRequest {
+  UserId target_user_id = 1;
+  string message = 2;     // optional short message (max 128 chars)
+}
+
+message PokeResponse {
+  // empty on success; error if rate limited or target not found
+}
+
+message PokeEvent {
+  Timestamp at = 1;
+  UserId from_user_id = 2;
+  string from_display_name = 3;
+  string message = 4;
+}

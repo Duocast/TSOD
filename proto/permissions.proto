@@ -1,0 +1,205 @@
+syntax = "proto3";
+
+package voiceplatform.v1;
+
+import "common.proto";
+
+option go_package = "github.com/yourorg/voiceplatform/proto/gen/go/voiceplatform/v1;voiceplatformv1";
+
+// ── Permission bits ────────────────────────────────────────────────────
+
+// Permissions are a bitmask. Each bit corresponds to a permission.
+// Server-level, channel-group-level, and per-user overrides all share
+// the same bitmask type. Effective = (role_allow & ~role_deny) | override_allow & ~override_deny.
+
+message PermissionSet {
+  uint64 allow = 1;    // bitmask of allowed permissions
+  uint64 deny = 2;     // bitmask of denied permissions (overrides allow)
+}
+
+// Well-known permission bits (client/server should share this enum).
+enum Permission {
+  PERM_UNSPECIFIED = 0;
+
+  // General
+  VIEW_CHANNEL = 1;
+  MANAGE_CHANNEL = 2;
+  MANAGE_SERVER = 3;
+
+  // Chat
+  SEND_MESSAGES = 10;
+  EMBED_LINKS = 11;
+  ATTACH_FILES = 12;
+  MANAGE_MESSAGES = 13;    // delete/pin others' messages
+  MENTION_EVERYONE = 14;
+
+  // Voice
+  CONNECT_VOICE = 20;
+  SPEAK = 21;
+  MUTE_MEMBERS = 22;
+  DEAFEN_MEMBERS = 23;
+  MOVE_MEMBERS = 24;
+  USE_VOICE_ACTIVITY = 25; // vs forced PTT
+  PRIORITY_SPEAKER = 26;
+
+  // Moderation
+  KICK_MEMBERS = 30;
+  BAN_MEMBERS = 31;
+  TIMEOUT_MEMBERS = 32;
+
+  // Admin
+  ADMIN = 40;               // full permissions
+  MANAGE_ROLES = 41;
+  VIEW_AUDIT_LOG = 42;
+  MANAGE_PRIVILEGE_KEYS = 43;
+}
+
+// ── Roles ──────────────────────────────────────────────────────────────
+
+message RoleId {
+  string value = 1;
+}
+
+message Role {
+  RoleId role_id = 1;
+  string name = 2;
+  uint32 color = 3;          // RGB packed as 0x00RRGGBB
+  bool hoist = 4;            // show separately in member list
+  uint32 position = 5;       // sort order (lower = less priority)
+  PermissionSet permissions = 6;
+  bool is_default = 7;       // the @everyone role
+}
+
+// ── Channel groups ─────────────────────────────────────────────────────
+
+message ChannelGroupId {
+  string value = 1;
+}
+
+message ChannelGroup {
+  ChannelGroupId group_id = 1;
+  string name = 2;
+  uint32 position = 3;
+
+  // Permission overrides for this group's channels, keyed by role.
+  repeated RolePermissionOverride role_overrides = 4;
+}
+
+message RolePermissionOverride {
+  RoleId role_id = 1;
+  PermissionSet permissions = 2;
+}
+
+// ── Per-channel per-user overrides ─────────────────────────────────────
+
+message ChannelPermissionOverride {
+  ChannelId channel_id = 1;
+
+  oneof target {
+    RoleId role_id = 2;
+    UserId user_id = 3;
+  }
+
+  PermissionSet permissions = 4;
+}
+
+// ── Privilege keys (invite-like tokens that grant a role on use) ───────
+
+message PrivilegeKeyId {
+  string value = 1;
+}
+
+message PrivilegeKey {
+  PrivilegeKeyId key_id = 1;
+  string token = 2;            // the actual secret token
+  RoleId grants_role_id = 3;
+  uint32 max_uses = 4;         // 0 = unlimited
+  uint32 uses = 5;
+  Timestamp expires_at = 6;    // 0 = never
+  UserId created_by = 7;
+}
+
+// ── Requests ───────────────────────────────────────────────────────────
+
+message GetRolesRequest {}
+message GetRolesResponse {
+  repeated Role roles = 1;
+}
+
+message CreateRoleRequest {
+  string name = 1;
+  uint32 color = 2;
+  PermissionSet permissions = 3;
+}
+message CreateRoleResponse {
+  Role role = 1;
+}
+
+message UpdateRoleRequest {
+  RoleId role_id = 1;
+  string name = 2;
+  uint32 color = 3;
+  uint32 position = 4;
+  PermissionSet permissions = 5;
+}
+message UpdateRoleResponse {
+  Role role = 1;
+}
+
+message DeleteRoleRequest {
+  RoleId role_id = 1;
+}
+message DeleteRoleResponse {}
+
+message AssignRoleRequest {
+  UserId user_id = 1;
+  RoleId role_id = 2;
+}
+message AssignRoleResponse {}
+
+message RevokeRoleRequest {
+  UserId user_id = 1;
+  RoleId role_id = 2;
+}
+message RevokeRoleResponse {}
+
+message SetChannelPermissionOverrideRequest {
+  ChannelPermissionOverride override = 1;
+}
+message SetChannelPermissionOverrideResponse {}
+
+message DeleteChannelPermissionOverrideRequest {
+  ChannelId channel_id = 1;
+  oneof target {
+    RoleId role_id = 2;
+    UserId user_id = 3;
+  }
+}
+message DeleteChannelPermissionOverrideResponse {}
+
+// Privilege keys
+message CreatePrivilegeKeyRequest {
+  RoleId grants_role_id = 1;
+  uint32 max_uses = 2;
+  uint64 expires_in_seconds = 3;  // 0 = never
+}
+message CreatePrivilegeKeyResponse {
+  PrivilegeKey key = 1;
+}
+
+message RedeemPrivilegeKeyRequest {
+  string token = 1;
+}
+message RedeemPrivilegeKeyResponse {
+  RoleId granted_role_id = 1;
+}
+
+message ListPrivilegeKeysRequest {}
+message ListPrivilegeKeysResponse {
+  repeated PrivilegeKey keys = 1;
+}
+
+message DeletePrivilegeKeyRequest {
+  PrivilegeKeyId key_id = 1;
+}
+message DeletePrivilegeKeyResponse {}

@@ -17,6 +17,16 @@ message FeatureCaps {
   bool supports_streaming = 3;
   bool supports_drag_drop_upload = 4;
   bool supports_relay_mode = 5;
+
+  // New capabilities
+  bool supports_screen_share = 6;
+  bool supports_video_call = 7;
+  bool supports_e2ee = 8;
+  bool supports_spatial_audio = 9;
+  bool supports_whisper = 10;
+  bool supports_noise_suppression = 11;
+  bool supports_echo_cancellation = 12;
+  bool supports_agc = 13;
 }
 
 message AudioCaps {
@@ -60,10 +70,22 @@ message VideoCaps {
   bool hw_encode_available = 6;
 }
 
+message ScreenShareCaps {
+  VideoCaps.Codec codec = 1;
+  uint32 max_width = 2;
+  uint32 max_height = 3;
+  uint32 max_fps = 4;
+  uint32 max_bitrate_bps = 5;
+  uint32 max_simulcast_layers = 6;
+  bool supports_system_audio = 7;
+}
+
 message ClientCaps {
   BuildInfo build = 1;
   FeatureCaps features = 2;
   AudioCaps voice_audio = 3;
   VideoCaps screen_video = 4;
   CapabilityHash caps_hash = 5;
+  ScreenShareCaps screen_share = 6;
+  VideoCaps camera_video = 7;
 }

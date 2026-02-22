@@ -1,0 +1,112 @@
+syntax = "proto3";
+
+package voiceplatform.v1;
+
+import "common.proto";
+
+option go_package = "github.com/yourorg/voiceplatform/proto/gen/go/voiceplatform/v1;voiceplatformv1";
+
+// ── E2EE for channels <= 50 users (MLS-based, Phase 3 scope) ──────────
+//
+// Uses the Messaging Layer Security (MLS) protocol for group key agreement.
+// The server acts as a delivery service (DS) for MLS messages but cannot
+// decrypt media. E2EE applies to voice datagrams; control messages remain
+// in cleartext (the server needs to process them).
+//
+// When E2EE is enabled for a channel:
+// 1. Each user publishes MLS key packages on join
+// 2. The channel creator (or first joiner) creates the MLS group
+// 3. New joiners are added via MLS Welcome messages
+// 4. Voice datagrams are encrypted with the current epoch key
+// 5. Members that leave trigger an epoch update (forward secrecy)
+
+message KeyPackageId {
+  string value = 1;
+}
+
+message MlsKeyPackage {
+  KeyPackageId key_package_id = 1;
+  UserId user_id = 2;
+  bytes key_package_data = 3;    // serialized MLS KeyPackage
+}
+
+message MlsGroupId {
+  string value = 1;
+}
+
+// ── Requests ───────────────────────────────────────────────────────────
+
+// Upload key packages for the server to distribute to group creators
+message UploadKeyPackagesRequest {
+  repeated bytes key_packages = 1;  // serialized MLS KeyPackages
+}
+
+message UploadKeyPackagesResponse {
+  repeated KeyPackageId key_package_ids = 1;
+}
+
+// Fetch a user's key package (used when adding them to a group)
+message FetchKeyPackageRequest {
+  UserId user_id = 1;
+}
+
+message FetchKeyPackageResponse {
+  MlsKeyPackage key_package = 1;
+}
+
+// Create or join an E2EE group for a channel
+message CreateE2eeGroupRequest {
+  ChannelId channel_id = 1;
+  bytes group_info = 2;     // serialized MLS GroupInfo
+}
+
+message CreateE2eeGroupResponse {
+  MlsGroupId group_id = 1;
+}
+
+// Send an MLS message (Commit, Proposal, Application) via the server DS
+message SendMlsMessageRequest {
+  MlsGroupId group_id = 1;
+  bytes mls_message = 2;    // serialized MLS message
+}
+
+message SendMlsMessageResponse {}
+
+// ── Events (server-relayed MLS messages) ──────────────────────────────
+
+message E2eeEvent {
+  Timestamp at = 1;
+
+  oneof kind {
+    MlsWelcome welcome = 10;
+    MlsCommit commit = 11;
+    MlsProposal proposal = 12;
+    E2eeEnabled channel_e2ee_enabled = 13;
+    E2eeDisabled channel_e2ee_disabled = 14;
+  }
+}
+
+message MlsWelcome {
+  MlsGroupId group_id = 1;
+  bytes welcome_message = 2;   // serialized MLS Welcome
+}
+
+message MlsCommit {
+  MlsGroupId group_id = 1;
+  bytes commit_message = 2;    // serialized MLS Commit
+  uint64 epoch = 3;
+}
+
+message MlsProposal {
+  MlsGroupId group_id = 1;
+  bytes proposal_message = 2;  // serialized MLS Proposal
+}
+
+message E2eeEnabled {
+  ChannelId channel_id = 1;
+  MlsGroupId group_id = 2;
+}
+
+message E2eeDisabled {
+  ChannelId channel_id = 1;
+}
