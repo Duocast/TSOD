@@ -6,21 +6,31 @@ use crossbeam_channel::Sender;
 use eframe::egui;
 
 pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>) {
-    ui.heading("Channels");
+    ui.horizontal(|ui| {
+        ui.heading("Channels");
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.small_button("+").on_hover_text("Create Channel").clicked() {
+                model.show_create_channel = true;
+                model.create_channel_name.clear();
+            }
+        });
+    });
     ui.separator();
 
     egui::ScrollArea::vertical().show(ui, |ui| {
-        // Group channels by parent (categories)
-        let categories: Vec<_> = model
-            .channels
+        // Clone channel data to avoid borrow conflicts with &mut model in show_channel
+        let channels: Vec<_> = model.channels.clone();
+
+        let categories: Vec<_> = channels
             .iter()
             .filter(|c| c.channel_type == ChannelType::Category)
+            .cloned()
             .collect();
 
-        let ungrouped: Vec<_> = model
-            .channels
+        let ungrouped: Vec<_> = channels
             .iter()
             .filter(|c| c.channel_type != ChannelType::Category && c.parent_id.is_none())
+            .cloned()
             .collect();
 
         // Show ungrouped channels first
@@ -31,16 +41,18 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
         // Show categories with their children
         for cat in &categories {
             let id = egui::Id::new(&cat.id);
+            let cat_name = cat.name.clone();
+            let cat_id = cat.id.clone();
             egui::CollapsingHeader::new(
-                egui::RichText::new(&cat.name).strong().color(theme::COLOR_TEXT_DIM).size(11.0),
+                egui::RichText::new(&cat_name).strong().color(theme::COLOR_TEXT_DIM).size(11.0),
             )
             .id_salt(id)
             .default_open(true)
             .show(ui, |ui| {
-                let children: Vec<_> = model
-                    .channels
+                let children: Vec<_> = channels
                     .iter()
-                    .filter(|c| c.parent_id.as_deref() == Some(&cat.id))
+                    .filter(|c| c.parent_id.as_deref() == Some(cat_id.as_str()))
+                    .cloned()
                     .collect();
 
                 for ch in &children {
@@ -50,7 +62,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
         }
 
         // If no channels exist, show placeholder
-        if model.channels.is_empty() {
+        if channels.is_empty() {
             ui.label(
                 egui::RichText::new("No channels yet")
                     .color(theme::COLOR_TEXT_MUTED)
@@ -60,13 +72,70 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
     });
 }
 
+pub fn show_create_channel_dialog(
+    ctx: &egui::Context,
+    model: &mut UiModel,
+    tx_intent: &Sender<UiIntent>,
+) {
+    if !model.show_create_channel {
+        return;
+    }
+
+    let mut open = true;
+    egui::Window::new("Create Channel")
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.label("Channel Name:");
+            let response = ui.text_edit_singleline(&mut model.create_channel_name);
+
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                let name = model.create_channel_name.trim().to_string();
+                let can_create = !name.is_empty();
+
+                if ui.add_enabled(can_create, egui::Button::new("Create Voice Channel")).clicked() {
+                    let _ = tx_intent.send(UiIntent::CreateChannel {
+                        name,
+                        channel_type: 1, // voice
+                    });
+                    model.show_create_channel = false;
+                    model.create_channel_name.clear();
+                }
+
+                if ui.button("Cancel").clicked() {
+                    model.show_create_channel = false;
+                    model.create_channel_name.clear();
+                }
+            });
+
+            // Submit on Enter
+            if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                let name = model.create_channel_name.trim().to_string();
+                if !name.is_empty() {
+                    let _ = tx_intent.send(UiIntent::CreateChannel {
+                        name,
+                        channel_type: 1,
+                    });
+                    model.show_create_channel = false;
+                    model.create_channel_name.clear();
+                }
+            }
+        });
+    if !open {
+        model.show_create_channel = false;
+    }
+}
+
 fn show_channel(
     ui: &mut egui::Ui,
     ch: &crate::ui::model::ChannelEntry,
-    model: &UiModel,
+    model: &mut UiModel,
     tx_intent: &Sender<UiIntent>,
 ) {
-    let is_selected = model.selected_channel.as_deref() == Some(&ch.id);
+    let is_selected = model.selected_channel.as_deref() == Some(ch.id.as_str());
     let icon = match ch.channel_type {
         ChannelType::Text => "#",
         ChannelType::Voice => "🔊",
@@ -87,6 +156,9 @@ fn show_channel(
     );
 
     if response.clicked() {
+        // Set selected channel in model immediately for UI responsiveness
+        model.selected_channel = Some(ch.id.clone());
+        model.selected_channel_name = ch.name.clone();
         let _ = tx_intent.send(UiIntent::JoinChannel {
             channel_id: ch.id.clone(),
         });

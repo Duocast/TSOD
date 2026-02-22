@@ -72,6 +72,19 @@ pub enum UiEvent {
 
     // User profile
     UserProfileLoaded(UserProfileData),
+
+    // Self state
+    SetSelfMuted(bool),
+    SetSelfDeafened(bool),
+
+    // Audio devices
+    SetAudioDevices {
+        input_devices: Vec<String>,
+        output_devices: Vec<String>,
+    },
+
+    // Channel management
+    ChannelCreated(ChannelEntry),
 }
 
 // ── Intents from UI to backend ─────────────────────────────────────────
@@ -252,6 +265,16 @@ pub struct UiModel {
     pub agc_enabled: bool,
     pub vad_threshold: f32,
 
+    // Audio devices
+    pub input_devices: Vec<String>,
+    pub output_devices: Vec<String>,
+    pub selected_input_device: String,
+    pub selected_output_device: String,
+
+    // Create channel dialog
+    pub show_create_channel: bool,
+    pub create_channel_name: String,
+
     // Notifications
     pub notifications: VecDeque<Notification>,
 }
@@ -300,6 +323,12 @@ impl Default for UiModel {
             noise_suppression_enabled: true,
             agc_enabled: true,
             vad_threshold: 0.5,
+            input_devices: Vec::new(),
+            output_devices: Vec::new(),
+            selected_input_device: "(system default)".into(),
+            selected_output_device: "(system default)".into(),
+            show_create_channel: false,
+            create_channel_name: String::new(),
             notifications: VecDeque::new(),
         }
     }
@@ -310,7 +339,11 @@ impl UiModel {
         match ev {
             UiEvent::SetConnected(c) => self.connected = c,
             UiEvent::SetAuthed(a) => self.authed = a,
-            UiEvent::SetChannelName(n) => self.selected_channel_name = n,
+            UiEvent::SetChannelName(n) => {
+                // Also set selected_channel so chat messages route correctly
+                self.selected_channel = Some(n.clone());
+                self.selected_channel_name = n;
+            }
             UiEvent::SetNick(n) => self.nick = n,
             UiEvent::SetUserId(id) => self.user_id = id,
             UiEvent::AppendLog(line) => {
@@ -378,6 +411,15 @@ impl UiModel {
             }
             UiEvent::UserProfileLoaded(_profile) => {
                 // TODO: store in profile cache
+            }
+            UiEvent::SetSelfMuted(m) => self.self_muted = m,
+            UiEvent::SetSelfDeafened(d) => self.self_deafened = d,
+            UiEvent::SetAudioDevices { input_devices, output_devices } => {
+                self.input_devices = input_devices;
+                self.output_devices = output_devices;
+            }
+            UiEvent::ChannelCreated(entry) => {
+                self.channels.push(entry);
             }
         }
 

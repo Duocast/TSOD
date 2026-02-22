@@ -5,7 +5,7 @@ use crate::ui::theme;
 use crossbeam_channel::Sender;
 use eframe::egui;
 
-pub fn show(ui: &mut egui::Ui, model: &UiModel, tx_intent: &Sender<UiIntent>) {
+pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>) {
     // Avatar circle
     let (rect, _) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::hover());
     let center = rect.center();
@@ -37,20 +37,24 @@ pub fn show(ui: &mut egui::Ui, model: &UiModel, tx_intent: &Sender<UiIntent>) {
 
     // Mute button
     let mute_icon = if model.self_muted { "🔇" } else { "🎤" };
+    let mute_color = if model.self_muted { theme::COLOR_DANGER } else { theme::COLOR_TEXT };
     let mute_btn = ui.add(
-        egui::Button::new(mute_icon).frame(false),
+        egui::Button::new(egui::RichText::new(mute_icon).color(mute_color)).frame(false),
     );
     if mute_btn.clicked() {
+        model.self_muted = !model.self_muted;
         let _ = tx_intent.send(UiIntent::ToggleSelfMute);
     }
     mute_btn.on_hover_text(if model.self_muted { "Unmute" } else { "Mute" });
 
     // Deafen button
     let deafen_icon = if model.self_deafened { "🔇" } else { "🔊" };
+    let deafen_color = if model.self_deafened { theme::COLOR_DANGER } else { theme::COLOR_TEXT };
     let deafen_btn = ui.add(
-        egui::Button::new(deafen_icon).frame(false),
+        egui::Button::new(egui::RichText::new(deafen_icon).color(deafen_color)).frame(false),
     );
     if deafen_btn.clicked() {
+        model.self_deafened = !model.self_deafened;
         let _ = tx_intent.send(UiIntent::ToggleSelfDeafen);
     }
     deafen_btn.on_hover_text(if model.self_deafened { "Undeafen" } else { "Deafen" });

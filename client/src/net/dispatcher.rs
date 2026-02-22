@@ -170,6 +170,50 @@ impl ControlDispatcher {
         }
     }
 
+    pub async fn leave_channel(&self, channel_id: &str) -> Result<()> {
+        let req = pb::LeaveChannelRequest {
+            channel_id: Some(pb::ChannelId { value: channel_id.into() }),
+        };
+        let resp = self
+            .send_request(
+                pb::client_to_server::Payload::LeaveChannelRequest(req),
+                Duration::from_secs(5),
+            )
+            .await??;
+
+        if let Some(err) = resp.error {
+            return Err(anyhow!("leave_channel error: {:?}", err));
+        }
+        Ok(())
+    }
+
+    pub async fn create_channel(&self, name: &str) -> Result<String> {
+        let req = pb::CreateChannelRequest {
+            name: name.into(),
+            ..Default::default()
+        };
+        let resp = self
+            .send_request(
+                pb::client_to_server::Payload::CreateChannelRequest(req),
+                Duration::from_secs(5),
+            )
+            .await??;
+
+        if let Some(err) = resp.error {
+            return Err(anyhow!("create_channel error: {:?}", err));
+        }
+        match resp.payload {
+            Some(pb::server_to_client::Payload::CreateChannelResponse(cr)) => {
+                let ch_id = cr.state
+                    .and_then(|s| s.channel_id)
+                    .map(|id| id.value)
+                    .unwrap_or_default();
+                Ok(ch_id)
+            }
+            _ => Err(anyhow!("expected CreateChannelResponse")),
+        }
+    }
+
     pub async fn send_chat(&self, channel_id: &str, text: &str) -> Result<()> {
         let req = pb::SendMessageRequest {
             channel_id: Some(pb::ChannelId { value: channel_id.into() }),

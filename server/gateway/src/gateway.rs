@@ -190,8 +190,10 @@ impl Gateway {
                                 display_name: m.display_name,
                                 muted: m.muted,
                                 deafened: m.deafened,
+                                ..Default::default()
                             })
                             .collect(),
+                        ..Default::default()
                     };
 
                     let resp = pb::ServerToClient {
@@ -261,6 +263,7 @@ impl Gateway {
                         }),
                         name: created.name,
                         members: vec![],
+                        ..Default::default()
                     };
 
                     let resp = pb::ServerToClient {
