@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
@@ -104,6 +103,7 @@ fn translate_record(rec: &OutboxEventRow) -> Result<(ChannelId, pb::ServerToClie
                         display_name,
                         muted: false,
                         deafened: false,
+                        ..Default::default()
                     }),
                 })),
             };
@@ -160,6 +160,7 @@ fn translate_record(rec: &OutboxEventRow) -> Result<(ChannelId, pb::ServerToClie
                         }),
                         muted,
                         deafened,
+                        ..Default::default()
                     },
                 )),
             };
@@ -199,6 +200,7 @@ fn translate_record(rec: &OutboxEventRow) -> Result<(ChannelId, pb::ServerToClie
                     }),
                     text,
                     attachments: json_attachments_to_pb(attachments),
+                    ..Default::default()
                 })),
             };
 
@@ -331,6 +333,7 @@ fn json_attachments_to_pb(v: Value) -> Vec<pb::AttachmentRef> {
                 width: o.get("width").and_then(Value::as_u64).unwrap_or(0) as u32,
                 height: o.get("height").and_then(Value::as_u64).unwrap_or(0) as u32,
                 duration_ms: o.get("duration_ms").and_then(Value::as_u64).unwrap_or(0),
+                ..Default::default()
             });
         }
     }
