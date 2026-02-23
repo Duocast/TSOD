@@ -11,6 +11,7 @@ mod audio;
 mod config;
 mod net;
 mod proto;
+mod settings_io;
 mod ui;
 
 use anyhow::{anyhow, Context, Result};
@@ -131,6 +132,10 @@ async fn app_task(
         input_devices,
         output_devices,
     });
+
+    // Load persisted settings and send to UI
+    let saved_settings = settings_io::load_settings();
+    let _ = tx_event.send(UiEvent::SettingsLoaded(Box::new(saved_settings.clone())));
 
     // Audio constants
     let sample_rate = 48_000u32;
@@ -598,6 +603,34 @@ async fn connect_and_run_session(
                             let _ = tx_event.send(UiEvent::AppendLog(
                                 format!("[audio] output device: {dev}"),
                             ));
+                        }
+                        UiIntent::ApplySettings(ref settings) => {
+                            // Apply all settings to the audio pipeline
+                            if let Some(ref dsp) = capture_dsp {
+                                let mut d = dsp.lock().await;
+                                d.set_noise_suppression(settings.noise_suppression);
+                                d.set_agc(settings.agc_enabled);
+                                d.set_vad_threshold(settings.vad_threshold);
+                                d.set_agc_target(settings.agc_target_db);
+                            }
+                            input_gain.store(f32_to_u32(settings.input_gain), Ordering::Relaxed);
+                            output_gain.store(f32_to_u32(settings.output_gain), Ordering::Relaxed);
+
+                            // Update PTT mode
+                            let is_ptt = settings.capture_mode == ui::model::CaptureMode::PushToTalk;
+                            let is_continuous = settings.capture_mode == ui::model::CaptureMode::Continuous;
+                            ptt_active.store(!is_ptt || is_continuous, Ordering::Relaxed);
+
+                            let _ = tx_event.send(UiEvent::AppendLog(
+                                "[settings] applied".into(),
+                            ));
+                        }
+                        UiIntent::SaveSettings(ref settings) => {
+                            if let Err(e) = settings_io::save_settings(settings) {
+                                let _ = tx_event.send(UiEvent::AppendLog(
+                                    format!("[settings] save failed: {e:#}"),
+                                ));
+                            }
                         }
                         _ => {
                             // Remaining intents (moderation, file upload, etc.)

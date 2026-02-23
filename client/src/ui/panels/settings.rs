@@ -1,264 +1,170 @@
-//! Settings panel (floating window).
+//! Settings panel — TS3-inspired Options dialog with sidebar navigation.
+//!
+//! Categories: Application, Capture, Playback, Hotkeys, Chat, Downloads,
+//!             Notifications, Whisper, Screen Share, Video Call, Security
 
-use crate::ui::model::{UiIntent, UiModel};
+use crate::ui::model::{
+    AppSettings, CaptureMode, SettingsPage, UiIntent, UiModel,
+};
 use crate::ui::theme;
 use crossbeam_channel::Sender;
 use eframe::egui;
 
+/// Main entry point: renders the full settings window content.
 pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>) {
-    egui::CollapsingHeader::new("Audio Processing")
-        .default_open(true)
-        .show(ui, |ui| {
-            // Noise suppression
-            let mut ns = model.noise_suppression_enabled;
-            if ui.checkbox(&mut ns, "Noise Suppression (RNNoise)").changed() {
-                model.noise_suppression_enabled = ns;
-                let _ = tx_intent.send(UiIntent::SetNoiseSuppression(ns));
-            }
-
-            // AGC
-            let mut agc = model.agc_enabled;
-            if ui.checkbox(&mut agc, "Automatic Gain Control").changed() {
-                model.agc_enabled = agc;
-                let _ = tx_intent.send(UiIntent::SetAgcEnabled(agc));
-            }
-
-            // VAD threshold
-            ui.horizontal(|ui| {
-                ui.label("VAD Threshold:");
-                let mut vad = model.vad_threshold;
-                if ui
-                    .add(egui::Slider::new(&mut vad, 0.0..=1.0).step_by(0.05))
-                    .changed()
-                {
-                    model.vad_threshold = vad;
-                    let _ = tx_intent.send(UiIntent::SetVadThreshold(vad));
-                }
-            });
-
-            // PTT toggle
-            ui.horizontal(|ui| {
-                ui.label("Push to Talk:");
-                let mut ptt = model.ptt_enabled;
-                if ui.checkbox(&mut ptt, "").changed() {
-                    model.ptt_enabled = ptt;
-                    let _ = tx_intent.send(UiIntent::TogglePtt);
-                }
-            });
-        });
-
-    egui::CollapsingHeader::new("Volume / Gain")
-        .default_open(true)
-        .show(ui, |ui| {
-            // Input gain slider
-            ui.horizontal(|ui| {
-                ui.label("Input Volume:");
-                let pct = (model.input_gain * 100.0).round() as i32;
-                ui.label(
-                    egui::RichText::new(format!("{pct}%"))
-                        .small()
-                        .color(theme::COLOR_TEXT_DIM),
-                );
-            });
-            let mut input_gain = model.input_gain;
-            if ui.add(
-                egui::Slider::new(&mut input_gain, 0.0..=2.0)
-                    .step_by(0.01)
-                    .show_value(false),
-            ).changed() {
-                model.input_gain = input_gain;
-                let _ = tx_intent.send(UiIntent::SetInputGain(input_gain));
-            }
-
-            ui.add_space(4.0);
-
-            // Output gain slider
-            ui.horizontal(|ui| {
-                ui.label("Output Volume:");
-                let pct = (model.output_gain * 100.0).round() as i32;
-                ui.label(
-                    egui::RichText::new(format!("{pct}%"))
-                        .small()
-                        .color(theme::COLOR_TEXT_DIM),
-                );
-            });
-            let mut output_gain = model.output_gain;
-            if ui.add(
-                egui::Slider::new(&mut output_gain, 0.0..=2.0)
-                    .step_by(0.01)
-                    .show_value(false),
-            ).changed() {
-                model.output_gain = output_gain;
-                let _ = tx_intent.send(UiIntent::SetOutputGain(output_gain));
-            }
-
-            ui.add_space(6.0);
-
-            // Reset button
-            if ui.small_button("Reset to 100%").clicked() {
-                model.input_gain = 1.0;
-                model.output_gain = 1.0;
-                let _ = tx_intent.send(UiIntent::SetInputGain(1.0));
-                let _ = tx_intent.send(UiIntent::SetOutputGain(1.0));
-            }
-        });
-
-    egui::CollapsingHeader::new("Mic Test")
-        .default_open(false)
-        .show(ui, |ui| {
-            ui.label(
-                egui::RichText::new("Test your microphone with the full DSP pipeline active.")
-                    .small()
-                    .color(theme::COLOR_TEXT_DIM),
-            );
-            ui.add_space(4.0);
-
-            let btn_text = if model.loopback_active {
-                "Stop Loopback"
-            } else {
-                "Start Loopback"
-            };
-            let btn_color = if model.loopback_active {
-                theme::COLOR_DANGER
-            } else {
-                theme::COLOR_ACCENT
-            };
-
-            if ui.add(
-                egui::Button::new(
-                    egui::RichText::new(btn_text).color(egui::Color32::WHITE).strong(),
-                )
-                .fill(btn_color)
-                .min_size(egui::vec2(140.0, 28.0))
-                .rounding(4.0),
-            ).clicked() {
-                model.loopback_active = !model.loopback_active;
-                let _ = tx_intent.send(UiIntent::ToggleLoopback);
-            }
-
-            // VU meter when loopback is active
-            if model.loopback_active {
+    ui.horizontal(|ui: &mut egui::Ui| {
+        // ── Left sidebar: category list ──
+        ui.allocate_ui_with_layout(
+            egui::vec2(160.0, ui.available_height()),
+            egui::Layout::top_down(egui::Align::LEFT),
+            |ui: &mut egui::Ui| {
                 ui.add_space(4.0);
-                if let Some(vad) = model.vad_level {
-                    let bar_width = ui.available_width().min(250.0);
-                    let (rect, _) = ui.allocate_exact_size(
-                        egui::vec2(bar_width, 10.0),
-                        egui::Sense::hover(),
-                    );
-                    ui.painter().rect_filled(rect, 3.0, theme::COLOR_BG_DARK);
-                    let filled = egui::Rect::from_min_size(
-                        rect.min,
-                        egui::vec2(bar_width * vad, 10.0),
-                    );
-                    let color = if vad > 0.7 {
-                        theme::COLOR_DANGER
-                    } else if vad > 0.3 {
-                        theme::COLOR_ONLINE
-                    } else {
-                        theme::COLOR_IDLE
-                    };
-                    ui.painter().rect_filled(filled, 3.0, color);
+                for page in SettingsPage::ALL {
+                    let selected = model.settings_page == page;
+                    let text = egui::RichText::new(page.label()).size(13.0);
+                    let text = if selected { text.strong().color(egui::Color32::WHITE) } else { text.color(theme::COLOR_TEXT_DIM) };
+
+                    let btn = egui::Button::new(text)
+                        .fill(if selected { theme::COLOR_ACCENT.linear_multiply(0.3) } else { egui::Color32::TRANSPARENT })
+                        .rounding(4.0)
+                        .min_size(egui::vec2(150.0, 28.0));
+
+                    if ui.add(btn).clicked() {
+                        model.settings_page = page;
+                    }
                 }
-                ui.label(
-                    egui::RichText::new("Loopback active — you should hear yourself")
-                        .small()
-                        .color(theme::COLOR_ONLINE),
-                );
-            }
-        });
 
-    egui::CollapsingHeader::new("Voice Devices")
-        .default_open(false)
-        .show(ui, |ui| {
-            // Input device dropdown
-            ui.label("Input Device:");
-            let input_selected = model.selected_input_device.clone();
-            egui::ComboBox::from_id_salt("input_device")
-                .selected_text(&input_selected)
-                .width(250.0)
-                .show_ui(ui, |ui| {
-                    if ui.selectable_value(
-                        &mut model.selected_input_device,
-                        "(system default)".to_string(),
-                        "(system default)",
-                    ).clicked() {
-                        let _ = tx_intent.send(UiIntent::SetInputDevice("(system default)".into()));
-                    }
-                    for dev_name in &model.input_devices {
-                        if ui.selectable_value(
-                            &mut model.selected_input_device,
-                            dev_name.clone(),
-                            dev_name,
-                        ).clicked() {
-                            let _ = tx_intent.send(UiIntent::SetInputDevice(dev_name.clone()));
-                        }
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(4.0);
+
+                // Apply / Revert buttons
+                let dirty = model.settings_dirty;
+                ui.horizontal(|ui: &mut egui::Ui| {
+                    let apply_btn = egui::Button::new(
+                        egui::RichText::new("Apply").size(12.0).color(if dirty { egui::Color32::WHITE } else { theme::COLOR_TEXT_MUTED }),
+                    )
+                    .fill(if dirty { theme::COLOR_ACCENT } else { theme::COLOR_BG_LIGHT })
+                    .rounding(4.0);
+
+                    if ui.add(apply_btn).clicked() && dirty {
+                        model.settings = model.settings_draft.clone();
+                        model.settings_dirty = false;
+                        model.sync_settings_to_runtime();
+                        let _ = tx_intent.send(UiIntent::ApplySettings(Box::new(model.settings.clone())));
+                        let _ = tx_intent.send(UiIntent::SaveSettings(Box::new(model.settings.clone())));
                     }
                 });
 
-            ui.add_space(4.0);
+                if ui.small_button("Revert").clicked() {
+                    model.settings_draft = model.settings.clone();
+                    model.settings_dirty = false;
+                }
+            },
+        );
 
-            // Output device dropdown
-            ui.label("Output Device:");
-            let output_selected = model.selected_output_device.clone();
-            egui::ComboBox::from_id_salt("output_device")
-                .selected_text(&output_selected)
-                .width(250.0)
-                .show_ui(ui, |ui| {
-                    if ui.selectable_value(
-                        &mut model.selected_output_device,
-                        "(system default)".to_string(),
-                        "(system default)",
-                    ).clicked() {
-                        let _ = tx_intent.send(UiIntent::SetOutputDevice("(system default)".into()));
-                    }
-                    for dev_name in &model.output_devices {
-                        if ui.selectable_value(
-                            &mut model.selected_output_device,
-                            dev_name.clone(),
-                            dev_name,
-                        ).clicked() {
-                            let _ = tx_intent.send(UiIntent::SetOutputDevice(dev_name.clone()));
-                        }
-                    }
-                });
+        ui.separator();
 
-            ui.add_space(4.0);
-
-            let device_count = model.input_devices.len() + model.output_devices.len();
-            ui.label(
-                egui::RichText::new(format!(
-                    "{} device(s) detected (auto-refreshing)",
-                    device_count,
-                ))
-                .small()
-                .color(theme::COLOR_TEXT_MUTED),
-            );
-        });
-
-    egui::CollapsingHeader::new("Connection")
-        .default_open(false)
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label("Status:");
-                if model.connected {
-                    ui.colored_label(egui::Color32::GREEN, "Connected");
-                } else {
-                    ui.colored_label(egui::Color32::RED, "Disconnected");
+        // ── Right side: page content ──
+        egui::ScrollArea::vertical()
+            .id_salt("settings_content")
+            .show(ui, |ui: &mut egui::Ui| {
+                ui.set_min_width(ui.available_width().max(400.0));
+                let dirty = match model.settings_page {
+                    SettingsPage::Application => page_application(ui, &mut model.settings_draft, &model.log),
+                    SettingsPage::Capture => page_capture(ui, &mut model.settings_draft, &model.input_devices, model.loopback_active, model.vad_level, tx_intent),
+                    SettingsPage::Playback => page_playback(ui, &mut model.settings_draft, &model.output_devices, model.connected, tx_intent),
+                    SettingsPage::Hotkeys => page_hotkeys(ui, &mut model.settings_draft),
+                    SettingsPage::Chat => page_chat(ui, &mut model.settings_draft),
+                    SettingsPage::Downloads => page_downloads(ui, &mut model.settings_draft),
+                    SettingsPage::Notifications => page_notifications(ui, &mut model.settings_draft),
+                    SettingsPage::Whisper => page_whisper(ui, &mut model.settings_draft),
+                    SettingsPage::ScreenShare => page_screen_share(ui, &mut model.settings_draft),
+                    SettingsPage::VideoCall => page_video_call(ui, &mut model.settings_draft),
+                    SettingsPage::Security => page_security(ui, &mut model.settings_draft),
+                };
+                if dirty {
+                    model.settings_dirty = true;
                 }
             });
-        });
+    });
+}
 
+// ── Helpers ───────────────────────────────────────────────────────────
+
+fn section(ui: &mut egui::Ui, title: &str) {
+    ui.add_space(8.0);
+    ui.label(egui::RichText::new(title).size(14.0).strong().color(theme::COLOR_TEXT));
+    ui.add_space(2.0);
     ui.separator();
+    ui.add_space(4.0);
+}
 
-    // Log viewer (collapsible)
+fn hint(ui: &mut egui::Ui, text: &str) {
+    ui.label(egui::RichText::new(text).small().color(theme::COLOR_TEXT_MUTED));
+}
+
+// ── Application ───────────────────────────────────────────────────────
+
+fn page_application(ui: &mut egui::Ui, s: &mut AppSettings, log: &std::collections::VecDeque<String>) -> bool {
+    let mut dirty = false;
+
+    section(ui, "General");
+
+    ui.horizontal(|ui: &mut egui::Ui| {
+        ui.label("Language:");
+        let langs = ["English", "German", "French", "Spanish", "Japanese", "Chinese"];
+        egui::ComboBox::from_id_salt("app_lang")
+            .selected_text(&s.language)
+            .width(180.0)
+            .show_ui(ui, |ui: &mut egui::Ui| {
+                for lang in &langs {
+                    if ui.selectable_value(&mut s.language, lang.to_string(), *lang).changed() {
+                        dirty = true;
+                    }
+                }
+            });
+    });
+
+    ui.horizontal(|ui: &mut egui::Ui| {
+        ui.label("Theme:");
+        let themes = ["Dark", "Light", "OLED Black"];
+        egui::ComboBox::from_id_salt("app_theme")
+            .selected_text(&s.theme)
+            .width(180.0)
+            .show_ui(ui, |ui: &mut egui::Ui| {
+                for t in &themes {
+                    if ui.selectable_value(&mut s.theme, t.to_string(), *t).changed() {
+                        dirty = true;
+                    }
+                }
+            });
+    });
+
+    ui.horizontal(|ui: &mut egui::Ui| {
+        let pct = (s.ui_scale * 100.0).round() as i32;
+        ui.label(format!("UI Scale: {pct}%"));
+    });
+    let prev = s.ui_scale;
+    ui.add(egui::Slider::new(&mut s.ui_scale, 0.75..=2.0).step_by(0.05).show_value(false));
+    if (s.ui_scale - prev).abs() > 0.001 { dirty = true; }
+
+    section(ui, "Behavior");
+
+    if ui.checkbox(&mut s.start_minimized, "Start minimized").changed() { dirty = true; }
+    if ui.checkbox(&mut s.minimize_to_tray, "Minimize to system tray").changed() { dirty = true; }
+    if ui.checkbox(&mut s.check_for_updates, "Check for updates on startup").changed() { dirty = true; }
+
+    section(ui, "Debug");
+
     egui::CollapsingHeader::new("Debug Log")
         .default_open(false)
-        .show(ui, |ui| {
+        .show(ui, |ui: &mut egui::Ui| {
             egui::ScrollArea::vertical()
                 .max_height(200.0)
                 .stick_to_bottom(true)
-                .show(ui, |ui| {
-                    for line in model.log.iter() {
+                .show(ui, |ui: &mut egui::Ui| {
+                    for line in log.iter() {
                         ui.label(
                             egui::RichText::new(line)
                                 .small()
@@ -268,4 +174,679 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                     }
                 });
         });
+
+    dirty
+}
+
+// ── Capture ───────────────────────────────────────────────────────────
+
+fn page_capture(
+    ui: &mut egui::Ui,
+    s: &mut AppSettings,
+    input_devices: &[String],
+    loopback_active: bool,
+    vad_level: Option<f32>,
+    tx_intent: &Sender<UiIntent>,
+) -> bool {
+    let mut dirty = false;
+
+    section(ui, "Capture Device");
+
+    ui.horizontal(|ui: &mut egui::Ui| {
+        ui.label("Input Device:");
+        egui::ComboBox::from_id_salt("cap_device")
+            .selected_text(&s.capture_device)
+            .width(300.0)
+            .show_ui(ui, |ui: &mut egui::Ui| {
+                if ui.selectable_value(&mut s.capture_device, "(system default)".to_string(), "(system default)").changed() {
+                    dirty = true;
+                }
+                for dev_name in input_devices {
+                    if ui.selectable_value(&mut s.capture_device, dev_name.clone(), dev_name.as_str()).changed() {
+                        dirty = true;
+                    }
+                }
+            });
+    });
+
+    hint(ui, &format!("{} input device(s) detected", input_devices.len()));
+
+    section(ui, "Voice Activation Mode");
+
+    for mode in CaptureMode::ALL {
+        let is_current = s.capture_mode == mode;
+        if ui.radio(is_current, mode.label()).clicked() && !is_current {
+            s.capture_mode = mode;
+            dirty = true;
+        }
+    }
+
+    ui.add_space(4.0);
+
+    match s.capture_mode {
+        CaptureMode::PushToTalk => {
+            ui.horizontal(|ui: &mut egui::Ui| {
+                ui.label("Hotkey:");
+                let prev = s.ptt_key.clone();
+                ui.add(
+                    egui::TextEdit::singleline(&mut s.ptt_key)
+                        .desired_width(120.0)
+                        .hint_text("Press a key..."),
+                );
+                if s.ptt_key != prev { dirty = true; }
+            });
+            ui.horizontal(|ui: &mut egui::Ui| {
+                ui.label("Release Delay:");
+                let prev = s.ptt_delay_ms;
+                ui.add(egui::Slider::new(&mut s.ptt_delay_ms, 0..=1000).suffix(" ms"));
+                if s.ptt_delay_ms != prev { dirty = true; }
+            });
+            hint(ui, "Audio transmits while hotkey is held. Release delay prevents clipping at end of speech.");
+        }
+        CaptureMode::VoiceActivation => {
+            ui.horizontal(|ui: &mut egui::Ui| {
+                ui.label("Sensitivity:");
+                let prev = s.vad_threshold;
+                ui.add(egui::Slider::new(&mut s.vad_threshold, 0.0..=1.0).step_by(0.05));
+                if (s.vad_threshold - prev).abs() > 0.001 {
+                    dirty = true;
+                    let _ = tx_intent.send(UiIntent::SetVadThreshold(s.vad_threshold));
+                }
+            });
+            hint(ui, "Lower = more sensitive. Higher = stricter, ignores background noise.");
+
+            // Live VAD meter with threshold marker
+            if let Some(vad) = vad_level {
+                ui.add_space(4.0);
+                ui.horizontal(|ui: &mut egui::Ui| {
+                    ui.label("Level:");
+                    let bar_width = ui.available_width().min(300.0);
+                    let (rect, _) = ui.allocate_exact_size(egui::vec2(bar_width, 14.0), egui::Sense::hover());
+                    ui.painter().rect_filled(rect, 3.0, theme::COLOR_BG_DARK);
+
+                    // Threshold marker
+                    let thresh_x = rect.left() + bar_width * s.vad_threshold;
+                    ui.painter().vline(thresh_x, rect.y_range(), egui::Stroke::new(2.0, theme::COLOR_DANGER));
+
+                    // Level fill
+                    let filled = egui::Rect::from_min_size(rect.min, egui::vec2(bar_width * vad, 14.0));
+                    let color = if vad >= s.vad_threshold { theme::COLOR_ONLINE } else { theme::COLOR_IDLE };
+                    ui.painter().rect_filled(filled, 3.0, color);
+                });
+            }
+        }
+        CaptureMode::Continuous => {
+            hint(ui, "Your microphone is always transmitting when connected to a voice channel.");
+        }
+    }
+
+    section(ui, "Input Volume");
+
+    ui.horizontal(|ui: &mut egui::Ui| {
+        let pct = (s.input_gain * 100.0).round() as i32;
+        ui.label(format!("Mic Gain: {pct}%"));
+    });
+    let prev_gain = s.input_gain;
+    ui.add(egui::Slider::new(&mut s.input_gain, 0.0..=2.0).step_by(0.01).show_value(false));
+    if (s.input_gain - prev_gain).abs() > 0.001 {
+        dirty = true;
+        let _ = tx_intent.send(UiIntent::SetInputGain(s.input_gain));
+    }
+
+    section(ui, "Signal Processing");
+
+    let ns_prev = s.noise_suppression;
+    ui.checkbox(&mut s.noise_suppression, "Noise Suppression (RNNoise)");
+    if s.noise_suppression != ns_prev {
+        dirty = true;
+        let _ = tx_intent.send(UiIntent::SetNoiseSuppression(s.noise_suppression));
+    }
+    hint(ui, "Neural network noise removal. Recommended for noisy environments.");
+
+    let agc_prev = s.agc_enabled;
+    ui.checkbox(&mut s.agc_enabled, "Automatic Gain Control");
+    if s.agc_enabled != agc_prev {
+        dirty = true;
+        let _ = tx_intent.send(UiIntent::SetAgcEnabled(s.agc_enabled));
+    }
+    hint(ui, "Maintains consistent microphone volume automatically.");
+
+    if s.agc_enabled {
+        ui.horizontal(|ui: &mut egui::Ui| {
+            ui.label("AGC Target:");
+            let prev = s.agc_target_db;
+            ui.add(egui::Slider::new(&mut s.agc_target_db, -30.0..=-6.0).suffix(" dBFS"));
+            if (s.agc_target_db - prev).abs() > 0.1 { dirty = true; }
+        });
+    }
+
+    if ui.checkbox(&mut s.echo_cancellation, "Echo Cancellation (experimental)").changed() { dirty = true; }
+    hint(ui, "Removes speaker bleed-through. Useful without headphones.");
+
+    if ui.checkbox(&mut s.typing_attenuation, "Typing Attenuation").changed() { dirty = true; }
+    hint(ui, "Reduces keyboard click noise while you type.");
+
+    section(ui, "Mic Test");
+
+    let btn_text = if loopback_active { "Stop Loopback" } else { "Start Loopback" };
+    let btn_color = if loopback_active { theme::COLOR_DANGER } else { theme::COLOR_ACCENT };
+
+    if ui.add(
+        egui::Button::new(egui::RichText::new(btn_text).color(egui::Color32::WHITE).strong())
+            .fill(btn_color)
+            .min_size(egui::vec2(160.0, 28.0))
+            .rounding(4.0),
+    ).clicked() {
+        let _ = tx_intent.send(UiIntent::ToggleLoopback);
+    }
+    hint(ui, "Play captured audio through your speakers to test your setup.");
+
+    if loopback_active {
+        if let Some(vad) = vad_level {
+            let bar_width = ui.available_width().min(300.0);
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(bar_width, 10.0), egui::Sense::hover());
+            ui.painter().rect_filled(rect, 3.0, theme::COLOR_BG_DARK);
+            let filled = egui::Rect::from_min_size(rect.min, egui::vec2(bar_width * vad, 10.0));
+            let color = if vad > 0.7 { theme::COLOR_DANGER } else if vad > 0.3 { theme::COLOR_ONLINE } else { theme::COLOR_IDLE };
+            ui.painter().rect_filled(filled, 3.0, color);
+        }
+        ui.label(egui::RichText::new("Loopback active - you should hear yourself").small().color(theme::COLOR_ONLINE));
+    }
+
+    dirty
+}
+
+// ── Playback ──────────────────────────────────────────────────────────
+
+fn page_playback(
+    ui: &mut egui::Ui,
+    s: &mut AppSettings,
+    output_devices: &[String],
+    connected: bool,
+    tx_intent: &Sender<UiIntent>,
+) -> bool {
+    let mut dirty = false;
+
+    section(ui, "Playback Device");
+
+    ui.horizontal(|ui: &mut egui::Ui| {
+        ui.label("Output Device:");
+        egui::ComboBox::from_id_salt("play_device")
+            .selected_text(&s.playback_device)
+            .width(300.0)
+            .show_ui(ui, |ui: &mut egui::Ui| {
+                if ui.selectable_value(&mut s.playback_device, "(system default)".to_string(), "(system default)").changed() {
+                    dirty = true;
+                }
+                for dev_name in output_devices {
+                    if ui.selectable_value(&mut s.playback_device, dev_name.clone(), dev_name.as_str()).changed() {
+                        dirty = true;
+                    }
+                }
+            });
+    });
+
+    hint(ui, &format!("{} output device(s) detected", output_devices.len()));
+
+    section(ui, "Volume");
+
+    ui.horizontal(|ui: &mut egui::Ui| {
+        let pct = (s.output_gain * 100.0).round() as i32;
+        ui.label(format!("Master Volume: {pct}%"));
+    });
+    let prev = s.output_gain;
+    ui.add(egui::Slider::new(&mut s.output_gain, 0.0..=2.0).step_by(0.01).show_value(false));
+    if (s.output_gain - prev).abs() > 0.001 {
+        dirty = true;
+        let _ = tx_intent.send(UiIntent::SetOutputGain(s.output_gain));
+    }
+
+    if ui.small_button("Reset to 100%").clicked() {
+        s.output_gain = 1.0;
+        dirty = true;
+        let _ = tx_intent.send(UiIntent::SetOutputGain(1.0));
+    }
+
+    section(ui, "Sound Processing");
+
+    if ui.checkbox(&mut s.output_auto_level, "Auto-level (normalize loud/quiet users)").changed() { dirty = true; }
+    hint(ui, "Adjusts volume per-user so everyone sounds equally loud.");
+
+    if ui.checkbox(&mut s.mono_expansion, "Mono-to-stereo expansion").changed() { dirty = true; }
+    hint(ui, "Expands mono voice audio to fill both headphone channels.");
+
+    section(ui, "Comfort Noise");
+
+    if ui.checkbox(&mut s.comfort_noise, "Enable comfort noise").changed() { dirty = true; }
+    hint(ui, "Adds subtle background noise to prevent dead silence when no one is speaking.");
+
+    if s.comfort_noise {
+        ui.horizontal(|ui: &mut egui::Ui| {
+            ui.label("Level:");
+            let prev = s.comfort_noise_level;
+            ui.add(egui::Slider::new(&mut s.comfort_noise_level, 0.0..=0.1).step_by(0.005));
+            if (s.comfort_noise_level - prev).abs() > 0.0001 { dirty = true; }
+        });
+    }
+
+    section(ui, "Audio Ducking");
+
+    if ui.checkbox(&mut s.ducking_enabled, "Duck other audio while receiving voice").changed() { dirty = true; }
+    hint(ui, "Lower volume of other apps (music, games) while someone speaks.");
+
+    if s.ducking_enabled {
+        ui.horizontal(|ui: &mut egui::Ui| {
+            ui.label("Ducking Amount:");
+            let prev = s.ducking_attenuation_db;
+            ui.add(egui::Slider::new(&mut s.ducking_attenuation_db, -40..=0).suffix(" dB"));
+            if s.ducking_attenuation_db != prev { dirty = true; }
+        });
+    }
+
+    section(ui, "Connection");
+
+    ui.horizontal(|ui: &mut egui::Ui| {
+        ui.label("Status:");
+        if connected {
+            ui.colored_label(egui::Color32::GREEN, "Connected");
+        } else {
+            ui.colored_label(egui::Color32::RED, "Disconnected");
+        }
+    });
+
+    dirty
+}
+
+// ── Hotkeys ───────────────────────────────────────────────────────────
+
+fn page_hotkeys(ui: &mut egui::Ui, s: &mut AppSettings) -> bool {
+    let mut dirty = false;
+
+    section(ui, "Keyboard Shortcuts");
+
+    hint(ui, "Configure keyboard shortcuts for common actions. Changes take effect after Apply.");
+
+    ui.add_space(8.0);
+
+    // Table header
+    egui::Grid::new("hotkey_grid")
+        .num_columns(3)
+        .spacing([20.0, 6.0])
+        .striped(true)
+        .show(ui, |ui: &mut egui::Ui| {
+            ui.label(egui::RichText::new("Action").strong().size(12.0));
+            ui.label(egui::RichText::new("Shortcut").strong().size(12.0));
+            ui.label(egui::RichText::new("On").strong().size(12.0));
+            ui.end_row();
+
+            for binding in s.hotkeys.iter_mut() {
+                ui.label(egui::RichText::new(binding.action.label()).size(12.0).color(theme::COLOR_TEXT));
+
+                let prev_key = binding.key.clone();
+                ui.add(
+                    egui::TextEdit::singleline(&mut binding.key)
+                        .desired_width(140.0)
+                        .hint_text("Key combo"),
+                );
+                if binding.key != prev_key { dirty = true; }
+
+                let prev_enabled = binding.enabled;
+                ui.checkbox(&mut binding.enabled, "");
+                if binding.enabled != prev_enabled { dirty = true; }
+
+                ui.end_row();
+            }
+        });
+
+    ui.add_space(12.0);
+
+    if ui.small_button("Reset to Defaults").clicked() {
+        s.hotkeys = crate::ui::model::default_hotkeys();
+        dirty = true;
+    }
+
+    dirty
+}
+
+// ── Chat ──────────────────────────────────────────────────────────────
+
+fn page_chat(ui: &mut egui::Ui, s: &mut AppSettings) -> bool {
+    let mut dirty = false;
+
+    section(ui, "Chat Display");
+
+    if ui.checkbox(&mut s.chat_show_timestamps, "Show timestamps").changed() { dirty = true; }
+    if ui.checkbox(&mut s.chat_show_join_leave, "Show join/leave messages").changed() { dirty = true; }
+
+    ui.horizontal(|ui: &mut egui::Ui| {
+        ui.label("Font Size:");
+        let prev = s.chat_font_size;
+        ui.add(egui::Slider::new(&mut s.chat_font_size, 10.0..=20.0).step_by(0.5).suffix(" px"));
+        if (s.chat_font_size - prev).abs() > 0.1 { dirty = true; }
+    });
+
+    ui.horizontal(|ui: &mut egui::Ui| {
+        ui.label("Max Chat Lines:");
+        let prev = s.chat_max_lines;
+        ui.add(egui::Slider::new(&mut s.chat_max_lines, 100..=5000).step_by(100.0));
+        if s.chat_max_lines != prev { dirty = true; }
+    });
+
+    section(ui, "Chat Logging");
+
+    if ui.checkbox(&mut s.chat_log_to_file, "Log chat messages to file").changed() { dirty = true; }
+
+    if s.chat_log_to_file {
+        ui.horizontal(|ui: &mut egui::Ui| {
+            ui.label("Log Directory:");
+            let prev = s.chat_log_directory.clone();
+            ui.add(
+                egui::TextEdit::singleline(&mut s.chat_log_directory)
+                    .desired_width(250.0)
+                    .hint_text("/path/to/logs"),
+            );
+            if s.chat_log_directory != prev { dirty = true; }
+        });
+        hint(ui, "Chat messages saved as daily text files in this directory.");
+    }
+
+    section(ui, "Media Sharing");
+
+    hint(ui, "Drag and drop files into the chat window to share. Images and videos show inline previews.");
+
+    ui.add_space(4.0);
+    ui.label(egui::RichText::new("Supported formats:").small().strong().color(theme::COLOR_TEXT));
+    ui.label(egui::RichText::new("  Images: PNG, JPEG, GIF, WebP").small().color(theme::COLOR_TEXT_DIM));
+    ui.label(egui::RichText::new("  Videos: MP4, WebM").small().color(theme::COLOR_TEXT_DIM));
+    ui.label(egui::RichText::new("  Files: Any (up to configured max size)").small().color(theme::COLOR_TEXT_DIM));
+
+    dirty
+}
+
+// ── Downloads ─────────────────────────────────────────────────────────
+
+fn page_downloads(ui: &mut egui::Ui, s: &mut AppSettings) -> bool {
+    let mut dirty = false;
+
+    section(ui, "File Downloads");
+
+    ui.horizontal(|ui: &mut egui::Ui| {
+        ui.label("Download Directory:");
+        let prev = s.download_directory.clone();
+        ui.add(
+            egui::TextEdit::singleline(&mut s.download_directory)
+                .desired_width(300.0)
+                .hint_text("(default: OS Downloads folder)"),
+        );
+        if s.download_directory != prev { dirty = true; }
+    });
+
+    ui.horizontal(|ui: &mut egui::Ui| {
+        ui.label("Max Download Size:");
+        let prev = s.max_download_size_mb;
+        ui.add(egui::Slider::new(&mut s.max_download_size_mb, 1..=1000).suffix(" MB"));
+        if s.max_download_size_mb != prev { dirty = true; }
+    });
+
+    section(ui, "Auto-Download");
+
+    if ui.checkbox(&mut s.auto_download_images, "Auto-download images (for inline preview)").changed() { dirty = true; }
+    if ui.checkbox(&mut s.auto_download_files, "Auto-download all files").changed() { dirty = true; }
+    hint(ui, "Warning: auto-download for all files may use significant bandwidth and disk space.");
+
+    dirty
+}
+
+// ── Notifications ─────────────────────────────────────────────────────
+
+fn page_notifications(ui: &mut egui::Ui, s: &mut AppSettings) -> bool {
+    let mut dirty = false;
+
+    section(ui, "Event Notifications");
+
+    if ui.checkbox(&mut s.notify_user_joined, "User joined your channel").changed() { dirty = true; }
+    if ui.checkbox(&mut s.notify_user_left, "User left your channel").changed() { dirty = true; }
+    if ui.checkbox(&mut s.notify_poke, "Poke received").changed() { dirty = true; }
+    if ui.checkbox(&mut s.notify_chat_message, "Chat message received").changed() { dirty = true; }
+
+    section(ui, "Sound");
+
+    ui.horizontal(|ui: &mut egui::Ui| {
+        ui.label("Sound Pack:");
+        let packs = ["Default", "Minimal", "Classic", "Silent"];
+        egui::ComboBox::from_id_salt("sound_pack")
+            .selected_text(&s.sound_pack)
+            .width(180.0)
+            .show_ui(ui, |ui: &mut egui::Ui| {
+                for pack in &packs {
+                    if ui.selectable_value(&mut s.sound_pack, pack.to_string(), *pack).changed() {
+                        dirty = true;
+                    }
+                }
+            });
+    });
+
+    ui.horizontal(|ui: &mut egui::Ui| {
+        let pct = (s.notification_volume * 100.0).round() as i32;
+        ui.label(format!("Volume: {pct}%"));
+    });
+    let prev = s.notification_volume;
+    ui.add(egui::Slider::new(&mut s.notification_volume, 0.0..=1.0).step_by(0.05).show_value(false));
+    if (s.notification_volume - prev).abs() > 0.001 { dirty = true; }
+
+    dirty
+}
+
+// ── Whisper ───────────────────────────────────────────────────────────
+
+fn page_whisper(ui: &mut egui::Ui, s: &mut AppSettings) -> bool {
+    let mut dirty = false;
+
+    section(ui, "Whisper Permissions");
+
+    let prev = s.whisper_allow_all;
+    ui.radio_value(&mut s.whisper_allow_all, true, "Allow whispers from everyone");
+    ui.radio_value(&mut s.whisper_allow_all, false, "Only allow whispers from specific users");
+    if s.whisper_allow_all != prev { dirty = true; }
+
+    if !s.whisper_allow_all {
+        ui.add_space(4.0);
+        hint(ui, "Allowed users:");
+
+        let mut to_remove = None;
+        for (i, user) in s.whisper_allowed_users.iter().enumerate() {
+            ui.horizontal(|ui: &mut egui::Ui| {
+                ui.label(egui::RichText::new(user).monospace());
+                if ui.small_button("x").clicked() {
+                    to_remove = Some(i);
+                }
+            });
+        }
+        if let Some(i) = to_remove {
+            s.whisper_allowed_users.remove(i);
+            dirty = true;
+        }
+
+        if ui.small_button("+ Add user").clicked() {
+            s.whisper_allowed_users.push(String::new());
+            dirty = true;
+        }
+    }
+
+    section(ui, "Whisper Notifications");
+
+    if ui.checkbox(&mut s.whisper_notify, "Show notification when receiving a whisper").changed() { dirty = true; }
+
+    hint(ui, "Whisper sends a private voice message directly to a user, bypassing the channel.");
+
+    dirty
+}
+
+// ── Screen Share (modern) ─────────────────────────────────────────────
+
+fn page_screen_share(ui: &mut egui::Ui, s: &mut AppSettings) -> bool {
+    let mut dirty = false;
+
+    section(ui, "Screen Sharing");
+
+    hint(ui, "Uses QUIC DATAGRAM for low-latency delivery with simulcast layers and adaptive bitrate.");
+
+    ui.add_space(4.0);
+
+    ui.horizontal(|ui: &mut egui::Ui| {
+        ui.label("Frame Rate:");
+        let prev = s.screen_share_fps;
+        ui.add(egui::Slider::new(&mut s.screen_share_fps, 5..=60).suffix(" fps"));
+        if s.screen_share_fps != prev { dirty = true; }
+    });
+
+    ui.horizontal(|ui: &mut egui::Ui| {
+        ui.label("Max Bitrate:");
+        let prev = s.screen_share_max_bitrate_kbps;
+        ui.add(egui::Slider::new(&mut s.screen_share_max_bitrate_kbps, 500..=10000).suffix(" kbps"));
+        if s.screen_share_max_bitrate_kbps != prev { dirty = true; }
+    });
+    hint(ui, "Higher bitrate = better quality. Adaptive bitrate reduces quality if network is constrained.");
+
+    ui.horizontal(|ui: &mut egui::Ui| {
+        ui.label("Codec:");
+        let codecs = ["H264", "VP9", "AV1"];
+        egui::ComboBox::from_id_salt("ss_codec")
+            .selected_text(&s.screen_share_codec)
+            .width(120.0)
+            .show_ui(ui, |ui: &mut egui::Ui| {
+                for c in &codecs {
+                    if ui.selectable_value(&mut s.screen_share_codec, c.to_string(), *c).changed() {
+                        dirty = true;
+                    }
+                }
+            });
+    });
+
+    if ui.checkbox(&mut s.screen_share_capture_audio, "Capture system audio with screen share").changed() { dirty = true; }
+
+    section(ui, "Simulcast & Adaptive Bitrate");
+
+    hint(ui, "TSOD transmits multiple resolution layers simultaneously. Receivers automatically \
+              select the best layer based on available bandwidth.");
+
+    ui.add_space(4.0);
+    ui.label(egui::RichText::new("Layers:").small().strong().color(theme::COLOR_TEXT));
+    ui.label(egui::RichText::new("  High: Full resolution at configured bitrate").small().color(theme::COLOR_TEXT_DIM));
+    ui.label(egui::RichText::new("  Medium: 1/2 resolution at 1/2 bitrate").small().color(theme::COLOR_TEXT_DIM));
+    ui.label(egui::RichText::new("  Low: 1/4 resolution at 1/4 bitrate (thumbnail)").small().color(theme::COLOR_TEXT_DIM));
+
+    dirty
+}
+
+// ── Video Call (modern) ───────────────────────────────────────────────
+
+fn page_video_call(ui: &mut egui::Ui, s: &mut AppSettings) -> bool {
+    let mut dirty = false;
+
+    section(ui, "Camera");
+
+    ui.horizontal(|ui: &mut egui::Ui| {
+        ui.label("Video Device:");
+        let devices = ["(system default)"];
+        egui::ComboBox::from_id_salt("vid_device")
+            .selected_text(&s.video_device)
+            .width(300.0)
+            .show_ui(ui, |ui: &mut egui::Ui| {
+                for d in &devices {
+                    if ui.selectable_value(&mut s.video_device, d.to_string(), *d).changed() {
+                        dirty = true;
+                    }
+                }
+            });
+    });
+
+    section(ui, "Video Quality");
+
+    ui.horizontal(|ui: &mut egui::Ui| {
+        ui.label("Resolution:");
+        let resolutions = ["480p", "720p", "1080p"];
+        egui::ComboBox::from_id_salt("vid_res")
+            .selected_text(&s.video_resolution)
+            .width(120.0)
+            .show_ui(ui, |ui: &mut egui::Ui| {
+                for r in &resolutions {
+                    if ui.selectable_value(&mut s.video_resolution, r.to_string(), *r).changed() {
+                        dirty = true;
+                    }
+                }
+            });
+    });
+
+    ui.horizontal(|ui: &mut egui::Ui| {
+        ui.label("Frame Rate:");
+        let prev = s.video_fps;
+        ui.add(egui::Slider::new(&mut s.video_fps, 15..=60).suffix(" fps"));
+        if s.video_fps != prev { dirty = true; }
+    });
+
+    ui.horizontal(|ui: &mut egui::Ui| {
+        ui.label("Max Bitrate:");
+        let prev = s.video_max_bitrate_kbps;
+        ui.add(egui::Slider::new(&mut s.video_max_bitrate_kbps, 200..=5000).suffix(" kbps"));
+        if s.video_max_bitrate_kbps != prev { dirty = true; }
+    });
+    hint(ui, "Video calls use QUIC DATAGRAM for 1:1 and small group calls with adaptive bitrate.");
+
+    section(ui, "Video Transport");
+
+    hint(ui, "TSOD uses QUIC DATAGRAM (not WebRTC) for all video transport. \
+              Lower latency and better congestion control than traditional approaches.");
+
+    dirty
+}
+
+// ── Security ──────────────────────────────────────────────────────────
+
+fn page_security(ui: &mut egui::Ui, s: &mut AppSettings) -> bool {
+    let mut dirty = false;
+
+    section(ui, "Identity");
+
+    ui.horizontal(|ui: &mut egui::Ui| {
+        ui.label("Nickname:");
+        let prev = s.identity_nickname.clone();
+        ui.add(
+            egui::TextEdit::singleline(&mut s.identity_nickname)
+                .desired_width(200.0)
+                .hint_text("Your display name"),
+        );
+        if s.identity_nickname != prev { dirty = true; }
+    });
+
+    section(ui, "Connection");
+
+    if ui.checkbox(&mut s.auto_connect, "Auto-connect to last server on startup").changed() { dirty = true; }
+    if ui.checkbox(&mut s.auto_reconnect, "Auto-reconnect on disconnect").changed() { dirty = true; }
+
+    if s.auto_reconnect {
+        ui.horizontal(|ui: &mut egui::Ui| {
+            ui.label("Reconnect Delay:");
+            let prev = s.reconnect_delay_sec;
+            ui.add(egui::Slider::new(&mut s.reconnect_delay_sec, 1..=60).suffix(" sec"));
+            if s.reconnect_delay_sec != prev { dirty = true; }
+        });
+    }
+
+    section(ui, "Encryption");
+
+    hint(ui, "All voice and control data encrypted in transit using QUIC/TLS 1.3.");
+
+    ui.add_space(4.0);
+    ui.label(egui::RichText::new("TLS Status:").small().strong().color(theme::COLOR_TEXT));
+    ui.label(egui::RichText::new("  Transport: TLS 1.3 via QUIC (always on)").small().color(theme::COLOR_ONLINE));
+    ui.label(egui::RichText::new("  Voice E2EE: Available (per-channel)").small().color(theme::COLOR_TEXT_DIM));
+    ui.label(egui::RichText::new("  Video E2EE: Available (per-channel)").small().color(theme::COLOR_TEXT_DIM));
+
+    section(ui, "Certificate");
+
+    hint(ui, "Server TLS certificate validated via CA cert (--ca-cert-pem) or \
+              certificate pinning (VP_TLS_PIN_SHA256_HEX). Dev mode accepts all certificates.");
+
+    dirty
 }

@@ -173,16 +173,25 @@ impl eframe::App for VpApp {
                 panels::members::show(ui, &self.model, &self.tx_intent);
             });
 
-        // Settings window (floating)
+        // Settings window (floating, TS3-style Options dialog)
         if self.model.show_settings {
             let mut open = true;
-            egui::Window::new("Settings")
+            egui::Window::new("Options")
                 .open(&mut open)
-                .default_width(400.0)
+                .default_width(750.0)
+                .default_height(550.0)
+                .min_width(600.0)
+                .min_height(400.0)
+                .collapsible(false)
                 .show(ctx, |ui| {
                     panels::settings::show(ui, &mut self.model, &self.tx_intent);
                 });
             if !open {
+                // Revert unsaved changes when closing
+                if self.model.settings_dirty {
+                    self.model.settings_draft = self.model.settings.clone();
+                    self.model.settings_dirty = false;
+                }
                 self.model.show_settings = false;
             }
         }
