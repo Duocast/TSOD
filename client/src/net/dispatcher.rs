@@ -187,9 +187,24 @@ impl ControlDispatcher {
         Ok(())
     }
 
-    pub async fn create_channel(&self, name: &str) -> Result<String> {
+    pub async fn create_channel(
+        &self,
+        name: &str,
+        description: &str,
+        channel_type: u8,
+        bitrate: u32,
+        user_limit: u32,
+    ) -> Result<String> {
+        let ch_type = match channel_type {
+            1 => pb::ChannelType::Text as i32,
+            _ => pb::ChannelType::Voice as i32,
+        };
         let req = pb::CreateChannelRequest {
             name: name.into(),
+            description: description.into(),
+            channel_type: ch_type,
+            bitrate,
+            user_limit,
             ..Default::default()
         };
         let resp = self

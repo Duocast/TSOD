@@ -8,10 +8,9 @@
 //! │         │                            │          │
 //! │         ├────────────────────────────┤          │
 //! │         │  Input bar                 │          │
-//! │         ├────────────────────────────┤          │
-//! │ ┌─────┐ │  Status bar               │          │
-//! │ │User │ │                            │          │
-//! │ │Panel│ │                            │          │
+//! ├─────────┼────────────────────────────┤          │
+//! │ User    │  Status bar                │          │
+//! │ Panel   │                            │          │
 //! └─────────┴────────────────────────────┴──────────┘
 
 pub mod model;
@@ -99,13 +98,16 @@ impl eframe::App for VpApp {
             });
         });
 
-        // Status bar at bottom
-        egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
+        // Status bar at bottom (simplified — user panel moved to left sidebar)
+        egui::TopBottomPanel::bottom("status_bar")
+            .max_height(24.0)
+            .show(ctx, |ui| {
             ui.horizontal(|ui| {
-                // User panel (avatar, status, mute/deafen)
-                panels::user_panel::show(ui, &mut self.model, &self.tx_intent);
-                ui.separator();
-                ui.label(&self.model.status_line);
+                ui.label(
+                    egui::RichText::new(&self.model.status_line)
+                        .small()
+                        .color(theme::COLOR_TEXT_DIM),
+                );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if self.model.ptt_enabled {
                         let ptt_text = if self.model.ptt_active { "PTT: ON" } else { "PTT: OFF" };
@@ -114,40 +116,53 @@ impl eframe::App for VpApp {
                         } else {
                             theme::COLOR_OFFLINE
                         };
-                        ui.colored_label(ptt_color, ptt_text);
+                        ui.colored_label(ptt_color, egui::RichText::new(ptt_text).small());
                     }
-                    if let Some(vad) = self.model.vad_level {
-                        let bar_width = 60.0;
-                        let (rect, _) = ui.allocate_exact_size(
-                            egui::vec2(bar_width, 12.0),
-                            egui::Sense::hover(),
+                    if self.model.loopback_active {
+                        ui.colored_label(
+                            theme::COLOR_MENTION,
+                            egui::RichText::new("LOOPBACK").small().strong(),
                         );
-                        ui.painter().rect_filled(
-                            rect,
-                            2.0,
-                            egui::Color32::from_gray(40),
+                    }
+                    if self.model.self_muted {
+                        ui.colored_label(
+                            theme::COLOR_DANGER,
+                            egui::RichText::new("MUTED").small(),
                         );
-                        let filled = egui::Rect::from_min_size(
-                            rect.min,
-                            egui::vec2(bar_width * vad, 12.0),
+                    }
+                    if self.model.self_deafened {
+                        ui.colored_label(
+                            theme::COLOR_DANGER,
+                            egui::RichText::new("DEAFENED").small(),
                         );
-                        let vad_color = if vad > 0.5 {
-                            theme::COLOR_ONLINE
-                        } else {
-                            theme::COLOR_IDLE
-                        };
-                        ui.painter().rect_filled(filled, 2.0, vad_color);
                     }
                 });
             });
         });
 
-        // Left panel: server/channel tree
+        // Left panel: server/channel tree + user panel at bottom
         egui::SidePanel::left("server_tree")
             .default_width(220.0)
             .min_width(180.0)
             .show(ctx, |ui| {
-                panels::server_tree::show(ui, &mut self.model, &self.tx_intent);
+                let total_height = ui.available_height();
+                let user_panel_height = 100.0;
+                let tree_height = (total_height - user_panel_height).max(100.0);
+
+                // Channel tree (scrollable, takes most space)
+                ui.allocate_ui_with_layout(
+                    egui::vec2(ui.available_width(), tree_height),
+                    egui::Layout::top_down(egui::Align::LEFT),
+                    |ui| {
+                        panels::server_tree::show(ui, &mut self.model, &self.tx_intent);
+                    },
+                );
+
+                // Separator between channel tree and user panel
+                ui.separator();
+
+                // User panel at the bottom of the sidebar
+                panels::user_panel::show(ui, &mut self.model, &self.tx_intent);
             });
 
         // Right panel: member list
@@ -163,6 +178,7 @@ impl eframe::App for VpApp {
             let mut open = true;
             egui::Window::new("Settings")
                 .open(&mut open)
+                .default_width(400.0)
                 .show(ctx, |ui| {
                     panels::settings::show(ui, &mut self.model, &self.tx_intent);
                 });
@@ -206,10 +222,12 @@ impl VpApp {
                 i.key_released(egui::Key::Space),
                 i.key_pressed(egui::Key::Escape),
                 i.modifiers.ctrl,
+                i.key_pressed(egui::Key::M),
+                i.key_pressed(egui::Key::D),
             )
         });
 
-        let (space_pressed, space_released, esc_pressed, _ctrl) = input;
+        let (space_pressed, space_released, esc_pressed, ctrl, m_pressed, d_pressed) = input;
 
         // PTT: space down = talk, space up = stop
         if self.model.ptt_enabled {
@@ -223,9 +241,22 @@ impl VpApp {
             }
         }
 
+        // Ctrl+M = toggle mute
+        if ctrl && m_pressed && !self.model.chat_input_focused {
+            self.model.self_muted = !self.model.self_muted;
+            let _ = self.tx_intent.send(UiIntent::ToggleSelfMute);
+        }
+
+        // Ctrl+D = toggle deafen
+        if ctrl && d_pressed && !self.model.chat_input_focused {
+            self.model.self_deafened = !self.model.self_deafened;
+            let _ = self.tx_intent.send(UiIntent::ToggleSelfDeafen);
+        }
+
         if esc_pressed {
             self.model.show_settings = false;
             self.model.show_telemetry = false;
+            self.model.show_create_channel = false;
         }
     }
 }

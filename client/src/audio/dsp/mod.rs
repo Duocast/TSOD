@@ -19,6 +19,8 @@ pub struct CaptureDsp {
     agc: agc::Agc,
     denoiser: rnnoise::Denoiser,
     vad_threshold: f32,
+    noise_suppression_enabled: bool,
+    agc_enabled: bool,
 }
 
 impl CaptureDsp {
@@ -30,6 +32,8 @@ impl CaptureDsp {
             agc: agc::Agc::new(-18.0, 0.3),
             denoiser: rnnoise::Denoiser::new(),
             vad_threshold: 0.5,
+            noise_suppression_enabled: true,
+            agc_enabled: true,
         })
     }
 
@@ -38,10 +42,17 @@ impl CaptureDsp {
     /// For 20ms frames (960 samples), call twice with each half.
     pub fn process_frame(&mut self, pcm: &mut [i16]) -> f32 {
         // Pre-amplify with AGC
-        self.agc.process(pcm);
+        if self.agc_enabled {
+            self.agc.process(pcm);
+        }
 
         // Denoise and get VAD
-        self.denoiser.process_frame(pcm)
+        if self.noise_suppression_enabled {
+            self.denoiser.process_frame(pcm)
+        } else {
+            // Still run VAD for level reporting even if denoiser is off
+            0.0
+        }
     }
 
     /// Returns true if the last processed frame had voice activity.
@@ -61,6 +72,16 @@ impl CaptureDsp {
 
     pub fn last_vad_probability(&self) -> f32 {
         self.denoiser.last_vad()
+    }
+
+    /// Enable or disable noise suppression (RNNoise).
+    pub fn set_noise_suppression(&mut self, enabled: bool) {
+        self.noise_suppression_enabled = enabled;
+    }
+
+    /// Enable or disable automatic gain control.
+    pub fn set_agc(&mut self, enabled: bool) {
+        self.agc_enabled = enabled;
     }
 }
 

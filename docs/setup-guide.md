@@ -783,4 +783,8 @@ vp-client.exe --server tsod.duckdns.org:4433 --server-name tsod-server --ca-cert
 --dev-token           Auth token (default: dev)
 --channel-id          Channel UUID to join on connect (optional)
 --push-to-talk        Enable push-to-talk mode (default: true)
+--display-name        Display name shown to other users (default: User)
+--no-noise-suppression  Disable RNNoise noise suppression
+--no-agc              Disable automatic gain control
+--vad-threshold       VAD sensitivity 0.0-1.0 (default: 0.5)
 ```

@@ -85,6 +85,9 @@ pub enum UiEvent {
 
     // Channel management
     ChannelCreated(ChannelEntry),
+
+    // Loopback
+    SetLoopbackActive(bool),
 }
 
 // ── Intents from UI to backend ─────────────────────────────────────────
@@ -95,7 +98,14 @@ pub enum UiIntent {
     SendChat { text: String },
     JoinChannel { channel_id: String },
     LeaveChannel,
-    CreateChannel { name: String, channel_type: u8 },
+    CreateChannel {
+        name: String,
+        description: String,
+        channel_type: u8,
+        codec: u8,
+        quality: u32,
+        user_limit: u32,
+    },
     TogglePtt,
     PttDown,
     PttUp,
@@ -133,6 +143,9 @@ pub enum UiIntent {
     SetVadThreshold(f32),
     SetInputDevice(String),
     SetOutputDevice(String),
+    SetInputGain(f32),
+    SetOutputGain(f32),
+    ToggleLoopback,
 }
 
 // ── Data types ─────────────────────────────────────────────────────────
@@ -271,9 +284,25 @@ pub struct UiModel {
     pub selected_input_device: String,
     pub selected_output_device: String,
 
+    // Gain sliders (0.0 = silent, 1.0 = 100%, 2.0 = 200%)
+    pub input_gain: f32,
+    pub output_gain: f32,
+
+    // Mic test loopback
+    pub loopback_active: bool,
+
     // Create channel dialog
     pub show_create_channel: bool,
     pub create_channel_name: String,
+    pub create_channel_description: String,
+    pub create_channel_type: usize,     // 0=voice, 1=text
+    pub create_channel_codec: usize,    // 0=Opus Voice, 1=Opus Music
+    pub create_channel_quality: u32,    // bitrate in kbps (8-510)
+    pub create_channel_user_limit: u32, // 0 = unlimited
+    pub create_channel_tab: usize,      // 0=standard, 1=audio
+
+    // User popup
+    pub show_user_popup: bool,
 
     // Notifications
     pub notifications: VecDeque<Notification>,
@@ -327,8 +356,18 @@ impl Default for UiModel {
             output_devices: Vec::new(),
             selected_input_device: "(system default)".into(),
             selected_output_device: "(system default)".into(),
+            input_gain: 1.0,
+            output_gain: 1.0,
+            loopback_active: false,
             show_create_channel: false,
             create_channel_name: String::new(),
+            create_channel_description: String::new(),
+            create_channel_type: 0,
+            create_channel_codec: 0,
+            create_channel_quality: 64,
+            create_channel_user_limit: 0,
+            create_channel_tab: 0,
+            show_user_popup: false,
             notifications: VecDeque::new(),
         }
     }
@@ -340,7 +379,6 @@ impl UiModel {
             UiEvent::SetConnected(c) => self.connected = c,
             UiEvent::SetAuthed(a) => self.authed = a,
             UiEvent::SetChannelName(n) => {
-                // Also set selected_channel so chat messages route correctly
                 self.selected_channel = Some(n.clone());
                 self.selected_channel_name = n;
             }
@@ -420,6 +458,9 @@ impl UiModel {
             }
             UiEvent::ChannelCreated(entry) => {
                 self.channels.push(entry);
+            }
+            UiEvent::SetLoopbackActive(active) => {
+                self.loopback_active = active;
             }
         }
 
