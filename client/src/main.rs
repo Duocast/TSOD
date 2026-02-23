@@ -174,6 +174,11 @@ async fn app_task(
     let self_muted = Arc::new(AtomicBool::new(false));
     let self_deafened = Arc::new(AtomicBool::new(false));
 
+    // Shared gain values (stored as u32 bits of f32, default 1.0)
+    let input_gain = Arc::new(std::sync::atomic::AtomicU32::new(f32_to_u32(1.0)));
+    let output_gain = Arc::new(std::sync::atomic::AtomicU32::new(f32_to_u32(1.0)));
+    let loopback_active = Arc::new(AtomicBool::new(false));
+
     let mut backoff = Backoff::new(Duration::from_millis(250), Duration::from_secs(10));
 
     while running.load(Ordering::Relaxed) && !*shutdown_rx.borrow() {
@@ -190,6 +195,9 @@ async fn app_task(
             ptt_active.clone(),
             self_muted.clone(),
             self_deafened.clone(),
+            input_gain.clone(),
+            output_gain.clone(),
+            loopback_active.clone(),
             &mut shutdown_rx,
         )
         .await
@@ -221,6 +229,9 @@ async fn connect_and_run_session(
     ptt_active: Arc<AtomicBool>,
     self_muted: Arc<AtomicBool>,
     self_deafened: Arc<AtomicBool>,
+    input_gain: Arc<std::sync::atomic::AtomicU32>,
+    output_gain: Arc<std::sync::atomic::AtomicU32>,
+    loopback_active: Arc<AtomicBool>,
     shutdown_rx: &mut watch::Receiver<bool>,
 ) -> Result<()> {
     let _ = tx_event.send(UiEvent::SetConnected(false));
@@ -382,11 +393,14 @@ async fn connect_and_run_session(
         conn.clone(),
         codec.clone(),
         capture.clone(),
+        playout.clone(),
         capture_dsp.clone(),
         tx_event.clone(),
         channel_route_hash,
         ptt_active.clone(),
         self_muted.clone(),
+        input_gain.clone(),
+        loopback_active.clone(),
         cfg.push_to_talk,
         voice_die_tx.clone(),
     ));
@@ -397,6 +411,7 @@ async fn connect_and_run_session(
         playout.clone(),
         jitter.clone(),
         self_deafened.clone(),
+        output_gain.clone(),
         voice_die_tx.clone(),
     ));
 
@@ -498,18 +513,23 @@ async fn connect_and_run_session(
                             }
                             active_channel = None;
                         }
-                        UiIntent::CreateChannel { name, channel_type: _ } => {
-                            match dispatcher.create_channel(&name).await {
+                        UiIntent::CreateChannel { name, description, channel_type, codec: _, quality, user_limit } => {
+                            match dispatcher.create_channel(&name, &description, channel_type, quality * 1000, user_limit).await {
                                 Ok(ch_id) => {
+                                    let ch_type = if channel_type == 1 {
+                                        ui::model::ChannelType::Text
+                                    } else {
+                                        ui::model::ChannelType::Voice
+                                    };
                                     let _ = tx_event.send(UiEvent::ChannelCreated(
                                         ui::model::ChannelEntry {
                                             id: ch_id.clone(),
                                             name: name.clone(),
-                                            channel_type: ui::model::ChannelType::Voice,
+                                            channel_type: ch_type,
                                             parent_id: None,
                                             position: 0,
                                             member_count: 0,
-                                            user_limit: 0,
+                                            user_limit,
                                         },
                                     ));
                                     let _ = tx_event.send(UiEvent::AppendLog(
@@ -528,8 +548,59 @@ async fn connect_and_run_session(
                                 "[help] Space=PTT | Enter=Send | Settings for audio config".into(),
                             ));
                         }
+                        UiIntent::SetNoiseSuppression(enabled) => {
+                            if let Some(ref dsp) = capture_dsp {
+                                let mut d = dsp.lock().await;
+                                d.set_noise_suppression(enabled);
+                            }
+                            let _ = tx_event.send(UiEvent::AppendLog(
+                                format!("[dsp] noise suppression: {enabled}"),
+                            ));
+                        }
+                        UiIntent::SetAgcEnabled(enabled) => {
+                            if let Some(ref dsp) = capture_dsp {
+                                let mut d = dsp.lock().await;
+                                d.set_agc(enabled);
+                            }
+                            let _ = tx_event.send(UiEvent::AppendLog(
+                                format!("[dsp] AGC: {enabled}"),
+                            ));
+                        }
+                        UiIntent::SetVadThreshold(threshold) => {
+                            if let Some(ref dsp) = capture_dsp {
+                                let mut d = dsp.lock().await;
+                                d.set_vad_threshold(threshold);
+                            }
+                            let _ = tx_event.send(UiEvent::AppendLog(
+                                format!("[dsp] VAD threshold: {threshold:.2}"),
+                            ));
+                        }
+                        UiIntent::SetInputGain(gain) => {
+                            input_gain.store(f32_to_u32(gain), Ordering::Relaxed);
+                        }
+                        UiIntent::SetOutputGain(gain) => {
+                            output_gain.store(f32_to_u32(gain), Ordering::Relaxed);
+                        }
+                        UiIntent::ToggleLoopback => {
+                            let new = !loopback_active.load(Ordering::Relaxed);
+                            loopback_active.store(new, Ordering::Relaxed);
+                            let _ = tx_event.send(UiEvent::SetLoopbackActive(new));
+                            let _ = tx_event.send(UiEvent::AppendLog(
+                                format!("[audio] loopback: {new}"),
+                            ));
+                        }
+                        UiIntent::SetInputDevice(dev) => {
+                            let _ = tx_event.send(UiEvent::AppendLog(
+                                format!("[audio] input device: {dev}"),
+                            ));
+                        }
+                        UiIntent::SetOutputDevice(dev) => {
+                            let _ = tx_event.send(UiEvent::AppendLog(
+                                format!("[audio] output device: {dev}"),
+                            ));
+                        }
                         _ => {
-                            // Other intents will be handled as features are wired up
+                            // Remaining intents (moderation, file upload, etc.)
                         }
                     }
                 }
@@ -556,11 +627,14 @@ async fn voice_send_loop(
     conn: quinn::Connection,
     codec: Arc<Mutex<audio::opus::OpusCodec>>,
     capture: Arc<audio::capture::Capture>,
+    playout: Arc<audio::playout::Playout>,
     capture_dsp: Option<Arc<Mutex<audio::dsp::CaptureDsp>>>,
     tx_event: Sender<UiEvent>,
     channel_route_hash: u32,
     ptt_active: Arc<AtomicBool>,
     self_muted: Arc<AtomicBool>,
+    input_gain: Arc<std::sync::atomic::AtomicU32>,
+    loopback_active: Arc<AtomicBool>,
     push_to_talk: bool,
     voice_die_tx: watch::Sender<bool>,
 ) {
@@ -592,6 +666,19 @@ async fn voice_send_loop(
 
         if !capture.read_frame(&mut pcm) {
             continue;
+        }
+
+        // Apply input gain
+        let gain = u32_to_f32(input_gain.load(Ordering::Relaxed));
+        if (gain - 1.0).abs() > 0.001 {
+            for s in pcm.iter_mut() {
+                *s = (*s as f32 * gain).clamp(-32768.0, 32767.0) as i16;
+            }
+        }
+
+        // Loopback: feed capture directly to playout for mic testing
+        if loopback_active.load(Ordering::Relaxed) {
+            playout.push_pcm(&pcm);
         }
 
         // Apply DSP pipeline (noise suppression + AGC + VAD)
@@ -636,6 +723,7 @@ async fn voice_recv_loop(
     playout: Arc<audio::playout::Playout>,
     jitter: Arc<Mutex<audio::jitter::JitterBuffer>>,
     self_deafened: Arc<AtomicBool>,
+    output_gain: Arc<std::sync::atomic::AtomicU32>,
     voice_die_tx: watch::Sender<bool>,
 ) {
     let sample_rate = 48_000u32;
@@ -673,6 +761,13 @@ async fn voice_recv_loop(
             };
 
             if n > 0 {
+                // Apply output gain
+                let gain = u32_to_f32(output_gain.load(Ordering::Relaxed));
+                if (gain - 1.0).abs() > 0.001 {
+                    for s in pcm_out[..n].iter_mut() {
+                        *s = (*s as f32 * gain).clamp(-32768.0, 32767.0) as i16;
+                    }
+                }
                 playout.push_pcm(&pcm_out[..n]);
             }
         }
@@ -704,6 +799,14 @@ fn stable_route_hash_u32(bytes: &[u8]) -> u32 {
         h = h.wrapping_mul(FNV_PRIME);
     }
     h
+}
+
+fn f32_to_u32(f: f32) -> u32 {
+    f.to_bits()
+}
+
+fn u32_to_f32(u: u32) -> f32 {
+    f32::from_bits(u)
 }
 
 fn unix_ms() -> u64 {

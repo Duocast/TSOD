@@ -273,8 +273,8 @@ impl Gateway {
                         }),
                         sent_at: Some(now_ts()),
                         error: None,
-                        payload: Some(pb::server_to_client::Payload::JoinChannelResponse(
-                            pb::JoinChannelResponse { state: Some(state) },
+                        payload: Some(pb::server_to_client::Payload::CreateChannelResponse(
+                            pb::CreateChannelResponse { state: Some(state) },
                         )),
                     };
                     if let Err(e) = write_delimited(&mut send, &resp).await {
