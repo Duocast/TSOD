@@ -88,6 +88,9 @@ pub enum UiEvent {
 
     // Loopback
     SetLoopbackActive(bool),
+
+    // Settings loaded from disk
+    SettingsLoaded(Box<AppSettings>),
 }
 
 // ── Intents from UI to backend ─────────────────────────────────────────
@@ -137,7 +140,7 @@ pub enum UiIntent {
     // File upload
     UploadFile { path: String },
 
-    // Settings
+    // Settings: Audio
     SetNoiseSuppression(bool),
     SetAgcEnabled(bool),
     SetVadThreshold(f32),
@@ -146,6 +149,301 @@ pub enum UiIntent {
     SetInputGain(f32),
     SetOutputGain(f32),
     ToggleLoopback,
+
+    // Settings: Apply all (sent after settings are saved)
+    ApplySettings(Box<AppSettings>),
+
+    // Settings: Save to disk
+    SaveSettings(Box<AppSettings>),
+}
+
+// ── Persisted application settings ────────────────────────────────────
+
+/// All user-configurable settings. Persisted to JSON on disk.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct AppSettings {
+    // ─── Capture ───
+    pub capture_device: String,
+    pub capture_mode: CaptureMode,
+    pub ptt_key: String,
+    pub ptt_delay_ms: u32,
+    pub vad_threshold: f32,
+    pub input_gain: f32,
+    pub noise_suppression: bool,
+    pub agc_enabled: bool,
+    pub agc_target_db: f32,
+    pub echo_cancellation: bool,
+    pub denoise_attenuation_db: i32,
+    pub typing_attenuation: bool,
+
+    // ─── Playback ───
+    pub playback_device: String,
+    pub output_gain: f32,
+    pub output_auto_level: bool,
+    pub mono_expansion: bool,
+    pub comfort_noise: bool,
+    pub comfort_noise_level: f32,
+    pub ducking_enabled: bool,
+    pub ducking_attenuation_db: i32,
+
+    // ─── Notifications ───
+    pub notify_user_joined: bool,
+    pub notify_user_left: bool,
+    pub notify_poke: bool,
+    pub notify_chat_message: bool,
+    pub sound_pack: String,
+    pub notification_volume: f32,
+
+    // ─── Chat ───
+    pub chat_show_timestamps: bool,
+    pub chat_show_join_leave: bool,
+    pub chat_max_lines: u32,
+    pub chat_font_size: f32,
+    pub chat_log_to_file: bool,
+    pub chat_log_directory: String,
+
+    // ─── Hotkeys ───
+    pub hotkeys: Vec<HotkeyBinding>,
+
+    // ─── Whisper ───
+    pub whisper_allow_all: bool,
+    pub whisper_allowed_users: Vec<String>,
+    pub whisper_notify: bool,
+
+    // ─── Security ───
+    pub identity_nickname: String,
+    pub auto_connect: bool,
+    pub auto_reconnect: bool,
+    pub reconnect_delay_sec: u32,
+
+    // ─── Application ───
+    pub start_minimized: bool,
+    pub minimize_to_tray: bool,
+    pub check_for_updates: bool,
+    pub language: String,
+    pub theme: String,
+    pub ui_scale: f32,
+
+    // ─── Screen Share (modern) ───
+    pub screen_share_fps: u32,
+    pub screen_share_max_bitrate_kbps: u32,
+    pub screen_share_codec: String,
+    pub screen_share_capture_audio: bool,
+
+    // ─── Video Call (modern) ───
+    pub video_device: String,
+    pub video_resolution: String,
+    pub video_fps: u32,
+    pub video_max_bitrate_kbps: u32,
+
+    // ─── Downloads / File Sharing ───
+    pub download_directory: String,
+    pub max_download_size_mb: u32,
+    pub auto_download_images: bool,
+    pub auto_download_files: bool,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            // Capture
+            capture_device: "(system default)".into(),
+            capture_mode: CaptureMode::PushToTalk,
+            ptt_key: "Space".into(),
+            ptt_delay_ms: 300,
+            vad_threshold: 0.5,
+            input_gain: 1.0,
+            noise_suppression: true,
+            agc_enabled: true,
+            agc_target_db: -18.0,
+            echo_cancellation: false,
+            denoise_attenuation_db: -30,
+            typing_attenuation: true,
+
+            // Playback
+            playback_device: "(system default)".into(),
+            output_gain: 1.0,
+            output_auto_level: false,
+            mono_expansion: false,
+            comfort_noise: false,
+            comfort_noise_level: 0.02,
+            ducking_enabled: false,
+            ducking_attenuation_db: -20,
+
+            // Notifications
+            notify_user_joined: true,
+            notify_user_left: true,
+            notify_poke: true,
+            notify_chat_message: true,
+            sound_pack: "Default".into(),
+            notification_volume: 0.8,
+
+            // Chat
+            chat_show_timestamps: true,
+            chat_show_join_leave: true,
+            chat_max_lines: 500,
+            chat_font_size: 13.0,
+            chat_log_to_file: false,
+            chat_log_directory: String::new(),
+
+            // Hotkeys
+            hotkeys: default_hotkeys(),
+
+            // Whisper
+            whisper_allow_all: true,
+            whisper_allowed_users: Vec::new(),
+            whisper_notify: true,
+
+            // Security
+            identity_nickname: String::new(),
+            auto_connect: false,
+            auto_reconnect: true,
+            reconnect_delay_sec: 5,
+
+            // Application
+            start_minimized: false,
+            minimize_to_tray: true,
+            check_for_updates: true,
+            language: "English".into(),
+            theme: "Dark".into(),
+            ui_scale: 1.0,
+
+            // Screen Share
+            screen_share_fps: 30,
+            screen_share_max_bitrate_kbps: 3000,
+            screen_share_codec: "H264".into(),
+            screen_share_capture_audio: true,
+
+            // Video Call
+            video_device: "(system default)".into(),
+            video_resolution: "720p".into(),
+            video_fps: 30,
+            video_max_bitrate_kbps: 1500,
+
+            // Downloads
+            download_directory: String::new(),
+            max_download_size_mb: 100,
+            auto_download_images: true,
+            auto_download_files: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum CaptureMode {
+    PushToTalk,
+    VoiceActivation,
+    Continuous,
+}
+
+impl CaptureMode {
+    pub const ALL: [CaptureMode; 3] = [
+        CaptureMode::PushToTalk,
+        CaptureMode::VoiceActivation,
+        CaptureMode::Continuous,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            CaptureMode::PushToTalk => "Push-to-Talk",
+            CaptureMode::VoiceActivation => "Voice Activation",
+            CaptureMode::Continuous => "Continuous Transmission",
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct HotkeyBinding {
+    pub action: HotkeyAction,
+    pub key: String,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum HotkeyAction {
+    ToggleMute,
+    ToggleDeafen,
+    PushToTalk,
+    ToggleScreenShare,
+    ToggleVideo,
+    FocusChat,
+    Disconnect,
+}
+
+impl HotkeyAction {
+    pub fn label(self) -> &'static str {
+        match self {
+            HotkeyAction::ToggleMute => "Toggle Mute",
+            HotkeyAction::ToggleDeafen => "Toggle Deafen",
+            HotkeyAction::PushToTalk => "Push-to-Talk",
+            HotkeyAction::ToggleScreenShare => "Toggle Screen Share",
+            HotkeyAction::ToggleVideo => "Toggle Video",
+            HotkeyAction::FocusChat => "Focus Chat Input",
+            HotkeyAction::Disconnect => "Disconnect from Server",
+        }
+    }
+}
+
+pub fn default_hotkeys() -> Vec<HotkeyBinding> {
+    vec![
+        HotkeyBinding { action: HotkeyAction::ToggleMute, key: "Ctrl+M".into(), enabled: true },
+        HotkeyBinding { action: HotkeyAction::ToggleDeafen, key: "Ctrl+D".into(), enabled: true },
+        HotkeyBinding { action: HotkeyAction::PushToTalk, key: "Space".into(), enabled: true },
+        HotkeyBinding { action: HotkeyAction::ToggleScreenShare, key: "Ctrl+Shift+S".into(), enabled: true },
+        HotkeyBinding { action: HotkeyAction::ToggleVideo, key: "Ctrl+Shift+V".into(), enabled: true },
+        HotkeyBinding { action: HotkeyAction::FocusChat, key: "Ctrl+T".into(), enabled: true },
+        HotkeyBinding { action: HotkeyAction::Disconnect, key: "Ctrl+Q".into(), enabled: true },
+    ]
+}
+
+// ── Settings page enum ────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsPage {
+    Application,
+    Capture,
+    Playback,
+    Hotkeys,
+    Chat,
+    Downloads,
+    Notifications,
+    Whisper,
+    ScreenShare,
+    VideoCall,
+    Security,
+}
+
+impl SettingsPage {
+    pub const ALL: [SettingsPage; 11] = [
+        SettingsPage::Application,
+        SettingsPage::Capture,
+        SettingsPage::Playback,
+        SettingsPage::Hotkeys,
+        SettingsPage::Chat,
+        SettingsPage::Downloads,
+        SettingsPage::Notifications,
+        SettingsPage::Whisper,
+        SettingsPage::ScreenShare,
+        SettingsPage::VideoCall,
+        SettingsPage::Security,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SettingsPage::Application => "Application",
+            SettingsPage::Capture => "Capture",
+            SettingsPage::Playback => "Playback",
+            SettingsPage::Hotkeys => "Hotkeys",
+            SettingsPage::Chat => "Chat",
+            SettingsPage::Downloads => "Downloads",
+            SettingsPage::Notifications => "Notifications",
+            SettingsPage::Whisper => "Whisper",
+            SettingsPage::ScreenShare => "Screen Share",
+            SettingsPage::VideoCall => "Video Call",
+            SettingsPage::Security => "Security",
+        }
+    }
 }
 
 // ── Data types ─────────────────────────────────────────────────────────
@@ -255,7 +553,7 @@ pub struct UiModel {
     pub chat_input_focused: bool,
     pub typing_users: HashMap<String, Vec<(String, std::time::Instant)>>,
 
-    // Voice
+    // Voice (runtime state, not persisted)
     pub ptt_enabled: bool,
     pub ptt_active: bool,
     pub self_muted: bool,
@@ -273,39 +571,34 @@ pub struct UiModel {
     pub show_telemetry: bool,
     pub status_line: String,
 
-    // Settings
-    pub noise_suppression_enabled: bool,
-    pub agc_enabled: bool,
-    pub vad_threshold: f32,
-
-    // Audio devices
+    // Audio devices (enumerated at runtime)
     pub input_devices: Vec<String>,
     pub output_devices: Vec<String>,
-    pub selected_input_device: String,
-    pub selected_output_device: String,
 
-    // Gain sliders (0.0 = silent, 1.0 = 100%, 2.0 = 200%)
-    pub input_gain: f32,
-    pub output_gain: f32,
-
-    // Mic test loopback
+    // Mic test loopback (runtime)
     pub loopback_active: bool,
 
     // Create channel dialog
     pub show_create_channel: bool,
     pub create_channel_name: String,
     pub create_channel_description: String,
-    pub create_channel_type: usize,     // 0=voice, 1=text
-    pub create_channel_codec: usize,    // 0=Opus Voice, 1=Opus Music
-    pub create_channel_quality: u32,    // bitrate in kbps (8-510)
-    pub create_channel_user_limit: u32, // 0 = unlimited
-    pub create_channel_tab: usize,      // 0=standard, 1=audio
+    pub create_channel_type: usize,
+    pub create_channel_codec: usize,
+    pub create_channel_quality: u32,
+    pub create_channel_user_limit: u32,
+    pub create_channel_tab: usize,
 
     // User popup
     pub show_user_popup: bool,
 
     // Notifications
     pub notifications: VecDeque<Notification>,
+
+    // ── Settings system ──
+    pub settings: AppSettings,
+    pub settings_draft: AppSettings,
+    pub settings_page: SettingsPage,
+    pub settings_dirty: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -325,6 +618,8 @@ pub enum NotificationKind {
 
 impl Default for UiModel {
     fn default() -> Self {
+        let settings = AppSettings::default();
+        let settings_draft = settings.clone();
         Self {
             connected: false,
             authed: false,
@@ -349,15 +644,8 @@ impl Default for UiModel {
             show_settings: false,
             show_telemetry: false,
             status_line: String::new(),
-            noise_suppression_enabled: true,
-            agc_enabled: true,
-            vad_threshold: 0.5,
             input_devices: Vec::new(),
             output_devices: Vec::new(),
-            selected_input_device: "(system default)".into(),
-            selected_output_device: "(system default)".into(),
-            input_gain: 1.0,
-            output_gain: 1.0,
             loopback_active: false,
             show_create_channel: false,
             create_channel_name: String::new(),
@@ -369,6 +657,10 @@ impl Default for UiModel {
             create_channel_tab: 0,
             show_user_popup: false,
             notifications: VecDeque::new(),
+            settings,
+            settings_draft,
+            settings_page: SettingsPage::Capture,
+            settings_dirty: false,
         }
     }
 }
@@ -447,9 +739,7 @@ impl UiModel {
                     kind: NotificationKind::Poke,
                 });
             }
-            UiEvent::UserProfileLoaded(_profile) => {
-                // TODO: store in profile cache
-            }
+            UiEvent::UserProfileLoaded(_profile) => {}
             UiEvent::SetSelfMuted(m) => self.self_muted = m,
             UiEvent::SetSelfDeafened(d) => self.self_deafened = d,
             UiEvent::SetAudioDevices { input_devices, output_devices } => {
@@ -461,6 +751,11 @@ impl UiModel {
             }
             UiEvent::SetLoopbackActive(active) => {
                 self.loopback_active = active;
+            }
+            UiEvent::SettingsLoaded(s) => {
+                self.settings = *s.clone();
+                self.settings_draft = *s;
+                self.sync_settings_to_runtime();
             }
         }
 
@@ -475,6 +770,11 @@ impl UiModel {
         while self.notifications.front().is_some_and(|n| n.created < notif_cutoff) {
             self.notifications.pop_front();
         }
+    }
+
+    /// Sync persisted settings into runtime model state.
+    pub fn sync_settings_to_runtime(&mut self) {
+        self.ptt_enabled = self.settings.capture_mode == CaptureMode::PushToTalk;
     }
 
     /// Get messages for the currently selected channel.
