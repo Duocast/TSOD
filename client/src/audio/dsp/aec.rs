@@ -9,7 +9,7 @@ const TEN_MS_AT_48K: usize = 480;
 
 /// AEC3-based acoustic echo canceller.
 pub struct Aec {
-    inner: sonora_aec3::Aec,
+    inner: sonora_aec3::Aec3,
     render_buf: Vec<i16>,
     capture_buf: Vec<i16>,
 }
@@ -19,7 +19,7 @@ impl Aec {
     pub fn new(sample_rate: u32) -> Result<Self> {
         anyhow::ensure!(sample_rate == 48_000, "AEC requires 48kHz audio");
 
-        let inner = sonora_aec3::Aec::new(sample_rate as usize, 1)
+        let inner = sonora_aec3::Aec3::new(sample_rate as usize, 1)
             .context("create sonora-aec3 processor")?;
 
         Ok(Self {
