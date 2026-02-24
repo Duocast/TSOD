@@ -1,8 +1,9 @@
 # TSOD Setup Guide
 
 Deploy the `vp-gateway` server on Ubuntu Server 24.04 and connect the `vp-client`
-from a Windows 11 desktop. Covers LAN and external access through a Ubiquiti
-Dream Machine SE gateway with full TLS using a custom Certificate Authority.
+from Windows 11 or Linux desktops. Covers LAN and external access through a
+Ubiquiti Dream Machine SE gateway with full TLS using a custom Certificate
+Authority.
 
 ---
 
@@ -332,7 +333,7 @@ sudo systemctl status tsod-gateway
 
 ---
 
-## Part 2: Client Setup (Windows 11)
+## Part 2: Client Setup (Windows 11 and Linux)
 
 ### 2.1 Install Visual Studio Build Tools 2022
 
@@ -471,6 +472,66 @@ For quick LAN testing without CA certs, omit `--ca-cert-pem` and
 
 ```powershell
 vp-client.exe --server 192.168.1.100:4433
+```
+
+### 2.8 Linux Client Build (Ubuntu 24.04 LTS / Lubuntu 24.04, kernel 6.19.3)
+
+These steps are intended for Ubuntu 24.04 LTS and Lubuntu 24.04 systems running
+Linux kernel `6.19.3`.
+
+Install required packages:
+
+```bash
+sudo apt update
+sudo apt install -y \
+  build-essential \
+  pkg-config \
+  libssl-dev \
+  libopus-dev \
+  libasound2-dev \
+  protobuf-compiler \
+  git \
+  curl
+```
+
+Install Rust:
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
+```
+
+Verify toolchain and kernel:
+
+```bash
+rustc --version
+cargo --version
+protoc --version
+uname -r
+# expected: 6.19.3
+```
+
+Build the Linux client:
+
+```bash
+git clone <your-repo-url> ~/tsod
+cd ~/tsod/client
+cargo build --release
+```
+
+Binary output:
+
+```bash
+~/tsod/client/target/release/vp-client
+```
+
+Run the Linux client (LAN):
+
+```bash
+~/tsod/client/target/release/vp-client \
+  --server 192.168.1.100:4433 \
+  --server-name tsod-server \
+  --ca-cert-pem ~/tsod/ca.crt
 ```
 
 #### Alternative: Certificate pinning
