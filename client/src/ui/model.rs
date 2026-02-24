@@ -186,6 +186,9 @@ pub enum UiIntent {
     UploadFile {
         path: String,
     },
+    SetAvatar {
+        path: String,
+    },
 
     // Settings: Audio
     SetNoiseSuppression(bool),
@@ -551,6 +554,7 @@ pub struct MemberEntry {
     pub self_deafened: bool,
     pub streaming: bool,
     pub speaking: bool,
+    pub avatar_url: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -667,6 +671,9 @@ pub struct UiModel {
     // User popup
     pub show_user_popup: bool,
     pub show_away_message_dialog: bool,
+    pub show_set_avatar_dialog: bool,
+    pub avatar_path_draft: String,
+    pub avatar_url: Option<String>,
     pub away_message: String,
     pub away_message_draft: String,
     pub away_message_presets: Vec<String>,
@@ -738,6 +745,9 @@ impl Default for UiModel {
             create_channel_tab: 0,
             show_user_popup: false,
             show_away_message_dialog: false,
+            show_set_avatar_dialog: false,
+            avatar_path_draft: String::new(),
+            avatar_url: None,
             away_message: String::new(),
             away_message_draft: String::new(),
             away_message_presets: vec![
