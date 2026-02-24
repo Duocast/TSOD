@@ -332,27 +332,11 @@ impl eframe::App for VpApp {
                     ui.label("Choose an image file for your avatar.");
                     ui.add_space(8.0);
 
-                    ui.horizontal(|ui| {
-                        if ui.button("Add Image").clicked() {
-                            if let Some(path) = rfd::FileDialog::new()
-                                .add_filter("Image", &["png", "jpg", "jpeg", "gif", "webp"])
-                                .pick_file()
-                            {
-                                self.model.avatar_path_draft = path.display().to_string();
-                            }
-                        }
-
-                        let selected = if self.model.avatar_path_draft.is_empty() {
-                            "No image selected".to_string()
-                        } else {
-                            self.model.avatar_path_draft.clone()
-                        };
-                        ui.label(
-                            egui::RichText::new(selected)
-                                .small()
-                                .color(theme::text_muted()),
-                        );
-                    });
+                    ui.label("Enter a local image path (png, jpg, jpeg, gif, or webp):");
+                    ui.add_sized(
+                        [ui.available_width(), 24.0],
+                        egui::TextEdit::singleline(&mut self.model.avatar_path_draft),
+                    );
 
                     ui.add_space(10.0);
                     ui.horizontal(|ui| {
