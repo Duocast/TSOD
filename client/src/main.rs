@@ -186,6 +186,18 @@ async fn app_task(
     let input_gain = Arc::new(std::sync::atomic::AtomicU32::new(f32_to_u32(1.0)));
     let output_gain = Arc::new(std::sync::atomic::AtomicU32::new(f32_to_u32(1.0)));
     let loopback_active = Arc::new(AtomicBool::new(false));
+    let session_voice_active = Arc::new(AtomicBool::new(false));
+
+    let _mic_test = tokio::spawn(mic_test_loop(
+        capture.clone(),
+        playout.clone(),
+        tx_event.clone(),
+        input_gain.clone(),
+        loopback_active.clone(),
+        session_voice_active.clone(),
+        running.clone(),
+        shutdown_rx.clone(),
+    ));
 
     let mut backoff = Backoff::new(Duration::from_millis(250), Duration::from_secs(10));
 
@@ -206,6 +218,7 @@ async fn app_task(
             input_gain.clone(),
             output_gain.clone(),
             loopback_active.clone(),
+            session_voice_active.clone(),
             &mut shutdown_rx,
         )
         .await
@@ -215,7 +228,38 @@ async fn app_task(
             }
             Err(e) => {
                 let _ = tx_event.send(UiEvent::AppendLog(format!("[net] disconnected: {e:#}")));
-                backoff.sleep().await;
+
+                let jitter = rand::random::<u64>() % 150;
+                let wait_for = backoff.cur + Duration::from_millis(jitter);
+                backoff.cur = (backoff.cur * 2).min(backoff.max);
+
+                let deadline = tokio::time::Instant::now() + wait_for;
+                while tokio::time::Instant::now() < deadline {
+                    while let Ok(intent) = rx_intent.try_recv() {
+                        match intent {
+                            UiIntent::Quit => return Ok(()),
+                            UiIntent::ToggleLoopback => {
+                                let new = !loopback_active.load(Ordering::Relaxed);
+                                loopback_active.store(new, Ordering::Relaxed);
+                                let _ = tx_event.send(UiEvent::SetLoopbackActive(new));
+                                let _ = tx_event
+                                    .send(UiEvent::AppendLog(format!("[audio] loopback: {new}")));
+                            }
+                            UiIntent::SetInputGain(gain) => {
+                                input_gain.store(f32_to_u32(gain), Ordering::Relaxed);
+                            }
+                            UiIntent::SaveSettings(ref settings) => {
+                                let _ = settings_io::save_settings(settings);
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    if *shutdown_rx.borrow() {
+                        return Ok(());
+                    }
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
             }
         }
     }
@@ -240,6 +284,7 @@ async fn connect_and_run_session(
     input_gain: Arc<std::sync::atomic::AtomicU32>,
     output_gain: Arc<std::sync::atomic::AtomicU32>,
     loopback_active: Arc<AtomicBool>,
+    session_voice_active: Arc<AtomicBool>,
     shutdown_rx: &mut watch::Receiver<bool>,
 ) -> Result<()> {
     let _ = tx_event.send(UiEvent::SetConnected(false));
@@ -383,6 +428,7 @@ async fn connect_and_run_session(
     }
 
     let (voice_die_tx, mut voice_die_rx) = watch::channel::<bool>(false);
+    let _session_voice_flag = SessionVoiceFlag::new(session_voice_active.clone());
 
     let _voice_send = tokio::spawn(voice_send_loop(
         conn.clone(),
@@ -646,6 +692,52 @@ async fn connect_and_run_session(
     }
 }
 
+async fn mic_test_loop(
+    capture: Arc<audio::capture::Capture>,
+    playout: Arc<audio::playout::Playout>,
+    tx_event: Sender<UiEvent>,
+    input_gain: Arc<std::sync::atomic::AtomicU32>,
+    loopback_active: Arc<AtomicBool>,
+    session_voice_active: Arc<AtomicBool>,
+    running: Arc<AtomicBool>,
+    shutdown_rx: watch::Receiver<bool>,
+) {
+    let sample_rate = 48_000u32;
+    let channels = 1usize;
+    let frame_ms = 20u32;
+    let frame_samples = (sample_rate as usize * frame_ms as usize / 1000) * channels;
+
+    let mut pcm = vec![0i16; frame_samples];
+    let mut tick = tokio::time::interval(Duration::from_millis(10));
+
+    loop {
+        if !running.load(Ordering::Relaxed) || *shutdown_rx.borrow() {
+            return;
+        }
+        tick.tick().await;
+
+        if !loopback_active.load(Ordering::Relaxed) || session_voice_active.load(Ordering::Relaxed)
+        {
+            continue;
+        }
+
+        if !capture.read_frame(&mut pcm) {
+            continue;
+        }
+
+        let gain = u32_to_f32(input_gain.load(Ordering::Relaxed));
+        if (gain - 1.0).abs() > 0.001 {
+            for s in pcm.iter_mut() {
+                *s = (*s as f32 * gain).clamp(-32768.0, 32767.0) as i16;
+            }
+        }
+
+        playout.push_pcm(&pcm);
+        let waveform = build_mic_test_waveform(&pcm, 96);
+        let _ = tx_event.send(UiEvent::MicTestWaveform(waveform));
+    }
+}
+
 async fn voice_send_loop(
     conn: quinn::Connection,
     codec: Arc<Mutex<audio::opus::OpusCodec>>,
@@ -678,15 +770,6 @@ async fn voice_send_loop(
     loop {
         tick.tick().await;
 
-        // Don't send voice when self-muted
-        if self_muted.load(Ordering::Relaxed) {
-            continue;
-        }
-
-        if push_to_talk && !ptt_active.load(Ordering::Relaxed) {
-            continue;
-        }
-
         if !capture.read_frame(&mut pcm) {
             continue;
         }
@@ -702,6 +785,14 @@ async fn voice_send_loop(
         // Loopback: feed capture directly to playout for mic testing
         if loopback_active.load(Ordering::Relaxed) {
             playout.push_pcm(&pcm);
+            let waveform = build_mic_test_waveform(&pcm, 96);
+            let _ = tx_event.send(UiEvent::MicTestWaveform(waveform));
+        }
+
+        let can_send = !self_muted.load(Ordering::Relaxed)
+            && (!push_to_talk || ptt_active.load(Ordering::Relaxed));
+        if !can_send {
+            continue;
         }
 
         // Apply DSP pipeline (noise suppression + AGC + VAD)
@@ -831,6 +922,30 @@ fn stable_route_hash_u32(bytes: &[u8]) -> u32 {
     h
 }
 
+fn build_mic_test_waveform(pcm: &[i16], points: usize) -> Vec<f32> {
+    if pcm.is_empty() || points == 0 {
+        return Vec::new();
+    }
+
+    let chunk = (pcm.len() / points.max(1)).max(1);
+    let mut out = Vec::with_capacity(points);
+
+    for i in 0..points {
+        let start = i * chunk;
+        if start >= pcm.len() {
+            break;
+        }
+
+        let end = ((i + 1) * chunk).min(pcm.len());
+        let slice = &pcm[start..end];
+        let signed_mean =
+            slice.iter().map(|s| *s as f32 / 32768.0).sum::<f32>() / slice.len() as f32;
+        out.push(signed_mean.clamp(-1.0, 1.0));
+    }
+
+    out
+}
+
 fn f32_to_u32(f: f32) -> u32 {
     f.to_bits()
 }
@@ -845,6 +960,21 @@ fn unix_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+struct SessionVoiceFlag(Arc<AtomicBool>);
+
+impl SessionVoiceFlag {
+    fn new(flag: Arc<AtomicBool>) -> Self {
+        flag.store(true, Ordering::Relaxed);
+        Self(flag)
+    }
+}
+
+impl Drop for SessionVoiceFlag {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Relaxed);
+    }
 }
 
 struct Backoff {

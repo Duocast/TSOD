@@ -22,7 +22,13 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
             // Top row: avatar + name + status
             ui.horizontal(|ui: &mut egui::Ui| {
                 // Clickable avatar button
-                let initial = model.nick.chars().next().unwrap_or('?').to_uppercase().to_string();
+                let initial = model
+                    .nick
+                    .chars()
+                    .next()
+                    .unwrap_or('?')
+                    .to_uppercase()
+                    .to_string();
                 let status_color = if model.connected {
                     theme::COLOR_ONLINE
                 } else {
@@ -52,7 +58,8 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
 
                 // Status indicator dot
                 let dot_pos = rect.center() + egui::vec2(10.0, 10.0);
-                ui.painter().circle_filled(dot_pos, 6.0, theme::COLOR_BG_DARK);
+                ui.painter()
+                    .circle_filled(dot_pos, 6.0, theme::COLOR_BG_DARK);
                 ui.painter().circle_filled(dot_pos, 4.0, status_color);
 
                 if response.clicked() {
@@ -100,7 +107,10 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                 let mute_btn = ui.add_sized(
                     btn_size,
                     egui::Button::new(
-                        egui::RichText::new(mute_icon).size(10.0).color(mute_text_color).strong(),
+                        egui::RichText::new(mute_icon)
+                            .size(10.0)
+                            .color(mute_text_color)
+                            .strong(),
                     )
                     .fill(mute_fill)
                     .rounding(4.0),
@@ -114,7 +124,11 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                 ui.add_space(2.0);
 
                 // Deafen button
-                let deafen_label = if model.self_deafened { "Undeafen" } else { "Deafen" };
+                let deafen_label = if model.self_deafened {
+                    "Undeafen"
+                } else {
+                    "Deafen"
+                };
                 let deafen_fill = if model.self_deafened {
                     theme::COLOR_DANGER.linear_multiply(0.3)
                 } else {
@@ -130,7 +144,10 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                 let deafen_btn = ui.add_sized(
                     btn_size,
                     egui::Button::new(
-                        egui::RichText::new(deafen_icon).size(10.0).color(deafen_text_color).strong(),
+                        egui::RichText::new(deafen_icon)
+                            .size(10.0)
+                            .color(deafen_text_color)
+                            .strong(),
                     )
                     .fill(deafen_fill)
                     .rounding(4.0),
@@ -140,38 +157,17 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                     let _ = tx_intent.send(UiIntent::ToggleSelfDeafen);
                 }
                 deafen_btn.on_hover_text(deafen_label);
-
-                // Spacer pushes settings to right
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui: &mut egui::Ui| {
-                    let settings_btn = ui.add_sized(
-                        btn_size,
-                        egui::Button::new(
-                            egui::RichText::new("SET").size(10.0).color(theme::COLOR_TEXT_DIM).strong(),
-                        )
-                        .fill(theme::COLOR_BG_LIGHT)
-                        .rounding(4.0),
-                    );
-                    if settings_btn.clicked() {
-                        model.show_settings = !model.show_settings;
-                    }
-                    settings_btn.on_hover_text("Settings");
-                });
             });
 
             // VAD level bar (when voice is active)
             if let Some(vad) = model.vad_level {
                 ui.add_space(4.0);
                 let bar_width = ui.available_width();
-                let (rect, _) = ui.allocate_exact_size(
-                    egui::vec2(bar_width, 4.0),
-                    egui::Sense::hover(),
-                );
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(bar_width, 4.0), egui::Sense::hover());
                 ui.painter().rect_filled(rect, 2.0, theme::COLOR_BG_MEDIUM);
                 let filled_width = bar_width * vad;
-                let filled = egui::Rect::from_min_size(
-                    rect.min,
-                    egui::vec2(filled_width, 4.0),
-                );
+                let filled = egui::Rect::from_min_size(rect.min, egui::vec2(filled_width, 4.0));
                 let color = if vad > 0.5 {
                     theme::COLOR_ONLINE
                 } else {

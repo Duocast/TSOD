@@ -56,6 +56,7 @@ pub enum UiEvent {
 
     // Voice
     VadLevel(f32),
+    MicTestWaveform(Vec<f32>),
     VoiceActivity {
         user_id: String,
         speaking: bool,
@@ -98,8 +99,12 @@ pub enum UiEvent {
 #[derive(Debug, Clone)]
 pub enum UiIntent {
     Quit,
-    SendChat { text: String },
-    JoinChannel { channel_id: String },
+    SendChat {
+        text: String,
+    },
+    JoinChannel {
+        channel_id: String,
+    },
     LeaveChannel,
     CreateChannel {
         name: String,
@@ -117,28 +122,66 @@ pub enum UiIntent {
     Help,
 
     // Chat
-    EditMessage { message_id: String, new_text: String },
-    DeleteMessage { message_id: String },
-    AddReaction { message_id: String, emoji: String },
-    RemoveReaction { message_id: String, emoji: String },
+    EditMessage {
+        message_id: String,
+        new_text: String,
+    },
+    DeleteMessage {
+        message_id: String,
+    },
+    AddReaction {
+        message_id: String,
+        emoji: String,
+    },
+    RemoveReaction {
+        message_id: String,
+        emoji: String,
+    },
     SendTyping,
 
     // Moderation
-    KickUser { user_id: String, reason: String },
-    BanUser { user_id: String, reason: String, duration: u32 },
-    MuteUser { user_id: String, muted: bool },
-    DeafenUser { user_id: String, deafened: bool },
-    MoveUser { user_id: String, target_channel_id: String },
-    TimeoutUser { user_id: String, duration: u32, reason: String },
+    KickUser {
+        user_id: String,
+        reason: String,
+    },
+    BanUser {
+        user_id: String,
+        reason: String,
+        duration: u32,
+    },
+    MuteUser {
+        user_id: String,
+        muted: bool,
+    },
+    DeafenUser {
+        user_id: String,
+        deafened: bool,
+    },
+    MoveUser {
+        user_id: String,
+        target_channel_id: String,
+    },
+    TimeoutUser {
+        user_id: String,
+        duration: u32,
+        reason: String,
+    },
 
     // Poke
-    PokeUser { user_id: String, message: String },
+    PokeUser {
+        user_id: String,
+        message: String,
+    },
 
     // Whisper
-    SetWhisperTargets { targets: Vec<String> },
+    SetWhisperTargets {
+        targets: Vec<String>,
+    },
 
     // File upload
-    UploadFile { path: String },
+    UploadFile {
+        path: String,
+    },
 
     // Settings: Audio
     SetNoiseSuppression(bool),
@@ -387,13 +430,41 @@ impl HotkeyAction {
 
 pub fn default_hotkeys() -> Vec<HotkeyBinding> {
     vec![
-        HotkeyBinding { action: HotkeyAction::ToggleMute, key: "Ctrl+M".into(), enabled: true },
-        HotkeyBinding { action: HotkeyAction::ToggleDeafen, key: "Ctrl+D".into(), enabled: true },
-        HotkeyBinding { action: HotkeyAction::PushToTalk, key: "Space".into(), enabled: true },
-        HotkeyBinding { action: HotkeyAction::ToggleScreenShare, key: "Ctrl+Shift+S".into(), enabled: true },
-        HotkeyBinding { action: HotkeyAction::ToggleVideo, key: "Ctrl+Shift+V".into(), enabled: true },
-        HotkeyBinding { action: HotkeyAction::FocusChat, key: "Ctrl+T".into(), enabled: true },
-        HotkeyBinding { action: HotkeyAction::Disconnect, key: "Ctrl+Q".into(), enabled: true },
+        HotkeyBinding {
+            action: HotkeyAction::ToggleMute,
+            key: "Ctrl+M".into(),
+            enabled: true,
+        },
+        HotkeyBinding {
+            action: HotkeyAction::ToggleDeafen,
+            key: "Ctrl+D".into(),
+            enabled: true,
+        },
+        HotkeyBinding {
+            action: HotkeyAction::PushToTalk,
+            key: "Space".into(),
+            enabled: true,
+        },
+        HotkeyBinding {
+            action: HotkeyAction::ToggleScreenShare,
+            key: "Ctrl+Shift+S".into(),
+            enabled: true,
+        },
+        HotkeyBinding {
+            action: HotkeyAction::ToggleVideo,
+            key: "Ctrl+Shift+V".into(),
+            enabled: true,
+        },
+        HotkeyBinding {
+            action: HotkeyAction::FocusChat,
+            key: "Ctrl+T".into(),
+            enabled: true,
+        },
+        HotkeyBinding {
+            action: HotkeyAction::Disconnect,
+            key: "Ctrl+Q".into(),
+            enabled: true,
+        },
     ]
 }
 
@@ -485,7 +556,7 @@ pub struct ChatMessage {
     pub author_id: String,
     pub author_name: String,
     pub text: String,
-    pub timestamp: i64,    // unix millis
+    pub timestamp: i64, // unix millis
     pub attachments: Vec<AttachmentData>,
     pub reply_to: Option<String>,
     pub reactions: Vec<ReactionData>,
@@ -577,6 +648,7 @@ pub struct UiModel {
 
     // Mic test loopback (runtime)
     pub loopback_active: bool,
+    pub mic_test_waveform: Vec<f32>,
 
     // Create channel dialog
     pub show_create_channel: bool,
@@ -647,6 +719,7 @@ impl Default for UiModel {
             input_devices: Vec::new(),
             output_devices: Vec::new(),
             loopback_active: false,
+            mic_test_waveform: Vec::new(),
             show_create_channel: false,
             create_channel_name: String::new(),
             create_channel_description: String::new(),
@@ -684,7 +757,10 @@ impl UiModel {
             }
             UiEvent::SetStatus(s) => self.status_line = s,
             UiEvent::SetChannels(chs) => self.channels = chs,
-            UiEvent::UpdateChannelMembers { channel_id, members } => {
+            UiEvent::UpdateChannelMembers {
+                channel_id,
+                members,
+            } => {
                 self.members.insert(channel_id, members);
             }
             UiEvent::MessageReceived(msg) => {
@@ -695,7 +771,11 @@ impl UiModel {
                     msgs.pop_front();
                 }
             }
-            UiEvent::MessageEdited { channel_id, message_id, new_text } => {
+            UiEvent::MessageEdited {
+                channel_id,
+                message_id,
+                new_text,
+            } => {
                 if let Some(msgs) = self.messages.get_mut(&channel_id) {
                     if let Some(msg) = msgs.iter_mut().find(|m| m.message_id == message_id) {
                         msg.text = new_text;
@@ -703,12 +783,18 @@ impl UiModel {
                     }
                 }
             }
-            UiEvent::MessageDeleted { channel_id, message_id } => {
+            UiEvent::MessageDeleted {
+                channel_id,
+                message_id,
+            } => {
                 if let Some(msgs) = self.messages.get_mut(&channel_id) {
                     msgs.retain(|m| m.message_id != message_id);
                 }
             }
-            UiEvent::TypingIndicator { channel_id, user_name } => {
+            UiEvent::TypingIndicator {
+                channel_id,
+                user_name,
+            } => {
                 let typers = self.typing_users.entry(channel_id).or_default();
                 typers.retain(|(name, _)| name != &user_name);
                 typers.push((user_name, std::time::Instant::now()));
@@ -717,12 +803,16 @@ impl UiModel {
                 let members = self.members.entry(channel_id).or_default();
                 members.push(member);
             }
-            UiEvent::MemberLeft { channel_id, user_id } => {
+            UiEvent::MemberLeft {
+                channel_id,
+                user_id,
+            } => {
                 if let Some(members) = self.members.get_mut(&channel_id) {
                     members.retain(|m| m.user_id != user_id);
                 }
             }
             UiEvent::VadLevel(v) => self.vad_level = Some(v),
+            UiEvent::MicTestWaveform(samples) => self.mic_test_waveform = samples,
             UiEvent::VoiceActivity { user_id, speaking } => {
                 self.speaking_users.insert(user_id, speaking);
             }
@@ -742,7 +832,10 @@ impl UiModel {
             UiEvent::UserProfileLoaded(_profile) => {}
             UiEvent::SetSelfMuted(m) => self.self_muted = m,
             UiEvent::SetSelfDeafened(d) => self.self_deafened = d,
-            UiEvent::SetAudioDevices { input_devices, output_devices } => {
+            UiEvent::SetAudioDevices {
+                input_devices,
+                output_devices,
+            } => {
                 self.input_devices = input_devices;
                 self.output_devices = output_devices;
             }
@@ -751,6 +844,9 @@ impl UiModel {
             }
             UiEvent::SetLoopbackActive(active) => {
                 self.loopback_active = active;
+                if !active {
+                    self.mic_test_waveform.clear();
+                }
             }
             UiEvent::SettingsLoaded(s) => {
                 self.settings = *s.clone();
@@ -767,7 +863,11 @@ impl UiModel {
 
         // Expire old notifications (>5s)
         let notif_cutoff = std::time::Instant::now() - std::time::Duration::from_secs(5);
-        while self.notifications.front().is_some_and(|n| n.created < notif_cutoff) {
+        while self
+            .notifications
+            .front()
+            .is_some_and(|n| n.created < notif_cutoff)
+        {
             self.notifications.pop_front();
         }
     }
@@ -775,6 +875,11 @@ impl UiModel {
     /// Sync persisted settings into runtime model state.
     pub fn sync_settings_to_runtime(&mut self) {
         self.ptt_enabled = self.settings.capture_mode == CaptureMode::PushToTalk;
+
+        let nick = self.settings.identity_nickname.trim();
+        if !nick.is_empty() {
+            self.nick = nick.to_string();
+        }
     }
 
     /// Get messages for the currently selected channel.
