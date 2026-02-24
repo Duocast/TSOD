@@ -1,79 +1,81 @@
-//! Acoustic Echo Cancellation (AEC) - feature-gated.
+//! Acoustic Echo Cancellation (AEC) using `sonora-aec3`.
 //!
-//! Uses a Normalized Least Mean Squares (NLMS) adaptive filter to cancel
-//! the echo of the playout signal from the capture signal.
-//!
-//! This is a simplified AEC suitable for basic echo cancellation. For
-//! production use, consider integrating WebRTC's AEC3 via FFI.
+//! This wraps the crate with a small API that fits the existing capture/playout
+//! pipeline: feed speaker/reference audio, then process microphone/capture audio.
 
-/// NLMS-based Acoustic Echo Canceller.
+use anyhow::{Context, Result};
+use sonora_aec3::Aec as SonoraAec;
+
+const TEN_MS_AT_48K: usize = 480;
+
+/// AEC3-based acoustic echo canceller.
 pub struct Aec {
-    /// Adaptive filter taps (length = filter_len).
-    weights: Vec<f32>,
-    /// Reference signal buffer (playout audio, ring buffer).
-    ref_buf: Vec<f32>,
-    /// Write position in ref_buf.
-    ref_pos: usize,
-    /// Step size (mu) for NLMS adaptation.
-    mu: f32,
-    /// Small constant to prevent division by zero.
-    delta: f32,
+    inner: SonoraAec,
+    render_buf: Vec<i16>,
+    capture_buf: Vec<i16>,
 }
 
 impl Aec {
-    /// Create a new AEC.
-    /// `filter_len`: number of taps (e.g., 4800 = 100ms at 48kHz)
-    /// `mu`: NLMS step size (0.0..1.0, typical 0.5)
-    pub fn new(filter_len: usize, mu: f32) -> Self {
-        Self {
-            weights: vec![0.0; filter_len],
-            ref_buf: vec![0.0; filter_len],
-            ref_pos: 0,
-            mu: mu.clamp(0.01, 1.0),
-            delta: 1e-6,
-        }
+    /// Create a new AEC instance for 48kHz mono audio.
+    pub fn new(sample_rate: u32) -> Result<Self> {
+        anyhow::ensure!(sample_rate == 48_000, "AEC requires 48kHz audio");
+
+        let inner =
+            SonoraAec::new(sample_rate as usize, 1).context("create sonora-aec3 processor")?;
+
+        Ok(Self {
+            inner,
+            render_buf: Vec::with_capacity(TEN_MS_AT_48K),
+            capture_buf: Vec::with_capacity(TEN_MS_AT_48K),
+        })
     }
 
-    /// Feed reference (playout) audio to the AEC. Call this whenever
-    /// audio is sent to the speaker so the AEC can model the echo path.
+    /// Feed reference/playout samples to the AEC.
     pub fn feed_reference(&mut self, reference: &[i16]) {
-        for &s in reference {
-            self.ref_buf[self.ref_pos] = s as f32;
-            self.ref_pos = (self.ref_pos + 1) % self.ref_buf.len();
+        self.render_buf.extend_from_slice(reference);
+
+        while self.render_buf.len() >= TEN_MS_AT_48K {
+            let frame: Vec<f32> = self
+                .render_buf
+                .drain(..TEN_MS_AT_48K)
+                .map(|s| s as f32 / 32768.0)
+                .collect();
+            // Render step should not be fatal; if it fails, we simply skip this frame.
+            let _ = self.inner.analyze_render(&frame);
         }
     }
 
-    /// Process a capture frame in-place, removing estimated echo.
+    /// Process capture/microphone samples in place.
     pub fn process(&mut self, capture: &mut [i16]) {
-        let filter_len = self.weights.len();
+        self.capture_buf.extend_from_slice(capture);
+        let mut out = Vec::with_capacity(self.capture_buf.len());
 
-        for s in capture.iter_mut() {
-            let mic = *s as f32;
+        while self.capture_buf.len() >= TEN_MS_AT_48K {
+            let mut frame: Vec<f32> = self
+                .capture_buf
+                .drain(..TEN_MS_AT_48K)
+                .map(|s| s as f32 / 32768.0)
+                .collect();
 
-            // Compute filter output (estimated echo)
-            let mut echo_est = 0.0f32;
-            let mut ref_power = 0.0f32;
+            // If processing fails for a frame, we still forward converted audio.
+            let _ = self.inner.process_capture(&mut frame);
+            out.extend(frame.into_iter().map(|s| {
+                (s * 32768.0)
+                    .round()
+                    .clamp(i16::MIN as f32, i16::MAX as f32) as i16
+            }));
+        }
 
-            for k in 0..filter_len {
-                let idx = (self.ref_pos + self.ref_buf.len() - 1 - k) % self.ref_buf.len();
-                let r = self.ref_buf[idx];
-                echo_est += self.weights[k] * r;
-                ref_power += r * r;
-            }
+        // Preserve tail samples that have not yet made a full 10ms frame by appending
+        // the original trailing input unchanged.
+        let tail = self.capture_buf.len();
+        if tail > 0 {
+            let start = capture.len().saturating_sub(tail);
+            out.extend_from_slice(&capture[start..]);
+        }
 
-            // Error = mic - estimated echo
-            let error = mic - echo_est;
-
-            // NLMS weight update
-            let norm = ref_power + self.delta;
-            let step = self.mu * error / norm;
-
-            for k in 0..filter_len {
-                let idx = (self.ref_pos + self.ref_buf.len() - 1 - k) % self.ref_buf.len();
-                self.weights[k] += step * self.ref_buf[idx];
-            }
-
-            *s = error.round().clamp(-32768.0, 32767.0) as i16;
+        if out.len() == capture.len() {
+            capture.copy_from_slice(&out);
         }
     }
 }

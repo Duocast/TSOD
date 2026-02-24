@@ -497,7 +497,7 @@ fn page_capture(
     }
 
     if ui
-        .checkbox(&mut s.echo_cancellation, "Echo Cancellation (experimental)")
+        .checkbox(&mut s.echo_cancellation, "Echo Cancellation")
         .changed()
     {
         dirty = true;
