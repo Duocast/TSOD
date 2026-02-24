@@ -1,3 +1,9 @@
+[package]
+name = "vp-client"
+version = "0.1.0"
+edition = "2021"
+
+[features]
 default = ["dsp", "aec"]
 dsp = []
 aec = ["dsp", "dep:sonora-aec3"]
