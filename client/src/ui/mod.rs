@@ -51,7 +51,17 @@ impl VpApp {
     }
 }
 
+impl VpApp {
+    fn signal_quit(&self) {
+        let _ = self.tx_intent.send(UiIntent::Quit);
+    }
+}
+
 impl eframe::App for VpApp {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.signal_quit();
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Drain backend events
         self.drain_events();
