@@ -103,8 +103,9 @@ fn main() -> Result<()> {
     running.store(false, Ordering::Relaxed);
     let _ = shutdown_tx.send(true);
 
-    // Wait for backend to finish
-    let _ = backend_thread.join();
+    // Do not block UI shutdown waiting for backend/network teardown.
+    // Once the main thread returns, the process exits immediately.
+    let _ = backend_thread;
 
     gui_result.map_err(|e| anyhow!("eframe error: {e}"))
 }
