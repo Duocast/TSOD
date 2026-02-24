@@ -169,6 +169,10 @@ async fn app_task(
     if let Some(ref dsp) = capture_dsp {
         let mut d = dsp.lock().await;
         d.set_vad_threshold(cfg.vad_threshold);
+        d.set_noise_suppression(saved_settings.noise_suppression);
+        d.set_agc(saved_settings.agc_enabled);
+        d.set_agc_target(saved_settings.agc_target_db);
+        d.set_echo_cancellation(saved_settings.echo_cancellation);
     }
 
     let channel_id_str = cfg.channel_id.clone().unwrap_or_default();
@@ -460,6 +464,7 @@ async fn connect_and_run_session(
         codec.clone(),
         playout.clone(),
         jitter.clone(),
+        capture_dsp.clone(),
         self_deafened.clone(),
         output_gain.clone(),
         voice_die_tx.clone(),
@@ -689,6 +694,7 @@ async fn connect_and_run_session(
                                 d.set_agc(settings.agc_enabled);
                                 d.set_vad_threshold(settings.vad_threshold);
                                 d.set_agc_target(settings.agc_target_db);
+                                d.set_echo_cancellation(settings.echo_cancellation);
                             }
                             input_gain.store(f32_to_u32(settings.input_gain), Ordering::Relaxed);
                             output_gain.store(f32_to_u32(settings.output_gain), Ordering::Relaxed);
@@ -884,6 +890,7 @@ async fn voice_recv_loop(
     codec: Arc<Mutex<audio::opus::OpusCodec>>,
     playout: Arc<audio::playout::Playout>,
     jitter: Arc<Mutex<audio::jitter::JitterBuffer>>,
+    capture_dsp: Option<Arc<Mutex<audio::dsp::CaptureDsp>>>,
     self_deafened: Arc<AtomicBool>,
     output_gain: Arc<std::sync::atomic::AtomicU32>,
     voice_die_tx: watch::Sender<bool>,
@@ -930,6 +937,12 @@ async fn voice_recv_loop(
                         *s = (*s as f32 * gain).clamp(-32768.0, 32767.0) as i16;
                     }
                 }
+
+                if let Some(ref dsp) = capture_dsp {
+                    let mut d = dsp.lock().await;
+                    d.feed_echo_reference(&pcm_out[..n]);
+                }
+
                 playout.push_pcm(&pcm_out[..n]);
             }
         }

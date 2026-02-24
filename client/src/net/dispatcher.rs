@@ -458,7 +458,7 @@ fn default_caps(alpn: &str) -> pb::ClientCaps {
             supports_spatial_audio: false,
             supports_whisper: true,
             supports_noise_suppression: true,
-            supports_echo_cancellation: false,
+            supports_echo_cancellation: cfg!(feature = "aec"),
             supports_agc: true,
         }),
         voice_audio: Some(pb::AudioCaps {
