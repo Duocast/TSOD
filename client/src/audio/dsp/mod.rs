@@ -1,16 +1,16 @@
 //! DSP pipeline: RNNoise (noise suppression + VAD), AGC, and optional AEC.
 //!
 //! Processing chain (capture path):
-//!   Mic PCM → AGC (pre-amplify) → RNNoise (denoise + VAD) → [AEC if enabled] → output
+//!   Mic PCM → AGC (pre-amplify) → [AEC if enabled] → RNNoise (denoise + VAD) → output
 //!
 //! Processing chain (playout path):
 //!   Network PCM → [Spatial mix if enabled] → AGC (normalize) → speaker
 
-pub mod rnnoise;
-pub mod agc;
-pub mod vad;
 #[cfg(feature = "aec")]
 pub mod aec;
+pub mod agc;
+pub mod rnnoise;
+pub mod vad;
 
 use anyhow::Result;
 
@@ -21,6 +21,9 @@ pub struct CaptureDsp {
     vad_threshold: f32,
     noise_suppression_enabled: bool,
     agc_enabled: bool,
+    #[cfg(feature = "aec")]
+    aec: Option<aec::Aec>,
+    echo_cancellation_enabled: bool,
 }
 
 impl CaptureDsp {
@@ -34,6 +37,9 @@ impl CaptureDsp {
             vad_threshold: 0.5,
             noise_suppression_enabled: true,
             agc_enabled: true,
+            #[cfg(feature = "aec")]
+            aec: Some(aec::Aec::new(sample_rate)?),
+            echo_cancellation_enabled: false,
         })
     }
 
@@ -44,6 +50,13 @@ impl CaptureDsp {
         // Pre-amplify with AGC
         if self.agc_enabled {
             self.agc.process(pcm);
+        }
+
+        #[cfg(feature = "aec")]
+        if self.echo_cancellation_enabled {
+            if let Some(aec) = self.aec.as_mut() {
+                aec.process(pcm);
+            }
         }
 
         // Denoise and get VAD
@@ -82,6 +95,21 @@ impl CaptureDsp {
     /// Enable or disable automatic gain control.
     pub fn set_agc(&mut self, enabled: bool) {
         self.agc_enabled = enabled;
+    }
+
+    /// Enable or disable acoustic echo cancellation.
+    pub fn set_echo_cancellation(&mut self, enabled: bool) {
+        self.echo_cancellation_enabled = enabled;
+    }
+
+    /// Feed playout/reference audio to the echo canceller.
+    pub fn feed_echo_reference(&mut self, pcm: &[i16]) {
+        #[cfg(feature = "aec")]
+        if self.echo_cancellation_enabled {
+            if let Some(aec) = self.aec.as_mut() {
+                aec.feed_reference(pcm);
+            }
+        }
     }
 }
 

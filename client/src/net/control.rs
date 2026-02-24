@@ -17,15 +17,23 @@ pub struct ControlClient {
 
 impl ControlClient {
     pub fn new(send: quinn::SendStream, recv: quinn::RecvStream) -> Self {
-        Self { session_id: None, send, recv, next_req: 1 }
+        Self {
+            session_id: None,
+            send,
+            recv,
+            next_req: 1,
+        }
     }
 
     pub async fn hello_and_auth(&mut self, alpn: &str, dev_token: &str) -> Result<()> {
         let hello = pb::Hello {
             caps: Some(default_caps(alpn)),
-            device_id: Some(pb::DeviceId { value: "dev-device".into() }),
+            device_id: Some(pb::DeviceId {
+                value: "dev-device".into(),
+            }),
         };
-        self.send_req(pb::client_to_server::Payload::Hello(hello)).await?;
+        self.send_req(pb::client_to_server::Payload::Hello(hello))
+            .await?;
         let resp = self.read_resp().await?;
         match resp.payload {
             Some(pb::server_to_client::Payload::HelloAck(ack)) => {
@@ -35,9 +43,12 @@ impl ControlClient {
         }
 
         let auth = pb::AuthRequest {
-            method: Some(pb::auth_request::Method::DevToken(pb::DevTokenAuth { token: dev_token.into() })),
+            method: Some(pb::auth_request::Method::DevToken(pb::DevTokenAuth {
+                token: dev_token.into(),
+            })),
         };
-        self.send_req(pb::client_to_server::Payload::AuthRequest(auth)).await?;
+        self.send_req(pb::client_to_server::Payload::AuthRequest(auth))
+            .await?;
         let resp = self.read_resp().await?;
         if resp.error.is_some() {
             return Err(anyhow!("auth failed: {:?}", resp.error));
@@ -49,8 +60,13 @@ impl ControlClient {
     }
 
     pub async fn join_channel(&mut self, channel_id: &str) -> Result<()> {
-        let req = pb::JoinChannelRequest { channel_id: Some(pb::ChannelId { value: channel_id.into() }) };
-        self.send_req(pb::client_to_server::Payload::JoinChannelRequest(req)).await?;
+        let req = pb::JoinChannelRequest {
+            channel_id: Some(pb::ChannelId {
+                value: channel_id.into(),
+            }),
+        };
+        self.send_req(pb::client_to_server::Payload::JoinChannelRequest(req))
+            .await?;
         let resp = self.read_resp().await?;
         if let Some(err) = resp.error {
             return Err(anyhow!("join error: {:?}", err));
@@ -60,7 +76,8 @@ impl ControlClient {
 
     pub async fn ping(&mut self) -> Result<()> {
         let nonce = rand::random::<u64>();
-        self.send_req(pb::client_to_server::Payload::Ping(pb::Ping { nonce })).await?;
+        self.send_req(pb::client_to_server::Payload::Ping(pb::Ping { nonce }))
+            .await?;
         let resp = timeout(Duration::from_secs(2), self.read_resp()).await??;
         match resp.payload {
             Some(pb::server_to_client::Payload::Pong(p)) if p.nonce == nonce => Ok(()),
@@ -113,7 +130,7 @@ fn default_caps(alpn: &str) -> pb::ClientCaps {
             supports_spatial_audio: false,
             supports_whisper: true,
             supports_noise_suppression: true,
-            supports_echo_cancellation: false,
+            supports_echo_cancellation: cfg!(feature = "aec"),
             supports_agc: true,
         }),
         voice_audio: Some(pb::AudioCaps {
@@ -125,7 +142,9 @@ fn default_caps(alpn: &str) -> pb::ClientCaps {
             max_simultaneous_decodes: 8,
         }),
         screen_video: None,
-        caps_hash: Some(pb::CapabilityHash { sha256: sha256_bytes(alpn.as_bytes()) }),
+        caps_hash: Some(pb::CapabilityHash {
+            sha256: sha256_bytes(alpn.as_bytes()),
+        }),
         screen_share: None,
         camera_video: None,
     }
