@@ -139,7 +139,10 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
 
 fn common_download_directories() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
+    {
         dirs.push(home.join("Downloads"));
         dirs.push(home.join("Desktop"));
         dirs.push(home.join("Documents"));
