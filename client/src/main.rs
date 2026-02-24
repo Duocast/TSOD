@@ -667,6 +667,20 @@ async fn connect_and_run_session(
                                 }
                             }
                         }
+                        UiIntent::SetAvatar { path } => {
+                            match dispatcher.set_avatar(&path).await {
+                                Ok(()) => {
+                                    let _ = tx_event.send(UiEvent::AppendLog(
+                                        "[profile] avatar updated".to_string(),
+                                    ));
+                                }
+                                Err(e) => {
+                                    let _ = tx_event.send(UiEvent::AppendLog(
+                                        format!("[profile] set avatar failed: {e:#}"),
+                                    ));
+                                }
+                            }
+                        }
                         UiIntent::ApplySettings(ref settings) => {
                             // Apply all settings to the audio pipeline
                             if let Some(ref dsp) = capture_dsp {
