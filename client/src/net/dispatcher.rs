@@ -1,11 +1,7 @@
 use anyhow::{anyhow, Result};
-use std::{
-    collections::HashMap,
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::{
-    sync::{mpsc, oneshot, Mutex, RwLock, watch},
+    sync::{mpsc, oneshot, watch, Mutex, RwLock},
     time::timeout,
 };
 use tracing::warn;
@@ -101,7 +97,10 @@ impl ControlDispatcher {
             }),
         };
         let resp = self
-            .send_request(pb::client_to_server::Payload::Hello(hello), Duration::from_secs(5))
+            .send_request(
+                pb::client_to_server::Payload::Hello(hello),
+                Duration::from_secs(5),
+            )
             .await??;
 
         match resp.payload {
@@ -172,7 +171,9 @@ impl ControlDispatcher {
 
     pub async fn leave_channel(&self, channel_id: &str) -> Result<()> {
         let req = pb::LeaveChannelRequest {
-            channel_id: Some(pb::ChannelId { value: channel_id.into() }),
+            channel_id: Some(pb::ChannelId {
+                value: channel_id.into(),
+            }),
         };
         let resp = self
             .send_request(
@@ -219,7 +220,8 @@ impl ControlDispatcher {
         }
         match resp.payload {
             Some(pb::server_to_client::Payload::CreateChannelResponse(cr)) => {
-                let ch_id = cr.state
+                let ch_id = cr
+                    .state
                     .and_then(|s| s.channel_id)
                     .map(|id| id.value)
                     .unwrap_or_default();
@@ -231,7 +233,9 @@ impl ControlDispatcher {
 
     pub async fn send_chat(&self, channel_id: &str, text: &str) -> Result<()> {
         let req = pb::SendMessageRequest {
-            channel_id: Some(pb::ChannelId { value: channel_id.into() }),
+            channel_id: Some(pb::ChannelId {
+                value: channel_id.into(),
+            }),
             text: text.into(),
             attachments: vec![],
             reply_to_message_id: None,
@@ -246,6 +250,30 @@ impl ControlDispatcher {
 
         if let Some(err) = resp.error {
             return Err(anyhow!("send_chat error: {:?}", err));
+        }
+        Ok(())
+    }
+
+    pub async fn set_away_message(&self, message: &str) -> Result<()> {
+        let req = pb::UpdateUserProfileRequest {
+            display_name: String::new(),
+            description: String::new(),
+            status: if message.trim().is_empty() {
+                pb::OnlineStatus::Online as i32
+            } else {
+                pb::OnlineStatus::Idle as i32
+            },
+            custom_status_text: message.to_string(),
+        };
+        let resp = self
+            .send_request(
+                pb::client_to_server::Payload::UpdateUserProfileRequest(req),
+                Duration::from_secs(5),
+            )
+            .await??;
+
+        if let Some(err) = resp.error {
+            return Err(anyhow!("set_away_message error: {:?}", err));
         }
         Ok(())
     }

@@ -251,6 +251,15 @@ async fn app_task(
                             UiIntent::SaveSettings(ref settings) => {
                                 let _ = settings_io::save_settings(settings);
                             }
+                            UiIntent::SetAwayMessage { message } => {
+                                let _ = tx_event.send(UiEvent::SetAwayMessage(message.clone()));
+                                let text = if message.trim().is_empty() {
+                                    "[presence] away message cleared".to_string()
+                                } else {
+                                    format!("[presence] away message set: {message}")
+                                };
+                                let _ = tx_event.send(UiEvent::AppendLog(text));
+                            }
                             _ => {}
                         }
                     }
@@ -639,6 +648,24 @@ async fn connect_and_run_session(
                             let _ = tx_event.send(UiEvent::AppendLog(
                                 format!("[audio] output device: {dev}"),
                             ));
+                        }
+                        UiIntent::SetAwayMessage { message } => {
+                            let _ = tx_event.send(UiEvent::SetAwayMessage(message.clone()));
+                            match dispatcher.set_away_message(&message).await {
+                                Ok(()) => {
+                                    let text = if message.trim().is_empty() {
+                                        "[presence] away message cleared".to_string()
+                                    } else {
+                                        format!("[presence] away message set: {message}")
+                                    };
+                                    let _ = tx_event.send(UiEvent::AppendLog(text));
+                                }
+                                Err(e) => {
+                                    let _ = tx_event.send(UiEvent::AppendLog(
+                                        format!("[presence] set away message failed: {e:#}"),
+                                    ));
+                                }
+                            }
                         }
                         UiIntent::ApplySettings(ref settings) => {
                             // Apply all settings to the audio pipeline
