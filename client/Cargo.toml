@@ -1,16 +1,9 @@
-[package]
-name = "vp-client"
-version = "0.2.0"
-edition = "2021"
-
-[features]
 default = ["dsp", "aec"]
 dsp = []
 aec = ["dsp", "dep:sonora-aec3"]
 screen-share = []
 video-call = []
 e2ee = []
-pipewire-backend = ["dep:pipewire"]
 
 [dependencies]
 async-trait = "0.1"
@@ -55,7 +48,7 @@ dirs = "5"
 rfd = "0.15"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-pipewire = "0.9"
+pipewire = { version = "0.9", optional = true }
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 cpal = "0.15"
