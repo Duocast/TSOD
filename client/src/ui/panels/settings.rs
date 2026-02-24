@@ -3,6 +3,7 @@
 //! Categories: Application, Capture, Playback, Hotkeys, Chat, Downloads,
 //!             Notifications, Whisper, Screen Share, Video Call, Security
 
+use crate::settings_io;
 use crate::ui::model::{AppSettings, CaptureMode, SettingsPage, UiIntent, UiModel};
 use crate::ui::theme;
 use crossbeam_channel::Sender;
@@ -70,6 +71,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                             .send(UiIntent::ApplySettings(Box::new(model.settings.clone())));
                         let _ = tx_intent
                             .send(UiIntent::SaveSettings(Box::new(model.settings.clone())));
+                        let _ = settings_io::save_settings(&model.settings);
                     }
                 });
 
@@ -599,28 +601,24 @@ fn draw_mic_test_waveform(ui: &mut egui::Ui, samples: &[f32]) {
         egui::Stroke::new(1.0, theme::COLOR_BG_LIGHT),
     );
 
-    let count = samples.len().max(1);
-    let bar_step = rect.width() / count as f32;
-    let bar_width = (bar_step * 0.75).max(1.0);
-    let max_height = rect.height() * 0.45;
+    let count = samples.len().max(2);
+    let step_x = rect.width() / (count as f32 - 1.0);
+    let amp = rect.height() * 0.45;
 
-    for (i, level) in samples.iter().enumerate() {
-        let amp = level.clamp(0.0, 1.0);
-        let h = (amp * max_height).max(1.0);
-        let center_x = rect.left() + (i as f32 + 0.5) * bar_step;
-        let bar = egui::Rect::from_min_max(
-            egui::pos2(center_x - bar_width * 0.5, mid - h),
-            egui::pos2(center_x + bar_width * 0.5, mid + h),
-        );
-        let color = if amp > 0.75 {
-            theme::COLOR_DANGER
-        } else if amp > 0.35 {
-            theme::COLOR_ONLINE
-        } else {
-            theme::COLOR_ACCENT
-        };
-        ui.painter().rect_filled(bar, 0.0, color);
-    }
+    let points: Vec<egui::Pos2> = samples
+        .iter()
+        .enumerate()
+        .map(|(i, level)| {
+            let x = rect.left() + step_x * i as f32;
+            let y = mid - level.clamp(-1.0, 1.0) * amp;
+            egui::pos2(x, y)
+        })
+        .collect();
+
+    ui.painter().add(egui::Shape::line(
+        points,
+        egui::Stroke::new(2.0, theme::COLOR_ACCENT),
+    ));
 }
 
 // ── Playback ──────────────────────────────────────────────────────────

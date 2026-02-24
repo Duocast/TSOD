@@ -876,9 +876,9 @@ impl UiModel {
     pub fn sync_settings_to_runtime(&mut self) {
         self.ptt_enabled = self.settings.capture_mode == CaptureMode::PushToTalk;
 
-        let nickname = self.settings.identity_nickname.trim();
-        if !nickname.is_empty() {
-            self.nick = nickname.to_string();
+        let nick = self.settings.identity_nickname.trim();
+        if !nick.is_empty() {
+            self.nick = nick.to_string();
         }
     }
 
