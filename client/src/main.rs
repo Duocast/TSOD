@@ -36,7 +36,7 @@ use std::sync::{
             {
                 warn!("backend error: {e:#}");
             }
-        });
+        );
     });
 
     // Run the eframe GUI on the main thread
