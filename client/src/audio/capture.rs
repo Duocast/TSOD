@@ -124,7 +124,7 @@ mod linux {
         let listener = stream
             .add_local_listener_with_user_data(())
             .process({
-                move |stream, _| {
+                move |stream: &pw::stream::StreamRef, _: &mut ()| {
                     let Some(mut buf) = stream.dequeue_buffer() else {
                         return;
                     };
