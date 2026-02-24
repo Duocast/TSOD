@@ -1,3 +1,5 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 //! vp-client main — egui/eframe GUI + QUIC voice
 //!
 //! Architecture:
@@ -66,20 +68,18 @@ fn main() -> Result<()> {
             .build()
             .expect("Failed to create tokio runtime");
 
-        rt.block_on(async {
-            if let Err(e) = app_task(
-                backend_cfg,
-                backend_tx_event,
-                rx_intent,
-                backend_running,
-                shutdown_rx,
-                backend_ptt,
-            )
-            .await
-            {
-                warn!("backend error: {e:#}");
-            }
-        });
+        let app_result = rt.block_on(app_task(
+            backend_cfg,
+            backend_tx_event,
+            rx_intent,
+            backend_running,
+            shutdown_rx,
+            backend_ptt,
+        ));
+
+        if let Err(e) = app_result {
+            warn!("backend error: {e:#}");
+        }
     });
 
     // Run the eframe GUI on the main thread
@@ -94,9 +94,7 @@ fn main() -> Result<()> {
     let gui_result = eframe::run_native(
         "TSOD",
         native_options,
-        Box::new(move |cc| {
-            Ok(Box::new(VpApp::new(cc, tx_intent, rx_event)))
-        }),
+        Box::new(move |cc| Ok(Box::new(VpApp::new(cc, tx_intent, rx_event)))),
     );
 
     // GUI exited — signal backend to shut down
@@ -148,7 +146,9 @@ async fn app_task(
         channels as u8,
     )?));
     let capture = Arc::new(audio::capture::Capture::start(
-        sample_rate, channels, frame_ms,
+        sample_rate,
+        channels,
+        frame_ms,
     )?);
     let playout = Arc::new(audio::playout::Playout::start(sample_rate, channels)?);
     let jitter = Arc::new(Mutex::new(audio::jitter::JitterBuffer::new(64)));
@@ -156,9 +156,9 @@ async fn app_task(
     // DSP pipeline
     let dsp_enabled = !cfg.no_noise_suppression;
     let capture_dsp = if dsp_enabled {
-        Some(Arc::new(Mutex::new(
-            audio::dsp::CaptureDsp::new(sample_rate)?,
-        )))
+        Some(Arc::new(Mutex::new(audio::dsp::CaptureDsp::new(
+            sample_rate,
+        )?)))
     } else {
         None
     };
@@ -297,9 +297,7 @@ async fn connect_and_run_session(
                                                 .map(|t| t.unix_millis)
                                                 .unwrap_or(0),
                                             attachments: Vec::new(),
-                                            reply_to: mp
-                                                .reply_to_message_id
-                                                .map(|r| r.value),
+                                            reply_to: mp.reply_to_message_id.map(|r| r.value),
                                             reactions: Vec::new(),
                                             pinned: mp.pinned,
                                             edited: mp.edited_at.is_some(),
@@ -336,14 +334,11 @@ async fn connect_and_run_session(
                         }
                     }
                     PushEvent::Presence(p) => {
-                        let _ = tx_event.send(UiEvent::AppendLog(format!(
-                            "[presence] {:?}",
-                            p.kind
-                        )));
+                        let _ =
+                            tx_event.send(UiEvent::AppendLog(format!("[presence] {:?}", p.kind)));
                     }
                     PushEvent::Moderation(m) => {
-                        let _ = tx_event
-                            .send(UiEvent::AppendLog(format!("[moderation] {:?}", m)));
+                        let _ = tx_event.send(UiEvent::AppendLog(format!("[moderation] {:?}", m)));
                     }
                     PushEvent::ServerHint(h) => {
                         let mut parts = vec![];
@@ -351,16 +346,10 @@ async fn connect_and_run_session(
                             parts.push(format!("rr={}ms", h.receiver_report_interval_ms));
                         }
                         if h.max_stream_bitrate_bps != 0 {
-                            parts.push(format!(
-                                "stream_cap={}bps",
-                                h.max_stream_bitrate_bps
-                            ));
+                            parts.push(format!("stream_cap={}bps", h.max_stream_bitrate_bps));
                         }
                         if h.max_voice_bitrate_bps != 0 {
-                            parts.push(format!(
-                                "voice_cap={}bps",
-                                h.max_voice_bitrate_bps
-                            ));
+                            parts.push(format!("voice_cap={}bps", h.max_voice_bitrate_bps));
                         }
                         let msg = if parts.is_empty() {
                             "server_hint".into()
@@ -382,12 +371,10 @@ async fn connect_and_run_session(
         match dispatcher.join_channel(ch).await {
             Ok(()) => {
                 let _ = tx_event.send(UiEvent::SetChannelName(ch.to_string()));
-                let _ = tx_event
-                    .send(UiEvent::AppendLog(format!("[ctl] joined channel {ch}")));
+                let _ = tx_event.send(UiEvent::AppendLog(format!("[ctl] joined channel {ch}")));
             }
             Err(e) => {
-                let _ = tx_event
-                    .send(UiEvent::AppendLog(format!("[ctl] join failed: {e:#}")));
+                let _ = tx_event.send(UiEvent::AppendLog(format!("[ctl] join failed: {e:#}")));
             }
         }
     }
@@ -740,7 +727,14 @@ async fn voice_send_loop(
 
         let ts_ms = (unix_ms() & 0xFFFF_FFFF) as u32;
 
-        let d = make_voice_datagram(channel_route_hash, ssrc, seq, ts_ms, is_voice, &enc_out[..n]);
+        let d = make_voice_datagram(
+            channel_route_hash,
+            ssrc,
+            seq,
+            ts_ms,
+            is_voice,
+            &enc_out[..n],
+        );
         seq = seq.wrapping_add(1);
 
         if conn.send_datagram(d).is_err() {
