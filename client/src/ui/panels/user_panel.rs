@@ -47,14 +47,23 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                 };
                 ui.painter().circle_filled(rect.center(), 16.0, bg_color);
 
-                // Initial letter
-                ui.painter().text(
-                    rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    &initial,
-                    egui::FontId::proportional(15.0),
-                    theme::text_color(),
-                );
+                if let Some(avatar_url) = &model.avatar_url {
+                    let image_rect =
+                        egui::Rect::from_center_size(rect.center(), egui::vec2(30.0, 30.0));
+                    ui.put(
+                        image_rect,
+                        egui::Image::from_uri(avatar_url).fit_to_exact_size(egui::vec2(30.0, 30.0)),
+                    );
+                } else {
+                    // Initial letter
+                    ui.painter().text(
+                        rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        &initial,
+                        egui::FontId::proportional(15.0),
+                        theme::text_color(),
+                    );
+                }
 
                 // Status indicator dot
                 let dot_pos = rect.center() + egui::vec2(10.0, 10.0);
@@ -62,9 +71,17 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                 ui.painter().circle_filled(dot_pos, 4.0, status_color);
 
                 if response.clicked() {
-                    model.show_user_popup = !model.show_user_popup;
+                    if let Some(path) = rfd::FileDialog::new()
+                        .set_title("Select Avatar")
+                        .add_filter("Image", &["png", "jpg", "jpeg", "gif", "webp", "bmp"])
+                        .pick_file()
+                    {
+                        let chosen = path.display().to_string();
+                        model.avatar_url = Some(format!("file://{chosen}"));
+                        let _ = tx_intent.send(UiIntent::SetAvatar { path: chosen });
+                    }
                 }
-                response.on_hover_text("User Profile");
+                response.on_hover_text("Set Avatar");
 
                 // Name and status text
                 ui.vertical(|ui: &mut egui::Ui| {

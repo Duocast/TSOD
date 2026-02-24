@@ -278,6 +278,25 @@ impl ControlDispatcher {
         Ok(())
     }
 
+    pub async fn set_avatar(&self, avatar_asset_url: &str) -> Result<()> {
+        let req = pb::SetAvatarRequest {
+            asset_id: Some(pb::AssetId {
+                value: avatar_asset_url.to_string(),
+            }),
+        };
+        let resp = self
+            .send_request(
+                pb::client_to_server::Payload::SetAvatarRequest(req),
+                Duration::from_secs(5),
+            )
+            .await??;
+
+        if let Some(err) = resp.error {
+            return Err(anyhow!("set_avatar error: {:?}", err));
+        }
+        Ok(())
+    }
+
     /// Low-level request API with correlation.
     pub async fn send_request(
         &self,

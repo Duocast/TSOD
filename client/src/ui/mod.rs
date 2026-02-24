@@ -32,10 +32,12 @@ pub struct VpApp {
 
 impl VpApp {
     pub fn new(
-        _cc: &eframe::CreationContext<'_>,
+        cc: &eframe::CreationContext<'_>,
         tx_intent: Sender<UiIntent>,
         rx_event: Receiver<UiEvent>,
     ) -> Self {
+        egui_extras::install_image_loaders(&cc.egui_ctx);
+
         Self {
             model: UiModel::default(),
             tx_intent,
