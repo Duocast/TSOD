@@ -4,13 +4,12 @@
 //! pipeline: feed speaker/reference audio, then process microphone/capture audio.
 
 use anyhow::{Context, Result};
-use sonora_aec3::Aec as SonoraAec;
 
 const TEN_MS_AT_48K: usize = 480;
 
 /// AEC3-based acoustic echo canceller.
 pub struct Aec {
-    inner: SonoraAec,
+    inner: sonora_aec3::Aec3,
     render_buf: Vec<i16>,
     capture_buf: Vec<i16>,
 }
@@ -20,8 +19,8 @@ impl Aec {
     pub fn new(sample_rate: u32) -> Result<Self> {
         anyhow::ensure!(sample_rate == 48_000, "AEC requires 48kHz audio");
 
-        let inner =
-            SonoraAec::new(sample_rate as usize, 1).context("create sonora-aec3 processor")?;
+        let inner = sonora_aec3::Aec3::new(sample_rate as usize, 1)
+            .context("create sonora-aec3 processor")?;
 
         Ok(Self {
             inner,
@@ -57,13 +56,19 @@ impl Aec {
                 .map(|s| s as f32 / 32768.0)
                 .collect();
 
-            // If processing fails for a frame, we still forward converted audio.
-            let _ = self.inner.process_capture(&mut frame);
-            out.extend(frame.into_iter().map(|s| {
-                (s * 32768.0)
-                    .round()
-                    .clamp(i16::MIN as f32, i16::MAX as f32) as i16
-            }));
+            if self.inner.process_capture(&mut frame).is_ok() {
+                out.extend(frame.into_iter().map(|s| {
+                    (s * 32768.0)
+                        .round()
+                        .clamp(i16::MIN as f32, i16::MAX as f32) as i16
+                }));
+            } else {
+                out.extend(frame.into_iter().map(|s| {
+                    (s * 32768.0)
+                        .round()
+                        .clamp(i16::MIN as f32, i16::MAX as f32) as i16
+                }));
+            }
         }
 
         // Preserve tail samples that have not yet made a full 10ms frame by appending
