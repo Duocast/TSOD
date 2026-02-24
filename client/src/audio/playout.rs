@@ -10,10 +10,10 @@ pub struct Playout {
     prod: Arc<Mutex<HeapProd<i16>>>,
 }
 
-#[cfg(all(target_os = "linux", feature = "pipewire-backend"))]
+#[cfg(target_os = "linux")]
 type PlayoutBackend = linux::LinuxPlayout;
 
-#[cfg(any(not(target_os = "linux"), not(feature = "pipewire-backend")))]
+#[cfg(not(target_os = "linux"))]
 type PlayoutBackend = non_linux::CpalPlayout;
 
 unsafe impl Send for Playout {}
@@ -24,10 +24,10 @@ impl Playout {
         let rb = HeapRb::<i16>::new(sample_rate as usize * channels as usize);
         let (prod, cons) = rb.split();
 
-        #[cfg(all(target_os = "linux", feature = "pipewire-backend"))]
+        #[cfg(target_os = "linux")]
         let backend = PlayoutBackend::start(sample_rate, channels, cons)?;
 
-        #[cfg(any(not(target_os = "linux"), not(feature = "pipewire-backend")))]
+        #[cfg(not(target_os = "linux"))]
         let backend = {
             let cons = Arc::new(Mutex::new(cons));
             PlayoutBackend::start(sample_rate, channels, cons)?
@@ -52,7 +52,7 @@ pub fn enumerate_output_devices() -> Vec<String> {
     PlayoutBackend::enumerate_output_devices()
 }
 
-#[cfg(all(target_os = "linux", feature = "pipewire-backend"))]
+#[cfg(target_os = "linux")]
 mod linux {
     use anyhow::{anyhow, Context, Result};
     use pipewire as pw;
@@ -173,7 +173,7 @@ mod linux {
     }
 }
 
-#[cfg(any(not(target_os = "linux"), not(feature = "pipewire-backend")))]
+#[cfg(not(target_os = "linux"))]
 mod non_linux {
     use anyhow::{anyhow, Context, Result};
     use cpal::{traits::DeviceTrait, traits::HostTrait, traits::StreamTrait};

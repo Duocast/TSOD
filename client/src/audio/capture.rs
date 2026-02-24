@@ -11,10 +11,10 @@ pub struct Capture {
     frame_samples: usize,
 }
 
-#[cfg(all(target_os = "linux", feature = "pipewire-backend"))]
+#[cfg(target_os = "linux")]
 type CaptureBackend = linux::LinuxCapture;
 
-#[cfg(any(not(target_os = "linux"), not(feature = "pipewire-backend")))]
+#[cfg(not(target_os = "linux"))]
 type CaptureBackend = non_linux::CpalCapture;
 
 unsafe impl Send for Capture {}
@@ -26,10 +26,10 @@ impl Capture {
         let rb = HeapRb::<i16>::new(frame_samples * 50);
         let (prod, cons) = rb.split();
 
-        #[cfg(all(target_os = "linux", feature = "pipewire-backend"))]
+        #[cfg(target_os = "linux")]
         let backend = CaptureBackend::start(sample_rate, channels, prod)?;
 
-        #[cfg(any(not(target_os = "linux"), not(feature = "pipewire-backend")))]
+        #[cfg(not(target_os = "linux"))]
         let backend = {
             let prod = Arc::new(Mutex::new(prod));
             CaptureBackend::start(sample_rate, channels, prod)?
@@ -68,7 +68,7 @@ pub fn enumerate_input_devices() -> Vec<String> {
     CaptureBackend::enumerate_input_devices()
 }
 
-#[cfg(all(target_os = "linux", feature = "pipewire-backend"))]
+#[cfg(target_os = "linux")]
 mod linux {
     use anyhow::{anyhow, Context, Result};
     use pipewire as pw;
@@ -188,7 +188,7 @@ mod linux {
     }
 }
 
-#[cfg(any(not(target_os = "linux"), not(feature = "pipewire-backend")))]
+#[cfg(not(target_os = "linux"))]
 mod non_linux {
     use anyhow::{anyhow, Context, Result};
     use cpal::{traits::DeviceTrait, traits::HostTrait, traits::StreamTrait};
