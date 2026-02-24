@@ -14,8 +14,8 @@
 //! └─────────┴────────────────────────────┴──────────┘
 
 pub mod model;
-pub mod theme;
 pub mod panels;
+pub mod theme;
 pub mod widgets;
 
 pub use model::{UiEvent, UiIntent, UiModel};
@@ -62,19 +62,19 @@ impl eframe::App for VpApp {
         }
 
         // Apply theme
-        theme::apply_theme(ctx);
+        theme::apply_theme(ctx, &self.model.settings.theme);
 
         // Top menu bar
         egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
-                ui.label(
-                    egui::RichText::new("TSOD")
-                        .strong()
-                        .size(16.0),
-                );
+                ui.label(egui::RichText::new("TSOD").strong().size(16.0));
                 ui.separator();
 
-                let conn_text = if self.model.connected { "Connected" } else { "Disconnected" };
+                let conn_text = if self.model.connected {
+                    "Connected"
+                } else {
+                    "Disconnected"
+                };
                 let conn_color = if self.model.connected {
                     theme::COLOR_ONLINE
                 } else {
@@ -102,43 +102,47 @@ impl eframe::App for VpApp {
         egui::TopBottomPanel::bottom("status_bar")
             .max_height(24.0)
             .show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new(&self.model.status_line)
-                        .small()
-                        .color(theme::COLOR_TEXT_DIM),
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if self.model.ptt_enabled {
-                        let ptt_text = if self.model.ptt_active { "PTT: ON" } else { "PTT: OFF" };
-                        let ptt_color = if self.model.ptt_active {
-                            theme::COLOR_ONLINE
-                        } else {
-                            theme::COLOR_OFFLINE
-                        };
-                        ui.colored_label(ptt_color, egui::RichText::new(ptt_text).small());
-                    }
-                    if self.model.loopback_active {
-                        ui.colored_label(
-                            theme::COLOR_MENTION,
-                            egui::RichText::new("LOOPBACK").small().strong(),
-                        );
-                    }
-                    if self.model.self_muted {
-                        ui.colored_label(
-                            theme::COLOR_DANGER,
-                            egui::RichText::new("MUTED").small(),
-                        );
-                    }
-                    if self.model.self_deafened {
-                        ui.colored_label(
-                            theme::COLOR_DANGER,
-                            egui::RichText::new("DEAFENED").small(),
-                        );
-                    }
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(&self.model.status_line)
+                            .small()
+                            .color(theme::COLOR_TEXT_DIM),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if self.model.ptt_enabled {
+                            let ptt_text = if self.model.ptt_active {
+                                "PTT: ON"
+                            } else {
+                                "PTT: OFF"
+                            };
+                            let ptt_color = if self.model.ptt_active {
+                                theme::COLOR_ONLINE
+                            } else {
+                                theme::COLOR_OFFLINE
+                            };
+                            ui.colored_label(ptt_color, egui::RichText::new(ptt_text).small());
+                        }
+                        if self.model.loopback_active {
+                            ui.colored_label(
+                                theme::COLOR_MENTION,
+                                egui::RichText::new("LOOPBACK").small().strong(),
+                            );
+                        }
+                        if self.model.self_muted {
+                            ui.colored_label(
+                                theme::COLOR_DANGER,
+                                egui::RichText::new("MUTED").small(),
+                            );
+                        }
+                        if self.model.self_deafened {
+                            ui.colored_label(
+                                theme::COLOR_DANGER,
+                                egui::RichText::new("DEAFENED").small(),
+                            );
+                        }
+                    });
                 });
             });
-        });
 
         // Left panel: server/channel tree + user panel at bottom
         egui::SidePanel::left("server_tree")
