@@ -102,6 +102,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                                 &model.input_devices,
                                 model.loopback_active,
                                 model.vad_level,
+                                &model.mic_test_waveform,
                                 tx_intent,
                             ),
                             SettingsPage::Playback => page_playback(
@@ -312,6 +313,7 @@ fn page_capture(
     input_devices: &[String],
     loopback_active: bool,
     vad_level: Option<f32>,
+    mic_test_waveform: &[f32],
     tx_intent: &Sender<UiIntent>,
 ) -> bool {
     let mut dirty = false;
@@ -514,9 +516,9 @@ fn page_capture(
     section(ui, "Mic Test");
 
     let btn_text = if loopback_active {
-        "Stop Loopback"
+        "End Test"
     } else {
-        "Start Loopback"
+        "Begin Test"
     };
     let btn_color = if loopback_active {
         theme::COLOR_DANGER
@@ -541,7 +543,7 @@ fn page_capture(
     }
     hint(
         ui,
-        "Play captured audio through your speakers to test your setup.",
+        "Runs a live microphone test with loopback and waveform visualization.",
     );
 
     if loopback_active {
@@ -560,14 +562,61 @@ fn page_capture(
             };
             ui.painter().rect_filled(filled, 3.0, color);
         }
+
+        ui.add_space(6.0);
+        draw_mic_test_waveform(ui, mic_test_waveform);
         ui.label(
-            egui::RichText::new("Loopback active - you should hear yourself")
+            egui::RichText::new("Mic test active - speak to see your waveform")
                 .small()
                 .color(theme::COLOR_ONLINE),
         );
     }
 
     dirty
+}
+
+fn draw_mic_test_waveform(ui: &mut egui::Ui, samples: &[f32]) {
+    let width = ui.available_width().min(420.0).max(220.0);
+    let height = 110.0;
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+
+    ui.painter().rect_filled(rect, 4.0, theme::COLOR_BG_DARK);
+
+    if samples.is_empty() {
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "No input detected yet...",
+            egui::FontId::proportional(12.0),
+            theme::COLOR_TEXT_DIM,
+        );
+        return;
+    }
+
+    let mid = rect.center().y;
+    ui.painter().line_segment(
+        [egui::pos2(rect.left(), mid), egui::pos2(rect.right(), mid)],
+        egui::Stroke::new(1.0, theme::COLOR_BG_LIGHT),
+    );
+
+    let count = samples.len().max(2);
+    let step_x = rect.width() / (count as f32 - 1.0);
+    let amp = rect.height() * 0.45;
+
+    let points: Vec<egui::Pos2> = samples
+        .iter()
+        .enumerate()
+        .map(|(i, level)| {
+            let x = rect.left() + step_x * i as f32;
+            let y = mid - level.clamp(-1.0, 1.0) * amp;
+            egui::pos2(x, y)
+        })
+        .collect();
+
+    ui.painter().add(egui::Shape::line(
+        points,
+        egui::Stroke::new(2.0, theme::COLOR_ACCENT),
+    ));
 }
 
 // ── Playback ──────────────────────────────────────────────────────────
