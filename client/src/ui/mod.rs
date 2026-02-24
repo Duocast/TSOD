@@ -53,7 +53,7 @@ impl VpApp {
 
 impl VpApp {
     fn signal_quit(&self) {
-        let _ = self.tx_intent.send(UiIntent::Quit);
+        let _ = self.tx_intent.try_send(UiIntent::Quit);
     }
 }
 
