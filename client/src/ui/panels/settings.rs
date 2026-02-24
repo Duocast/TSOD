@@ -3,6 +3,7 @@
 //! Categories: Application, Capture, Playback, Hotkeys, Chat, Downloads,
 //!             Notifications, Whisper, Screen Share, Video Call, Security
 
+use crate::settings_io;
 use crate::ui::model::{AppSettings, CaptureMode, SettingsPage, UiIntent, UiModel};
 use crate::ui::theme;
 use crossbeam_channel::Sender;
@@ -70,6 +71,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                             .send(UiIntent::ApplySettings(Box::new(model.settings.clone())));
                         let _ = tx_intent
                             .send(UiIntent::SaveSettings(Box::new(model.settings.clone())));
+                        let _ = settings_io::save_settings(&model.settings);
                     }
                 });
 

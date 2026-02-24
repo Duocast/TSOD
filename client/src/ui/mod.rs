@@ -66,9 +66,9 @@ impl eframe::App for VpApp {
         // Drain backend events
         self.drain_events();
 
-        // Request continuous repaint while connected (for real-time updates)
-        if self.model.connected {
-            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        // Request continuous repaint for real-time views (connection telemetry or mic test)
+        if self.model.connected || self.model.loopback_active {
+            ctx.request_repaint_after(std::time::Duration::from_millis(33));
         }
 
         // Apply theme
@@ -201,10 +201,18 @@ impl eframe::App for VpApp {
                     panels::settings::show(ui, &mut self.model, &self.tx_intent);
                 });
             if !open {
-                // Revert unsaved changes when closing
+                // Auto-apply pending settings when closing the window.
                 if self.model.settings_dirty {
-                    self.model.settings_draft = self.model.settings.clone();
+                    self.model.settings = self.model.settings_draft.clone();
                     self.model.settings_dirty = false;
+                    self.model.sync_settings_to_runtime();
+                    let _ = self.tx_intent.send(UiIntent::ApplySettings(Box::new(
+                        self.model.settings.clone(),
+                    )));
+                    let _ = self.tx_intent.send(UiIntent::SaveSettings(Box::new(
+                        self.model.settings.clone(),
+                    )));
+                    let _ = crate::settings_io::save_settings(&self.model.settings);
                 }
                 self.model.show_settings = false;
             }

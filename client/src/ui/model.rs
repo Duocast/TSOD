@@ -875,6 +875,11 @@ impl UiModel {
     /// Sync persisted settings into runtime model state.
     pub fn sync_settings_to_runtime(&mut self) {
         self.ptt_enabled = self.settings.capture_mode == CaptureMode::PushToTalk;
+
+        let nick = self.settings.identity_nickname.trim();
+        if !nick.is_empty() {
+            self.nick = nick.to_string();
+        }
     }
 
     /// Get messages for the currently selected channel.
