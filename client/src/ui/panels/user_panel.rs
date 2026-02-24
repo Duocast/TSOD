@@ -71,15 +71,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                 ui.painter().circle_filled(dot_pos, 4.0, status_color);
 
                 if response.clicked() {
-                    if let Some(path) = rfd::FileDialog::new()
-                        .set_title("Select Avatar")
-                        .add_filter("Image", &["png", "jpg", "jpeg", "gif", "webp", "bmp"])
-                        .pick_file()
-                    {
-                        let chosen = path.display().to_string();
-                        model.avatar_url = Some(format!("file://{chosen}"));
-                        let _ = tx_intent.send(UiIntent::SetAvatar { path: chosen });
-                    }
+                    model.show_set_avatar_dialog = true;
                 }
                 response.on_hover_text("Set Avatar");
 
