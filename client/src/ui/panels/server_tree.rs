@@ -9,7 +9,11 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
     ui.horizontal(|ui| {
         ui.heading("Channels");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.small_button("+").on_hover_text("Create Channel").clicked() {
+            if ui
+                .small_button("+")
+                .on_hover_text("Create Channel")
+                .clicked()
+            {
                 model.show_create_channel = true;
                 model.create_channel_name.clear();
                 model.create_channel_description.clear();
@@ -50,7 +54,10 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
             let cat_name = cat.name.clone();
             let cat_id = cat.id.clone();
             egui::CollapsingHeader::new(
-                egui::RichText::new(&cat_name).strong().color(theme::COLOR_TEXT_DIM).size(11.0),
+                egui::RichText::new(&cat_name)
+                    .strong()
+                    .color(theme::text_dim())
+                    .size(11.0),
             )
             .id_salt(id)
             .default_open(true)
@@ -71,7 +78,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
         if channels.is_empty() {
             ui.label(
                 egui::RichText::new("No channels yet")
-                    .color(theme::COLOR_TEXT_MUTED)
+                    .color(theme::text_muted())
                     .italics(),
             );
         }
@@ -100,11 +107,17 @@ pub fn show_create_channel_dialog(
         .show(ctx, |ui| {
             // Tab bar
             ui.horizontal(|ui| {
-                if ui.selectable_label(model.create_channel_tab == 0, "Standard").clicked() {
+                if ui
+                    .selectable_label(model.create_channel_tab == 0, "Standard")
+                    .clicked()
+                {
                     model.create_channel_tab = 0;
                 }
                 ui.separator();
-                if ui.selectable_label(model.create_channel_tab == 1, "Audio").clicked() {
+                if ui
+                    .selectable_label(model.create_channel_tab == 1, "Audio")
+                    .clicked()
+                {
                     model.create_channel_tab = 1;
                 }
             });
@@ -126,7 +139,10 @@ pub fn show_create_channel_dialog(
                 let name = model.create_channel_name.trim().to_string();
                 let can_create = !name.is_empty();
 
-                if ui.add_enabled(can_create, egui::Button::new("Create")).clicked() {
+                if ui
+                    .add_enabled(can_create, egui::Button::new("Create"))
+                    .clicked()
+                {
                     let ch_type = model.create_channel_type as u8;
                     let codec = model.create_channel_codec as u8;
                     let quality = model.create_channel_quality;
@@ -165,7 +181,11 @@ fn show_create_tab_standard(ui: &mut egui::Ui, model: &mut UiModel) {
     ui.horizontal(|ui| {
         ui.label("Channel Type:");
         egui::ComboBox::from_id_salt("create_ch_type")
-            .selected_text(*CHANNEL_TYPE_LABELS.get(model.create_channel_type).unwrap_or(&"Voice"))
+            .selected_text(
+                *CHANNEL_TYPE_LABELS
+                    .get(model.create_channel_type)
+                    .unwrap_or(&"Voice"),
+            )
             .width(140.0)
             .show_ui(ui, |ui| {
                 for (i, label) in CHANNEL_TYPE_LABELS.iter().enumerate() {
@@ -189,14 +209,17 @@ fn show_create_tab_standard(ui: &mut egui::Ui, model: &mut UiModel) {
     ui.horizontal(|ui| {
         ui.label("Max Clients:");
         let mut limit = model.create_channel_user_limit as i32;
-        if ui.add(egui::DragValue::new(&mut limit).range(0..=999).speed(1)).changed() {
+        if ui
+            .add(egui::DragValue::new(&mut limit).range(0..=999).speed(1))
+            .changed()
+        {
             model.create_channel_user_limit = limit.max(0) as u32;
         }
         if model.create_channel_user_limit == 0 {
             ui.label(
                 egui::RichText::new("(unlimited)")
                     .small()
-                    .color(theme::COLOR_TEXT_MUTED),
+                    .color(theme::text_muted()),
             );
         }
     });
@@ -207,7 +230,11 @@ fn show_create_tab_audio(ui: &mut egui::Ui, model: &mut UiModel) {
     ui.horizontal(|ui| {
         ui.label("Codec:");
         egui::ComboBox::from_id_salt("create_ch_codec")
-            .selected_text(*CODEC_LABELS.get(model.create_channel_codec).unwrap_or(&"Opus Voice"))
+            .selected_text(
+                *CODEC_LABELS
+                    .get(model.create_channel_codec)
+                    .unwrap_or(&"Opus Voice"),
+            )
             .width(160.0)
             .show_ui(ui, |ui| {
                 for (i, label) in CODEC_LABELS.iter().enumerate() {
@@ -227,7 +254,7 @@ fn show_create_tab_audio(ui: &mut egui::Ui, model: &mut UiModel) {
         egui::RichText::new(codec_desc)
             .small()
             .italics()
-            .color(theme::COLOR_TEXT_MUTED),
+            .color(theme::text_muted()),
     );
     ui.add_space(8.0);
 
@@ -235,16 +262,19 @@ fn show_create_tab_audio(ui: &mut egui::Ui, model: &mut UiModel) {
     ui.horizontal(|ui| {
         ui.label("Quality:");
         let range = match model.create_channel_codec {
-            0 => 8..=128,   // voice range
-            1 => 32..=510,  // music range
+            0 => 8..=128,  // voice range
+            1 => 32..=510, // music range
             _ => 8..=510,
         };
         let mut quality = model.create_channel_quality as i32;
-        if ui.add(
-            egui::Slider::new(&mut quality, range)
-                .suffix(" kbps")
-                .step_by(1.0),
-        ).changed() {
+        if ui
+            .add(
+                egui::Slider::new(&mut quality, range)
+                    .suffix(" kbps")
+                    .step_by(1.0),
+            )
+            .changed()
+        {
             model.create_channel_quality = quality as u32;
         }
     });
@@ -253,7 +283,9 @@ fn show_create_tab_audio(ui: &mut egui::Ui, model: &mut UiModel) {
     // Quality presets
     ui.horizontal(|ui| {
         ui.label(
-            egui::RichText::new("Presets:").small().color(theme::COLOR_TEXT_DIM),
+            egui::RichText::new("Presets:")
+                .small()
+                .color(theme::text_dim()),
         );
         if model.create_channel_codec == 0 {
             // Voice presets
@@ -296,7 +328,7 @@ fn show_create_tab_audio(ui: &mut egui::Ui, model: &mut UiModel) {
             "Estimated bandwidth: ~{total} kbps/user ({bw_kbps} audio + ~{overhead_kbps} overhead)"
         ))
         .small()
-        .color(theme::COLOR_TEXT_DIM),
+        .color(theme::text_dim()),
     );
 }
 
@@ -314,17 +346,14 @@ fn show_channel(
     };
 
     let text_color = if is_selected {
-        theme::COLOR_TEXT
+        theme::text_color()
     } else {
-        theme::COLOR_TEXT_DIM
+        theme::text_dim()
     };
 
     let label = format!("{} {}", icon, ch.name);
 
-    let response = ui.selectable_label(
-        is_selected,
-        egui::RichText::new(&label).color(text_color),
-    );
+    let response = ui.selectable_label(is_selected, egui::RichText::new(&label).color(text_color));
 
     if response.clicked() {
         model.selected_channel = Some(ch.id.clone());
@@ -345,7 +374,7 @@ fn show_channel(
             ui.label(
                 egui::RichText::new(count_text)
                     .small()
-                    .color(theme::COLOR_TEXT_MUTED),
+                    .color(theme::text_muted()),
             );
         });
     }

@@ -13,7 +13,7 @@ pub fn show(ui: &mut egui::Ui, model: &UiModel, tx_intent: &Sender<UiIntent>) {
     if members.is_empty() {
         ui.label(
             egui::RichText::new("No members")
-                .color(theme::COLOR_TEXT_MUTED)
+                .color(theme::text_muted())
                 .italics(),
         );
         return;
@@ -24,7 +24,7 @@ pub fn show(ui: &mut egui::Ui, model: &UiModel, tx_intent: &Sender<UiIntent>) {
         egui::RichText::new(format!("ONLINE — {}", members.len()))
             .small()
             .strong()
-            .color(theme::COLOR_TEXT_MUTED),
+            .color(theme::text_muted()),
     );
 
     egui::ScrollArea::vertical().show(ui, |ui| {
@@ -45,11 +45,8 @@ pub fn show(ui: &mut egui::Ui, model: &UiModel, tx_intent: &Sender<UiIntent>) {
                     let radius = 14.0;
 
                     // Avatar circle (placeholder)
-                    ui.painter().circle_filled(
-                        center,
-                        radius,
-                        theme::COLOR_BG_LIGHT,
-                    );
+                    ui.painter()
+                        .circle_filled(center, radius, theme::bg_light());
 
                     // First letter of name as avatar
                     let initial = member
@@ -64,7 +61,7 @@ pub fn show(ui: &mut egui::Ui, model: &UiModel, tx_intent: &Sender<UiIntent>) {
                         egui::Align2::CENTER_CENTER,
                         &initial,
                         egui::FontId::proportional(14.0),
-                        theme::COLOR_TEXT,
+                        theme::text_color(),
                     );
 
                     // Speaking ring
@@ -79,8 +76,7 @@ pub fn show(ui: &mut egui::Ui, model: &UiModel, tx_intent: &Sender<UiIntent>) {
                     // Name and status icons
                     ui.vertical(|ui| {
                         ui.label(
-                            egui::RichText::new(&member.display_name)
-                                .color(theme::COLOR_TEXT),
+                            egui::RichText::new(&member.display_name).color(theme::text_color()),
                         );
                         let mut status_parts = Vec::new();
                         if member.muted || member.self_muted {
@@ -96,7 +92,7 @@ pub fn show(ui: &mut egui::Ui, model: &UiModel, tx_intent: &Sender<UiIntent>) {
                             ui.label(
                                 egui::RichText::new(status_parts.join(", "))
                                     .small()
-                                    .color(theme::COLOR_TEXT_MUTED),
+                                    .color(theme::text_muted()),
                             );
                         }
                     });
@@ -121,7 +117,11 @@ pub fn show(ui: &mut egui::Ui, model: &UiModel, tx_intent: &Sender<UiIntent>) {
                     });
                     ui.close_menu();
                 }
-                let deafen_label = if member.deafened { "Undeafen" } else { "Deafen" };
+                let deafen_label = if member.deafened {
+                    "Undeafen"
+                } else {
+                    "Deafen"
+                };
                 if ui.button(deafen_label).clicked() {
                     let _ = tx_intent.send(UiIntent::DeafenUser {
                         user_id: member.user_id.clone(),

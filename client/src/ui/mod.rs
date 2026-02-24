@@ -137,7 +137,7 @@ impl eframe::App for VpApp {
                     ui.label(
                         egui::RichText::new(&self.model.status_line)
                             .small()
-                            .color(theme::COLOR_TEXT_DIM),
+                            .color(theme::text_dim()),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if self.model.ptt_enabled {

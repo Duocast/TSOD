@@ -23,9 +23,13 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                     let selected = model.settings_page == page;
                     let text = egui::RichText::new(page.label()).size(13.0);
                     let text = if selected {
-                        text.strong().color(egui::Color32::WHITE)
+                        text.strong().color(if theme::is_light_mode() {
+                            egui::Color32::from_rgb(36, 41, 47)
+                        } else {
+                            egui::Color32::WHITE
+                        })
                     } else {
-                        text.color(theme::COLOR_TEXT_DIM)
+                        text.color(theme::text_dim())
                     };
 
                     let btn = egui::Button::new(text)
@@ -53,13 +57,13 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                         egui::RichText::new("Apply").size(12.0).color(if dirty {
                             egui::Color32::WHITE
                         } else {
-                            theme::COLOR_TEXT_MUTED
+                            theme::text_muted()
                         }),
                     )
                     .fill(if dirty {
                         theme::COLOR_ACCENT
                     } else {
-                        theme::COLOR_BG_LIGHT
+                        theme::muted_button_fill()
                     })
                     .rounding(4.0);
 
@@ -185,7 +189,7 @@ fn section(ui: &mut egui::Ui, title: &str) {
         egui::RichText::new(title)
             .size(14.0)
             .strong()
-            .color(theme::COLOR_TEXT),
+            .color(theme::text_color()),
     );
     ui.add_space(2.0);
     ui.separator();
@@ -193,11 +197,7 @@ fn section(ui: &mut egui::Ui, title: &str) {
 }
 
 fn hint(ui: &mut egui::Ui, text: &str) {
-    ui.label(
-        egui::RichText::new(text)
-            .small()
-            .color(theme::COLOR_TEXT_MUTED),
-    );
+    ui.label(egui::RichText::new(text).small().color(theme::text_muted()));
 }
 
 // ── Application ───────────────────────────────────────────────────────
@@ -417,7 +417,7 @@ fn page_capture(
                     let bar_width = ui.available_width().min(300.0);
                     let (rect, _) =
                         ui.allocate_exact_size(egui::vec2(bar_width, 14.0), egui::Sense::hover());
-                    ui.painter().rect_filled(rect, 3.0, theme::COLOR_BG_DARK);
+                    ui.painter().rect_filled(rect, 3.0, theme::bg_dark());
 
                     // Threshold marker
                     let thresh_x = rect.left() + bar_width * s.vad_threshold;
@@ -553,7 +553,7 @@ fn page_capture(
             let bar_width = ui.available_width().min(300.0);
             let (rect, _) =
                 ui.allocate_exact_size(egui::vec2(bar_width, 10.0), egui::Sense::hover());
-            ui.painter().rect_filled(rect, 3.0, theme::COLOR_BG_DARK);
+            ui.painter().rect_filled(rect, 3.0, theme::bg_dark());
             let filled = egui::Rect::from_min_size(rect.min, egui::vec2(bar_width * vad, 10.0));
             let color = if vad > 0.7 {
                 theme::COLOR_DANGER
@@ -582,7 +582,7 @@ fn draw_mic_test_waveform(ui: &mut egui::Ui, samples: &[f32]) {
     let height = 110.0;
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
 
-    ui.painter().rect_filled(rect, 4.0, theme::COLOR_BG_DARK);
+    ui.painter().rect_filled(rect, 4.0, theme::bg_dark());
 
     if samples.is_empty() {
         ui.painter().text(
@@ -590,7 +590,7 @@ fn draw_mic_test_waveform(ui: &mut egui::Ui, samples: &[f32]) {
             egui::Align2::CENTER_CENTER,
             "No input detected yet...",
             egui::FontId::proportional(12.0),
-            theme::COLOR_TEXT_DIM,
+            theme::text_dim(),
         );
         return;
     }
@@ -598,7 +598,7 @@ fn draw_mic_test_waveform(ui: &mut egui::Ui, samples: &[f32]) {
     let mid = rect.center().y;
     ui.painter().line_segment(
         [egui::pos2(rect.left(), mid), egui::pos2(rect.right(), mid)],
-        egui::Stroke::new(1.0, theme::COLOR_BG_LIGHT),
+        egui::Stroke::new(1.0, theme::bg_light()),
     );
 
     let count = samples.len().max(2);
@@ -814,7 +814,7 @@ fn page_hotkeys(ui: &mut egui::Ui, s: &mut AppSettings) -> bool {
                 ui.label(
                     egui::RichText::new(binding.action.label())
                         .size(12.0)
-                        .color(theme::COLOR_TEXT),
+                        .color(theme::text_color()),
                 );
 
                 let prev_key = binding.key.clone();
@@ -926,22 +926,22 @@ fn page_chat(ui: &mut egui::Ui, s: &mut AppSettings) -> bool {
         egui::RichText::new("Supported formats:")
             .small()
             .strong()
-            .color(theme::COLOR_TEXT),
+            .color(theme::text_color()),
     );
     ui.label(
         egui::RichText::new("  Images: PNG, JPEG, GIF, WebP")
             .small()
-            .color(theme::COLOR_TEXT_DIM),
+            .color(theme::text_dim()),
     );
     ui.label(
         egui::RichText::new("  Videos: MP4, WebM")
             .small()
-            .color(theme::COLOR_TEXT_DIM),
+            .color(theme::text_dim()),
     );
     ui.label(
         egui::RichText::new("  Files: Any (up to configured max size)")
             .small()
-            .color(theme::COLOR_TEXT_DIM),
+            .color(theme::text_dim()),
     );
 
     dirty
@@ -1233,22 +1233,22 @@ fn page_screen_share(ui: &mut egui::Ui, s: &mut AppSettings) -> bool {
         egui::RichText::new("Layers:")
             .small()
             .strong()
-            .color(theme::COLOR_TEXT),
+            .color(theme::text_color()),
     );
     ui.label(
         egui::RichText::new("  High: Full resolution at configured bitrate")
             .small()
-            .color(theme::COLOR_TEXT_DIM),
+            .color(theme::text_dim()),
     );
     ui.label(
         egui::RichText::new("  Medium: 1/2 resolution at 1/2 bitrate")
             .small()
-            .color(theme::COLOR_TEXT_DIM),
+            .color(theme::text_dim()),
     );
     ui.label(
         egui::RichText::new("  Low: 1/4 resolution at 1/4 bitrate (thumbnail)")
             .small()
-            .color(theme::COLOR_TEXT_DIM),
+            .color(theme::text_dim()),
     );
 
     dirty
@@ -1404,7 +1404,7 @@ fn page_security(ui: &mut egui::Ui, s: &mut AppSettings) -> bool {
         egui::RichText::new("TLS Status:")
             .small()
             .strong()
-            .color(theme::COLOR_TEXT),
+            .color(theme::text_color()),
     );
     ui.label(
         egui::RichText::new("  Transport: TLS 1.3 via QUIC (always on)")
@@ -1414,12 +1414,12 @@ fn page_security(ui: &mut egui::Ui, s: &mut AppSettings) -> bool {
     ui.label(
         egui::RichText::new("  Voice E2EE: Available (per-channel)")
             .small()
-            .color(theme::COLOR_TEXT_DIM),
+            .color(theme::text_dim()),
     );
     ui.label(
         egui::RichText::new("  Video E2EE: Available (per-channel)")
             .small()
-            .color(theme::COLOR_TEXT_DIM),
+            .color(theme::text_dim()),
     );
 
     section(ui, "Certificate");
