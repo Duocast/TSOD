@@ -89,6 +89,12 @@ impl eframe::App for VpApp {
             ctx.request_repaint_after(std::time::Duration::from_millis(33));
         }
 
+        // Apply UI scale from settings.
+        let ui_scale = self.model.settings.ui_scale.clamp(0.75, 2.0);
+        if (ctx.pixels_per_point() - ui_scale).abs() > f32::EPSILON {
+            ctx.set_pixels_per_point(ui_scale);
+        }
+
         // Apply theme
         theme::apply_theme(ctx, &self.model.settings.theme);
 
