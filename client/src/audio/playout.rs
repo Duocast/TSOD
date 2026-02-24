@@ -56,7 +56,7 @@ pub fn enumerate_output_devices() -> Vec<String> {
 mod linux {
     use anyhow::{anyhow, Context, Result};
     use pipewire as pw;
-    use pw::prelude::*;
+    use pw::properties::properties;
     use ringbuf::{traits::Consumer, HeapCons};
 
     pub struct LinuxPlayout {
@@ -64,11 +64,11 @@ mod linux {
     }
 
     impl LinuxPlayout {
-        pub fn start(sample_rate: u32, channels: u16, mut cons: HeapCons<i16>) -> Result<Self> {
+        pub fn start(sample_rate: u32, channels: u16, cons: HeapCons<i16>) -> Result<Self> {
             let thread = std::thread::Builder::new()
                 .name("tsod-pipewire-playout".to_string())
                 .spawn(move || {
-                    if let Err(e) = run_pipewire_playout(sample_rate, channels, &mut cons) {
+                    if let Err(e) = run_pipewire_playout(sample_rate, channels, cons) {
                         eprintln!("pipewire playout thread failed: {e:#}");
                     }
                 })
@@ -85,18 +85,20 @@ mod linux {
     fn run_pipewire_playout(
         sample_rate: u32,
         channels: u16,
-        cons: &mut HeapCons<i16>,
+        mut cons: HeapCons<i16>,
     ) -> Result<()> {
         pw::init();
 
-        let mainloop = pw::main_loop::MainLoop::new(None).context("create PipeWire mainloop")?;
-        let context = pw::context::Context::new(&mainloop).context("create PipeWire context")?;
+        let mainloop =
+            pw::main_loop::MainLoopBox::new(None).context("create PipeWire mainloop")?;
+        let context = pw::context::ContextBox::new(mainloop.loop_(), None)
+            .context("create PipeWire context")?;
         let core = context.connect(None).context("connect PipeWire core")?;
 
-        let stream = pw::stream::Stream::new(
+        let stream = pw::stream::StreamBox::new(
             &core,
             "tsod-playout",
-            pw::properties! {
+            properties! {
                 *pw::keys::MEDIA_TYPE => "Audio",
                 *pw::keys::MEDIA_CATEGORY => "Playback",
                 *pw::keys::MEDIA_ROLE => "Communication",
@@ -108,19 +110,17 @@ mod linux {
         let listener = stream
             .add_local_listener_with_user_data(())
             .process({
-                move |stream: &pw::stream::StreamRef, _: &mut ()| {
+                move |stream: &pw::stream::Stream, _: &mut ()| {
                     let Some(mut buf) = stream.dequeue_buffer() else {
                         return;
                     };
 
                     let datas = buf.datas_mut();
                     if datas.is_empty() {
-                        stream.queue_buffer(buf);
                         return;
                     }
 
-                    let Some(raw) = datas[0].data_mut() else {
-                        stream.queue_buffer(buf);
+                    let Some(raw) = datas[0].data() else {
                         return;
                     };
 
@@ -140,21 +140,32 @@ mod linux {
                             }
                         }
                     }
-
-                    stream.queue_buffer(buf);
                 }
             })
-            .register();
+            .register()
+            .context("register PipeWire playout listener")?;
 
         let mut info = pw::spa::param::audio::AudioInfoRaw::new();
-        info.set_format(Some(pw::spa::param::audio::AudioFormat::S16LE));
-        info.set_rate(sample_rate as i32);
-        info.set_channels(channels as i32);
+        info.set_format(pw::spa::param::audio::AudioFormat::S16LE);
+        info.set_rate(sample_rate);
+        info.set_channels(channels as u32);
 
-        let mut params = [
-            pw::spa::pod::Pod::from(&pw::spa::param::audio::AudioInfo::Raw(info))
-                .ok_or_else(|| anyhow!("failed to build PipeWire playout format"))?,
-        ];
+        let format_props: Vec<pw::spa::pod::Property> = info.into();
+        let obj = pw::spa::pod::Object {
+            type_: pw::spa::utils::SpaTypes::ObjectParamFormat.as_raw(),
+            id: pw::spa::param::ParamType::EnumFormat.as_raw(),
+            properties: format_props,
+        };
+        let values: Vec<u8> = pw::spa::pod::serialize::PodSerializer::serialize(
+            std::io::Cursor::new(Vec::new()),
+            &pw::spa::pod::Value::Object(obj),
+        )
+        .map_err(|_| anyhow!("failed to serialize PipeWire playout format"))?
+        .0
+        .into_inner();
+
+        let mut params = [pw::spa::pod::Pod::from_bytes(&values)
+            .ok_or_else(|| anyhow!("failed to build PipeWire playout format"))?];
 
         stream
             .connect(
@@ -167,8 +178,11 @@ mod linux {
             )
             .context("connect PipeWire playout stream")?;
 
-        let _keepalive = (context, core, stream, listener);
-        let _ = mainloop.run();
+        // All PipeWire objects (stream, listener, core, context) stay alive
+        // as local variables until mainloop.run() returns, then drop in
+        // reverse declaration order.
+        let _listener = listener;
+        mainloop.run();
         Ok(())
     }
 }
