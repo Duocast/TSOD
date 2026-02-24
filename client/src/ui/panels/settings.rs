@@ -156,9 +156,22 @@ fn common_download_directories() -> Vec<PathBuf> {
 }
 
 fn enumerate_video_devices() -> Vec<String> {
+    fn parse_lines(output: std::process::Output) -> Vec<String> {
+        if !output.status.success() {
+            return Vec::new();
+        }
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(ToOwned::to_owned)
+            .collect()
+    }
+
+    let mut devices = Vec::new();
+
     #[cfg(target_os = "linux")]
     {
-        let mut devices = Vec::new();
         if let Ok(entries) = std::fs::read_dir("/dev") {
             for entry in entries.flatten() {
                 if let Some(name) = entry.file_name().to_str() {
@@ -168,13 +181,54 @@ fn enumerate_video_devices() -> Vec<String> {
                 }
             }
         }
-        devices.sort();
-        devices
+
+        if let Ok(output) = std::process::Command::new("bash")
+            .arg("-lc")
+            .arg("for d in /sys/class/video4linux/*/name; do [ -r \"$d\" ] && cat \"$d\"; done")
+            .output()
+        {
+            devices.extend(parse_lines(output));
+        }
     }
-    #[cfg(not(target_os = "linux"))]
+
+    #[cfg(target_os = "windows")]
     {
-        Vec::new()
+        if let Ok(output) = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                "Get-CimInstance Win32_PnPEntity | Where-Object { $_.PNPClass -eq 'Camera' -or $_.Service -match 'usbvideo' } | Select-Object -ExpandProperty Name",
+            ])
+            .output()
+        {
+            devices.extend(parse_lines(output));
+        }
     }
+
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(output) = std::process::Command::new("system_profiler")
+            .arg("SPCameraDataType")
+            .output()
+        {
+            let names = parse_lines(output)
+                .into_iter()
+                .filter_map(|line| {
+                    let trimmed = line.trim();
+                    if trimmed.ends_with(":") && !trimmed.starts_with("Model ID") {
+                        Some(trimmed.trim_end_matches(':').trim().to_string())
+                    } else {
+                        None
+                    }
+                })
+                .filter(|line| !line.is_empty());
+            devices.extend(names);
+        }
+    }
+
+    devices.sort();
+    devices.dedup();
+    devices
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────
