@@ -1,6 +1,6 @@
-pub mod server_tree;
 pub mod chat;
 pub mod members;
-pub mod user_panel;
+pub mod server_tree;
 pub mod settings;
 pub mod telemetry;
+pub mod user_panel;

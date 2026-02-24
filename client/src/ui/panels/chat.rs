@@ -13,9 +13,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
         } else {
             &model.selected_channel_name
         };
-        ui.heading(
-            egui::RichText::new(format!("# {ch_name}")).color(theme::COLOR_TEXT),
-        );
+        ui.heading(egui::RichText::new(format!("# {ch_name}")).color(theme::text_color()));
     });
     ui.separator();
 
@@ -36,7 +34,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                 ui.centered_and_justified(|ui| {
                     ui.label(
                         egui::RichText::new("No messages yet. Start the conversation!")
-                            .color(theme::COLOR_TEXT_MUTED)
+                            .color(theme::text_muted())
                             .italics(),
                     );
                 });
@@ -49,12 +47,16 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
         let text = match typing.len() {
             1 => format!("{} is typing...", typing[0]),
             2 => format!("{} and {} are typing...", typing[0], typing[1]),
-            _ => format!("{} and {} others are typing...", typing[0], typing.len() - 1),
+            _ => format!(
+                "{} and {} others are typing...",
+                typing[0],
+                typing.len() - 1
+            ),
         };
         ui.label(
             egui::RichText::new(text)
                 .small()
-                .color(theme::COLOR_TEXT_MUTED)
+                .color(theme::text_muted())
                 .italics(),
         );
     }
@@ -109,26 +111,19 @@ fn show_message(
                     ui.label(
                         egui::RichText::new(&msg.author_name)
                             .strong()
-                            .color(theme::COLOR_TEXT),
+                            .color(theme::text_color()),
                     );
                     let ts = format_timestamp(msg.timestamp);
-                    ui.label(
-                        egui::RichText::new(ts)
-                            .small()
-                            .color(theme::COLOR_TEXT_MUTED),
-                    );
+                    ui.label(egui::RichText::new(ts).small().color(theme::text_muted()));
                     if msg.edited {
                         ui.label(
                             egui::RichText::new("(edited)")
                                 .small()
-                                .color(theme::COLOR_TEXT_MUTED),
+                                .color(theme::text_muted()),
                         );
                     }
                     if msg.pinned {
-                        ui.label(
-                            egui::RichText::new("📌")
-                                .small(),
-                        );
+                        ui.label(egui::RichText::new("📌").small());
                     }
                 });
                 show_message_content(ui, msg, tx_intent);
@@ -141,11 +136,7 @@ fn show_message(
     });
 }
 
-fn show_message_content(
-    ui: &mut egui::Ui,
-    msg: &ChatMessage,
-    tx_intent: &Sender<UiIntent>,
-) {
+fn show_message_content(ui: &mut egui::Ui, msg: &ChatMessage, tx_intent: &Sender<UiIntent>) {
     // Message text (markdown-like rendering - basic for now)
     ui.label(&msg.text);
 
@@ -153,8 +144,12 @@ fn show_message_content(
     for att in &msg.attachments {
         ui.horizontal(|ui| {
             ui.label(
-                egui::RichText::new(format!("📎 {} ({})", att.filename, format_size(att.size_bytes)))
-                    .color(theme::COLOR_LINK),
+                egui::RichText::new(format!(
+                    "📎 {} ({})",
+                    att.filename,
+                    format_size(att.size_bytes)
+                ))
+                .color(theme::COLOR_LINK),
             );
         });
     }
@@ -165,15 +160,13 @@ fn show_message_content(
             for reaction in &msg.reactions {
                 let label = format!("{} {}", reaction.emoji, reaction.count);
                 let btn = ui.add(
-                    egui::Button::new(
-                        egui::RichText::new(&label).small(),
-                    )
-                    .small()
-                    .fill(if reaction.me {
-                        theme::COLOR_ACCENT.linear_multiply(0.3)
-                    } else {
-                        theme::COLOR_BG_LIGHT
-                    }),
+                    egui::Button::new(egui::RichText::new(&label).small())
+                        .small()
+                        .fill(if reaction.me {
+                            theme::COLOR_ACCENT.linear_multiply(0.3)
+                        } else {
+                            theme::bg_light()
+                        }),
                 );
                 if btn.clicked() {
                     if reaction.me {
@@ -210,10 +203,8 @@ fn show_notifications(ui: &mut egui::Ui, model: &UiModel) {
             crate::ui::model::NotificationKind::Info => theme::COLOR_ACCENT,
         };
 
-        let notif_rect = egui::Rect::from_min_size(
-            egui::pos2(rect.right() - 300.0, y),
-            egui::vec2(280.0, 30.0),
-        );
+        let notif_rect =
+            egui::Rect::from_min_size(egui::pos2(rect.right() - 300.0, y), egui::vec2(280.0, 30.0));
         ui.painter()
             .rect_filled(notif_rect, 6.0, color.linear_multiply(0.9));
         ui.painter().text(

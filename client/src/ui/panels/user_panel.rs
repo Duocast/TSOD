@@ -12,7 +12,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
 
     // Background frame for the entire user panel
     egui::Frame::none()
-        .fill(theme::COLOR_BG_DARK)
+        .fill(theme::bg_dark())
         .inner_margin(8.0)
         .outer_margin(egui::Margin::ZERO)
         .rounding(0.0)
@@ -41,9 +41,9 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
 
                 // Avatar circle background
                 let bg_color = if response.hovered() {
-                    theme::COLOR_BG_INPUT
+                    theme::bg_input()
                 } else {
-                    theme::COLOR_BG_LIGHT
+                    theme::bg_light()
                 };
                 ui.painter().circle_filled(rect.center(), 16.0, bg_color);
 
@@ -53,13 +53,12 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                     egui::Align2::CENTER_CENTER,
                     &initial,
                     egui::FontId::proportional(15.0),
-                    theme::COLOR_TEXT,
+                    theme::text_color(),
                 );
 
                 // Status indicator dot
                 let dot_pos = rect.center() + egui::vec2(10.0, 10.0);
-                ui.painter()
-                    .circle_filled(dot_pos, 6.0, theme::COLOR_BG_DARK);
+                ui.painter().circle_filled(dot_pos, 6.0, theme::bg_dark());
                 ui.painter().circle_filled(dot_pos, 4.0, status_color);
 
                 if response.clicked() {
@@ -73,13 +72,13 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                         egui::RichText::new(&model.nick)
                             .strong()
                             .size(13.0)
-                            .color(theme::COLOR_TEXT),
+                            .color(theme::text_color()),
                     );
                     let status_text = if model.connected { "Online" } else { "Offline" };
                     ui.label(
                         egui::RichText::new(status_text)
                             .size(11.0)
-                            .color(theme::COLOR_TEXT_MUTED),
+                            .color(theme::text_muted()),
                     );
                 });
             });
@@ -95,12 +94,12 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                 let mute_fill = if model.self_muted {
                     theme::COLOR_DANGER.linear_multiply(0.3)
                 } else {
-                    theme::COLOR_BG_LIGHT
+                    theme::bg_light()
                 };
                 let mute_text_color = if model.self_muted {
                     theme::COLOR_DANGER
                 } else {
-                    theme::COLOR_TEXT
+                    theme::text_color()
                 };
                 let mute_icon = if model.self_muted { "MIC OFF" } else { "MIC" };
 
@@ -132,12 +131,12 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                 let deafen_fill = if model.self_deafened {
                     theme::COLOR_DANGER.linear_multiply(0.3)
                 } else {
-                    theme::COLOR_BG_LIGHT
+                    theme::bg_light()
                 };
                 let deafen_text_color = if model.self_deafened {
                     theme::COLOR_DANGER
                 } else {
-                    theme::COLOR_TEXT
+                    theme::text_color()
                 };
                 let deafen_icon = if model.self_deafened { "DEAF" } else { "SOUND" };
 
@@ -165,7 +164,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                 let bar_width = ui.available_width();
                 let (rect, _) =
                     ui.allocate_exact_size(egui::vec2(bar_width, 4.0), egui::Sense::hover());
-                ui.painter().rect_filled(rect, 2.0, theme::COLOR_BG_MEDIUM);
+                ui.painter().rect_filled(rect, 2.0, theme::bg_medium());
                 let filled_width = bar_width * vad;
                 let filled = egui::Rect::from_min_size(rect.min, egui::vec2(filled_width, 4.0));
                 let color = if vad > 0.5 {

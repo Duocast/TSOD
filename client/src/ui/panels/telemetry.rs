@@ -46,7 +46,7 @@ pub fn show(ui: &mut egui::Ui, model: &UiModel) {
             let vad_color = if t.vad_probability > 0.5 {
                 theme::COLOR_ONLINE
             } else {
-                theme::COLOR_TEXT_MUTED
+                theme::text_muted()
             };
             ui.colored_label(vad_color, format!("{:.0}%", t.vad_probability * 100.0));
             ui.end_row();
@@ -55,11 +55,7 @@ pub fn show(ui: &mut egui::Ui, model: &UiModel) {
     ui.separator();
 
     // Visual RTT / loss graph (simple bar)
-    ui.label(
-        egui::RichText::new("Network Quality")
-            .strong()
-            .size(13.0),
-    );
+    ui.label(egui::RichText::new("Network Quality").strong().size(13.0));
 
     let quality = compute_quality_score(t.rtt_ms, t.loss_rate, t.jitter_ms);
     let (quality_text, quality_color) = match quality {
@@ -80,10 +76,7 @@ pub fn show(ui: &mut egui::Ui, model: &UiModel) {
             egui::vec2(bar_width * quality as f32 / 100.0, 16.0),
         );
         ui.painter().rect_filled(filled, 4.0, quality_color);
-        ui.label(
-            egui::RichText::new(format!("{quality_text} ({quality}%)"))
-                .color(quality_color),
-        );
+        ui.label(egui::RichText::new(format!("{quality_text} ({quality}%)")).color(quality_color));
     });
 }
 
