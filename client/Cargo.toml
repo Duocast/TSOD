@@ -31,7 +31,6 @@ rustls-pemfile = "2"
 ring = "0.17"
 
 # Audio (cross-platform)
-cpal = "0.15"
 opus = "0.3"
 ringbuf = "0.4"
 
@@ -56,7 +55,10 @@ dirs = "5"
 rfd = "0.15"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-pipewire = { version = "0.9", optional = true }
+pipewire = "0.9"
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+cpal = "0.15"
 
 [build-dependencies]
 prost-build = "0.13"
