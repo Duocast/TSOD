@@ -32,10 +32,12 @@ pub struct VpApp {
 
 impl VpApp {
     pub fn new(
-        _cc: &eframe::CreationContext<'_>,
+        cc: &eframe::CreationContext<'_>,
         tx_intent: Sender<UiIntent>,
         rx_event: Receiver<UiEvent>,
     ) -> Self {
+        egui_extras::install_image_loaders(&cc.egui_ctx);
+
         Self {
             model: UiModel::default(),
             tx_intent,
@@ -315,6 +317,44 @@ impl eframe::App for VpApp {
                 });
             if !open {
                 self.model.show_away_message_dialog = false;
+            }
+        }
+
+        if self.model.show_set_avatar_dialog {
+            let mut open = true;
+            egui::Window::new("Set Avatar")
+                .open(&mut open)
+                .default_width(420.0)
+                .min_width(380.0)
+                .collapsible(false)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.label("Choose an image file for your avatar.");
+                    ui.add_space(8.0);
+
+                    ui.label("Enter a local image path (png, jpg, jpeg, gif, or webp):");
+                    ui.add_sized(
+                        [ui.available_width(), 24.0],
+                        egui::TextEdit::singleline(&mut self.model.avatar_path_draft),
+                    );
+
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Apply").clicked() {
+                            let chosen = self.model.avatar_path_draft.trim().to_string();
+                            if !chosen.is_empty() {
+                                self.model.avatar_url = Some(format!("file://{chosen}"));
+                                let _ = self.tx_intent.send(UiIntent::SetAvatar { path: chosen });
+                                self.model.show_set_avatar_dialog = false;
+                            }
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.model.show_set_avatar_dialog = false;
+                        }
+                    });
+                });
+            if !open {
+                self.model.show_set_avatar_dialog = false;
             }
         }
 
