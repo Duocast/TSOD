@@ -55,10 +55,28 @@ impl VpApp {
     fn signal_quit(&self) {
         let _ = self.tx_intent.try_send(UiIntent::Quit);
     }
+
+    fn persist_settings_if_dirty(&mut self) {
+        if !self.model.settings_dirty {
+            return;
+        }
+
+        self.model.settings = self.model.settings_draft.clone();
+        self.model.settings_dirty = false;
+        self.model.sync_settings_to_runtime();
+
+        let _ = self.tx_intent.try_send(UiIntent::ApplySettings(Box::new(
+            self.model.settings.clone(),
+        )));
+        let _ = self.tx_intent.try_send(UiIntent::SaveSettings(Box::new(
+            self.model.settings.clone(),
+        )));
+    }
 }
 
 impl eframe::App for VpApp {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.persist_settings_if_dirty();
         self.signal_quit();
     }
 
@@ -99,6 +117,9 @@ impl eframe::App for VpApp {
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("Settings").clicked() {
+                        if self.model.show_settings {
+                            self.persist_settings_if_dirty();
+                        }
                         self.model.show_settings = !self.model.show_settings;
                     }
                     if ui.button("Telemetry").clicked() {

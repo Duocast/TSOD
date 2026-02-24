@@ -937,10 +937,11 @@ fn build_mic_test_waveform(pcm: &[i16], points: usize) -> Vec<f32> {
         }
 
         let end = ((i + 1) * chunk).min(pcm.len());
-        let slice = &pcm[start..end];
-        let signed_mean =
-            slice.iter().map(|s| *s as f32 / 32768.0).sum::<f32>() / slice.len() as f32;
-        out.push(signed_mean.clamp(-1.0, 1.0));
+        let peak = pcm[start..end]
+            .iter()
+            .map(|s| (*s as f32).abs() / 32768.0)
+            .fold(0.0_f32, f32::max);
+        out.push(peak);
     }
 
     out
