@@ -25,7 +25,7 @@ use net::dispatcher::{ControlDispatcher, PushEvent};
 use net::voice_datagram::{make_voice_datagram, VOICE_HDR_LEN, VOICE_VERSION};
 use proto::voiceplatform::v1 as pb;
 use std::sync::{
-@@ -72,53 +74,51 @@ fn main() -> Result<()> {
+    fn main() -> Result<()> {
                 backend_tx_event,
                 rx_intent,
                 backend_running,
@@ -77,7 +77,7 @@ async fn app_task(
     let _ = tx_event.send(UiEvent::AppendLog(format!(
         "[sys] starting, server={}",
         cfg.server
-@@ -126,61 +126,63 @@ async fn app_task(
+async fn app_task(
     let _ = tx_event.send(UiEvent::SetNick(cfg.display_name.clone()));
 
     // Enumerate and report audio devices to the UI
@@ -141,7 +141,7 @@ async fn app_task(
     let output_gain = Arc::new(std::sync::atomic::AtomicU32::new(f32_to_u32(1.0)));
     let loopback_active = Arc::new(AtomicBool::new(false));
 
-@@ -275,141 +277,128 @@ async fn connect_and_run_session(
+async fn connect_and_run_session(
                                 pb::chat_event::Kind::MessagePosted(mp) => {
                                     let author = mp
                                         .author_user_id
@@ -270,7 +270,7 @@ async fn app_task(
     let _voice_recv = tokio::spawn(voice_recv_loop(
         conn.clone(),
         codec.clone(),
-@@ -718,51 +707,58 @@ async fn voice_send_loop(
+async fn voice_send_loop(
         let mut is_voice = true;
         if let Some(ref dsp) = capture_dsp {
             let mut d = dsp.lock().await;
