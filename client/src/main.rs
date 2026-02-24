@@ -678,15 +678,6 @@ async fn voice_send_loop(
     loop {
         tick.tick().await;
 
-        // Don't send voice when self-muted
-        if self_muted.load(Ordering::Relaxed) {
-            continue;
-        }
-
-        if push_to_talk && !ptt_active.load(Ordering::Relaxed) {
-            continue;
-        }
-
         if !capture.read_frame(&mut pcm) {
             continue;
         }
@@ -702,6 +693,14 @@ async fn voice_send_loop(
         // Loopback: feed capture directly to playout for mic testing
         if loopback_active.load(Ordering::Relaxed) {
             playout.push_pcm(&pcm);
+            let waveform = build_mic_test_waveform(&pcm, 96);
+            let _ = tx_event.send(UiEvent::MicTestWaveform(waveform));
+        }
+
+        let can_send = !self_muted.load(Ordering::Relaxed)
+            && (!push_to_talk || ptt_active.load(Ordering::Relaxed));
+        if !can_send {
+            continue;
         }
 
         // Apply DSP pipeline (noise suppression + AGC + VAD)
@@ -829,6 +828,30 @@ fn stable_route_hash_u32(bytes: &[u8]) -> u32 {
         h = h.wrapping_mul(FNV_PRIME);
     }
     h
+}
+
+fn build_mic_test_waveform(pcm: &[i16], points: usize) -> Vec<f32> {
+    if pcm.is_empty() || points == 0 {
+        return Vec::new();
+    }
+
+    let chunk = (pcm.len() / points.max(1)).max(1);
+    let mut out = Vec::with_capacity(points);
+
+    for i in 0..points {
+        let start = i * chunk;
+        if start >= pcm.len() {
+            break;
+        }
+
+        let end = ((i + 1) * chunk).min(pcm.len());
+        let slice = &pcm[start..end];
+        let signed_mean =
+            slice.iter().map(|s| *s as f32 / 32768.0).sum::<f32>() / slice.len() as f32;
+        out.push(signed_mean.clamp(-1.0, 1.0));
+    }
+
+    out
 }
 
 fn f32_to_u32(f: f32) -> u32 {
