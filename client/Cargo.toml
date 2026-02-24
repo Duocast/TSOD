@@ -10,6 +10,7 @@ aec = ["dsp", "dep:sonora-aec3"]
 screen-share = []
 video-call = []
 e2ee = []
+pipewire-backend = ["dep:pipewire"]
 
 [dependencies]
 async-trait = "0.1"
