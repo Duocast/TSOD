@@ -4,9 +4,9 @@ version = "0.2.0"
 edition = "2021"
 
 [features]
-default = ["dsp"]
+default = ["dsp", "aec"]
 dsp = []
-aec = ["dsp"]          # acoustic echo cancellation (experimental)
+aec = ["dsp", "dep:sonora-aec3"]
 screen-share = []
 video-call = []
 e2ee = []
@@ -36,6 +36,7 @@ ringbuf = "0.4"
 
 # DSP
 nnnoiseless = "0.5"      # Pure Rust RNNoise (noise suppression + VAD)
+sonora-aec3 = { version = "0.1", optional = true }
 
 # GUI
 eframe = "0.29"
