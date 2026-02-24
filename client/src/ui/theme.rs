@@ -20,25 +20,66 @@ pub const COLOR_MENTION: egui::Color32 = egui::Color32::from_rgb(250, 168, 26);
 pub const COLOR_LINK: egui::Color32 = egui::Color32::from_rgb(0, 168, 252);
 pub const COLOR_DANGER: egui::Color32 = egui::Color32::from_rgb(237, 66, 69);
 
-pub fn apply_theme(ctx: &egui::Context) {
+pub fn apply_theme(ctx: &egui::Context, theme_name: &str) {
     let mut style = (*ctx.style()).clone();
 
     // Visuals
     let v = &mut style.visuals;
-    v.dark_mode = true;
+    let light_mode = theme_name.eq_ignore_ascii_case("light");
+    let oled_mode = theme_name.eq_ignore_ascii_case("oled black");
+    v.dark_mode = !light_mode;
 
-    v.override_text_color = Some(COLOR_TEXT);
-
-    v.widgets.noninteractive.bg_fill = COLOR_BG_MEDIUM;
-    v.widgets.inactive.bg_fill = COLOR_BG_LIGHT;
-    v.widgets.hovered.bg_fill = egui::Color32::from_rgb(70, 73, 80);
-    v.widgets.active.bg_fill = COLOR_ACCENT;
-    v.widgets.open.bg_fill = COLOR_BG_LIGHT;
-
-    v.window_fill = COLOR_BG_MEDIUM;
-    v.panel_fill = COLOR_BG_DARK;
-    v.extreme_bg_color = COLOR_BG_INPUT;
-    v.faint_bg_color = COLOR_BG_MEDIUM;
+    if light_mode {
+        v.override_text_color = Some(egui::Color32::from_rgb(36, 41, 47));
+        v.widgets.noninteractive.bg_fill = egui::Color32::from_rgb(244, 246, 249);
+        v.widgets.inactive.bg_fill = egui::Color32::from_rgb(230, 234, 240);
+        v.widgets.hovered.bg_fill = egui::Color32::from_rgb(215, 222, 232);
+        v.widgets.active.bg_fill = COLOR_ACCENT;
+        v.widgets.open.bg_fill = egui::Color32::from_rgb(230, 234, 240);
+        v.window_fill = egui::Color32::from_rgb(248, 250, 252);
+        v.panel_fill = egui::Color32::from_rgb(239, 242, 247);
+        v.extreme_bg_color = egui::Color32::from_rgb(255, 255, 255);
+        v.faint_bg_color = egui::Color32::from_rgb(239, 242, 247);
+    } else {
+        v.override_text_color = Some(COLOR_TEXT);
+        v.widgets.noninteractive.bg_fill = if oled_mode {
+            egui::Color32::from_rgb(12, 12, 14)
+        } else {
+            COLOR_BG_MEDIUM
+        };
+        v.widgets.inactive.bg_fill = if oled_mode {
+            egui::Color32::from_rgb(22, 22, 24)
+        } else {
+            COLOR_BG_LIGHT
+        };
+        v.widgets.hovered.bg_fill = egui::Color32::from_rgb(70, 73, 80);
+        v.widgets.active.bg_fill = COLOR_ACCENT;
+        v.widgets.open.bg_fill = if oled_mode {
+            egui::Color32::from_rgb(22, 22, 24)
+        } else {
+            COLOR_BG_LIGHT
+        };
+        v.window_fill = if oled_mode {
+            egui::Color32::from_rgb(8, 8, 9)
+        } else {
+            COLOR_BG_MEDIUM
+        };
+        v.panel_fill = if oled_mode {
+            egui::Color32::from_rgb(0, 0, 0)
+        } else {
+            COLOR_BG_DARK
+        };
+        v.extreme_bg_color = if oled_mode {
+            egui::Color32::from_rgb(14, 14, 16)
+        } else {
+            COLOR_BG_INPUT
+        };
+        v.faint_bg_color = if oled_mode {
+            egui::Color32::from_rgb(8, 8, 9)
+        } else {
+            COLOR_BG_MEDIUM
+        };
+    }
 
     v.window_rounding = egui::Rounding::same(8.0);
     v.window_shadow = egui::epaint::Shadow {
