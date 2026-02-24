@@ -29,8 +29,7 @@ rustls = { version = "0.23", default-features = false, features = ["std", "ring"
 rustls-pemfile = "2"
 ring = "0.17"
 
-# Audio
-cpal = "0.15"
+# Audio (cross-platform)
 opus = "0.3"
 ringbuf = "0.4"
 
@@ -53,6 +52,12 @@ crossbeam-channel = "0.5"
 open = "5"                # open URLs in browser
 dirs = "5"
 rfd = "0.15"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+pipewire = "0.9"
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+cpal = "0.15"
 
 [build-dependencies]
 prost-build = "0.13"
