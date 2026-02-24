@@ -74,7 +74,14 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                             .size(13.0)
                             .color(theme::text_color()),
                     );
-                    let status_text = if model.connected { "Online" } else { "Offline" };
+                    let mut status_text = if model.connected {
+                        "Online".to_string()
+                    } else {
+                        "Offline".to_string()
+                    };
+                    if !model.away_message.is_empty() {
+                        status_text = format!("Away: {}", model.away_message);
+                    }
                     ui.label(
                         egui::RichText::new(status_text)
                             .size(11.0)
@@ -88,6 +95,25 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
             // Bottom row: action buttons
             ui.horizontal(|ui: &mut egui::Ui| {
                 let btn_size = egui::vec2(36.0, 28.0);
+
+                let away_btn = ui.add_sized(
+                    btn_size,
+                    egui::Button::new(
+                        egui::RichText::new("AWAY")
+                            .size(9.0)
+                            .color(theme::text_color())
+                            .strong(),
+                    )
+                    .fill(theme::bg_light())
+                    .rounding(4.0),
+                );
+                if away_btn.clicked() {
+                    model.show_away_message_dialog = true;
+                    model.away_message_draft = model.away_message.clone();
+                }
+                away_btn.on_hover_text("Set Away Message");
+
+                ui.add_space(2.0);
 
                 // Mute button
                 let mute_label = if model.self_muted { "Unmute" } else { "Mute" };

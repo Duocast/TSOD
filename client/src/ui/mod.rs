@@ -259,6 +259,65 @@ impl eframe::App for VpApp {
             }
         }
 
+        // Away message dialog (TS3-style)
+        if self.model.show_away_message_dialog {
+            let mut open = true;
+            egui::Window::new("Set Away Message")
+                .open(&mut open)
+                .default_width(360.0)
+                .min_width(320.0)
+                .collapsible(false)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Message:");
+                        ui.add_sized(
+                            [ui.available_width(), 24.0],
+                            egui::TextEdit::singleline(&mut self.model.away_message_draft),
+                        );
+                    });
+
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        ui.label("Preset:");
+                        egui::ComboBox::from_id_source("away_message_preset")
+                            .selected_text("<None>")
+                            .show_ui(ui, |ui| {
+                                for preset in &self.model.away_message_presets {
+                                    if ui.selectable_label(false, preset).clicked() {
+                                        self.model.away_message_draft = preset.clone();
+                                    }
+                                }
+                            });
+                    });
+
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        let apply_away = |model: &mut UiModel, tx_intent: &Sender<UiIntent>| {
+                            model.away_message = model.away_message_draft.trim().to_string();
+                            let _ = tx_intent.send(UiIntent::SetAwayMessage {
+                                message: model.away_message.clone(),
+                            });
+                        };
+
+                        if ui.button("OK").clicked() {
+                            apply_away(&mut self.model, &self.tx_intent);
+                            self.model.show_away_message_dialog = false;
+                        }
+                        if ui.button("Save").clicked() {
+                            apply_away(&mut self.model, &self.tx_intent);
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.model.away_message_draft = self.model.away_message.clone();
+                            self.model.show_away_message_dialog = false;
+                        }
+                    });
+                });
+            if !open {
+                self.model.show_away_message_dialog = false;
+            }
+        }
+
         // Create channel dialog (floating)
         panels::server_tree::show_create_channel_dialog(ctx, &mut self.model, &self.tx_intent);
 

@@ -20,6 +20,7 @@ pub enum UiEvent {
     SetUserId(String),
     AppendLog(String),
     SetStatus(String),
+    SetAwayMessage(String),
 
     // Channel list
     SetChannels(Vec<ChannelEntry>),
@@ -120,6 +121,9 @@ pub enum UiIntent {
     ToggleSelfMute,
     ToggleSelfDeafen,
     Help,
+    SetAwayMessage {
+        message: String,
+    },
 
     // Chat
     EditMessage {
@@ -662,6 +666,10 @@ pub struct UiModel {
 
     // User popup
     pub show_user_popup: bool,
+    pub show_away_message_dialog: bool,
+    pub away_message: String,
+    pub away_message_draft: String,
+    pub away_message_presets: Vec<String>,
 
     // Notifications
     pub notifications: VecDeque<Notification>,
@@ -729,6 +737,14 @@ impl Default for UiModel {
             create_channel_user_limit: 0,
             create_channel_tab: 0,
             show_user_popup: false,
+            show_away_message_dialog: false,
+            away_message: String::new(),
+            away_message_draft: String::new(),
+            away_message_presets: vec![
+                "Out to lunch".into(),
+                "Back in 5".into(),
+                "In a meeting".into(),
+            ],
             notifications: VecDeque::new(),
             settings,
             settings_draft,
@@ -756,6 +772,7 @@ impl UiModel {
                 }
             }
             UiEvent::SetStatus(s) => self.status_line = s,
+            UiEvent::SetAwayMessage(message) => self.away_message = message,
             UiEvent::SetChannels(chs) => self.channels = chs,
             UiEvent::UpdateChannelMembers {
                 channel_id,
