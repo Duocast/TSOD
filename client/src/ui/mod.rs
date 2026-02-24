@@ -178,3 +178,108 @@ impl eframe::App for VpApp {
                 // User panel at the bottom of the sidebar
                 panels::user_panel::show(ui, &mut self.model, &self.tx_intent);
             });
+
+        // Right panel: member list
+        egui::SidePanel::right("members_panel")
+            .default_width(200.0)
+            .min_width(150.0)
+            .show(ctx, |ui| {
+                panels::members::show(ui, &self.model, &self.tx_intent);
+            });
+
+        // Settings window (floating, TS3-style Options dialog)
+        if self.model.show_settings {
+            let mut open = true;
+            egui::Window::new("Options")
+                .open(&mut open)
+                .default_width(750.0)
+                .default_height(550.0)
+                .min_width(600.0)
+                .min_height(400.0)
+                .collapsible(false)
+                .show(ctx, |ui| {
+                    panels::settings::show(ui, &mut self.model, &self.tx_intent);
+                });
+            if !open {
+                // Revert unsaved changes when closing
+                if self.model.settings_dirty {
+                    self.model.settings_draft = self.model.settings.clone();
+                    self.model.settings_dirty = false;
+                }
+                self.model.show_settings = false;
+            }
+        }
+
+        // Telemetry window (floating)
+        if self.model.show_telemetry {
+            let mut open = true;
+            egui::Window::new("Connection Telemetry")
+                .open(&mut open)
+                .default_width(400.0)
+                .show(ctx, |ui| {
+                    panels::telemetry::show(ui, &self.model);
+                });
+            if !open {
+                self.model.show_telemetry = false;
+            }
+        }
+
+        // Create channel dialog (floating)
+        panels::server_tree::show_create_channel_dialog(ctx, &mut self.model, &self.tx_intent);
+
+        // Central panel: chat messages + input
+        egui::CentralPanel::default().show(ctx, |ui| {
+            panels::chat::show(ui, &mut self.model, &self.tx_intent);
+        });
+
+        // Handle keyboard shortcuts
+        self.handle_shortcuts(ctx);
+    }
+}
+
+impl VpApp {
+    fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+        let input = ctx.input(|i| {
+            (
+                i.key_pressed(egui::Key::Space),
+                i.key_released(egui::Key::Space),
+                i.key_pressed(egui::Key::Escape),
+                i.modifiers.ctrl,
+                i.key_pressed(egui::Key::M),
+                i.key_pressed(egui::Key::D),
+            )
+        });
+
+        let (space_pressed, space_released, esc_pressed, ctrl, m_pressed, d_pressed) = input;
+
+        // PTT: space down = talk, space up = stop
+        if self.model.ptt_enabled {
+            if space_pressed && !self.model.chat_input_focused {
+                let _ = self.tx_intent.send(UiIntent::PttDown);
+                self.model.ptt_active = true;
+            }
+            if space_released && !self.model.chat_input_focused {
+                let _ = self.tx_intent.send(UiIntent::PttUp);
+                self.model.ptt_active = false;
+            }
+        }
+
+        // Ctrl+M = toggle mute
+        if ctrl && m_pressed && !self.model.chat_input_focused {
+            self.model.self_muted = !self.model.self_muted;
+            let _ = self.tx_intent.send(UiIntent::ToggleSelfMute);
+        }
+
+        // Ctrl+D = toggle deafen
+        if ctrl && d_pressed && !self.model.chat_input_focused {
+            self.model.self_deafened = !self.model.self_deafened;
+            let _ = self.tx_intent.send(UiIntent::ToggleSelfDeafen);
+        }
+
+        if esc_pressed {
+            self.model.show_settings = false;
+            self.model.show_telemetry = false;
+            self.model.show_create_channel = false;
+        }
+    }
+}
