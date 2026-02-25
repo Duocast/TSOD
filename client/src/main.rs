@@ -43,7 +43,7 @@ fn main() -> Result<()> {
         .install_default()
         .expect("Failed to install rustls crypto provider");
 
-    let cfg = Config::parse();
+    let cfg = Config::load();
 
     // Channels between GUI and backend (crossbeam for sync/async bridging)
     let (tx_intent, rx_intent) = bounded::<UiIntent>(256);
@@ -121,10 +121,18 @@ async fn app_task(
     ptt_active: Arc<AtomicBool>,
 ) -> Result<()> {
     let _ = tx_event.send(UiEvent::AppendLog(format!(
-        "[sys] starting, server={}",
-        cfg.server
+        "[sys] starting, server={}, sni={}, ca_cert={}",
+        cfg.server,
+        cfg.server_name,
+        cfg.ca_cert_pem.as_deref().unwrap_or("(insecure dev mode)")
     )));
     let _ = tx_event.send(UiEvent::SetNick(cfg.display_name.clone()));
+
+    if cfg.server == "127.0.0.1:4433" || cfg.server == "localhost:4433" {
+        let _ = tx_event.send(UiEvent::AppendLog(
+            "[net] warning: using default server 127.0.0.1:4433; set --server or VP_SERVER for remote gateway".into(),
+        ));
+    }
 
     // Enumerate and report audio devices to the UI
     let input_devices = audio::capture::enumerate_input_devices();
