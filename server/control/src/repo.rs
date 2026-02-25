@@ -468,13 +468,14 @@ impl ControlRepo for PgControlRepo {
     ) -> ControlResult<()> {
         sqlx::query(
             r#"
-            INSERT INTO outbox_events (id, server_id, topic, payload_json, created_at)
-            VALUES ($1, $2, $3, $4, NOW())
+            INSERT INTO outbox_events (id, server_id, topic, payload, payload_json, created_at)
+            VALUES ($1, $2, $3, $4, $5, NOW())
             "#,
         )
         .bind(ev.id.0)
         .bind(ev.server_id.0)
         .bind(&ev.topic)
+        .bind(&ev.payload_json)
         .bind(&ev.payload_json)
         .execute(&mut **tx)
         .await
@@ -518,11 +519,24 @@ impl ControlRepo for PgControlRepo {
 
         let mut out = Vec::with_capacity(rows.len());
         for r in rows {
+            let id = r
+                .try_get::<Uuid, _>("id")
+                .context("decode outbox_events.id as uuid")?;
+            let server_id = r
+                .try_get::<Uuid, _>("server_id")
+                .context("decode outbox_events.server_id as uuid")?;
+            let topic = r
+                .try_get::<String, _>("topic")
+                .context("decode outbox_events.topic")?;
+            let payload_json = r
+                .try_get::<Json, _>("payload_json")
+                .context("decode outbox_events.payload_json as jsonb")?;
+
             out.push(OutboxEventRow {
-                id: OutboxId(r.get::<Uuid, _>("id")),
-                server_id: ServerId(r.get::<Uuid, _>("server_id")),
-                topic: r.get::<String, _>("topic"),
-                payload_json: r.get::<Json, _>("payload_json"),
+                id: OutboxId(id),
+                server_id: ServerId(server_id),
+                topic,
+                payload_json,
             });
         }
         Ok(out)
@@ -563,8 +577,18 @@ impl ControlRepo for PgControlRepo {
     ) -> ControlResult<()> {
         sqlx::query(
             r#"
-            INSERT INTO audit_log (id, server_id, actor_user_id, action, target_type, target_id, context_json, created_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            INSERT INTO audit_log (
+                id,
+                server_id,
+                actor_user_id,
+                action,
+                target_type,
+                target_id,
+                context,
+                context_json,
+                created_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             "#,
         )
         .bind(entry.id.0)
@@ -573,6 +597,7 @@ impl ControlRepo for PgControlRepo {
         .bind(&entry.action)
         .bind(&entry.target_type)
         .bind(&entry.target_id)
+        .bind(&entry.context_json)
         .bind(&entry.context_json)
         .bind(entry.created_at)
         .execute(&mut **tx)
