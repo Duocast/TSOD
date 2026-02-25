@@ -132,6 +132,7 @@ pub enum UiIntent {
     ConnectToServer {
         host: String,
         port: u16,
+        nickname: String,
     },
 
     // Chat
@@ -661,6 +662,7 @@ pub struct UiModel {
     pub status_line: String,
     pub connection_host_draft: String,
     pub connection_port_draft: String,
+    pub connection_nickname_draft: String,
     pub connection_error: String,
 
     // Audio devices (enumerated at runtime)
@@ -747,6 +749,7 @@ impl Default for UiModel {
             status_line: String::new(),
             connection_host_draft: "127.0.0.1".into(),
             connection_port_draft: "4433".into(),
+            connection_nickname_draft: String::new(),
             connection_error: String::new(),
             input_devices: Vec::new(),
             output_devices: Vec::new(),
@@ -790,7 +793,12 @@ impl UiModel {
                 self.selected_channel = Some(n.clone());
                 self.selected_channel_name = n;
             }
-            UiEvent::SetNick(n) => self.nick = n,
+            UiEvent::SetNick(n) => {
+                self.nick = n.clone();
+                if !n.trim().is_empty() {
+                    self.connection_nickname_draft = n;
+                }
+            }
             UiEvent::SetUserId(id) => self.user_id = id,
             UiEvent::AppendLog(line) => {
                 self.log.push_back(line);
@@ -968,6 +976,7 @@ impl UiModel {
         let nick = self.settings.identity_nickname.trim();
         if !nick.is_empty() {
             self.nick = nick.to_string();
+            self.connection_nickname_draft = nick.to_string();
         }
     }
 
@@ -1000,6 +1009,17 @@ impl UiModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sync_settings_updates_nick_and_connection_nickname() {
+        let mut model = UiModel::new();
+        model.settings.identity_nickname = "Overdose".into();
+
+        model.sync_settings_to_runtime();
+
+        assert_eq!(model.nick, "Overdose");
+        assert_eq!(model.connection_nickname_draft, "Overdose");
+    }
 
     #[test]
     fn resolves_author_name_from_channel_member_then_fallback() {

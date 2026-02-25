@@ -25,7 +25,12 @@ impl ControlClient {
         }
     }
 
-    pub async fn hello_and_auth(&mut self, alpn: &str, dev_token: &str) -> Result<()> {
+    pub async fn hello_and_auth(
+        &mut self,
+        alpn: &str,
+        dev_token: &str,
+        preferred_display_name: &str,
+    ) -> Result<()> {
         let hello = pb::Hello {
             caps: Some(default_caps(alpn)),
             device_id: Some(pb::DeviceId {
@@ -43,6 +48,7 @@ impl ControlClient {
         }
 
         let auth = pb::AuthRequest {
+            preferred_display_name: preferred_display_name.into(),
             method: Some(pb::auth_request::Method::DevToken(pb::DevTokenAuth {
                 token: dev_token.into(),
             })),
