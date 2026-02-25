@@ -114,7 +114,13 @@ impl Gateway {
         let server_id =
             ServerId(uuid::Uuid::parse_str(&identity.server_id).context("invalid server_id uuid")?);
 
-        info!(%remote, session_id=%session_id, user_id=%identity.user_id, "authenticated");
+        info!(
+            %remote,
+            session_id = %session_id,
+            user_id = %identity.user_id,
+            display_name = %identity.display_name,
+            "authenticated"
+        );
 
         // Control stream writes are performed inline in this task.
 
@@ -189,6 +195,14 @@ impl Gateway {
             match msg.payload {
                 Some(pb::client_to_server::Payload::JoinChannelRequest(r)) => {
                     let ch = parse_channel_id(r.channel_id.as_ref())?;
+                    debug!(
+                        session_id = %session_id,
+                        server_id = %server_id.0,
+                        channel_id = %ch.0,
+                        user_id = %user_id.0,
+                        display_name = %identity.display_name,
+                        "join_channel request"
+                    );
                     let members = self
                         .control
                         .join_channel(
@@ -210,6 +224,24 @@ impl Gateway {
                     );
                     for m in &members {
                         self.membership.set_user(m.user_id, ch, m.muted);
+                    }
+
+                    debug!(
+                        session_id = %session_id,
+                        server_id = %server_id.0,
+                        channel_id = %ch.0,
+                        user_id = %user_id.0,
+                        member_count = members.len(),
+                        "join_channel response state built"
+                    );
+                    for member in &members {
+                        debug!(
+                            session_id = %session_id,
+                            channel_id = %ch.0,
+                            member_user_id = %member.user_id.0,
+                            member_display_name = %member.display_name,
+                            "join_channel member snapshot"
+                        );
                     }
 
                     let state = pb::ChannelState {
@@ -300,7 +332,6 @@ impl Gateway {
                         .await?;
 
                     debug!(server_id=%server_id.0, channel_id=%created.id.0, user_id=%user_id.0, "create_channel request committed in control service");
-
                     let state = pb::ChannelState {
                         channel_id: Some(pb::ChannelId {
                             value: created.id.0.to_string(),

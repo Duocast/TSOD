@@ -406,6 +406,17 @@ mod tests {
     }
 
     #[test]
+    fn same_author_id_different_names_is_grouped() {
+        let now = Local::now().timestamp_millis();
+        let mut first = msg("shared-auth-id", now);
+        let mut second = msg("shared-auth-id", now + 5_000);
+        first.author_name = "Overdose".into();
+        second.author_name = "Dresk".into();
+
+        assert!(should_group_messages(&first, &second));
+    }
+
+    #[test]
     fn same_text_different_author_is_not_grouped() {
         let now = Local::now().timestamp_millis();
         let mut first = msg("dresk-id", now);
