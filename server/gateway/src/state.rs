@@ -57,11 +57,7 @@ impl PushHub {
     }
 
     pub fn connected_users(&self) -> Vec<UserId> {
-        let mut set = HashSet::new();
-        for entry in self.inner.iter() {
-            set.insert(entry.key().0);
-        }
-        set.into_iter().collect()
+        self.inner.iter().map(|entry| *entry.key()).collect()
     }
 }
 
