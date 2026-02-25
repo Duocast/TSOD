@@ -24,15 +24,19 @@ use crossbeam_channel::{bounded, Receiver, Sender};
 use net::dispatcher::{ControlDispatcher, PushEvent};
 use net::voice_datagram::{make_voice_datagram, VOICE_HDR_LEN, VOICE_VERSION};
 use proto::voiceplatform::v1 as pb;
+use std::collections::HashSet;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc,
+    Arc, Mutex as StdMutex, OnceLock,
 };
 use tokio::sync::{watch, Mutex};
 use tokio::time::{sleep, Duration, Instant};
 use tracing::{debug, info, warn, Level};
 use tracing_subscriber::EnvFilter;
 use ui::{UiEvent, UiIntent, VpApp};
+
+#[cfg(debug_assertions)]
+static DEBUG_SEEN_AUTH_USER_IDS: OnceLock<StdMutex<HashSet<String>>> = OnceLock::new();
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -416,6 +420,14 @@ async fn connect_and_run_session(
         ui::model::ConnectionStage::Authenticating,
         "Authenticating with gateway",
     );
+    if cfg.dev_token.trim() == "dev" {
+        warn!(
+            "legacy dev token detected on this client; all clients using token=dev authenticate as the same test identity"
+        );
+        let _ = tx_event.send(UiEvent::AppendLog(
+            "[auth] warning: legacy dev token 'dev' maps all clients to one test user_id; use dev:<name> per client".into(),
+        ));
+    }
     let auth_started = Instant::now();
     let auth_info = dispatcher
         .hello_auth(&cfg.alpn, &cfg.dev_token, &cfg.display_name)
@@ -431,8 +443,34 @@ async fn connect_and_run_session(
         ),
     );
 
+    debug!(
+        session_id = %auth_info.session_id,
+        user_id = %auth_info.user_id,
+        display_name = %cfg.display_name,
+        "auth success"
+    );
     if !auth_info.user_id.is_empty() {
         let _ = tx_event.send(UiEvent::SetUserId(auth_info.user_id.clone()));
+    }
+
+    #[cfg(debug_assertions)]
+    if !auth_info.user_id.trim().is_empty() {
+        let seen = DEBUG_SEEN_AUTH_USER_IDS.get_or_init(|| StdMutex::new(HashSet::new()));
+        if let Ok(mut seen_ids) = seen.lock() {
+            if !seen_ids.insert(auth_info.user_id.clone()) {
+                warn!(
+                    user_id = %auth_info.user_id,
+                    session_id = %auth_info.session_id,
+                    "debug warning: auth user_id already seen in this process; sessions may represent the same identity"
+                );
+                let _ = tx_event.send(UiEvent::AppendLog(
+                    format!(
+                        "[auth] warning: authenticated user_id {} already exists in a local session; nickname does not change auth identity",
+                        auth_info.user_id
+                    ),
+                ));
+            }
+        }
     }
 
     let local_user_id = if auth_info.user_id.trim().is_empty() {
@@ -547,7 +585,12 @@ async fn connect_and_run_session(
                                             .as_ref()
                                             .map(|u| u.value.clone())
                                             .unwrap_or_default();
-                                        debug!(channel_id=%channel_id.value, user_id=%user_id, "received member-joined push event");
+                                        debug!(
+                                            channel_id = %channel_id.value,
+                                            user_id = %user_id,
+                                            display_name = %member.display_name,
+                                            "received member-joined push event"
+                                        );
                                         let _ = tx_event.send(UiEvent::MemberJoined {
                                             channel_id: channel_id.value,
                                             member: ui::model::MemberEntry {
@@ -640,6 +683,14 @@ async fn connect_and_run_session(
     if let Some(ch) = cfg.channel_id.as_deref() {
         match dispatcher.join_channel(ch).await {
             Ok(state) => {
+                for member in &state.members {
+                    debug!(
+                        channel_id = %ch,
+                        user_id = %member.user_id.as_ref().map(|u| u.value.clone()).unwrap_or_default(),
+                        display_name = %member.display_name,
+                        "join/member upsert snapshot"
+                    );
+                }
                 let _ = tx_event.send(UiEvent::SetChannelName(ch.to_string()));
                 let _ = tx_event.send(UiEvent::UpdateChannelMembers {
                     channel_id: ch.to_string(),
@@ -804,6 +855,14 @@ async fn connect_and_run_session(
                         UiIntent::JoinChannel { channel_id } => {
                             match dispatcher.join_channel(&channel_id).await {
                                 Ok(state) => {
+                                    for member in &state.members {
+                                        debug!(
+                                            channel_id = %channel_id,
+                                            user_id = %member.user_id.as_ref().map(|u| u.value.clone()).unwrap_or_default(),
+                                            display_name = %member.display_name,
+                                            "join/member upsert snapshot"
+                                        );
+                                    }
                                     active_channel = Some(channel_id.clone());
                                     let _ = tx_event.send(UiEvent::SetChannelName(channel_id.clone()));
                                     let _ = tx_event.send(UiEvent::UpdateChannelMembers {

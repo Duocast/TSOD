@@ -637,7 +637,7 @@ pub struct UiModel {
     pub selected_channel: Option<String>,
     pub selected_channel_name: String,
 
-    // Members (keyed by channel_id)
+    // Members (keyed by channel_id, with each channel list deduped by user_id)
     pub members: HashMap<String, Vec<MemberEntry>>,
     pub speaking_users: HashMap<String, bool>,
 
@@ -1232,6 +1232,42 @@ mod tests {
             .unwrap();
         assert_eq!(fallback, "LocalNick");
     }
+    #[test]
+    fn member_joined_distinct_user_ids_are_kept_as_two_members() {
+        let mut model = UiModel::new();
+        model.apply_event(UiEvent::MemberJoined {
+            channel_id: "c1".into(),
+            member: MemberEntry {
+                user_id: "u-overdose".into(),
+                display_name: "Overdose".into(),
+                muted: false,
+                deafened: false,
+                self_muted: false,
+                self_deafened: false,
+                streaming: false,
+                speaking: false,
+                avatar_url: None,
+            },
+        });
+        model.apply_event(UiEvent::MemberJoined {
+            channel_id: "c1".into(),
+            member: MemberEntry {
+                user_id: "u-dresk".into(),
+                display_name: "Dresk".into(),
+                muted: false,
+                deafened: false,
+                self_muted: false,
+                self_deafened: false,
+                streaming: false,
+                speaking: false,
+                avatar_url: None,
+            },
+        });
+
+        let members = model.members.get("c1").expect("members");
+        assert_eq!(members.len(), 2);
+    }
+
     #[test]
     fn member_joined_updates_existing_member_instead_of_dup() {
         let mut model = UiModel::new();

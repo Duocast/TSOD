@@ -28,6 +28,7 @@ pub enum PushEvent {
 #[derive(Clone, Debug)]
 pub struct AuthInfo {
     pub user_id: String,
+    pub session_id: String,
 }
 
 #[derive(Clone, Debug)]
@@ -146,9 +147,19 @@ impl ControlDispatcher {
             return Err(anyhow!("auth failed: {:?}", resp.error));
         }
 
+        let session_id = self
+            .inner
+            .session_id
+            .read()
+            .await
+            .as_ref()
+            .map(|sid| sid.value.clone())
+            .unwrap_or_default();
+
         match resp.payload {
             Some(pb::server_to_client::Payload::AuthResponse(a)) => Ok(AuthInfo {
                 user_id: a.user_id.map(|u| u.value).unwrap_or_default(),
+                session_id,
             }),
             _ => Err(anyhow!("expected AuthResponse")),
         }

@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use tracing::warn;
 
 use crate::proto::voiceplatform::v1 as pb;
 
@@ -22,6 +23,10 @@ impl AuthProvider for DevAuthProvider {
         match req.method.as_ref() {
             Some(pb::auth_request::Method::DevToken(m)) => {
                 if m.token == "dev" {
+                    warn!(
+                        token = %m.token,
+                        "legacy dev token used; all clients with token=dev map to the same test user_id"
+                    );
                     Ok(AuthedIdentity {
                         user_id: "00000000-0000-0000-0000-000000000001".to_string(),
                         server_id: "00000000-0000-0000-0000-0000000000aa".to_string(),
@@ -54,6 +59,30 @@ mod tests {
     use super::{AuthProvider, DevAuthProvider};
     use crate::proto::voiceplatform::v1 as pb;
 
+    #[test]
+    fn legacy_dev_token_maps_to_single_identity() {
+        let provider = DevAuthProvider;
+        let req_a = pb::AuthRequest {
+            method: Some(pb::auth_request::Method::DevToken(pb::DevTokenAuth {
+                token: "dev".into(),
+            })),
+            ..Default::default()
+        };
+        let req_b = pb::AuthRequest {
+            method: Some(pb::auth_request::Method::DevToken(pb::DevTokenAuth {
+                token: "dev".into(),
+            })),
+            ..Default::default()
+        };
+
+        let a = provider
+            .authenticate(&req_a)
+            .expect("first legacy dev auth");
+        let b = provider
+            .authenticate(&req_b)
+            .expect("second legacy dev auth");
+        assert_eq!(a.user_id, b.user_id);
+    }
     #[test]
     fn dev_colon_token_produces_distinct_user_ids() {
         let provider = DevAuthProvider;

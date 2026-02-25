@@ -190,6 +190,13 @@ impl<R: ControlRepo> ControlService<R> {
             joined_at: Utc::now(),
         };
 
+        debug!(
+            server_id = %ctx.server_id.0,
+            channel_id = %req.channel_id.0,
+            user_id = %ctx.user_id.0,
+            display_name = %m.display_name,
+            "join_channel member upsert"
+        );
         <R as ControlRepo>::upsert_member(&self.repo, &mut tx, ctx.server_id, &m).await?;
 
         <R as ControlRepo>::insert_audit(
@@ -229,6 +236,15 @@ impl<R: ControlRepo> ControlService<R> {
         let members =
             <R as ControlRepo>::list_members(&self.repo, &mut tx, ctx.server_id, req.channel_id)
                 .await?;
+        for member in &members {
+            debug!(
+                server_id = %ctx.server_id.0,
+                channel_id = %req.channel_id.0,
+                member_user_id = %member.user_id.0,
+                member_display_name = %member.display_name,
+                "join_channel member listed"
+            );
+        }
         tx.commit().await?;
         debug!(server_id=%ctx.server_id.0, channel_id=%req.channel_id.0, user_id=%ctx.user_id.0, "join_channel transaction committed");
         Ok(members)
