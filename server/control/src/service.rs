@@ -95,11 +95,14 @@ impl<R: ControlRepo> ControlService<R> {
                 server_id: ctx.server_id,
                 topic: "channel.created".to_string(),
                 payload_json: json!({
+                    "server_id": ctx.server_id.0,
                     "channel_id": ch.id.0,
                     "name": ch.name,
-                    "parent_id": ch.parent_id.map(|p| p.0),
+                    "parent_channel_id": ch.parent_id.map(|p| p.0),
                     "max_members": ch.max_members,
                     "max_talkers": ch.max_talkers,
+                    "created_at": ch.created_at,
+                    "updated_at": ch.updated_at,
                 }),
             },
         )
@@ -132,6 +135,147 @@ impl<R: ControlRepo> ControlService<R> {
             .ok_or(ControlError::NotFound("channel"))?;
         tx.commit().await?;
         Ok(ch)
+    }
+
+    pub async fn rename_channel(
+        &self,
+        ctx: &RequestContext,
+        channel_id: ChannelId,
+        new_name: &str,
+    ) -> ControlResult<Channel> {
+        let name = new_name.trim();
+        if name.is_empty() {
+            return Err(ControlError::InvalidArgument("channel name empty"));
+        }
+        if name.len() > 64 {
+            return Err(ControlError::InvalidArgument("channel name too long"));
+        }
+
+        let mut tx = <R as ControlRepo>::tx(&self.repo).await?;
+        self.require(
+            &mut tx,
+            ctx,
+            Some(channel_id),
+            None,
+            Capability::CreateChannel,
+        )
+        .await?;
+
+        let renamed = <R as ControlRepo>::rename_channel(
+            &self.repo,
+            &mut tx,
+            ctx.server_id,
+            channel_id,
+            name,
+        )
+        .await?
+        .ok_or(ControlError::NotFound("channel"))?;
+
+        <R as ControlRepo>::insert_audit(
+            &self.repo,
+            &mut tx,
+            &AuditEntry::new(
+                ctx.server_id,
+                Some(ctx.user_id),
+                "channel.rename",
+                "channel",
+                renamed.id.0.to_string(),
+                json!({ "new_name": renamed.name }),
+            ),
+        )
+        .await?;
+
+        <R as ControlRepo>::insert_outbox(
+            &self.repo,
+            &mut tx,
+            &OutboxEvent {
+                id: OutboxId(Uuid::new_v4()),
+                server_id: ctx.server_id,
+                topic: "channel.renamed".to_string(),
+                payload_json: json!({
+                    "server_id": ctx.server_id.0,
+                    "channel_id": renamed.id.0,
+                    "name": renamed.name,
+                    "parent_channel_id": renamed.parent_id.map(|p| p.0),
+                    "updated_at": renamed.updated_at,
+                }),
+            },
+        )
+        .await?;
+
+        debug!(server_id=%ctx.server_id.0, channel_id=%renamed.id.0, topic="channel.renamed", "produced outbox event");
+        tx.commit().await?;
+        Ok(renamed)
+    }
+
+    pub async fn delete_channel(
+        &self,
+        ctx: &RequestContext,
+        channel_id: ChannelId,
+    ) -> ControlResult<Vec<ChannelId>> {
+        let mut tx = <R as ControlRepo>::tx(&self.repo).await?;
+        self.require(
+            &mut tx,
+            ctx,
+            Some(channel_id),
+            None,
+            Capability::CreateChannel,
+        )
+        .await?;
+
+        let descendants = <R as ControlRepo>::list_channel_descendants(
+            &self.repo,
+            &mut tx,
+            ctx.server_id,
+            channel_id,
+        )
+        .await?;
+        if descendants.is_empty() {
+            return Err(ControlError::NotFound("channel"));
+        }
+
+        let deleted =
+            <R as ControlRepo>::delete_channel(&self.repo, &mut tx, ctx.server_id, channel_id)
+                .await?;
+        if !deleted {
+            return Err(ControlError::NotFound("channel"));
+        }
+
+        <R as ControlRepo>::insert_audit(
+            &self.repo,
+            &mut tx,
+            &AuditEntry::new(
+                ctx.server_id,
+                Some(ctx.user_id),
+                "channel.delete",
+                "channel",
+                channel_id.0.to_string(),
+                json!({ "cascade_count": descendants.len() }),
+            ),
+        )
+        .await?;
+
+        for deleted_channel_id in &descendants {
+            <R as ControlRepo>::insert_outbox(
+                &self.repo,
+                &mut tx,
+                &OutboxEvent {
+                    id: OutboxId(Uuid::new_v4()),
+                    server_id: ctx.server_id,
+                    topic: "channel.deleted".to_string(),
+                    payload_json: json!({
+                        "server_id": ctx.server_id.0,
+                        "channel_id": deleted_channel_id.0,
+                        "updated_at": Utc::now(),
+                    }),
+                },
+            )
+            .await?;
+            debug!(server_id=%ctx.server_id.0, channel_id=%deleted_channel_id.0, topic="channel.deleted", "produced outbox event");
+        }
+
+        tx.commit().await?;
+        Ok(descendants)
     }
 
     // -------------------------------------------------------------------------

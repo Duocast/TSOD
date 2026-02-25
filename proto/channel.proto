@@ -81,6 +81,15 @@ message CreateChannelResponse {
   ChannelState state = 1;
 }
 
+message RenameChannelRequest {
+  ChannelId channel_id = 1;
+  string new_name = 2;
+}
+
+message RenameChannelResponse {
+  ChannelInfo channel = 1;
+}
+
 message UpdateChannelRequest {
   ChannelId channel_id = 1;
   string name = 2;
@@ -99,7 +108,21 @@ message DeleteChannelRequest {
   ChannelId channel_id = 1;
 }
 
-message DeleteChannelResponse {}
+message DeleteChannelResponse {
+  ChannelId channel_id = 1;
+}
+
+message ChannelCreatedPush {
+  ChannelInfo channel = 1;
+}
+
+message ChannelRenamedPush {
+  ChannelInfo channel = 1;
+}
+
+message ChannelDeletedPush {
+  ChannelId channel_id = 1;
+}
 
 message GetChannelListRequest {}
 
