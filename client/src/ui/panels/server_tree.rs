@@ -29,6 +29,24 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
     ui.separator();
 
     egui::ScrollArea::vertical().show(ui, |ui| {
+        #[cfg(debug_assertions)]
+        {
+            let panel_rect = ui.max_rect();
+            ui.input(|input| {
+                if input.pointer.button_clicked(egui::PointerButton::Secondary) {
+                    if let Some(pos) = input.pointer.interact_pos() {
+                        if panel_rect.contains(pos) {
+                            tracing::debug!(
+                                target: "ui::channels_panel",
+                                ?pos,
+                                "secondary click detected in channels panel"
+                            );
+                        }
+                    }
+                }
+            });
+        }
+
         // Clone channel data to avoid borrow conflicts with &mut model in show_channel
         let channels: Vec<_> = model.channels.clone();
 
@@ -63,7 +81,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
         }
 
         // Right-click empty area in channels panel.
-        let filler_h = ui.available_height().max(24.0);
+        let filler_h = ui.available_height().max(1.0);
         let (filler_rect, filler_resp) = ui.allocate_exact_size(
             egui::vec2(ui.available_width(), filler_h),
             egui::Sense::click(),
@@ -249,49 +267,73 @@ fn show_channel(
     let has_children = !children.is_empty();
     let collapsed = *model.channel_collapsed.get(&ch.id).unwrap_or(&false);
 
-    ui.horizontal(|ui| {
-        if has_children {
-            let icon = if collapsed { "▶" } else { "▼" };
-            if ui.small_button(icon).clicked() {
-                model.channel_collapsed.insert(ch.id.clone(), !collapsed);
-            }
-        } else {
-            ui.add_space(20.0);
-        }
+    let row_height = ui.spacing().interact_size.y.max(20.0);
+    let row_width = ui.available_width().max(1.0);
+    let (row_rect, row_response) =
+        ui.allocate_exact_size(egui::vec2(row_width, row_height), egui::Sense::click());
 
-        let response = ui.selectable_label(is_selected, &ch.name);
-        if response.clicked() {
+    let inner_response = ui
+        .allocate_ui_at_rect(row_rect, |ui| {
+            ui.horizontal(|ui| {
+                ui.set_height(row_height);
+
+                if has_children {
+                    let icon = if collapsed { "▶" } else { "▼" };
+                    if ui.small_button(icon).clicked() {
+                        model.channel_collapsed.insert(ch.id.clone(), !collapsed);
+                    }
+                } else {
+                    ui.add_space(20.0);
+                }
+
+                let response = ui.selectable_label(is_selected, &ch.name);
+                if response.clicked() {
+                    let _ = tx_intent.send(UiIntent::JoinChannel {
+                        channel_id: ch.id.clone(),
+                    });
+                }
+            })
+            .response
+        })
+        .response;
+
+    let response = row_response.union(inner_response);
+
+    #[cfg(debug_assertions)]
+    if response.secondary_clicked() {
+        tracing::debug!(
+            target: "ui::channels_panel",
+            channel_id = %ch.id,
+            channel_name = %ch.name,
+            "secondary click captured on channel row"
+        );
+    }
+
+    response.context_menu(|ui| {
+        if ui.button("Switch to channel").clicked() {
             let _ = tx_intent.send(UiIntent::JoinChannel {
                 channel_id: ch.id.clone(),
             });
+            ui.close_menu();
         }
-
-        response.context_menu(|ui| {
-            if ui.button("Switch to channel").clicked() {
-                let _ = tx_intent.send(UiIntent::JoinChannel {
-                    channel_id: ch.id.clone(),
-                });
-                ui.close_menu();
-            }
-            if ui.button("Edit channel").clicked() {
-                model.rename_channel_target_id = Some(ch.id.clone());
-                model.rename_channel_name = ch.name.clone();
-                model.show_rename_channel = true;
-                ui.close_menu();
-            }
-            if ui.button("Delete channel").clicked() {
-                model.delete_channel_target_id = Some(ch.id.clone());
-                model.show_delete_channel_confirm = true;
-                ui.close_menu();
-            }
-            if ui.button("Create sub-channel").clicked() {
-                model.show_create_channel = true;
-                model.create_channel_parent_id = Some(ch.id.clone());
-                model.create_channel_name.clear();
-                model.create_channel_description.clear();
-                ui.close_menu();
-            }
-        });
+        if ui.button("Edit channel").clicked() {
+            model.rename_channel_target_id = Some(ch.id.clone());
+            model.rename_channel_name = ch.name.clone();
+            model.show_rename_channel = true;
+            ui.close_menu();
+        }
+        if ui.button("Delete channel").clicked() {
+            model.delete_channel_target_id = Some(ch.id.clone());
+            model.show_delete_channel_confirm = true;
+            ui.close_menu();
+        }
+        if ui.button("Create sub-channel").clicked() {
+            model.show_create_channel = true;
+            model.create_channel_parent_id = Some(ch.id.clone());
+            model.create_channel_name.clear();
+            model.create_channel_description.clear();
+            ui.close_menu();
+        }
     });
 
     if has_children && !collapsed {
