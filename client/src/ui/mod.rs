@@ -76,12 +76,6 @@ impl VpApp {
     }
 
     fn launch_connect_attempt(&mut self, close_dialog_on_success: bool) -> bool {
-        if self.model.connection_stage.is_in_progress() {
-            self.model.connection_error =
-                "Connection attempt already in progress. Use Cancel to abort first.".to_string();
-            return false;
-        }
-
         let host = self.model.connection_host_draft.trim().to_string();
         let port_text = self.model.connection_port_draft.trim();
         let nickname = self.model.connection_nickname_draft.trim().to_string();
@@ -386,6 +380,11 @@ impl eframe::App for VpApp {
                             .small()
                             .color(theme::text_muted()),
                     );
+                    ui.label(
+                        egui::RichText::new("Changes apply immediately when you press Connect.")
+                            .small()
+                            .color(theme::text_dim()),
+                    );
 
                     if !self.model.connection_error.is_empty() {
                         ui.colored_label(theme::COLOR_DANGER, &self.model.connection_error);
@@ -409,16 +408,11 @@ impl eframe::App for VpApp {
                     );
 
                     let connect_label = if self.model.connection_stage.is_in_progress() {
-                        "Connecting..."
+                        "Reconnect"
                     } else {
                         "Connect"
                     };
-                    let connect_clicked = ui
-                        .add_enabled(
-                            !self.model.connection_stage.is_in_progress(),
-                            egui::Button::new(connect_label),
-                        )
-                        .clicked();
+                    let connect_clicked = ui.button(connect_label).clicked();
                     if connect_clicked {
                         self.launch_connect_attempt(true);
                     }
