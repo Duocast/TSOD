@@ -4,7 +4,7 @@ use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use tokio::time::sleep;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::proto::voiceplatform::v1 as pb;
 use crate::state::{MembershipCache, PushHub};
@@ -47,6 +47,8 @@ pub async fn run_outbox_dispatcher(
             continue;
         }
 
+        debug!(server_id=%cfg.server_id.0, claimed=batch.len(), "claimed outbox rows");
+
         for rec in batch {
             if let Err(e) = handle_record(&repo, &hub, &membership, token, rec).await {
                 warn!("outbox record handling error: {:#}", e);
@@ -65,7 +67,20 @@ async fn handle_record(
 ) -> Result<()> {
     let (channel_id, push) = translate_record(&rec)?;
 
-    let recipients = membership.members_of(channel_id).unwrap_or_default();
+    let recipients = if rec.topic == "channel.created" || rec.topic == "channels.created" {
+        hub.connected_users()
+    } else {
+        membership.members_of(channel_id).unwrap_or_default()
+    };
+
+    debug!(
+        outbox_id = %rec.id.0,
+        topic = %rec.topic,
+        channel_id = %channel_id.0,
+        server_id = %rec.server_id.0,
+        fanout = recipients.len(),
+        "dispatching outbox event"
+    );
 
     apply_cache_side_effects(membership, &rec)?;
 
@@ -261,11 +276,27 @@ fn translate_record(rec: &OutboxEventRow) -> Result<(ChannelId, pb::ServerToClie
         // emitted by older/newer producers.
         "channel.created" | "channels.created" => {
             let channel_id = parse_channel_id_field(&rec.payload_json, "channel_id")?;
-            let hint = pb::ServerHint::default();
+            let name = rec
+                .payload_json
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("New Channel")
+                .to_string();
+
+            let state = pb::ChannelState {
+                channel_id: Some(pb::ChannelId {
+                    value: channel_id.0.to_string(),
+                }),
+                name,
+                members: vec![],
+                ..Default::default()
+            };
 
             Ok((
                 channel_id,
-                server_push(pb::server_to_client::Payload::ServerHint(hint)),
+                server_push(pb::server_to_client::Payload::CreateChannelResponse(
+                    pb::CreateChannelResponse { state: Some(state) },
+                )),
             ))
         }
         other => Err(anyhow!("unsupported outbox event type: {other}")),
@@ -386,6 +417,7 @@ fn now_ts() -> pb::Timestamp {
 #[cfg(test)]
 mod tests {
     use super::translate_record;
+    use crate::proto::voiceplatform::v1 as pb;
     use serde_json::json;
     use vp_control::ids::{OutboxId, ServerId};
     use vp_control::model::OutboxEventRow;
@@ -403,9 +435,16 @@ mod tests {
             }),
         };
 
-        let (parsed_channel, _push) =
+        let (parsed_channel, push) =
             translate_record(&rec).expect("channel.created should be supported");
         assert_eq!(parsed_channel.0, channel_id);
+        match push.payload {
+            Some(pb::server_to_client::Payload::CreateChannelResponse(cr)) => {
+                let state = cr.state.expect("state");
+                assert_eq!(state.name, "General");
+            }
+            other => panic!("unexpected payload: {:?}", other),
+        }
     }
 
     #[test]

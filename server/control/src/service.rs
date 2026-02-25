@@ -1,5 +1,6 @@
 use chrono::Utc;
 use serde_json::json;
+use tracing::debug;
 use uuid::Uuid;
 
 use crate::{
@@ -103,6 +104,8 @@ impl<R: ControlRepo> ControlService<R> {
             },
         )
         .await?;
+
+        debug!(server_id=%ctx.server_id.0, channel_id=%ch.id.0, topic="channel.created", "produced outbox event");
 
         tx.commit().await?;
         Ok(ch)
@@ -219,6 +222,8 @@ impl<R: ControlRepo> ControlService<R> {
             },
         )
         .await?;
+
+        debug!(server_id=%ctx.server_id.0, channel_id=%req.channel_id.0, user_id=%ctx.user_id.0, topic="presence.member_joined", "produced outbox event");
 
         let members =
             <R as ControlRepo>::list_members(&self.repo, &mut tx, ctx.server_id, req.channel_id)
