@@ -460,6 +460,8 @@ impl Gateway {
                                     "width": a.width,
                                     "height": a.height,
                                     "duration_ms": a.duration_ms,
+                                    "download_url": a.download_url,
+                                    "thumbnail_url": a.thumbnail_url,
                                 })
                             })
                             .collect(),
@@ -502,12 +504,31 @@ impl Gateway {
                         uuid::Uuid::parse_str(&target.value).context("invalid target_user_id")?,
                     );
 
-                    if let Some(pb::moderation_action_request::Action::Mute(m)) = r.action {
-                        let _ = self
-                            .control
-                            .set_voice_mute(&ctx, ch, target, m.muted, None)
-                            .await?;
-                        self.membership.update_mute(target, ch, m.muted);
+                    if let Some(action) = r.action {
+                        match action {
+                            pb::moderation_action_request::Action::Mute(m) => {
+                                tracing::info!(actor=%ctx.user_id.0,target=%target.0,channel=%ch.0,muted=m.muted,"moderation mute action");
+                                let _ = self
+                                    .control
+                                    .set_voice_mute(&ctx, ch, target, m.muted, None)
+                                    .await?;
+                                self.membership.update_mute(target, ch, m.muted);
+                            }
+                            pb::moderation_action_request::Action::Deafen(m) => {
+                                tracing::info!(actor=%ctx.user_id.0,target=%target.0,channel=%ch.0,deafened=m.deafened,"moderation deafen action");
+                                let _ = self
+                                    .control
+                                    .set_voice_deafen(&ctx, ch, target, m.deafened, None)
+                                    .await?;
+                            }
+                            pb::moderation_action_request::Action::Kick(k) => {
+                                tracing::info!(actor=%ctx.user_id.0,target=%target.0,channel=%ch.0,"moderation kick action");
+                                self.control
+                                    .kick_member(&ctx, ch, target, Some(k.reason))
+                                    .await?;
+                            }
+                            _ => {}
+                        }
                     }
 
                     let resp = pb::ServerToClient {
@@ -519,6 +540,35 @@ impl Gateway {
                         error: None,
                         event_seq: 0,
                         payload: None,
+                    };
+                    if let Err(e) = write_delimited(&mut send, &resp).await {
+                        warn!("control write failed: {:#}", e);
+                        break;
+                    }
+                }
+                Some(pb::client_to_server::Payload::PokeRequest(r)) => {
+                    let target = r
+                        .target_user_id
+                        .as_ref()
+                        .ok_or_else(|| anyhow!("target_user_id missing"))?;
+                    let target = UserId(
+                        uuid::Uuid::parse_str(&target.value).context("invalid target_user_id")?,
+                    );
+                    tracing::info!(actor=%ctx.user_id.0,target=%target.0,"poke request");
+                    self.control
+                        .poke_user(&ctx, target, &identity.display_name, r.message)
+                        .await?;
+                    let resp = pb::ServerToClient {
+                        request_id: req_id,
+                        session_id: Some(pb::SessionId {
+                            value: session_id.clone(),
+                        }),
+                        sent_at: Some(now_ts()),
+                        error: None,
+                        event_seq: 0,
+                        payload: Some(pb::server_to_client::Payload::PokeResponse(
+                            pb::PokeResponse {},
+                        )),
                     };
                     if let Err(e) = write_delimited(&mut send, &resp).await {
                         warn!("control write failed: {:#}", e);

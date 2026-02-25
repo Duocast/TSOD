@@ -5,11 +5,11 @@ use crate::ui::theme;
 use crossbeam_channel::Sender;
 use eframe::egui;
 
-pub fn show(ui: &mut egui::Ui, model: &UiModel, tx_intent: &Sender<UiIntent>) {
+pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>) {
     ui.heading("Members");
     ui.separator();
 
-    let members = model.current_members();
+    let members = model.current_members().to_vec();
     if members.is_empty() {
         ui.label(
             egui::RichText::new("No members")
@@ -19,7 +19,6 @@ pub fn show(ui: &mut egui::Ui, model: &UiModel, tx_intent: &Sender<UiIntent>) {
         return;
     }
 
-    // Separate online (connected) members - for now all are "online"
     ui.label(
         egui::RichText::new(format!("ONLINE — {}", members.len()))
             .small()
@@ -112,13 +111,12 @@ pub fn show(ui: &mut egui::Ui, model: &UiModel, tx_intent: &Sender<UiIntent>) {
                 );
             }
 
-            // Context menu for moderation
             response.context_menu(|ui| {
                 if ui.button("Poke").clicked() {
-                    let _ = tx_intent.send(UiIntent::PokeUser {
-                        user_id: member.user_id.clone(),
-                        message: String::new(),
-                    });
+                    model.show_poke_dialog = true;
+                    model.poke_target_user_id = member.user_id.clone();
+                    model.poke_target_display_name = member.display_name.clone();
+                    model.poke_message_draft = "Poke".into();
                     ui.close_menu();
                 }
                 ui.separator();
@@ -150,18 +148,33 @@ pub fn show(ui: &mut egui::Ui, model: &UiModel, tx_intent: &Sender<UiIntent>) {
                     });
                     ui.close_menu();
                 }
-                if ui
-                    .button(egui::RichText::new("Ban").color(theme::COLOR_DANGER))
-                    .clicked()
-                {
-                    let _ = tx_intent.send(UiIntent::BanUser {
-                        user_id: member.user_id.clone(),
-                        reason: String::new(),
-                        duration: 0,
-                    });
-                    ui.close_menu();
-                }
+                ui.add_enabled(
+                    false,
+                    egui::Button::new(egui::RichText::new("Ban").color(theme::COLOR_DANGER)),
+                );
             });
         }
     });
+
+    if model.show_poke_dialog {
+        egui::Window::new("Poke user")
+            .collapsible(false)
+            .resizable(false)
+            .show(ui.ctx(), |ui| {
+                ui.label(format!("Send a poke to {}", model.poke_target_display_name));
+                ui.text_edit_singleline(&mut model.poke_message_draft);
+                ui.horizontal(|ui| {
+                    if ui.button("Send").clicked() {
+                        let _ = tx_intent.send(UiIntent::PokeUser {
+                            user_id: model.poke_target_user_id.clone(),
+                            message: model.poke_message_draft.clone(),
+                        });
+                        model.show_poke_dialog = false;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        model.show_poke_dialog = false;
+                    }
+                });
+            });
+    }
 }
