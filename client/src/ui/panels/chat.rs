@@ -2,8 +2,11 @@
 
 use crate::ui::model::{ChatMessage, UiIntent, UiModel};
 use crate::ui::theme;
+use chrono::{DateTime, Days, Local, NaiveDate, TimeZone};
 use crossbeam_channel::Sender;
 use eframe::egui;
+
+const MESSAGE_GROUP_WINDOW_MS: i64 = 5 * 60 * 1000;
 
 pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>) {
     // Channel header
@@ -24,11 +27,20 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
         .stick_to_bottom(true)
         .show(ui, |ui| {
             if let Some(messages) = model.current_messages() {
-                let mut prev_author: Option<&str> = None;
+                let mut prev_msg: Option<&ChatMessage> = None;
+                let mut prev_day: Option<NaiveDate> = None;
+
                 for msg in messages.iter() {
-                    let compact = prev_author == Some(&msg.author_id);
-                    show_message(ui, msg, compact, model, tx_intent);
-                    prev_author = Some(&msg.author_id);
+                    let msg_day = message_day(msg.timestamp);
+                    if msg_day.is_some() && msg_day != prev_day {
+                        show_date_separator(ui, msg_day.unwrap());
+                    }
+
+                    let grouped = prev_msg.is_some_and(|prev| should_group_messages(prev, msg));
+                    show_message(ui, msg, grouped, tx_intent);
+
+                    prev_msg = Some(msg);
+                    prev_day = msg_day;
                 }
             } else {
                 ui.centered_and_justified(|ui| {
@@ -98,15 +110,9 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
     show_notifications(ui, model);
 }
 
-fn show_message(
-    ui: &mut egui::Ui,
-    msg: &ChatMessage,
-    compact: bool,
-    _model: &UiModel,
-    tx_intent: &Sender<UiIntent>,
-) {
+fn show_message(ui: &mut egui::Ui, msg: &ChatMessage, grouped: bool, tx_intent: &Sender<UiIntent>) {
     ui.horizontal(|ui| {
-        if !compact {
+        if !grouped {
             // Full message with author + timestamp
             ui.vertical(|ui| {
                 ui.horizontal(|ui| {
@@ -131,11 +137,64 @@ fn show_message(
                 show_message_content(ui, msg, tx_intent);
             });
         } else {
-            // Compact: just the content, indented
+            // Grouped message: content only, indented.
             ui.add_space(8.0);
             show_message_content(ui, msg, tx_intent);
         }
     });
+}
+
+fn show_date_separator(ui: &mut egui::Ui, date: NaiveDate) {
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.add(egui::Separator::default().spacing(6.0));
+        ui.label(
+            egui::RichText::new(format_day_label(date))
+                .small()
+                .color(theme::text_muted())
+                .strong(),
+        );
+        ui.add(egui::Separator::default().spacing(6.0));
+    });
+    ui.add_space(4.0);
+}
+
+fn should_group_messages(previous: &ChatMessage, current: &ChatMessage) -> bool {
+    if previous.author_id != current.author_id {
+        return false;
+    }
+
+    let previous_day = message_day(previous.timestamp);
+    let current_day = message_day(current.timestamp);
+    if previous_day.is_none() || current_day.is_none() || previous_day != current_day {
+        return false;
+    }
+
+    let elapsed = current.timestamp - previous.timestamp;
+    (0..=MESSAGE_GROUP_WINDOW_MS).contains(&elapsed)
+}
+
+fn message_day(unix_millis: i64) -> Option<NaiveDate> {
+    Local
+        .timestamp_millis_opt(unix_millis)
+        .single()
+        .map(|dt| dt.date_naive())
+}
+
+fn format_day_label(date: NaiveDate) -> String {
+    let today = Local::now().date_naive();
+    if date == today {
+        return "Today".to_string();
+    }
+
+    if today
+        .checked_sub_days(Days::new(1))
+        .is_some_and(|yesterday| date == yesterday)
+    {
+        return "Yesterday".to_string();
+    }
+
+    date.format("%b %-d, %Y").to_string()
 }
 
 fn show_message_content(ui: &mut egui::Ui, msg: &ChatMessage, tx_intent: &Sender<UiIntent>) {
@@ -221,11 +280,11 @@ fn show_notifications(ui: &mut egui::Ui, model: &UiModel) {
 }
 
 fn format_timestamp(unix_millis: i64) -> String {
-    // Simple HH:MM format
-    let secs = unix_millis / 1000;
-    let hours = (secs % 86400) / 3600;
-    let minutes = (secs % 3600) / 60;
-    format!("{hours:02}:{minutes:02}")
+    Local
+        .timestamp_millis_opt(unix_millis)
+        .single()
+        .map(|dt| dt.format("%H:%M").to_string())
+        .unwrap_or_else(|| "--:--".to_string())
 }
 
 fn format_size(bytes: u64) -> String {
@@ -235,5 +294,72 @@ fn format_size(bytes: u64) -> String {
         format!("{:.1} KB", bytes as f64 / 1024.0)
     } else {
         format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        format_day_label, format_timestamp, should_group_messages, ChatMessage,
+        MESSAGE_GROUP_WINDOW_MS,
+    };
+    use chrono::{DateTime, Days, Local};
+
+    fn msg(author_id: &str, timestamp: i64) -> ChatMessage {
+        ChatMessage {
+            message_id: format!("{author_id}-{timestamp}"),
+            channel_id: "lounge-1".into(),
+            author_id: author_id.into(),
+            author_name: author_id.into(),
+            text: "hello".into(),
+            timestamp,
+            attachments: vec![],
+            reply_to: None,
+            reactions: vec![],
+            pinned: false,
+            edited: false,
+        }
+    }
+
+    #[test]
+    fn formats_timestamp_using_local_time() {
+        let unix_millis = 1_710_000_000_000_i64;
+        let expected = DateTime::<Local>::from_timestamp_millis(unix_millis)
+            .unwrap()
+            .format("%H:%M")
+            .to_string();
+
+        assert_eq!(format_timestamp(unix_millis), expected);
+    }
+
+    #[test]
+    fn invalid_timestamp_uses_placeholder() {
+        assert_eq!(format_timestamp(i64::MAX), "--:--");
+    }
+
+    #[test]
+    fn groups_only_same_author_within_window() {
+        let now = Local::now().timestamp_millis();
+        assert!(should_group_messages(
+            &msg("u1", now),
+            &msg("u1", now + 60_000)
+        ));
+        assert!(!should_group_messages(
+            &msg("u1", now),
+            &msg("u2", now + 60_000)
+        ));
+        assert!(!should_group_messages(
+            &msg("u1", now),
+            &msg("u1", now + MESSAGE_GROUP_WINDOW_MS + 1)
+        ));
+    }
+
+    #[test]
+    fn day_labels_today_and_yesterday() {
+        let today = Local::now().date_naive();
+        let yesterday = today.checked_sub_days(Days::new(1)).unwrap();
+
+        assert_eq!(format_day_label(today), "Today");
+        assert_eq!(format_day_label(yesterday), "Yesterday");
     }
 }

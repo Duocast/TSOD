@@ -811,7 +811,12 @@ impl UiModel {
             } => {
                 self.members.insert(channel_id, members);
             }
-            UiEvent::MessageReceived(msg) => {
+            UiEvent::MessageReceived(mut msg) => {
+                msg.author_name = self.resolve_message_author_name(
+                    &msg.channel_id,
+                    &msg.author_id,
+                    &msg.author_name,
+                );
                 let ch = msg.channel_id.clone();
                 let msgs = self.messages.entry(ch).or_default();
                 msgs.push_back(msg);
@@ -920,6 +925,41 @@ impl UiModel {
         }
     }
 
+    fn resolve_message_author_name(
+        &self,
+        channel_id: &str,
+        author_id: &str,
+        fallback_author_name: &str,
+    ) -> String {
+        if !author_id.trim().is_empty() {
+            if let Some(display_name) = self.members.get(channel_id).and_then(|members| {
+                members
+                    .iter()
+                    .find(|member| {
+                        member.user_id == author_id && !member.display_name.trim().is_empty()
+                    })
+                    .map(|member| member.display_name.trim())
+            }) {
+                return display_name.to_string();
+            }
+
+            if !self.user_id.is_empty() && self.user_id == author_id && !self.nick.trim().is_empty()
+            {
+                return self.nick.trim().to_string();
+            }
+        }
+
+        if !fallback_author_name.trim().is_empty() {
+            return fallback_author_name.trim().to_string();
+        }
+
+        if !self.nick.trim().is_empty() {
+            return self.nick.trim().to_string();
+        }
+
+        "User".to_string()
+    }
+
     /// Sync persisted settings into runtime model state.
     pub fn sync_settings_to_runtime(&mut self) {
         self.ptt_enabled = self.settings.capture_mode == CaptureMode::PushToTalk;
@@ -953,5 +993,75 @@ impl UiModel {
             .and_then(|ch| self.typing_users.get(ch))
             .map(|typers| typers.iter().map(|(name, _)| name.as_str()).collect())
             .unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolves_author_name_from_channel_member_then_fallback() {
+        let mut model = UiModel::new();
+        model.nick = "LocalNick".into();
+        model.user_id = "local-user".into();
+        model.members.insert(
+            "lounge-1".into(),
+            vec![MemberEntry {
+                user_id: "user-1".into(),
+                display_name: "Overdose".into(),
+                muted: false,
+                deafened: false,
+                self_muted: false,
+                self_deafened: false,
+                streaming: false,
+                speaking: false,
+                avatar_url: None,
+            }],
+        );
+
+        model.apply_event(UiEvent::MessageReceived(ChatMessage {
+            message_id: "m1".into(),
+            channel_id: "lounge-1".into(),
+            author_id: "user-1".into(),
+            author_name: "user-1".into(),
+            text: "hello".into(),
+            timestamp: 1_710_000_000_000,
+            attachments: vec![],
+            reply_to: None,
+            reactions: vec![],
+            pinned: false,
+            edited: false,
+        }));
+
+        let name = model
+            .messages
+            .get("lounge-1")
+            .and_then(|msgs| msgs.back())
+            .map(|m| m.author_name.clone())
+            .unwrap();
+        assert_eq!(name, "Overdose");
+
+        model.apply_event(UiEvent::MessageReceived(ChatMessage {
+            message_id: "m2".into(),
+            channel_id: "lounge-1".into(),
+            author_id: "unknown".into(),
+            author_name: "".into(),
+            text: "fallback".into(),
+            timestamp: 1_710_000_000_100,
+            attachments: vec![],
+            reply_to: None,
+            reactions: vec![],
+            pinned: false,
+            edited: false,
+        }));
+
+        let fallback = model
+            .messages
+            .get("lounge-1")
+            .and_then(|msgs| msgs.back())
+            .map(|m| m.author_name.clone())
+            .unwrap();
+        assert_eq!(fallback, "LocalNick");
     }
 }
