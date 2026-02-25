@@ -526,6 +526,8 @@ async fn connect_and_run_session(
     let _ = tx_event.send(UiEvent::SetAuthed(true));
     let _ = tx_event.send(UiEvent::AppendLog("[net] authed".into()));
 
+    let mut initial_active_channel: Option<String> = cfg.channel_id.clone();
+
     if let Some(ch) = cfg.channel_id.as_deref() {
         match dispatcher.join_channel(ch).await {
             Ok(state) => {
@@ -598,7 +600,7 @@ async fn connect_and_run_session(
     });
 
     // Track the active channel (for SendChat and other channel-scoped operations)
-    let mut active_channel: Option<String> = cfg.channel_id.clone();
+    let mut active_channel: Option<String> = initial_active_channel;
 
     tokio::pin!(ctl_keepalive);
     loop {

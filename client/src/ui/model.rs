@@ -1,6 +1,7 @@
 //! Application state model for the GUI.
 
 use std::collections::{HashMap, VecDeque};
+use tracing::debug;
 
 /// Maximum number of chat messages to retain per channel.
 const MAX_MESSAGES_PER_CHANNEL: usize = 500;
