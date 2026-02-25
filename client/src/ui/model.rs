@@ -932,54 +932,32 @@ impl UiModel {
         author_id: &str,
         fallback_author_name: &str,
     ) -> String {
-        let member_name = self.members.get(channel_id).and_then(|members| {
-            members
-                .iter()
-                .find(|member| {
-                    member.user_id == author_id && !member.display_name.trim().is_empty()
-                })
-                .map(|member| member.display_name.trim().to_string())
-        });
-        if let Some(name) = member_name {
-            debug!(
-                author_user_id = author_id,
-                channel_id,
-                member_lookup = "hit",
-                chosen_source = "member.display_name",
-                "resolved chat message author"
-            );
-            return name;
+        if !author_id.trim().is_empty() {
+            if let Some(display_name) = self.members.get(channel_id).and_then(|members| {
+                members
+                    .iter()
+                    .find(|member| {
+                        member.user_id == author_id && !member.display_name.trim().is_empty()
+                    })
+                    .map(|member| member.display_name.trim())
+            }) {
+                return display_name.to_string();
+            }
+
+            if !self.user_id.is_empty() && self.user_id == author_id && !self.nick.trim().is_empty()
+            {
+                return self.nick.trim().to_string();
+            }
         }
 
         if !fallback_author_name.trim().is_empty() {
-            debug!(
-                author_user_id = author_id,
-                channel_id,
-                member_lookup = "miss",
-                chosen_source = "user_profile.display_name",
-                "resolved chat message author"
-            );
             return fallback_author_name.trim().to_string();
         }
 
-        if !author_id.trim().is_empty() {
-            debug!(
-                author_user_id = author_id,
-                channel_id,
-                member_lookup = "miss",
-                chosen_source = "username_or_login",
-                "resolved chat message author"
-            );
-            return author_id.trim().to_string();
+        if !self.nick.trim().is_empty() {
+            return self.nick.trim().to_string();
         }
 
-        debug!(
-            author_user_id = author_id,
-            channel_id,
-            member_lookup = "miss",
-            chosen_source = "default_user",
-            "resolved chat message author"
-        );
         "User".to_string()
     }
 
@@ -1023,33 +1001,31 @@ impl UiModel {
 mod tests {
     use super::*;
 
-    fn member(user_id: &str, display_name: &str) -> MemberEntry {
-        MemberEntry {
-            user_id: user_id.into(),
-            display_name: display_name.into(),
-            muted: false,
-            deafened: false,
-            self_muted: false,
-            self_deafened: false,
-            streaming: false,
-            speaking: false,
-            avatar_url: None,
-        }
-    }
-
     #[test]
-    fn prefers_member_nickname_over_profile_name_for_same_author() {
+    fn resolves_author_name_from_channel_member_then_fallback() {
         let mut model = UiModel::new();
-        model.user_id = "self-user".into();
-        model
-            .members
-            .insert("lounge-1".into(), vec![member("self-user", "Overdose")]);
+        model.nick = "LocalNick".into();
+        model.user_id = "local-user".into();
+        model.members.insert(
+            "lounge-1".into(),
+            vec![MemberEntry {
+                user_id: "user-1".into(),
+                display_name: "Overdose".into(),
+                muted: false,
+                deafened: false,
+                self_muted: false,
+                self_deafened: false,
+                streaming: false,
+                speaking: false,
+                avatar_url: None,
+            }],
+        );
 
         model.apply_event(UiEvent::MessageReceived(ChatMessage {
             message_id: "m1".into(),
             channel_id: "lounge-1".into(),
-            author_id: "self-user".into(),
-            author_name: "dev".into(),
+            author_id: "user-1".into(),
+            author_name: "user-1".into(),
             text: "hello".into(),
             timestamp: 1_710_000_000_000,
             attachments: vec![],
@@ -1066,19 +1042,14 @@ mod tests {
             .map(|m| m.author_name.clone())
             .unwrap();
         assert_eq!(name, "Overdose");
-    }
-
-    #[test]
-    fn falls_back_to_profile_name_when_member_nickname_missing() {
-        let mut model = UiModel::new();
 
         model.apply_event(UiEvent::MessageReceived(ChatMessage {
             message_id: "m2".into(),
             channel_id: "lounge-1".into(),
-            author_id: "self-user".into(),
-            author_name: "dev".into(),
-            text: "hello".into(),
-            timestamp: 1_710_000_000_000,
+            author_id: "unknown".into(),
+            author_name: "".into(),
+            text: "fallback".into(),
+            timestamp: 1_710_000_000_100,
             attachments: vec![],
             reply_to: None,
             reactions: vec![],
@@ -1086,12 +1057,12 @@ mod tests {
             edited: false,
         }));
 
-        let name = model
+        let fallback = model
             .messages
             .get("lounge-1")
             .and_then(|msgs| msgs.back())
             .map(|m| m.author_name.clone())
             .unwrap();
-        assert_eq!(name, "dev");
+        assert_eq!(fallback, "LocalNick");
     }
 }

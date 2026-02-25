@@ -409,7 +409,7 @@ async fn connect_and_run_session(
                                                 .map(|m| m.value)
                                                 .unwrap_or_default(),
                                             channel_id,
-                                            author_name: String::new(),
+                                            author_name: author_id.clone(),
                                             author_id,
                                             text: mp.text.clone(),
                                             timestamp,
@@ -531,10 +531,9 @@ async fn connect_and_run_session(
     if let Some(ch) = cfg.channel_id.as_deref() {
         match dispatcher.join_channel(ch).await {
             Ok(state) => {
-                let resolved_channel_id = state.channel_id.clone();
-                let _ = tx_event.send(UiEvent::SetChannelName(resolved_channel_id.clone()));
+                let _ = tx_event.send(UiEvent::SetChannelName(ch.to_string()));
                 let _ = tx_event.send(UiEvent::UpdateChannelMembers {
-                    channel_id: resolved_channel_id,
+                    channel_id: ch.to_string(),
                     members: state
                         .members
                         .into_iter()
@@ -551,7 +550,6 @@ async fn connect_and_run_session(
                         })
                         .collect(),
                 });
-                initial_active_channel = Some(state.channel_id);
                 let _ = tx_event.send(UiEvent::AppendLog(format!("[ctl] joined channel {ch}")));
             }
             Err(e) => {
@@ -677,10 +675,10 @@ async fn connect_and_run_session(
                         UiIntent::JoinChannel { channel_id } => {
                             match dispatcher.join_channel(&channel_id).await {
                                 Ok(state) => {
-                                    active_channel = Some(state.channel_id.clone());
-                                    let _ = tx_event.send(UiEvent::SetChannelName(state.channel_id.clone()));
+                                    active_channel = Some(channel_id.clone());
+                                    let _ = tx_event.send(UiEvent::SetChannelName(channel_id.clone()));
                                     let _ = tx_event.send(UiEvent::UpdateChannelMembers {
-                                        channel_id: state.channel_id,
+                                        channel_id: channel_id.clone(),
                                         members: state
                                             .members
                                             .into_iter()

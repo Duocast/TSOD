@@ -31,7 +31,6 @@ pub struct AuthInfo {
 
 #[derive(Clone, Debug)]
 pub struct JoinChannelState {
-    pub channel_id: String,
     pub members: Vec<pb::ChannelMember>,
 }
 
@@ -170,10 +169,6 @@ impl ControlDispatcher {
                     .state
                     .ok_or_else(|| anyhow!("join response missing channel state"))?;
                 Ok(JoinChannelState {
-                    channel_id: state
-                        .channel_id
-                        .map(|c| c.value)
-                        .unwrap_or_else(|| channel_id.to_string()),
                     members: state.members,
                 })
             }
