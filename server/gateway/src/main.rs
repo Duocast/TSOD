@@ -88,8 +88,11 @@ async fn main() -> Result<()> {
     ));
 
     // QUIC listener
-    let (certs, key) =
-        tls::load_or_generate_tls(cfg.tls_cert_pem.as_deref(), cfg.tls_key_pem.as_deref())?;
+    let (certs, key) = tls::load_or_generate_tls(
+        cfg.tls_cert_pem.as_deref(),
+        cfg.tls_key_pem.as_deref(),
+        &cfg.tls_self_signed_sans,
+    )?;
 
     let mut rustls = RustlsServerConfig::builder()
         .with_no_client_auth()
