@@ -18,20 +18,23 @@ mod ui;
 
 use anyhow::{anyhow, Context, Result};
 use bytes::Bytes;
-use clap::Parser;
 use config::Config;
+use serde::Deserialize;
 use crossbeam_channel::{bounded, Receiver, Sender};
 use net::dispatcher::{ControlDispatcher, PushEvent};
 use net::voice_datagram::{make_voice_datagram, VOICE_HDR_LEN, VOICE_VERSION};
 use proto::voiceplatform::v1 as pb;
+#[cfg(debug_assertions)]
 use std::collections::HashSet;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc, Mutex as StdMutex, OnceLock,
+    Arc,
 };
+#[cfg(debug_assertions)]
+use std::sync::{Mutex as StdMutex, OnceLock};
 use tokio::sync::{watch, Mutex};
 use tokio::time::{sleep, Duration, Instant};
-use tracing::{debug, info, warn, Level};
+use tracing::{debug, warn, Level};
 use tracing_subscriber::EnvFilter;
 use ui::{UiEvent, UiIntent, VpApp};
 
@@ -636,6 +639,7 @@ async fn connect_and_run_session(
     {
         let tx_event = tx_event.clone();
         let mut last_event_seq = snapshot.snapshot_version;
+        let local_user_id = local_user_id.clone();
         tokio::spawn(async move {
             while let Some(ev) = push_rx.recv().await {
                 match ev {
@@ -1075,8 +1079,9 @@ async fn connect_and_run_session(
                                     "sending chat message (optimistic local echo)"
                                 );
                                 let mut uploaded_attachments = Vec::new();
+                                let mut upload_failed = false;
                                 for attachment in &attachments {
-                                    if let Err(e) = (|| async {
+                                    let result: anyhow::Result<()> = async {
                                         if attachment.asset_id.starts_with('/') {
                                             let uploaded = upload_attachment(
                                                 &cfg.upload_base_url,
@@ -1089,19 +1094,21 @@ async fn connect_and_run_session(
                                         } else {
                                             uploaded_attachments.push(attachment.clone());
                                         }
-                                        Ok::<(), anyhow::Error>(())
-                                    })().await {
+                                        Ok(())
+                                    }.await;
+                                    if let Err(e) = result {
                                         let _ = tx_event.send(UiEvent::AttachmentUploadError {
                                             path: attachment.asset_id.clone(),
                                             error: e.to_string(),
                                         });
                                         let _ = tx_event.send(UiEvent::AppendLog(format!("[upload] failed: {e:#}")));
                                         uploaded_attachments.clear();
+                                        upload_failed = true;
                                         break;
                                     }
                                 }
 
-                                if uploaded_attachments.is_empty() && !attachments.is_empty() {
+                                if upload_failed {
                                     continue;
                                 }
 
@@ -1449,8 +1456,10 @@ async fn upload_attachment(
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
 
-    let bytes = tokio::fs::read(&attachment.asset_id)
+    let path = attachment.asset_id.clone();
+    let bytes = tokio::task::spawn_blocking(move || std::fs::read(&path))
         .await
+        .context("spawn_blocking join")?
         .with_context(|| format!("read attachment bytes: {}", attachment.asset_id))?;
 
     let (host, port) = parse_http_base_url(upload_base_url)?;

@@ -1,6 +1,6 @@
 use anyhow::Result;
 use ringbuf::{
-    traits::{Consumer, Producer, Split},
+    traits::{Consumer, Split},
     HeapCons, HeapRb,
 };
 use std::sync::{Arc, Mutex};

@@ -1,6 +1,6 @@
 //! Acoustic Echo Cancellation (AEC) using `sonora-aec3`.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use sonora_aec3::block_processor::BlockProcessor;
 use sonora_aec3::config::EchoCanceller3Config;
 

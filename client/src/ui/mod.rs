@@ -475,7 +475,7 @@ impl eframe::App for VpApp {
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         ui.label("Preset:");
-                        egui::ComboBox::from_id_source("away_message_preset")
+                        egui::ComboBox::from_id_salt("away_message_preset")
                             .selected_text("<None>")
                             .show_ui(ui, |ui| {
                                 for preset in &self.model.away_message_presets {
