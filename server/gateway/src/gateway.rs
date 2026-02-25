@@ -48,7 +48,7 @@ impl Gateway {
     }
 
     pub async fn serve(self, endpoint: quinn::Endpoint) -> Result<()> {
-        info!("gateway listening");
+        info!(expected_alpn = %String::from_utf8_lossy(&self.alpn), "gateway listening");
     
         loop {
             let incoming = endpoint.accept().await.ok_or_else(|| anyhow!("endpoint closed"))?;
@@ -70,6 +70,15 @@ impl Gateway {
             .handshake_data()
             .and_then(|d| d.downcast::<quinn::crypto::rustls::HandshakeData>().ok())
             .and_then(|d| d.protocol);
+
+        info!(
+            remote = %conn.remote_address(),
+            expected_alpn = %String::from_utf8_lossy(&self.alpn),
+            negotiated_alpn = ?negotiated
+                .as_ref()
+                .map(|p| String::from_utf8_lossy(p).to_string()),
+            "QUIC handshake completed"
+        );
 
         if negotiated.as_deref() != Some(&self.alpn[..]) {
             return Err(anyhow!(
