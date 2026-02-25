@@ -113,7 +113,7 @@ fn main() -> Result<()> {
 // ── Backend task ───────────────────────────────────────────────────────
 
 async fn app_task(
-    cfg: Config,
+    mut cfg: Config,
     tx_event: Sender<UiEvent>,
     rx_intent: Receiver<UiIntent>,
     running: Arc<AtomicBool>,
@@ -127,6 +127,11 @@ async fn app_task(
         cfg.ca_cert_pem.as_deref().unwrap_or("(insecure dev mode)")
     )));
     let _ = tx_event.send(UiEvent::SetNick(cfg.display_name.clone()));
+    let (initial_host, initial_port) = split_server_host_port(&cfg.server);
+    let _ = tx_event.send(UiEvent::SetServerAddress {
+        host: initial_host,
+        port: initial_port,
+    });
 
     if cfg.server == "127.0.0.1:4433" || cfg.server == "localhost:4433" {
         let _ = tx_event.send(UiEvent::AppendLog(
@@ -215,7 +220,7 @@ async fn app_task(
 
     while running.load(Ordering::Relaxed) && !*shutdown_rx.borrow() {
         match connect_and_run_session(
-            &cfg,
+            &mut cfg,
             &tx_event,
             &rx_intent,
             codec.clone(),
@@ -246,7 +251,7 @@ async fn app_task(
                 backoff.cur = (backoff.cur * 2).min(backoff.max);
 
                 let deadline = tokio::time::Instant::now() + wait_for;
-                while tokio::time::Instant::now() < deadline {
+                'retry_wait: while tokio::time::Instant::now() < deadline {
                     while let Ok(intent) = rx_intent.try_recv() {
                         match intent {
                             UiIntent::Quit => return Ok(()),
@@ -262,6 +267,16 @@ async fn app_task(
                             }
                             UiIntent::SaveSettings(ref settings) => {
                                 let _ = settings_io::save_settings(settings);
+                            }
+                            UiIntent::ConnectToServer { host, port } => {
+                                cfg.server = format!("{host}:{port}");
+                                cfg.server_name = host.clone();
+                                let _ = tx_event.send(UiEvent::SetServerAddress { host, port });
+                                let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                    "[net] target server updated: {}",
+                                    cfg.server
+                                )));
+                                break 'retry_wait;
                             }
                             UiIntent::SetAwayMessage { message } => {
                                 let _ = tx_event.send(UiEvent::SetAwayMessage(message.clone()));
@@ -289,8 +304,17 @@ async fn app_task(
     Ok(())
 }
 
+fn split_server_host_port(server: &str) -> (String, u16) {
+    if let Some((host, port_text)) = server.rsplit_once(':') {
+        if let Ok(port) = port_text.parse::<u16>() {
+            return (host.to_string(), port);
+        }
+    }
+    (server.to_string(), 4433)
+}
+
 async fn connect_and_run_session(
-    cfg: &Config,
+    cfg: &mut Config,
     tx_event: &Sender<UiEvent>,
     rx_intent: &Receiver<UiIntent>,
     codec: Arc<Mutex<audio::opus::OpusCodec>>,
@@ -500,6 +524,18 @@ async fn connect_and_run_session(
                 while let Ok(intent) = rx_intent.try_recv() {
                     match intent {
                         UiIntent::Quit => return Ok(()),
+                        UiIntent::ConnectToServer { host, port } => {
+                            let new_server = format!("{host}:{port}");
+                            if cfg.server != new_server {
+                                cfg.server = new_server.clone();
+                                cfg.server_name = host.clone();
+                                let _ = tx_event.send(UiEvent::SetServerAddress { host, port });
+                                let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                    "[net] reconnect requested: {new_server}"
+                                )));
+                                return Err(anyhow!("reconnect requested"));
+                            }
+                        }
                         UiIntent::TogglePtt => {
                             let new = !ptt_active.load(Ordering::Relaxed);
                             ptt_active.store(new, Ordering::Relaxed);
