@@ -24,6 +24,16 @@ pub enum PushEvent {
     Unknown(pb::ServerToClient),
 }
 
+#[derive(Clone, Debug)]
+pub struct AuthInfo {
+    pub user_id: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct JoinChannelState {
+    pub members: Vec<pb::ChannelMember>,
+}
+
 /// Commands into the dispatcher (outgoing requests).
 #[derive(Debug)]
 enum Command {
@@ -89,7 +99,7 @@ impl ControlDispatcher {
             .expect("push receiver already taken")
     }
 
-    pub async fn hello_auth(&self, alpn: &str, dev_token: &str) -> Result<()> {
+    pub async fn hello_auth(&self, alpn: &str, dev_token: &str) -> Result<AuthInfo> {
         let hello = pb::Hello {
             caps: Some(default_caps(alpn)),
             device_id: Some(pb::DeviceId {
@@ -130,12 +140,14 @@ impl ControlDispatcher {
         }
 
         match resp.payload {
-            Some(pb::server_to_client::Payload::AuthResponse(_)) => Ok(()),
+            Some(pb::server_to_client::Payload::AuthResponse(a)) => Ok(AuthInfo {
+                user_id: a.user_id.map(|u| u.value).unwrap_or_default(),
+            }),
             _ => Err(anyhow!("expected AuthResponse")),
         }
     }
 
-    pub async fn join_channel(&self, channel_id: &str) -> Result<()> {
+    pub async fn join_channel(&self, channel_id: &str) -> Result<JoinChannelState> {
         let req = pb::JoinChannelRequest {
             channel_id: Some(pb::ChannelId {
                 value: channel_id.into(),
@@ -151,7 +163,17 @@ impl ControlDispatcher {
         if let Some(err) = resp.error {
             return Err(anyhow!("join error: {:?}", err));
         }
-        Ok(())
+        match resp.payload {
+            Some(pb::server_to_client::Payload::JoinChannelResponse(jr)) => {
+                let state = jr
+                    .state
+                    .ok_or_else(|| anyhow!("join response missing channel state"))?;
+                Ok(JoinChannelState {
+                    members: state.members,
+                })
+            }
+            _ => Err(anyhow!("expected JoinChannelResponse")),
+        }
     }
 
     pub async fn ping(&self) -> Result<()> {

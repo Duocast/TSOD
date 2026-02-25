@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
+use chrono::{DateTime, Utc};
 use serde_json::Value;
 use tokio::time::sleep;
 use tracing::{info, warn};
@@ -65,7 +66,7 @@ async fn handle_record(
     let (channel_id, push) = translate_record(&rec)?;
 
     let recipients = membership.members_of(channel_id).unwrap_or_default();
-    
+
     apply_cache_side_effects(membership, &rec)?;
 
     for uid in recipients {
@@ -186,8 +187,18 @@ fn translate_record(rec: &OutboxEventRow) -> Result<(ChannelId, pb::ServerToClie
                 .cloned()
                 .unwrap_or(Value::Array(vec![]));
 
+            let event_at = rec
+                .payload_json
+                .get("created_at")
+                .and_then(Value::as_str)
+                .and_then(|raw| DateTime::parse_from_rfc3339(raw).ok())
+                .map(|dt| pb::Timestamp {
+                    unix_millis: dt.with_timezone(&Utc).timestamp_millis(),
+                })
+                .unwrap_or_else(now_ts);
+
             let ev = pb::ChatEvent {
-                at: Some(now_ts()),
+                at: Some(event_at),
                 kind: Some(pb::chat_event::Kind::MessagePosted(pb::MessagePosted {
                     message_id: Some(pb::MessageId {
                         value: message_id.0.to_string(),
@@ -372,7 +383,6 @@ fn now_ts() -> pb::Timestamp {
     pb::Timestamp { unix_millis: ms }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::translate_record;
@@ -393,7 +403,8 @@ mod tests {
             }),
         };
 
-        let (parsed_channel, _push) = translate_record(&rec).expect("channel.created should be supported");
+        let (parsed_channel, _push) =
+            translate_record(&rec).expect("channel.created should be supported");
         assert_eq!(parsed_channel.0, channel_id);
     }
 
@@ -407,7 +418,8 @@ mod tests {
             payload_json: json!({"channel_id": channel_id}),
         };
 
-        let (parsed_channel, _push) = translate_record(&rec).expect("channels.created alias should be supported");
+        let (parsed_channel, _push) =
+            translate_record(&rec).expect("channels.created alias should be supported");
         assert_eq!(parsed_channel.0, channel_id);
     }
 }
