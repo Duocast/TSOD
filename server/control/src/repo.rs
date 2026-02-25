@@ -519,11 +519,24 @@ impl ControlRepo for PgControlRepo {
 
         let mut out = Vec::with_capacity(rows.len());
         for r in rows {
+            let id = r
+                .try_get::<Uuid, _>("id")
+                .context("decode outbox_events.id as uuid")?;
+            let server_id = r
+                .try_get::<Uuid, _>("server_id")
+                .context("decode outbox_events.server_id as uuid")?;
+            let topic = r
+                .try_get::<String, _>("topic")
+                .context("decode outbox_events.topic")?;
+            let payload_json = r
+                .try_get::<Json, _>("payload_json")
+                .context("decode outbox_events.payload_json as jsonb")?;
+
             out.push(OutboxEventRow {
-                id: OutboxId(r.get::<Uuid, _>("id")),
-                server_id: ServerId(r.get::<Uuid, _>("server_id")),
-                topic: r.get::<String, _>("topic"),
-                payload_json: r.get::<Json, _>("payload_json"),
+                id: OutboxId(id),
+                server_id: ServerId(server_id),
+                topic,
+                payload_json,
             });
         }
         Ok(out)
