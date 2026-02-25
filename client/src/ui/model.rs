@@ -49,6 +49,17 @@ pub enum UiEvent {
         channel_id: String,
         message_id: String,
     },
+    ClearPendingAttachments,
+    AttachmentUploadError {
+        path: String,
+        error: String,
+    },
+    MemberVoiceStateUpdated {
+        channel_id: String,
+        user_id: String,
+        muted: bool,
+        deafened: bool,
+    },
     TypingIndicator {
         channel_id: String,
         user_name: String,
@@ -117,6 +128,7 @@ pub enum UiIntent {
     Quit,
     SendChat {
         text: String,
+        attachments: Vec<AttachmentData>,
     },
     JoinChannel {
         channel_id: String,
@@ -605,6 +617,7 @@ pub struct ChatMessage {
 
 #[derive(Debug, Clone)]
 pub struct AttachmentData {
+    pub asset_id: String,
     pub filename: String,
     pub mime_type: String,
     pub size_bytes: u64,
@@ -661,6 +674,7 @@ pub struct UiModel {
     pub messages: HashMap<String, VecDeque<ChatMessage>>,
     pub chat_input: String,
     pub chat_input_focused: bool,
+    pub pending_attachments: Vec<PendingAttachment>,
     pub typing_users: HashMap<String, Vec<(String, std::time::Instant)>>,
 
     // Voice (runtime state, not persisted)
@@ -720,6 +734,10 @@ pub struct UiModel {
     pub show_away_message_dialog: bool,
     pub show_set_avatar_dialog: bool,
     pub avatar_path_draft: String,
+    pub show_poke_dialog: bool,
+    pub poke_target_user_id: String,
+    pub poke_target_display_name: String,
+    pub poke_message_draft: String,
     pub avatar_url: Option<String>,
     pub away_message: String,
     pub away_message_draft: String,
@@ -733,6 +751,15 @@ pub struct UiModel {
     pub settings_draft: AppSettings,
     pub settings_page: SettingsPage,
     pub settings_dirty: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingAttachment {
+    pub path: String,
+    pub filename: String,
+    pub mime_type: String,
+    pub size_bytes: u64,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -803,6 +830,7 @@ impl Default for UiModel {
             messages: HashMap::new(),
             chat_input: String::new(),
             chat_input_focused: false,
+            pending_attachments: Vec::new(),
             typing_users: HashMap::new(),
             ptt_enabled: true,
             ptt_active: false,
@@ -846,6 +874,10 @@ impl Default for UiModel {
             show_away_message_dialog: false,
             show_set_avatar_dialog: false,
             avatar_path_draft: String::new(),
+            show_poke_dialog: false,
+            poke_target_user_id: String::new(),
+            poke_target_display_name: String::new(),
+            poke_message_draft: "Poke".into(),
             avatar_url: None,
             away_message: String::new(),
             away_message_draft: String::new(),
@@ -992,6 +1024,19 @@ impl UiModel {
                     msgs.retain(|m| m.message_id != message_id);
                 }
             }
+            UiEvent::ClearPendingAttachments => {
+                self.pending_attachments.clear();
+            }
+            UiEvent::AttachmentUploadError { path, error } => {
+                if let Some(att) = self.pending_attachments.iter_mut().find(|a| a.path == path) {
+                    att.error = Some(error.clone());
+                }
+                self.notifications.push_back(Notification {
+                    text: format!("Upload failed: {error}"),
+                    created: std::time::Instant::now(),
+                    kind: NotificationKind::Error,
+                });
+            }
             UiEvent::TypingIndicator {
                 channel_id,
                 user_name,
@@ -1014,6 +1059,32 @@ impl UiModel {
             } => {
                 if let Some(members) = self.members.get_mut(&channel_id) {
                     members.retain(|m| m.user_id != user_id);
+                }
+                if user_id == self.user_id
+                    && self
+                        .selected_channel
+                        .as_ref()
+                        .is_some_and(|c| c == &channel_id)
+                {
+                    self.selected_channel = self
+                        .default_channel_id
+                        .clone()
+                        .filter(|candidate| self.channels.iter().any(|ch| ch.id == *candidate))
+                        .or_else(|| self.channels.first().map(|ch| ch.id.clone()));
+                    self.refresh_selected_channel_name();
+                }
+            }
+            UiEvent::MemberVoiceStateUpdated {
+                channel_id,
+                user_id,
+                muted,
+                deafened,
+            } => {
+                if let Some(members) = self.members.get_mut(&channel_id) {
+                    if let Some(member) = members.iter_mut().find(|m| m.user_id == user_id) {
+                        member.muted = muted;
+                        member.deafened = deafened;
+                    }
                 }
             }
             UiEvent::VadLevel(v) => self.vad_level = Some(v),

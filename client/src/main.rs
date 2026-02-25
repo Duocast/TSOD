@@ -693,7 +693,25 @@ async fn connect_and_run_session(
                                             author_id,
                                             text: mp.text.clone(),
                                             timestamp,
-                                            attachments: Vec::new(),
+                                            attachments: mp
+                                                .attachments
+                                                .into_iter()
+                                                .map(|a| ui::model::AttachmentData {
+                                                    asset_id: a
+                                                        .asset_id
+                                                        .map(|x| x.value)
+                                                        .unwrap_or_default(),
+                                                    filename: a.filename,
+                                                    mime_type: a.mime_type,
+                                                    size_bytes: a.size_bytes,
+                                                    download_url: a.download_url,
+                                                    thumbnail_url: if a.thumbnail_url.is_empty() {
+                                                        None
+                                                    } else {
+                                                        Some(a.thumbnail_url)
+                                                    },
+                                                })
+                                                .collect(),
                                             reply_to: mp.reply_to_message_id.map(|r| r.value),
                                             reactions: Vec::new(),
                                             pinned: mp.pinned,
@@ -769,13 +787,35 @@ async fn connect_and_run_session(
                                     }
                                 }
                                 pb::presence_event::Kind::MemberLeft(ml) => {
-                                    debug!(channel_id=%ml.channel_id.as_ref().map(|c| c.value.clone()).unwrap_or_default(), user_id=%ml.user_id.as_ref().map(|u| u.value.clone()).unwrap_or_default(), "received member-left push event");
+                                    let left_user = ml
+                                        .user_id
+                                        .as_ref()
+                                        .map(|u| u.value.clone())
+                                        .unwrap_or_default();
+                                    debug!(channel_id=%ml.channel_id.as_ref().map(|c| c.value.clone()).unwrap_or_default(), user_id=%left_user, "received member-left push event");
+                                    if left_user == local_user_id {
+                                        let _ = tx_event.send(UiEvent::AppendLog(
+                                            "[moderation] you were removed from this channel"
+                                                .into(),
+                                        ));
+                                    }
                                     let _ = tx_event.send(UiEvent::MemberLeft {
                                         channel_id: ml
                                             .channel_id
                                             .map(|c| c.value)
                                             .unwrap_or_default(),
                                         user_id: ml.user_id.map(|u| u.value).unwrap_or_default(),
+                                    });
+                                }
+                                pb::presence_event::Kind::MemberVoiceStateChanged(vs) => {
+                                    let _ = tx_event.send(UiEvent::MemberVoiceStateUpdated {
+                                        channel_id: vs
+                                            .channel_id
+                                            .map(|c| c.value)
+                                            .unwrap_or_default(),
+                                        user_id: vs.user_id.map(|u| u.value).unwrap_or_default(),
+                                        muted: vs.muted,
+                                        deafened: vs.deafened,
                                     });
                                 }
                                 other => {
@@ -795,7 +835,27 @@ async fn connect_and_run_session(
                         if !should_apply_event_seq(&tx_event, &mut last_event_seq, event_seq) {
                             continue;
                         }
+                        if let Some(pb::moderation_event::Kind::UserKicked(ev)) = m.kind.clone() {
+                            let _ = tx_event.send(UiEvent::MemberLeft {
+                                channel_id: ev.channel_id.map(|c| c.value).unwrap_or_default(),
+                                user_id: ev.target_user_id.map(|u| u.value).unwrap_or_default(),
+                            });
+                        }
                         let _ = tx_event.send(UiEvent::AppendLog(format!("[moderation] {:?}", m)));
+                    }
+                    PushEvent::Poke { event, event_seq } => {
+                        maybe_note_event_gap(&tx_event, event_seq);
+                        if !should_apply_event_seq(&tx_event, &mut last_event_seq, event_seq) {
+                            continue;
+                        }
+                        let _ = tx_event.send(UiEvent::AppendLog(format!(
+                            "[poke] from={} message={}",
+                            event.from_display_name, event.message
+                        )));
+                        let _ = tx_event.send(UiEvent::PokeReceived {
+                            from_name: event.from_display_name,
+                            message: event.message,
+                        });
                     }
                     PushEvent::ChannelCreated {
                         event: cr,
@@ -1003,7 +1063,7 @@ async fn connect_and_run_session(
                             self_deafened.store(new, Ordering::Relaxed);
                             let _ = tx_event.send(UiEvent::SetSelfDeafened(new));
                         }
-                        UiIntent::SendChat { text } => {
+                        UiIntent::SendChat { text, attachments } => {
                             if let Some(ref ch) = active_channel {
                                 // Optimistic local echo
                                 let now_ms = unix_ms() as i64;
@@ -1014,6 +1074,37 @@ async fn connect_and_run_session(
                                     channel_id = %ch,
                                     "sending chat message (optimistic local echo)"
                                 );
+                                let mut uploaded_attachments = Vec::new();
+                                for attachment in &attachments {
+                                    if let Err(e) = (|| async {
+                                        if attachment.asset_id.starts_with('/') {
+                                            let uploaded = upload_attachment(
+                                                &cfg.upload_base_url,
+                                                ch,
+                                                &local_user_id,
+                                                attachment,
+                                            )
+                                            .await?;
+                                            uploaded_attachments.push(uploaded);
+                                        } else {
+                                            uploaded_attachments.push(attachment.clone());
+                                        }
+                                        Ok::<(), anyhow::Error>(())
+                                    })().await {
+                                        let _ = tx_event.send(UiEvent::AttachmentUploadError {
+                                            path: attachment.asset_id.clone(),
+                                            error: e.to_string(),
+                                        });
+                                        let _ = tx_event.send(UiEvent::AppendLog(format!("[upload] failed: {e:#}")));
+                                        uploaded_attachments.clear();
+                                        break;
+                                    }
+                                }
+
+                                if uploaded_attachments.is_empty() && !attachments.is_empty() {
+                                    continue;
+                                }
+
                                 let _ = tx_event.send(UiEvent::MessageReceived(
                                     ui::model::ChatMessage {
                                         message_id: local_message_id,
@@ -1022,17 +1113,31 @@ async fn connect_and_run_session(
                                         author_name: cfg.display_name.clone(),
                                         text: text.clone(),
                                         timestamp: now_ms,
-                                        attachments: Vec::new(),
+                                        attachments: uploaded_attachments.clone(),
                                         reply_to: None,
                                         reactions: Vec::new(),
                                         pinned: false,
                                         edited: false,
                                     },
                                 ));
-                                if let Err(e) = dispatcher.send_chat(ch, &text).await {
-                                    let _ = tx_event.send(UiEvent::AppendLog(
-                                        format!("[ctl] send_chat failed: {e:#}"),
-                                    ));
+                                let pb_attachments = uploaded_attachments
+                                    .into_iter()
+                                    .map(|a| pb::AttachmentRef {
+                                        asset_id: Some(pb::AssetId { value: a.asset_id }),
+                                        filename: a.filename,
+                                        mime_type: a.mime_type,
+                                        size_bytes: a.size_bytes,
+                                        download_url: a.download_url,
+                                        thumbnail_url: a.thumbnail_url.unwrap_or_default(),
+                                        ..Default::default()
+                                    })
+                                    .collect();
+                                if let Err(e) = dispatcher.send_chat(ch, &text, pb_attachments).await {
+                                    let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                        "[ctl] send_chat failed: {e:#}",
+                                    )));
+                                } else {
+                                    let _ = tx_event.send(UiEvent::ClearPendingAttachments);
                                 }
                             } else {
                                 let _ = tx_event.send(UiEvent::AppendLog(
@@ -1251,6 +1356,37 @@ async fn connect_and_run_session(
                                 ));
                             }
                         }
+                        UiIntent::PokeUser { user_id, message } => {
+                            if let Err(e) = dispatcher.poke_user(&user_id, &message).await {
+                                let _ = tx_event.send(UiEvent::AppendLog(format!("[moderation] poke failed: {e:#}")));
+                            } else {
+                                let _ = tx_event.send(UiEvent::AppendLog(format!("[moderation] poked {user_id}")));
+                            }
+                        }
+                        UiIntent::MuteUser { user_id, muted } => {
+                            if let Some(ref ch) = active_channel {
+                                let action = pb::moderation_action_request::Action::Mute(pb::MuteUser { muted, duration_seconds: 0 });
+                                if let Err(e) = dispatcher.moderate_user(ch, &user_id, action).await {
+                                    let _ = tx_event.send(UiEvent::AppendLog(format!("[moderation] mute failed: {e:#}")));
+                                }
+                            }
+                        }
+                        UiIntent::DeafenUser { user_id, deafened } => {
+                            if let Some(ref ch) = active_channel {
+                                let action = pb::moderation_action_request::Action::Deafen(pb::DeafenUser { deafened, duration_seconds: 0 });
+                                if let Err(e) = dispatcher.moderate_user(ch, &user_id, action).await {
+                                    let _ = tx_event.send(UiEvent::AppendLog(format!("[moderation] deafen failed: {e:#}")));
+                                }
+                            }
+                        }
+                        UiIntent::KickUser { user_id, reason } => {
+                            if let Some(ref ch) = active_channel {
+                                let action = pb::moderation_action_request::Action::Kick(pb::KickUser { reason });
+                                if let Err(e) = dispatcher.moderate_user(ch, &user_id, action).await {
+                                    let _ = tx_event.send(UiEvent::AppendLog(format!("[moderation] kick failed: {e:#}")));
+                                }
+                            }
+                        }
                         _ => {
                             // Remaining intents (moderation, file upload, etc.)
                         }
@@ -1273,6 +1409,104 @@ async fn connect_and_run_session(
             }
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct UploadResponse {
+    attachment_id: String,
+    download_url: String,
+    content_type: String,
+    size_bytes: u64,
+    filename: String,
+}
+
+fn parse_http_base_url(base: &str) -> anyhow::Result<(String, u16)> {
+    let trimmed = base.trim();
+    let without_scheme = trimmed
+        .strip_prefix("http://")
+        .ok_or_else(|| anyhow!("only http:// upload_base_url is supported in this build"))?;
+    let host_port = without_scheme.split('/').next().unwrap_or(without_scheme);
+    let mut parts = host_port.splitn(2, ':');
+    let host = parts.next().unwrap_or_default().to_string();
+    let port = parts
+        .next()
+        .map(|p| p.parse::<u16>())
+        .transpose()
+        .context("invalid upload port")?
+        .unwrap_or(80);
+    if host.is_empty() {
+        return Err(anyhow!("invalid upload host"));
+    }
+    Ok((host, port))
+}
+
+async fn upload_attachment(
+    upload_base_url: &str,
+    channel_id: &str,
+    uploader_user_id: &str,
+    attachment: &ui::model::AttachmentData,
+) -> anyhow::Result<ui::model::AttachmentData> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    let bytes = tokio::fs::read(&attachment.asset_id)
+        .await
+        .with_context(|| format!("read attachment bytes: {}", attachment.asset_id))?;
+
+    let (host, port) = parse_http_base_url(upload_base_url)?;
+    let mut stream = TcpStream::connect((host.as_str(), port))
+        .await
+        .context("connect upload server")?;
+
+    let request_head = format!(
+        "POST /upload HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\nx-filename: {}\r\nx-content-type: {}\r\nx-channel-id: {}\r\nx-uploader-user-id: {}\r\n\r\n",
+        bytes.len(),
+        attachment.filename,
+        attachment.mime_type,
+        channel_id,
+        uploader_user_id
+    );
+
+    stream
+        .write_all(request_head.as_bytes())
+        .await
+        .context("write upload headers")?;
+    stream
+        .write_all(&bytes)
+        .await
+        .context("write upload body")?;
+
+    let mut raw = Vec::new();
+    stream
+        .read_to_end(&mut raw)
+        .await
+        .context("read upload response")?;
+
+    let sep = b"\r\n\r\n";
+    let Some(idx) = raw.windows(sep.len()).position(|w| w == sep) else {
+        return Err(anyhow!("malformed upload response"));
+    };
+    let head = String::from_utf8_lossy(&raw[..idx]);
+    let body = &raw[idx + sep.len()..];
+
+    let status_ok = head
+        .lines()
+        .next()
+        .map(|line| line.contains(" 200 "))
+        .unwrap_or(false);
+    if !status_ok {
+        return Err(anyhow!("upload failed: {}", String::from_utf8_lossy(body)));
+    }
+
+    let payload: UploadResponse = serde_json::from_slice(body).context("decode upload response")?;
+    Ok(ui::model::AttachmentData {
+        asset_id: payload.attachment_id,
+        filename: payload.filename,
+        mime_type: payload.content_type,
+        size_bytes: payload.size_bytes,
+        download_url: payload.download_url,
+        thumbnail_url: None,
+    })
 }
 
 async fn mic_test_loop(

@@ -45,6 +45,10 @@ pub enum PushEvent {
         hint: pb::ServerHint,
         event_seq: u64,
     },
+    Poke {
+        event: pb::PokeEvent,
+        event_seq: u64,
+    },
     Snapshot {
         snapshot: pb::InitialStateSnapshot,
         event_seq: u64,
@@ -360,13 +364,18 @@ impl ControlDispatcher {
         Ok(())
     }
 
-    pub async fn send_chat(&self, channel_id: &str, text: &str) -> Result<()> {
+    pub async fn send_chat(
+        &self,
+        channel_id: &str,
+        text: &str,
+        attachments: Vec<pb::AttachmentRef>,
+    ) -> Result<()> {
         let req = pb::SendMessageRequest {
             channel_id: Some(pb::ChannelId {
                 value: channel_id.into(),
             }),
             text: text.into(),
-            attachments: vec![],
+            attachments,
             reply_to_message_id: None,
             mentions: vec![],
         };
@@ -383,6 +392,51 @@ impl ControlDispatcher {
         Ok(())
     }
 
+    pub async fn moderate_user(
+        &self,
+        channel_id: &str,
+        target_user_id: &str,
+        action: pb::moderation_action_request::Action,
+    ) -> Result<()> {
+        let req = pb::ModerationActionRequest {
+            channel_id: Some(pb::ChannelId {
+                value: channel_id.into(),
+            }),
+            target_user_id: Some(pb::UserId {
+                value: target_user_id.into(),
+            }),
+            action: Some(action),
+        };
+        let resp = self
+            .send_request(
+                pb::client_to_server::Payload::ModerationActionRequest(req),
+                Duration::from_secs(5),
+            )
+            .await??;
+        if let Some(err) = resp.error {
+            return Err(anyhow!("moderate_user error: {:?}", err));
+        }
+        Ok(())
+    }
+
+    pub async fn poke_user(&self, target_user_id: &str, message: &str) -> Result<()> {
+        let req = pb::PokeRequest {
+            target_user_id: Some(pb::UserId {
+                value: target_user_id.into(),
+            }),
+            message: message.into(),
+        };
+        let resp = self
+            .send_request(
+                pb::client_to_server::Payload::PokeRequest(req),
+                Duration::from_secs(5),
+            )
+            .await??;
+        if let Some(err) = resp.error {
+            return Err(anyhow!("poke_user error: {:?}", err));
+        }
+        Ok(())
+    }
     pub async fn set_away_message(&self, message: &str) -> Result<()> {
         let req = pb::UpdateUserProfileRequest {
             display_name: String::new(),
@@ -585,6 +639,10 @@ fn classify_push(msg: pb::ServerToClient) -> PushEvent {
         },
         Some(pb::server_to_client::Payload::ServerHint(h)) => PushEvent::ServerHint {
             hint: h,
+            event_seq: msg.event_seq,
+        },
+        Some(pb::server_to_client::Payload::PokeEvent(e)) => PushEvent::Poke {
+            event: e,
             event_seq: msg.event_seq,
         },
         Some(pb::server_to_client::Payload::InitialStateSnapshot(snapshot)) => {

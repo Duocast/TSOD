@@ -540,6 +540,7 @@ impl<R: ControlRepo> ControlService<R> {
                     "target_user_id": target_user.0,
                     "actor_user_id": ctx.user_id.0,
                     "muted": muted,
+                    "deafened": m.deafened,
                     "reason": reason
                 }),
             },
@@ -548,6 +549,142 @@ impl<R: ControlRepo> ControlService<R> {
 
         tx.commit().await?;
         Ok(m)
+    }
+
+    pub async fn set_voice_deafen(
+        &self,
+        ctx: &RequestContext,
+        channel_id: ChannelId,
+        target_user: UserId,
+        deafened: bool,
+        reason: Option<String>,
+    ) -> ControlResult<Member> {
+        let mut tx = <R as ControlRepo>::tx(&self.repo).await?;
+        let mut m = <R as ControlRepo>::get_member(
+            &self.repo,
+            &mut tx,
+            ctx.server_id,
+            channel_id,
+            target_user,
+        )
+        .await?
+        .ok_or(ControlError::NotFound("member"))?;
+        m.deafened = deafened;
+        <R as ControlRepo>::upsert_member(&self.repo, &mut tx, ctx.server_id, &m).await?;
+        <R as ControlRepo>::insert_outbox(
+            &self.repo,
+            &mut tx,
+            &OutboxEvent {
+                id: OutboxId(Uuid::new_v4()),
+                server_id: ctx.server_id,
+                topic: "presence.voice_state_changed".to_string(),
+                payload_json: json!({
+                    "channel_id": channel_id.0,
+                    "user_id": target_user.0,
+                    "muted": m.muted,
+                    "deafened": deafened
+                }),
+            },
+        )
+        .await?;
+
+        <R as ControlRepo>::insert_outbox(
+            &self.repo,
+            &mut tx,
+            &OutboxEvent {
+                id: OutboxId(Uuid::new_v4()),
+                server_id: ctx.server_id,
+                topic: "moderation.user_deafened".to_string(),
+                payload_json: json!({
+                    "channel_id": channel_id.0,
+                    "target_user_id": target_user.0,
+                    "actor_user_id": ctx.user_id.0,
+                    "deafened": deafened,
+                    "reason": reason
+                }),
+            },
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(m)
+    }
+
+    pub async fn kick_member(
+        &self,
+        ctx: &RequestContext,
+        channel_id: ChannelId,
+        target_user: UserId,
+        reason: Option<String>,
+    ) -> ControlResult<()> {
+        let mut tx = <R as ControlRepo>::tx(&self.repo).await?;
+        <R as ControlRepo>::delete_member(
+            &self.repo,
+            &mut tx,
+            ctx.server_id,
+            channel_id,
+            target_user,
+        )
+        .await?;
+        <R as ControlRepo>::insert_outbox(
+            &self.repo,
+            &mut tx,
+            &OutboxEvent {
+                id: OutboxId(Uuid::new_v4()),
+                server_id: ctx.server_id,
+                topic: "moderation.user_kicked".to_string(),
+                payload_json: json!({
+                    "channel_id": channel_id.0,
+                    "target_user_id": target_user.0,
+                    "actor_user_id": ctx.user_id.0,
+                    "reason": reason
+                }),
+            },
+        )
+        .await?;
+        <R as ControlRepo>::insert_outbox(
+            &self.repo,
+            &mut tx,
+            &OutboxEvent {
+                id: OutboxId(Uuid::new_v4()),
+                server_id: ctx.server_id,
+                topic: "presence.member_left".to_string(),
+                payload_json: json!({
+                    "channel_id": channel_id.0,
+                    "user_id": target_user.0
+                }),
+            },
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn poke_user(
+        &self,
+        ctx: &RequestContext,
+        target_user: UserId,
+        from_display_name: &str,
+        message: String,
+    ) -> ControlResult<()> {
+        let mut tx = <R as ControlRepo>::tx(&self.repo).await?;
+        <R as ControlRepo>::insert_outbox(
+            &self.repo,
+            &mut tx,
+            &OutboxEvent {
+                id: OutboxId(Uuid::new_v4()),
+                server_id: ctx.server_id,
+                topic: "poke.received".to_string(),
+                payload_json: json!({
+                    "target_user_id": target_user.0,
+                    "from_user_id": ctx.user_id.0,
+                    "from_display_name": from_display_name,
+                    "message": message,
+                }),
+            },
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
     }
 
     // -------------------------------------------------------------------------

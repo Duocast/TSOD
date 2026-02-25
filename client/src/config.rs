@@ -30,6 +30,18 @@ pub struct Config {
     #[arg(long, env = "VP_CA_CERT_PEM")]
     pub ca_cert_pem: Option<String>,
 
+    /// Base URL for attachment upload/download HTTP service.
+    #[arg(
+        long,
+        env = "VP_UPLOAD_BASE_URL",
+        default_value = "http://127.0.0.1:8081"
+    )]
+    pub upload_base_url: String,
+
+    /// Max upload size in MB (client-side precheck).
+    #[arg(long, env = "VP_MAX_UPLOAD_MB", default_value_t = 25)]
+    pub max_upload_mb: u64,
+
     /// Display name shown to other users.
     #[arg(long, default_value = "User")]
     pub display_name: String,

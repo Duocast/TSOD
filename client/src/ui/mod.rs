@@ -312,7 +312,7 @@ impl eframe::App for VpApp {
             .default_width(200.0)
             .min_width(150.0)
             .show(ctx, |ui| {
-                panels::members::show(ui, &self.model, &self.tx_intent);
+                panels::members::show(ui, &mut self.model, &self.tx_intent);
             });
 
         // Settings window (floating, TS3-style Options dialog)

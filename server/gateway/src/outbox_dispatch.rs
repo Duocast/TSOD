@@ -67,7 +67,9 @@ async fn handle_record(
 ) -> Result<()> {
     let (channel_id, push) = translate_record(&rec)?;
 
-    let recipients = if matches!(
+    let recipients = if rec.topic == "poke.received" {
+        vec![parse_user_id_field(&rec.payload_json, "target_user_id")?]
+    } else if matches!(
         rec.topic.as_str(),
         "channel.created" | "channels.created" | "channel.renamed" | "channel.deleted"
     ) {
@@ -276,6 +278,95 @@ fn translate_record(rec: &OutboxEventRow) -> Result<(ChannelId, pb::ServerToClie
                 server_push(pb::server_to_client::Payload::ModerationEvent(ev)),
             ))
         }
+
+        "moderation.user_deafened" => {
+            let channel_id = parse_channel_id_field(&rec.payload_json, "channel_id")?;
+            let target_user_id = parse_user_id_field(&rec.payload_json, "target_user_id")?;
+            let actor_user_id = parse_user_id_field(&rec.payload_json, "actor_user_id")?;
+            let deafened = rec
+                .payload_json
+                .get("deafened")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let ev = pb::ModerationEvent {
+                at: Some(now_ts()),
+                kind: Some(pb::moderation_event::Kind::UserDeafened(pb::UserDeafened {
+                    channel_id: Some(pb::ChannelId {
+                        value: channel_id.0.to_string(),
+                    }),
+                    target_user_id: Some(pb::UserId {
+                        value: target_user_id.0.to_string(),
+                    }),
+                    deafened,
+                    duration_seconds: 0,
+                    actor_user_id: Some(pb::UserId {
+                        value: actor_user_id.0.to_string(),
+                    }),
+                })),
+            };
+            Ok((
+                channel_id,
+                server_push(pb::server_to_client::Payload::ModerationEvent(ev)),
+            ))
+        }
+        "moderation.user_kicked" => {
+            let channel_id = parse_channel_id_field(&rec.payload_json, "channel_id")?;
+            let target_user_id = parse_user_id_field(&rec.payload_json, "target_user_id")?;
+            let actor_user_id = parse_user_id_field(&rec.payload_json, "actor_user_id")?;
+            let reason = rec
+                .payload_json
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let ev = pb::ModerationEvent {
+                at: Some(now_ts()),
+                kind: Some(pb::moderation_event::Kind::UserKicked(pb::UserKicked {
+                    channel_id: Some(pb::ChannelId {
+                        value: channel_id.0.to_string(),
+                    }),
+                    target_user_id: Some(pb::UserId {
+                        value: target_user_id.0.to_string(),
+                    }),
+                    reason,
+                    actor_user_id: Some(pb::UserId {
+                        value: actor_user_id.0.to_string(),
+                    }),
+                })),
+            };
+            Ok((
+                channel_id,
+                server_push(pb::server_to_client::Payload::ModerationEvent(ev)),
+            ))
+        }
+        "poke.received" => {
+            let _target_user_id = parse_user_id_field(&rec.payload_json, "target_user_id")?;
+            let from_user_id = parse_user_id_field(&rec.payload_json, "from_user_id")?;
+            let from_display_name = rec
+                .payload_json
+                .get("from_display_name")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let message = rec
+                .payload_json
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let ev = pb::PokeEvent {
+                at: Some(now_ts()),
+                from_user_id: Some(pb::UserId {
+                    value: from_user_id.0.to_string(),
+                }),
+                from_display_name,
+                message,
+            };
+            Ok((
+                ChannelId(uuid::Uuid::nil()),
+                server_push(pb::server_to_client::Payload::PokeEvent(ev)),
+            ))
+        }
         // Compatibility alias support: keep consuming queued channel-created rows
         // emitted by older/newer producers.
         "channel.created" | "channels.created" => {
@@ -445,6 +536,16 @@ fn json_attachments_to_pb(v: Value) -> Vec<pb::AttachmentRef> {
                 width: o.get("width").and_then(Value::as_u64).unwrap_or(0) as u32,
                 height: o.get("height").and_then(Value::as_u64).unwrap_or(0) as u32,
                 duration_ms: o.get("duration_ms").and_then(Value::as_u64).unwrap_or(0),
+                download_url: o
+                    .get("download_url")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                thumbnail_url: o
+                    .get("thumbnail_url")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
                 ..Default::default()
             });
         }
