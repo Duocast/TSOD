@@ -468,13 +468,14 @@ impl ControlRepo for PgControlRepo {
     ) -> ControlResult<()> {
         sqlx::query(
             r#"
-            INSERT INTO outbox_events (id, server_id, topic, payload_json, created_at)
-            VALUES ($1, $2, $3, $4, NOW())
+            INSERT INTO outbox_events (id, server_id, topic, payload, payload_json, created_at)
+            VALUES ($1, $2, $3, $4, $5, NOW())
             "#,
         )
         .bind(ev.id.0)
         .bind(ev.server_id.0)
         .bind(&ev.topic)
+        .bind(&ev.payload_json)
         .bind(&ev.payload_json)
         .execute(&mut **tx)
         .await
@@ -563,8 +564,18 @@ impl ControlRepo for PgControlRepo {
     ) -> ControlResult<()> {
         sqlx::query(
             r#"
-            INSERT INTO audit_log (id, server_id, actor_user_id, action, target_type, target_id, context_json, created_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            INSERT INTO audit_log (
+                id,
+                server_id,
+                actor_user_id,
+                action,
+                target_type,
+                target_id,
+                context,
+                context_json,
+                created_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             "#,
         )
         .bind(entry.id.0)
@@ -573,6 +584,7 @@ impl ControlRepo for PgControlRepo {
         .bind(&entry.action)
         .bind(&entry.target_type)
         .bind(&entry.target_id)
+        .bind(&entry.context_json)
         .bind(&entry.context_json)
         .bind(entry.created_at)
         .execute(&mut **tx)
