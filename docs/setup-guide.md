@@ -422,6 +422,9 @@ cargo build --release
 
 The binary will be at `C:\tsod\client\target\release\vp-client.exe`.
 
+> **Defaults to know:** If you run without flags, the client targets `127.0.0.1:4433` and SNI `localhost`.
+> For remote servers, always set `--server` (or `VP_SERVER`) and `--server-name` (or `VP_SERVER_NAME`).
+
 ### 2.6 Copy the CA Certificate
 
 Copy `ca.crt` from the server to the Windows machine. For example, using `scp`:
@@ -431,6 +434,8 @@ scp user@192.168.1.100:/etc/tsod/tls/ca.crt C:\tsod\ca.crt
 ```
 
 Or transfer via USB, shared folder, etc.
+
+> **Tip:** `vp-client.exe` now auto-detects a CA file placed next to the executable (`ca.crt`, `ca.pem`, or `ca-cert.pem`), so you can keep `ca.crt` in `C:\tsod\client\target\release\` and omit `--ca-cert-pem`.
 
 ### 2.7 Run the Client
 
@@ -722,6 +727,16 @@ openssl s_client -connect 127.0.0.1:4433 -CAfile /etc/tsod/tls/ca.crt 2>/dev/nul
 
 ### Connection timeout / no response
 
+- **Wrong client target (most common):** The client defaults to `127.0.0.1:4433`. If logs show `connect await: timed out`, launch with the real gateway address, for example:
+  ```powershell
+  vp-client.exe --server 192.168.1.220:4433 --server-name tsod-server
+  ```
+  Or set persistent environment variables:
+  ```powershell
+  setx VP_SERVER 192.168.1.220:4433
+  setx VP_SERVER_NAME tsod-server
+  setx VP_CA_CERT_PEM C:\tsod\client\target\release\ca.crt
+  ```
 - **Firewall:** Verify UDP 4433 is open: `sudo ufw status | grep 4433`
 - **Port forwarding:** For external access, verify with an external port
   checker that UDP 4433 is reachable on your WAN IP
