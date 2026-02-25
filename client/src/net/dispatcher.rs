@@ -428,8 +428,16 @@ async fn dispatcher_task(
                 }
             }
             r = &mut reader => {
-                if let Err(e) = r {
-                    warn!("control reader join error: {}", e);
+                match r {
+                    Ok(Ok(())) => {
+                        warn!("control reader stopped cleanly");
+                    }
+                    Ok(Err(e)) => {
+                        warn!("control reader stream error: {:#}", e);
+                    }
+                    Err(e) => {
+                        warn!("control reader join error: {}", e);
+                    }
                 }
                 fail_all_pending(&pending).await;
                 break;

@@ -398,7 +398,7 @@ fn json_attachments_to_pb(v: Value) -> Vec<pb::AttachmentRef> {
 
 fn server_push(payload: pb::server_to_client::Payload) -> pb::ServerToClient {
     pb::ServerToClient {
-        request_id: Some(pb::RequestId { value: 0 }),
+        request_id: None,
         session_id: None,
         sent_at: Some(now_ts()),
         error: None,

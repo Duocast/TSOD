@@ -299,6 +299,8 @@ impl Gateway {
                         )
                         .await?;
 
+                    debug!(server_id=%server_id.0, channel_id=%created.id.0, user_id=%user_id.0, "create_channel request committed in control service");
+
                     let state = pb::ChannelState {
                         channel_id: Some(pb::ChannelId {
                             value: created.id.0.to_string(),
@@ -323,6 +325,7 @@ impl Gateway {
                         warn!("control write failed: {:#}", e);
                         break;
                     }
+                    debug!(server_id=%server_id.0, channel_id=%created.id.0, user_id=%user_id.0, "create_channel response sent");
                 }
                 Some(pb::client_to_server::Payload::SendMessageRequest(r)) => {
                     let ch = parse_channel_id(r.channel_id.as_ref())?;

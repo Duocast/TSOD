@@ -108,6 +108,7 @@ impl<R: ControlRepo> ControlService<R> {
         debug!(server_id=%ctx.server_id.0, channel_id=%ch.id.0, topic="channel.created", "produced outbox event");
 
         tx.commit().await?;
+        debug!(server_id=%ctx.server_id.0, channel_id=%ch.id.0, "create_channel transaction committed");
         Ok(ch)
     }
 
@@ -229,6 +230,7 @@ impl<R: ControlRepo> ControlService<R> {
             <R as ControlRepo>::list_members(&self.repo, &mut tx, ctx.server_id, req.channel_id)
                 .await?;
         tx.commit().await?;
+        debug!(server_id=%ctx.server_id.0, channel_id=%req.channel_id.0, user_id=%ctx.user_id.0, "join_channel transaction committed");
         Ok(members)
     }
 
