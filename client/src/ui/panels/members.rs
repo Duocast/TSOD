@@ -35,69 +35,82 @@ pub fn show(ui: &mut egui::Ui, model: &UiModel, tx_intent: &Sender<UiIntent>) {
                 .copied()
                 .unwrap_or(false)
                 || member.speaking;
+            let row_height = ui.spacing().interact_size.y.max(36.0);
+            let row_width = ui.available_width().max(1.0);
+            let (row_rect, response) =
+                ui.allocate_exact_size(egui::vec2(row_width, row_height), egui::Sense::click());
 
-            let response = ui
-                .horizontal(|ui| {
-                    // Speaking indicator (green ring)
-                    let (rect, _) =
-                        ui.allocate_exact_size(egui::vec2(32.0, 32.0), egui::Sense::hover());
-                    let center = rect.center();
-                    let radius = 14.0;
+            if response.hovered() {
+                ui.painter().rect_filled(
+                    row_rect,
+                    egui::Rounding::same(4.0),
+                    ui.visuals().widgets.hovered.bg_fill.linear_multiply(0.35),
+                );
+            }
 
-                    // Avatar circle (placeholder)
-                    ui.painter()
-                        .circle_filled(center, radius, theme::bg_light());
+            let avatar_size = 32.0;
+            let avatar_rect = egui::Rect::from_min_size(
+                row_rect.min + egui::vec2(4.0, (row_height - avatar_size) * 0.5),
+                egui::vec2(avatar_size, avatar_size),
+            );
+            let center = avatar_rect.center();
+            let radius = 14.0;
 
-                    // First letter of name as avatar
-                    let initial = member
-                        .display_name
-                        .chars()
-                        .next()
-                        .unwrap_or('?')
-                        .to_uppercase()
-                        .to_string();
-                    ui.painter().text(
-                        center,
-                        egui::Align2::CENTER_CENTER,
-                        &initial,
-                        egui::FontId::proportional(14.0),
-                        theme::text_color(),
-                    );
+            ui.painter()
+                .circle_filled(center, radius, theme::bg_light());
 
-                    // Speaking ring
-                    if is_speaking {
-                        ui.painter().circle_stroke(
-                            center,
-                            radius + 2.0,
-                            egui::Stroke::new(2.0, theme::COLOR_VOICE_ACTIVE),
-                        );
-                    }
+            let initial = member
+                .display_name
+                .chars()
+                .next()
+                .unwrap_or('?')
+                .to_uppercase()
+                .to_string();
+            ui.painter().text(
+                center,
+                egui::Align2::CENTER_CENTER,
+                &initial,
+                egui::FontId::proportional(14.0),
+                theme::text_color(),
+            );
 
-                    // Name and status icons
-                    ui.vertical(|ui| {
-                        ui.label(
-                            egui::RichText::new(&member.display_name).color(theme::text_color()),
-                        );
-                        let mut status_parts = Vec::new();
-                        if member.muted || member.self_muted {
-                            status_parts.push("muted");
-                        }
-                        if member.deafened || member.self_deafened {
-                            status_parts.push("deafened");
-                        }
-                        if member.streaming {
-                            status_parts.push("streaming");
-                        }
-                        if !status_parts.is_empty() {
-                            ui.label(
-                                egui::RichText::new(status_parts.join(", "))
-                                    .small()
-                                    .color(theme::text_muted()),
-                            );
-                        }
-                    });
-                })
-                .response;
+            if is_speaking {
+                ui.painter().circle_stroke(
+                    center,
+                    radius + 2.0,
+                    egui::Stroke::new(2.0, theme::COLOR_VOICE_ACTIVE),
+                );
+            }
+
+            let text_x = avatar_rect.right() + 8.0;
+            let top_y = row_rect.top() + 8.0;
+            ui.painter().text(
+                egui::pos2(text_x, top_y),
+                egui::Align2::LEFT_TOP,
+                &member.display_name,
+                egui::TextStyle::Body.resolve(ui.style()),
+                theme::text_color(),
+            );
+
+            let mut status_parts = Vec::new();
+            if member.muted || member.self_muted {
+                status_parts.push("muted");
+            }
+            if member.deafened || member.self_deafened {
+                status_parts.push("deafened");
+            }
+            if member.streaming {
+                status_parts.push("streaming");
+            }
+            if !status_parts.is_empty() {
+                ui.painter().text(
+                    egui::pos2(text_x, row_rect.bottom() - 8.0),
+                    egui::Align2::LEFT_BOTTOM,
+                    status_parts.join(", "),
+                    egui::TextStyle::Small.resolve(ui.style()),
+                    theme::text_muted(),
+                );
+            }
 
             // Context menu for moderation
             response.context_menu(|ui| {
