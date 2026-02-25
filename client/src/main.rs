@@ -705,13 +705,15 @@ async fn connect_and_run_session(
                             let _ = tx_event.send(UiEvent::SetNick(nickname));
 
                             let new_server = format!("{host}:{port}");
-                            if cfg.server != new_server {
-                                cfg.server = new_server.clone();
-                                cfg.server_name = host.clone();
-                                let _ = tx_event.send(UiEvent::SetServerAddress { host, port });
-                                set_connection_stage(tx_event, ui::model::ConnectionStage::Resolving, format!("Reconnect requested: {new_server}"));
-                                return Err(anyhow!("reconnect requested"));
-                            }
+                            cfg.server = new_server.clone();
+                            cfg.server_name = host.clone();
+                            let _ = tx_event.send(UiEvent::SetServerAddress { host, port });
+                            set_connection_stage(
+                                tx_event,
+                                ui::model::ConnectionStage::Resolving,
+                                format!("Reconnect requested: {new_server}"),
+                            );
+                            return Err(anyhow!("reconnect requested"));
                         }
                         UiIntent::TogglePtt => {
                             let new = !ptt_active.load(Ordering::Relaxed);
