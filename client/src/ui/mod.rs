@@ -133,6 +133,10 @@ impl eframe::App for VpApp {
                     if ui.button("Telemetry").clicked() {
                         self.model.show_telemetry = !self.model.show_telemetry;
                     }
+                    if ui.button("Connections").clicked() {
+                        self.model.show_connections = !self.model.show_connections;
+                        self.model.connection_error.clear();
+                    }
                 });
             });
         });
@@ -201,7 +205,9 @@ impl eframe::App for VpApp {
                     },
                 );
 
-                // Separator between channel tree and user panel
+                // Push the user panel to the bottom of the sidebar.
+                let spacer = (ui.available_height() - 112.0).max(4.0);
+                ui.add_space(spacer);
                 ui.separator();
 
                 // User panel at the bottom of the sidebar
@@ -244,6 +250,58 @@ impl eframe::App for VpApp {
                     let _ = crate::settings_io::save_settings(&self.model.settings);
                 }
                 self.model.show_settings = false;
+            }
+        }
+
+        // Connections window (floating)
+        if self.model.show_connections {
+            let mut open = true;
+            egui::Window::new("Connections")
+                .open(&mut open)
+                .default_width(360.0)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.label("Server address:");
+                    ui.horizontal(|ui| {
+                        ui.label("IP / Host");
+                        ui.add_sized(
+                            [ui.available_width() - 70.0, 24.0],
+                            egui::TextEdit::singleline(&mut self.model.connection_host_draft),
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Port");
+                        ui.add_sized(
+                            [80.0, 24.0],
+                            egui::TextEdit::singleline(&mut self.model.connection_port_draft),
+                        );
+                    });
+
+                    if !self.model.connection_error.is_empty() {
+                        ui.colored_label(theme::COLOR_DANGER, &self.model.connection_error);
+                    }
+
+                    ui.add_space(8.0);
+                    if ui.button("Connect").clicked() {
+                        let host = self.model.connection_host_draft.trim().to_string();
+                        let port_text = self.model.connection_port_draft.trim();
+
+                        if host.is_empty() {
+                            self.model.connection_error = "Host/IP cannot be empty.".to_string();
+                        } else if let Ok(port) = port_text.parse::<u16>() {
+                            self.model.connection_error.clear();
+                            let _ = self
+                                .tx_intent
+                                .send(UiIntent::ConnectToServer { host, port });
+                        } else {
+                            self.model.connection_error =
+                                "Port must be a number between 1 and 65535.".to_string();
+                        }
+                    }
+                });
+            if !open {
+                self.model.show_connections = false;
+                self.model.connection_error.clear();
             }
         }
 
@@ -413,6 +471,7 @@ impl VpApp {
         if esc_pressed {
             self.model.show_settings = false;
             self.model.show_telemetry = false;
+            self.model.show_connections = false;
             self.model.show_create_channel = false;
         }
     }

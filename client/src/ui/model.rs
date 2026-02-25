@@ -21,6 +21,10 @@ pub enum UiEvent {
     AppendLog(String),
     SetStatus(String),
     SetAwayMessage(String),
+    SetServerAddress {
+        host: String,
+        port: u16,
+    },
 
     // Channel list
     SetChannels(Vec<ChannelEntry>),
@@ -123,6 +127,10 @@ pub enum UiIntent {
     Help,
     SetAwayMessage {
         message: String,
+    },
+    ConnectToServer {
+        host: String,
+        port: u16,
     },
 
     // Chat
@@ -648,7 +656,11 @@ pub struct UiModel {
     // UI toggles
     pub show_settings: bool,
     pub show_telemetry: bool,
+    pub show_connections: bool,
     pub status_line: String,
+    pub connection_host_draft: String,
+    pub connection_port_draft: String,
+    pub connection_error: String,
 
     // Audio devices (enumerated at runtime)
     pub input_devices: Vec<String>,
@@ -730,7 +742,11 @@ impl Default for UiModel {
             telemetry: TelemetryData::default(),
             show_settings: false,
             show_telemetry: false,
+            show_connections: false,
             status_line: String::new(),
+            connection_host_draft: "127.0.0.1".into(),
+            connection_port_draft: "4433".into(),
+            connection_error: String::new(),
             input_devices: Vec::new(),
             output_devices: Vec::new(),
             loopback_active: false,
@@ -783,6 +799,11 @@ impl UiModel {
             }
             UiEvent::SetStatus(s) => self.status_line = s,
             UiEvent::SetAwayMessage(message) => self.away_message = message,
+            UiEvent::SetServerAddress { host, port } => {
+                self.connection_host_draft = host;
+                self.connection_port_draft = port.to_string();
+                self.connection_error.clear();
+            }
             UiEvent::SetChannels(chs) => self.channels = chs,
             UiEvent::UpdateChannelMembers {
                 channel_id,

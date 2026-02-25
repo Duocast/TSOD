@@ -18,7 +18,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
     ui.separator();
 
     // Messages area (takes remaining space minus input)
-    let available = ui.available_height() - 80.0; // reserve space for input + typing
+    let available = ui.available_height() - 64.0; // reserve space for typing + compact input
     egui::ScrollArea::vertical()
         .max_height(available.max(100.0))
         .stick_to_bottom(true)
@@ -61,6 +61,8 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
         );
     }
 
+    let lower_input_spacer = (ui.available_height() - 34.0).max(2.0);
+    ui.add_space(lower_input_spacer);
     ui.separator();
 
     // Input bar
