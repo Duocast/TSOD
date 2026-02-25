@@ -29,7 +29,7 @@ use std::sync::{
     Arc,
 };
 use tokio::sync::{watch, Mutex};
-use tokio::time::{sleep, Duration};
+use tokio::time::{sleep, Duration, Instant};
 use tracing::{info, warn, Level};
 use tracing_subscriber::EnvFilter;
 use ui::{UiEvent, UiIntent, VpApp};
@@ -111,6 +111,19 @@ fn main() -> Result<()> {
 }
 
 // ── Backend task ───────────────────────────────────────────────────────
+
+fn set_connection_stage(
+    tx_event: &Sender<UiEvent>,
+    stage: ui::model::ConnectionStage,
+    detail: impl Into<String>,
+) {
+    let detail = detail.into();
+    let _ = tx_event.send(UiEvent::SetConnectionStage {
+        stage,
+        detail: detail.clone(),
+    });
+    let _ = tx_event.send(UiEvent::AppendLog(format!("[conn] {detail}")));
+}
 
 async fn app_task(
     mut cfg: Config,
@@ -248,6 +261,11 @@ async fn app_task(
                 backoff.reset();
             }
             Err(e) => {
+                set_connection_stage(
+                    &tx_event,
+                    ui::model::ConnectionStage::Failed,
+                    format!("Connection failed: {e:#}"),
+                );
                 let _ = tx_event.send(UiEvent::AppendLog(format!("[net] disconnected: {e:#}")));
 
                 let jitter = rand::random::<u64>() % 150;
@@ -287,6 +305,13 @@ async fn app_task(
                                     cfg.server
                                 )));
                                 break 'retry_wait;
+                            }
+                            UiIntent::CancelConnect => {
+                                set_connection_stage(
+                                    &tx_event,
+                                    ui::model::ConnectionStage::Idle,
+                                    "Connection attempt cancelled",
+                                );
                             }
                             UiIntent::SetAwayMessage { message } => {
                                 let _ = tx_event.send(UiEvent::SetAwayMessage(message.clone()));
@@ -345,25 +370,66 @@ async fn connect_and_run_session(
     let _ = tx_event.send(UiEvent::SetConnected(false));
     let _ = tx_event.send(UiEvent::SetAuthed(false));
 
+    set_connection_stage(
+        tx_event,
+        ui::model::ConnectionStage::Resolving,
+        format!("Connect requested for {}", cfg.server),
+    );
+    let resolve_started = Instant::now();
     let endpoint = make_endpoint_with_optional_pinning(cfg)?;
     let addr = cfg.server.parse().context("parse server addr")?;
+    let resolve_elapsed = resolve_started.elapsed();
+    set_connection_stage(
+        tx_event,
+        ui::model::ConnectionStage::Resolving,
+        format!("Host/addr prepared in {} ms", resolve_elapsed.as_millis()),
+    );
 
+    set_connection_stage(
+        tx_event,
+        ui::model::ConnectionStage::Handshaking,
+        format!("Establishing QUIC/TLS to {}", cfg.server_name),
+    );
+    let handshake_started = Instant::now();
     let conn = endpoint
         .connect(addr, &cfg.server_name)
         .context("connect start")?
         .await
         .context("connect await")?;
+    let handshake_elapsed = handshake_started.elapsed();
 
     let _ = tx_event.send(UiEvent::SetConnected(true));
-    let _ = tx_event.send(UiEvent::AppendLog("[net] connected".into()));
+    set_connection_stage(
+        tx_event,
+        ui::model::ConnectionStage::Handshaking,
+        format!(
+            "QUIC/TLS established in {} ms",
+            handshake_elapsed.as_millis()
+        ),
+    );
 
     let (send, recv) = conn.open_bi().await.context("open control stream")?;
     let dispatcher = ControlDispatcher::start(send, recv, shutdown_rx.clone());
 
+    set_connection_stage(
+        tx_event,
+        ui::model::ConnectionStage::Authenticating,
+        "Authenticating with gateway",
+    );
+    let auth_started = Instant::now();
     let auth_info = dispatcher
         .hello_auth(&cfg.alpn, &cfg.dev_token, &cfg.display_name)
         .await
         .context("hello/auth")?;
+    let auth_elapsed = auth_started.elapsed();
+    set_connection_stage(
+        tx_event,
+        ui::model::ConnectionStage::Authenticating,
+        format!(
+            "Authentication completed in {} ms",
+            auth_elapsed.as_millis()
+        ),
+    );
 
     if !auth_info.user_id.is_empty() {
         let _ = tx_event.send(UiEvent::SetUserId(auth_info.user_id.clone()));
@@ -534,7 +600,11 @@ async fn connect_and_run_session(
     }
 
     let _ = tx_event.send(UiEvent::SetAuthed(true));
-    let _ = tx_event.send(UiEvent::AppendLog("[net] authed".into()));
+    set_connection_stage(
+        tx_event,
+        ui::model::ConnectionStage::Syncing,
+        "Syncing initial state",
+    );
 
     let mut initial_active_channel: Option<String> = cfg.channel_id.clone();
 
@@ -567,6 +637,12 @@ async fn connect_and_run_session(
             }
         }
     }
+
+    set_connection_stage(
+        tx_event,
+        ui::model::ConnectionStage::Connected,
+        "Connected and ready",
+    );
 
     let (voice_die_tx, mut voice_die_rx) = watch::channel::<bool>(false);
     let _session_voice_flag = SessionVoiceFlag::new(session_voice_active.clone());
@@ -620,6 +696,10 @@ async fn connect_and_run_session(
                 while let Ok(intent) = rx_intent.try_recv() {
                     match intent {
                         UiIntent::Quit => return Ok(()),
+                        UiIntent::CancelConnect => {
+                            set_connection_stage(tx_event, ui::model::ConnectionStage::Idle, "Disconnect requested by user");
+                            return Err(anyhow!("disconnect requested"));
+                        }
                         UiIntent::ConnectToServer { host, port, nickname } => {
                             cfg.display_name = nickname.clone();
                             let _ = tx_event.send(UiEvent::SetNick(nickname));
@@ -629,9 +709,7 @@ async fn connect_and_run_session(
                                 cfg.server = new_server.clone();
                                 cfg.server_name = host.clone();
                                 let _ = tx_event.send(UiEvent::SetServerAddress { host, port });
-                                let _ = tx_event.send(UiEvent::AppendLog(format!(
-                                    "[net] reconnect requested: {new_server}"
-                                )));
+                                set_connection_stage(tx_event, ui::model::ConnectionStage::Resolving, format!("Reconnect requested: {new_server}"));
                                 return Err(anyhow!("reconnect requested"));
                             }
                         }
