@@ -563,8 +563,18 @@ impl ControlRepo for PgControlRepo {
     ) -> ControlResult<()> {
         sqlx::query(
             r#"
-            INSERT INTO audit_log (id, server_id, actor_user_id, action, target_type, target_id, context_json, created_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            INSERT INTO audit_log (
+                id,
+                server_id,
+                actor_user_id,
+                action,
+                target_type,
+                target_id,
+                context,
+                context_json,
+                created_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             "#,
         )
         .bind(entry.id.0)
@@ -573,6 +583,7 @@ impl ControlRepo for PgControlRepo {
         .bind(&entry.action)
         .bind(&entry.target_type)
         .bind(&entry.target_id)
+        .bind(&entry.context_json)
         .bind(&entry.context_json)
         .bind(entry.created_at)
         .execute(&mut **tx)
