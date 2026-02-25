@@ -468,13 +468,14 @@ impl ControlRepo for PgControlRepo {
     ) -> ControlResult<()> {
         sqlx::query(
             r#"
-            INSERT INTO outbox_events (id, server_id, topic, payload_json, created_at)
-            VALUES ($1, $2, $3, $4, NOW())
+            INSERT INTO outbox_events (id, server_id, topic, payload, payload_json, created_at)
+            VALUES ($1, $2, $3, $4, $5, NOW())
             "#,
         )
         .bind(ev.id.0)
         .bind(ev.server_id.0)
         .bind(&ev.topic)
+        .bind(&ev.payload_json)
         .bind(&ev.payload_json)
         .execute(&mut **tx)
         .await
