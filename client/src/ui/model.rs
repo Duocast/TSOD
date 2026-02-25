@@ -26,6 +26,10 @@ pub enum UiEvent {
         host: String,
         port: u16,
     },
+    SetConnectionStage {
+        stage: ConnectionStage,
+        detail: String,
+    },
 
     // Channel list
     SetChannels(Vec<ChannelEntry>),
@@ -134,6 +138,7 @@ pub enum UiIntent {
         port: u16,
         nickname: String,
     },
+    CancelConnect,
 
     // Chat
     EditMessage {
@@ -664,6 +669,8 @@ pub struct UiModel {
     pub connection_port_draft: String,
     pub connection_nickname_draft: String,
     pub connection_error: String,
+    pub connection_stage: ConnectionStage,
+    pub connection_details: VecDeque<String>,
 
     // Audio devices (enumerated at runtime)
     pub input_devices: Vec<String>,
@@ -710,6 +717,42 @@ pub struct Notification {
     pub kind: NotificationKind,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ConnectionStage {
+    #[default]
+    Idle,
+    Resolving,
+    Handshaking,
+    Authenticating,
+    Syncing,
+    Connected,
+    Failed,
+}
+
+impl ConnectionStage {
+    pub fn is_in_progress(self) -> bool {
+        matches!(
+            self,
+            ConnectionStage::Resolving
+                | ConnectionStage::Handshaking
+                | ConnectionStage::Authenticating
+                | ConnectionStage::Syncing
+        )
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ConnectionStage::Idle => "Idle",
+            ConnectionStage::Resolving => "Resolving host",
+            ConnectionStage::Handshaking => "Establishing QUIC/TLS",
+            ConnectionStage::Authenticating => "Authenticating",
+            ConnectionStage::Syncing => "Syncing initial state",
+            ConnectionStage::Connected => "Connected",
+            ConnectionStage::Failed => "Failed",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum NotificationKind {
     Info,
@@ -751,6 +794,8 @@ impl Default for UiModel {
             connection_port_draft: "4433".into(),
             connection_nickname_draft: String::new(),
             connection_error: String::new(),
+            connection_stage: ConnectionStage::Idle,
+            connection_details: VecDeque::new(),
             input_devices: Vec::new(),
             output_devices: Vec::new(),
             loopback_active: false,
@@ -812,6 +857,19 @@ impl UiModel {
                 self.connection_host_draft = host;
                 self.connection_port_draft = port.to_string();
                 self.connection_error.clear();
+            }
+            UiEvent::SetConnectionStage { stage, detail } => {
+                self.connection_stage = stage;
+                self.status_line = format!("Connection: {}", stage.label());
+                if stage == ConnectionStage::Failed {
+                    self.connection_error = detail.clone();
+                } else if stage != ConnectionStage::Idle {
+                    self.connection_error.clear();
+                }
+                self.connection_details.push_back(detail);
+                if self.connection_details.len() > 64 {
+                    self.connection_details.pop_front();
+                }
             }
             UiEvent::SetChannels(chs) => self.channels = chs,
             UiEvent::UpdateChannelMembers {

@@ -18,7 +18,7 @@ pub mod panels;
 pub mod theme;
 pub mod widgets;
 
-pub use model::{UiEvent, UiIntent, UiModel};
+pub use model::{ConnectionStage, UiEvent, UiIntent, UiModel};
 
 use crossbeam_channel::{Receiver, Sender};
 use eframe::egui;
@@ -74,6 +74,87 @@ impl VpApp {
             self.model.settings.clone(),
         )));
     }
+
+    fn launch_connect_attempt(&mut self, close_dialog_on_success: bool) -> bool {
+        if self.model.connection_stage.is_in_progress() {
+            self.model.connection_error =
+                "Connection attempt already in progress. Use Cancel to abort first.".to_string();
+            return false;
+        }
+
+        let host = self.model.connection_host_draft.trim().to_string();
+        let port_text = self.model.connection_port_draft.trim();
+        let nickname = self.model.connection_nickname_draft.trim().to_string();
+
+        if host.is_empty() {
+            self.model.connection_error = "Host/IP cannot be empty.".to_string();
+            return false;
+        }
+        if nickname.is_empty() {
+            self.model.connection_error = "Nickname cannot be empty.".to_string();
+            return false;
+        }
+
+        let Ok(port) = port_text.parse::<u16>() else {
+            self.model.connection_error = "Port must be a number between 1 and 65535.".to_string();
+            return false;
+        };
+
+        self.model.connection_error.clear();
+        self.model.settings.identity_nickname = nickname.clone();
+        self.model.settings_draft.identity_nickname = nickname.clone();
+        let _ = crate::settings_io::save_settings(&self.model.settings);
+        let _ = self.tx_intent.send(UiIntent::SaveSettings(Box::new(
+            self.model.settings.clone(),
+        )));
+
+        match self.tx_intent.send(UiIntent::ConnectToServer {
+            host,
+            port,
+            nickname,
+        }) {
+            Ok(()) => {
+                if close_dialog_on_success {
+                    self.model.show_connections = false;
+                }
+                true
+            }
+            Err(_) => {
+                self.model.connection_error =
+                    "Failed to start connection attempt (UI/backend channel closed).".to_string();
+                false
+            }
+        }
+    }
+
+    fn copy_connection_details(&mut self, ctx: &egui::Context) {
+        let mut lines = Vec::new();
+        lines.push(format!(
+            "Connection stage: {}",
+            self.model.connection_stage.label()
+        ));
+        lines.push(format!(
+            "Server: {}:{}",
+            self.model.connection_host_draft.trim(),
+            self.model.connection_port_draft.trim()
+        ));
+        lines.push("Details:".to_string());
+
+        if self.model.connection_details.is_empty() {
+            lines.push("- (no connection details yet)".to_string());
+        } else {
+            for detail in self.model.connection_details.iter().rev().take(8) {
+                lines.push(format!("- {detail}"));
+            }
+        }
+
+        ctx.copy_text(lines.join("\n"));
+        self.model.notifications.push_back(model::Notification {
+            text: "Connection details copied".to_string(),
+            created: std::time::Instant::now(),
+            kind: model::NotificationKind::Info,
+        });
+    }
 }
 
 impl eframe::App for VpApp {
@@ -117,6 +198,22 @@ impl eframe::App for VpApp {
                     theme::COLOR_OFFLINE
                 };
                 ui.colored_label(conn_color, conn_text);
+
+                if self.model.connection_stage.is_in_progress() {
+                    ui.separator();
+                    ui.label(egui::RichText::new("⏳").small());
+                    ui.label(
+                        egui::RichText::new(self.model.connection_stage.label())
+                            .small()
+                            .color(theme::COLOR_MENTION),
+                    );
+                    if ui.small_button("Cancel").clicked() {
+                        let _ = self.tx_intent.send(UiIntent::CancelConnect);
+                    }
+                } else if self.model.connection_stage == ConnectionStage::Failed {
+                    ui.separator();
+                    ui.colored_label(theme::COLOR_DANGER, "Connection failed");
+                }
 
                 if self.model.authed {
                     ui.separator();
@@ -295,33 +392,51 @@ impl eframe::App for VpApp {
                     }
 
                     ui.add_space(8.0);
-                    if ui.button("Connect").clicked() {
-                        let host = self.model.connection_host_draft.trim().to_string();
-                        let port_text = self.model.connection_port_draft.trim();
-                        let nickname = self.model.connection_nickname_draft.trim().to_string();
+                    let stage_color = if self.model.connection_stage == ConnectionStage::Failed {
+                        theme::COLOR_DANGER
+                    } else if self.model.connection_stage == ConnectionStage::Connected {
+                        theme::COLOR_ONLINE
+                    } else {
+                        theme::text_muted()
+                    };
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "Status: {}",
+                            self.model.connection_stage.label()
+                        ))
+                        .small()
+                        .color(stage_color),
+                    );
 
-                        if host.is_empty() {
-                            self.model.connection_error = "Host/IP cannot be empty.".to_string();
-                        } else if nickname.is_empty() {
-                            self.model.connection_error = "Nickname cannot be empty.".to_string();
-                        } else if let Ok(port) = port_text.parse::<u16>() {
-                            self.model.connection_error.clear();
-                            self.model.settings.identity_nickname = nickname.clone();
-                            self.model.settings_draft.identity_nickname = nickname.clone();
-                            let _ = crate::settings_io::save_settings(&self.model.settings);
-                            let _ = self.tx_intent.send(UiIntent::SaveSettings(Box::new(
-                                self.model.settings.clone(),
-                            )));
-                            let _ = self.tx_intent.send(UiIntent::ConnectToServer {
-                                host,
-                                port,
-                                nickname,
-                            });
-                        } else {
-                            self.model.connection_error =
-                                "Port must be a number between 1 and 65535.".to_string();
-                        }
+                    let connect_label = if self.model.connection_stage.is_in_progress() {
+                        "Connecting..."
+                    } else {
+                        "Connect"
+                    };
+                    let connect_clicked = ui
+                        .add_enabled(
+                            !self.model.connection_stage.is_in_progress(),
+                            egui::Button::new(connect_label),
+                        )
+                        .clicked();
+                    if connect_clicked {
+                        self.launch_connect_attempt(true);
                     }
+
+                    ui.add_space(6.0);
+                    ui.collapsing("Connection details", |ui| {
+                        if self.model.connection_details.is_empty() {
+                            ui.label(
+                                egui::RichText::new("No connection attempts yet.")
+                                    .small()
+                                    .color(theme::text_muted()),
+                            );
+                        } else {
+                            for line in self.model.connection_details.iter().rev().take(8) {
+                                ui.label(egui::RichText::new(line).small());
+                            }
+                        }
+                    });
                 });
             if !open {
                 self.model.show_connections = false;
@@ -443,8 +558,74 @@ impl eframe::App for VpApp {
         // Create channel dialog (floating)
         panels::server_tree::show_create_channel_dialog(ctx, &mut self.model, &self.tx_intent);
 
-        // Central panel: chat messages + input
+        // Central panel: connection status + chat messages + input
         egui::CentralPanel::default().show(ctx, |ui| {
+            let stage = self.model.connection_stage;
+            let panel_visible = stage.is_in_progress()
+                || stage == ConnectionStage::Failed
+                || (!self.model.connected && !self.model.connection_details.is_empty());
+            let stage_color = if stage == ConnectionStage::Failed {
+                theme::COLOR_DANGER
+            } else if stage == ConnectionStage::Connected {
+                theme::COLOR_ONLINE
+            } else if stage.is_in_progress() {
+                theme::COLOR_MENTION
+            } else {
+                theme::text_muted()
+            };
+
+            if panel_visible {
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(
+                            egui::RichText::new(format!("Connection: {}", stage.label()))
+                                .small()
+                                .color(stage_color)
+                                .strong(),
+                        );
+                        if stage.is_in_progress() {
+                            ui.label(egui::RichText::new("⏳ in progress").small());
+                        }
+                        if ui.small_button("Open Connections").clicked() {
+                            self.model.show_connections = true;
+                        }
+                        if stage.is_in_progress() && ui.small_button("Cancel").clicked() {
+                            let _ = self.tx_intent.send(UiIntent::CancelConnect);
+                        }
+                        if stage == ConnectionStage::Failed && ui.small_button("Retry").clicked() {
+                            let _ = self.launch_connect_attempt(false);
+                        }
+                        if ui.small_button("Copy details").clicked() {
+                            self.copy_connection_details(ctx);
+                        }
+                    });
+
+                    if stage == ConnectionStage::Failed && !self.model.connection_error.is_empty() {
+                        ui.colored_label(
+                            theme::COLOR_DANGER,
+                            egui::RichText::new(&self.model.connection_error).small(),
+                        );
+                    }
+
+                    for line in self.model.connection_details.iter().rev().take(4) {
+                        ui.label(egui::RichText::new(line).small().color(theme::text_dim()));
+                    }
+                });
+                ui.add_space(6.0);
+            } else {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(format!("Connection: {}", stage.label()))
+                            .small()
+                            .color(theme::text_dim()),
+                    );
+                    if ui.small_button("Connections").clicked() {
+                        self.model.show_connections = true;
+                    }
+                });
+                ui.add_space(4.0);
+            }
+
             panels::chat::show(ui, &mut self.model, &self.tx_intent);
         });
 
