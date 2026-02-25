@@ -352,6 +352,26 @@ fn maybe_note_event_gap(tx_event: &Sender<UiEvent>, event_seq: u64) {
     }
 }
 
+fn should_apply_event_seq(
+    tx_event: &Sender<UiEvent>,
+    last_event_seq: &mut u64,
+    event_seq: u64,
+) -> bool {
+    if event_seq == 0 {
+        return true;
+    }
+    if event_seq <= *last_event_seq {
+        let _ = tx_event.send(UiEvent::AppendLog(format!(
+            "[sync] ignoring stale push event_seq={} <= last_event_seq={}",
+            event_seq, *last_event_seq
+        )));
+        return false;
+    }
+    *last_event_seq = event_seq;
+    let _ = tx_event.send(UiEvent::SetLastEventSeq(event_seq));
+    true
+}
+
 fn apply_authoritative_snapshot(
     snapshot: &pb::InitialStateSnapshot,
     tx_event: &Sender<UiEvent>,
@@ -377,6 +397,13 @@ fn apply_authoritative_snapshot(
         .collect::<Vec<_>>();
 
     let _ = tx_event.send(UiEvent::SetChannels(channels.clone()));
+    let _ = tx_event.send(UiEvent::SetDefaultChannelId(
+        snapshot
+            .default_channel_id
+            .as_ref()
+            .map(|channel_id| channel_id.value.clone()),
+    ));
+    let _ = tx_event.send(UiEvent::SetLastEventSeq(snapshot.snapshot_version));
 
     for scope in &snapshot.channel_members {
         let channel_id = scope
@@ -589,10 +616,26 @@ async fn connect_and_run_session(
         auth_info.user_id.clone()
     };
 
+    let _ = tx_event.send(UiEvent::SetAuthed(true));
+    set_connection_stage(
+        tx_event,
+        ui::model::ConnectionStage::Syncing,
+        "Syncing initial state",
+    );
+
+    let initial_active_channel: Option<String> = cfg.channel_id.clone();
+
+    let snapshot = dispatcher
+        .get_initial_state_snapshot()
+        .await
+        .context("get_initial_state_snapshot")?;
+    apply_authoritative_snapshot(&snapshot, tx_event, initial_active_channel.as_deref());
+
     // Server push consumer
     let mut push_rx = dispatcher.take_push_receiver().await;
     {
         let tx_event = tx_event.clone();
+        let mut last_event_seq = snapshot.snapshot_version;
         tokio::spawn(async move {
             while let Some(ev) = push_rx.recv().await {
                 match ev {
@@ -749,6 +792,9 @@ async fn connect_and_run_session(
                         event_seq,
                     } => {
                         maybe_note_event_gap(&tx_event, event_seq);
+                        if !should_apply_event_seq(&tx_event, &mut last_event_seq, event_seq) {
+                            continue;
+                        }
                         let _ = tx_event.send(UiEvent::AppendLog(format!("[moderation] {:?}", m)));
                     }
                     PushEvent::ChannelCreated {
@@ -756,25 +802,68 @@ async fn connect_and_run_session(
                         event_seq,
                     } => {
                         maybe_note_event_gap(&tx_event, event_seq);
-                        if let Some(state) = cr.state {
-                            if let Some(ch_id) = state.channel_id {
-                                debug!(channel_id=%ch_id.value, name=%state.name, "received channel-created push event");
+                        if !should_apply_event_seq(&tx_event, &mut last_event_seq, event_seq) {
+                            continue;
+                        }
+                        if let Some(channel) = cr.channel {
+                            if let Some(ch_id) = channel.channel_id {
+                                debug!(channel_id=%ch_id.value, name=%channel.name, event_seq, "received channel-created push event");
                                 let _ = tx_event.send(UiEvent::ChannelCreated(
                                     ui::model::ChannelEntry {
                                         id: ch_id.value,
-                                        name: state.name,
+                                        name: channel.name,
                                         channel_type: ui::model::ChannelType::Voice,
-                                        parent_id: None,
-                                        position: 0,
+                                        parent_id: channel.parent_channel_id.map(|pid| pid.value),
+                                        position: channel.position,
                                         member_count: 0,
-                                        user_limit: 0,
+                                        user_limit: channel.user_limit,
                                     },
                                 ));
                             }
                         }
                     }
+                    PushEvent::ChannelRenamed {
+                        event: cr,
+                        event_seq,
+                    } => {
+                        maybe_note_event_gap(&tx_event, event_seq);
+                        if !should_apply_event_seq(&tx_event, &mut last_event_seq, event_seq) {
+                            continue;
+                        }
+                        if let Some(channel) = cr.channel {
+                            if let Some(ch_id) = channel.channel_id {
+                                debug!(channel_id=%ch_id.value, name=%channel.name, event_seq, "received channel-renamed push event");
+                                let _ = tx_event.send(UiEvent::ChannelRenamed(
+                                    ui::model::ChannelEntry {
+                                        id: ch_id.value,
+                                        name: channel.name,
+                                        channel_type: ui::model::ChannelType::Voice,
+                                        parent_id: channel.parent_channel_id.map(|pid| pid.value),
+                                        position: channel.position,
+                                        member_count: 0,
+                                        user_limit: channel.user_limit,
+                                    },
+                                ));
+                            }
+                        }
+                    }
+                    PushEvent::ChannelDeleted { event, event_seq } => {
+                        maybe_note_event_gap(&tx_event, event_seq);
+                        if !should_apply_event_seq(&tx_event, &mut last_event_seq, event_seq) {
+                            continue;
+                        }
+                        if let Some(channel_id) = event.channel_id {
+                            debug!(channel_id=%channel_id.value, event_seq, "received channel-deleted push event");
+                            let _ = tx_event.send(UiEvent::ChannelDeleted {
+                                channel_id: channel_id.value,
+                            });
+                        }
+                    }
                     PushEvent::ServerHint { hint: h, event_seq } => {
                         maybe_note_event_gap(&tx_event, event_seq);
+                        if !should_apply_event_seq(&tx_event, &mut last_event_seq, event_seq) {
+                            continue;
+                        }
                         let mut parts = vec![];
                         if h.receiver_report_interval_ms != 0 {
                             parts.push(format!("rr={}ms", h.receiver_report_interval_ms));
@@ -797,6 +886,9 @@ async fn connect_and_run_session(
                         event_seq,
                     } => {
                         maybe_note_event_gap(&tx_event, event_seq);
+                        if !should_apply_event_seq(&tx_event, &mut last_event_seq, event_seq) {
+                            continue;
+                        }
                         let _ = tx_event.send(UiEvent::AppendLog(format!(
                             "[sync] received snapshot push server_id={} channels={} member_scopes={} self_user_id={}",
                             snapshot.server_id.as_ref().map(|sid| sid.value.clone()).unwrap_or_default(),
@@ -810,21 +902,6 @@ async fn connect_and_run_session(
             }
         });
     }
-
-    let _ = tx_event.send(UiEvent::SetAuthed(true));
-    set_connection_stage(
-        tx_event,
-        ui::model::ConnectionStage::Syncing,
-        "Syncing initial state",
-    );
-
-    let initial_active_channel: Option<String> = cfg.channel_id.clone();
-
-    let snapshot = dispatcher
-        .get_initial_state_snapshot()
-        .await
-        .context("get_initial_state_snapshot")?;
-    apply_authoritative_snapshot(&snapshot, tx_event, initial_active_channel.as_deref());
 
     let selected_after_sync =
         choose_initial_selected_channel(&snapshot, initial_active_channel.as_deref());
@@ -1015,25 +1092,9 @@ async fn connect_and_run_session(
                             }
                             active_channel = None;
                         }
-                        UiIntent::CreateChannel { name, description, channel_type, codec: _, quality, user_limit } => {
-                            match dispatcher.create_channel(&name, &description, channel_type, quality * 1000, user_limit).await {
+                        UiIntent::CreateChannel { name, description, channel_type, codec: _, quality, user_limit, parent_channel_id } => {
+                            match dispatcher.create_channel(&name, &description, channel_type, quality * 1000, user_limit, parent_channel_id.as_deref()).await {
                                 Ok(ch_id) => {
-                                    let ch_type = if channel_type == 1 {
-                                        ui::model::ChannelType::Text
-                                    } else {
-                                        ui::model::ChannelType::Voice
-                                    };
-                                    let _ = tx_event.send(UiEvent::ChannelCreated(
-                                        ui::model::ChannelEntry {
-                                            id: ch_id.clone(),
-                                            name: name.clone(),
-                                            channel_type: ch_type,
-                                            parent_id: None,
-                                            position: 0,
-                                            member_count: 0,
-                                            user_limit,
-                                        },
-                                    ));
                                     let _ = tx_event.send(UiEvent::AppendLog(
                                         format!("[ctl] created channel '{name}' ({ch_id})"),
                                     ));
@@ -1041,6 +1102,34 @@ async fn connect_and_run_session(
                                 Err(e) => {
                                     let _ = tx_event.send(UiEvent::AppendLog(
                                         format!("[ctl] create_channel failed: {e:#}"),
+                                    ));
+                                }
+                            }
+                        }
+                        UiIntent::RenameChannel { channel_id, new_name } => {
+                            match dispatcher.rename_channel(&channel_id, &new_name).await {
+                                Ok(()) => {
+                                    let _ = tx_event.send(UiEvent::AppendLog(
+                                        format!("[ctl] renamed channel {channel_id} -> '{new_name}'"),
+                                    ));
+                                }
+                                Err(e) => {
+                                    let _ = tx_event.send(UiEvent::AppendLog(
+                                        format!("[ctl] rename_channel failed: {e:#}"),
+                                    ));
+                                }
+                            }
+                        }
+                        UiIntent::DeleteChannel { channel_id } => {
+                            match dispatcher.delete_channel(&channel_id).await {
+                                Ok(()) => {
+                                    let _ = tx_event.send(UiEvent::AppendLog(
+                                        format!("[ctl] deleted channel {channel_id}"),
+                                    ));
+                                }
+                                Err(e) => {
+                                    let _ = tx_event.send(UiEvent::AppendLog(
+                                        format!("[ctl] delete_channel failed: {e:#}"),
                                     ));
                                 }
                             }

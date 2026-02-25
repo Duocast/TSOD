@@ -19,7 +19,7 @@ use crate::{
 pub trait ControlRepo: Send + Sync {
     async fn tx(&self) -> ControlResult<Transaction<'_, Postgres>>;
     // Channels
-   async fn create_channel(
+    async fn create_channel(
         &self,
         tx: &mut Transaction<'_, Postgres>,
         ch: &Channel,
@@ -35,6 +35,25 @@ pub trait ControlRepo: Send + Sync {
         tx: &mut Transaction<'_, Postgres>,
         server: ServerId,
     ) -> ControlResult<Vec<ChannelListItem>>;
+    async fn rename_channel(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        server: ServerId,
+        id: ChannelId,
+        new_name: &str,
+    ) -> ControlResult<Option<Channel>>;
+    async fn delete_channel(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        server: ServerId,
+        id: ChannelId,
+    ) -> ControlResult<bool>;
+    async fn list_channel_descendants(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        server: ServerId,
+        id: ChannelId,
+    ) -> ControlResult<Vec<ChannelId>>;
 
     // Members (Member has NO server_id)
     async fn upsert_member(
@@ -141,8 +160,8 @@ impl PgControlRepo {
 #[async_trait]
 impl ControlRepo for PgControlRepo {
     async fn tx(&self) -> ControlResult<Transaction<'_, Postgres>> {
-    Ok(self.pool.begin().await?)
-}
+        Ok(self.pool.begin().await?)
+    }
 
     // -------------------------
     // Channels
@@ -231,6 +250,91 @@ impl ControlRepo for PgControlRepo {
             });
         }
         Ok(out)
+    }
+
+    async fn rename_channel(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        server: ServerId,
+        id: ChannelId,
+        new_name: &str,
+    ) -> ControlResult<Option<Channel>> {
+        let row = sqlx::query(
+            r#"
+            UPDATE channels
+            SET name = $3, updated_at = NOW()
+            WHERE server_id = $1 AND id = $2
+            RETURNING id, server_id, name, parent_id, max_members, max_talkers, created_at, updated_at
+            "#,
+        )
+        .bind(server.0)
+        .bind(id.0)
+        .bind(new_name)
+        .fetch_optional(&mut **tx)
+        .await
+        .context("rename channel")?;
+
+        Ok(row.map(|r| Channel {
+            id: ChannelId(r.get::<Uuid, _>("id")),
+            server_id: ServerId(r.get::<Uuid, _>("server_id")),
+            name: r.get::<String, _>("name"),
+            parent_id: r.get::<Option<Uuid>, _>("parent_id").map(ChannelId),
+            max_members: r.get::<Option<i32>, _>("max_members"),
+            max_talkers: r.get::<Option<i32>, _>("max_talkers"),
+            created_at: r.get::<DateTime<Utc>, _>("created_at"),
+            updated_at: r.get::<DateTime<Utc>, _>("updated_at"),
+        }))
+    }
+
+    async fn delete_channel(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        server: ServerId,
+        id: ChannelId,
+    ) -> ControlResult<bool> {
+        let res = sqlx::query(
+            r#"
+            DELETE FROM channels
+            WHERE server_id = $1 AND id = $2
+            "#,
+        )
+        .bind(server.0)
+        .bind(id.0)
+        .execute(&mut **tx)
+        .await
+        .context("delete channel")?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    async fn list_channel_descendants(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        server: ServerId,
+        id: ChannelId,
+    ) -> ControlResult<Vec<ChannelId>> {
+        let rows = sqlx::query(
+            r#"
+            WITH RECURSIVE descendants AS (
+              SELECT id FROM channels WHERE server_id = $1 AND id = $2
+              UNION ALL
+              SELECT c.id
+              FROM channels c
+              INNER JOIN descendants d ON c.parent_id = d.id
+              WHERE c.server_id = $1
+            )
+            SELECT id FROM descendants
+            "#,
+        )
+        .bind(server.0)
+        .bind(id.0)
+        .fetch_all(&mut **tx)
+        .await
+        .context("list channel descendants")?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| ChannelId(r.get::<Uuid, _>("id")))
+            .collect())
     }
 
     // -------------------------
@@ -355,7 +459,7 @@ impl ControlRepo for PgControlRepo {
         Ok(out)
     }
 
-        async fn count_members(
+    async fn count_members(
         &self,
         tx: &mut Transaction<'_, Postgres>,
         server: ServerId,
@@ -376,7 +480,7 @@ impl ControlRepo for PgControlRepo {
 
         Ok(n)
     }
-    
+
     // -------------------------
     // Permissions
     // -------------------------

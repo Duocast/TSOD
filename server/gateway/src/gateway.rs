@@ -389,6 +389,63 @@ impl Gateway {
                     }
                     debug!(server_id=%server_id.0, channel_id=%created.id.0, user_id=%user_id.0, "create_channel response sent");
                 }
+                Some(pb::client_to_server::Payload::RenameChannelRequest(r)) => {
+                    let ch = parse_channel_id(r.channel_id.as_ref())?;
+                    let renamed = self.control.rename_channel(&ctx, ch, &r.new_name).await?;
+                    let resp = pb::ServerToClient {
+                        request_id: req_id,
+                        session_id: Some(pb::SessionId {
+                            value: session_id.clone(),
+                        }),
+                        sent_at: Some(now_ts()),
+                        error: None,
+                        event_seq: 0,
+                        payload: Some(pb::server_to_client::Payload::RenameChannelResponse(
+                            pb::RenameChannelResponse {
+                                channel: Some(pb::ChannelInfo {
+                                    channel_id: Some(pb::ChannelId {
+                                        value: renamed.id.0.to_string(),
+                                    }),
+                                    name: renamed.name,
+                                    parent_channel_id: renamed.parent_id.map(|pid| pb::ChannelId {
+                                        value: pid.0.to_string(),
+                                    }),
+                                    user_limit: renamed.max_members.unwrap_or_default().max(0)
+                                        as u32,
+                                    ..Default::default()
+                                }),
+                            },
+                        )),
+                    };
+                    if let Err(e) = write_delimited(&mut send, &resp).await {
+                        warn!("control write failed: {:#}", e);
+                        break;
+                    }
+                }
+                Some(pb::client_to_server::Payload::DeleteChannelRequest(r)) => {
+                    let ch = parse_channel_id(r.channel_id.as_ref())?;
+                    self.control.delete_channel(&ctx, ch).await?;
+                    let resp = pb::ServerToClient {
+                        request_id: req_id,
+                        session_id: Some(pb::SessionId {
+                            value: session_id.clone(),
+                        }),
+                        sent_at: Some(now_ts()),
+                        error: None,
+                        event_seq: 0,
+                        payload: Some(pb::server_to_client::Payload::DeleteChannelResponse(
+                            pb::DeleteChannelResponse {
+                                channel_id: Some(pb::ChannelId {
+                                    value: ch.0.to_string(),
+                                }),
+                            },
+                        )),
+                    };
+                    if let Err(e) = write_delimited(&mut send, &resp).await {
+                        warn!("control write failed: {:#}", e);
+                        break;
+                    }
+                }
                 Some(pb::client_to_server::Payload::SendMessageRequest(r)) => {
                     let ch = parse_channel_id(r.channel_id.as_ref())?;
                     let attachments = serde_json::Value::Array(

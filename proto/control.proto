@@ -43,6 +43,7 @@ message ClientToServer {
     DeleteChannelRequest delete_channel_request = 24;
     GetChannelListRequest get_channel_list_request = 25;
     GetMessageHistoryRequest get_message_history_request = 26;
+    RenameChannelRequest rename_channel_request = 27;
 
     // Chat
     SendMessageRequest send_message_request = 30;
@@ -154,6 +155,7 @@ message ServerToClient {
     DeleteChannelResponse delete_channel_response = 24;
     GetChannelListResponse get_channel_list_response = 25;
     GetMessageHistoryResponse get_message_history_response = 26;
+    RenameChannelResponse rename_channel_response = 27;
 
     // Chat responses
     EditMessageResponse edit_message_response = 31;
@@ -176,6 +178,9 @@ message ServerToClient {
     VideoCallEvent video_call_event = 48;
     E2eeEvent e2ee_event = 49;
     DmEvent dm_event = 50;
+    ChannelCreatedPush channel_created_push = 51;
+    ChannelRenamedPush channel_renamed_push = 52;
+    ChannelDeletedPush channel_deleted_push = 53;
 
     // Telemetry
     Pong pong = 55;
