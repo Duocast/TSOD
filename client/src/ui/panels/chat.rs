@@ -2,7 +2,7 @@
 
 use crate::ui::model::{AttachmentData, ChatMessage, PendingAttachment, UiIntent, UiModel};
 use crate::ui::theme;
-use chrono::{DateTime, Days, Local, NaiveDate, TimeZone};
+use chrono::{Days, Local, NaiveDate, TimeZone};
 use crossbeam_channel::Sender;
 use eframe::egui;
 use std::path::Path;
