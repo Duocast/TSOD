@@ -246,6 +246,17 @@ fn translate_record(rec: &OutboxEventRow) -> Result<(ChannelId, pb::ServerToClie
                 server_push(pb::server_to_client::Payload::ModerationEvent(ev)),
             ))
         }
+        // Compatibility alias support: keep consuming queued channel-created rows
+        // emitted by older/newer producers.
+        "channel.created" | "channels.created" => {
+            let channel_id = parse_channel_id_field(&rec.payload_json, "channel_id")?;
+            let hint = pb::ServerHint::default();
+
+            Ok((
+                channel_id,
+                server_push(pb::server_to_client::Payload::ServerHint(hint)),
+            ))
+        }
         other => Err(anyhow!("unsupported outbox event type: {other}")),
     }
 }
@@ -280,6 +291,9 @@ fn apply_cache_side_effects(membership: &MembershipCache, rec: &OutboxEventRow) 
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
             membership.update_mute(user_id, channel_id, muted);
+        }
+        "channel.created" | "channels.created" => {
+            // no membership side-effects; event is still consumed/acked.
         }
         _ => {}
     }
@@ -356,4 +370,44 @@ fn now_ts() -> pb::Timestamp {
         .unwrap_or_default()
         .as_millis() as i64;
     pb::Timestamp { unix_millis: ms }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::translate_record;
+    use serde_json::json;
+    use vp_control::ids::{OutboxId, ServerId};
+    use vp_control::model::OutboxEventRow;
+
+    #[test]
+    fn translate_channel_created_topic_is_supported() {
+        let channel_id = uuid::Uuid::new_v4();
+        let rec = OutboxEventRow {
+            id: OutboxId(uuid::Uuid::new_v4()),
+            server_id: ServerId(uuid::Uuid::new_v4()),
+            topic: "channel.created".to_string(),
+            payload_json: json!({
+                "channel_id": channel_id,
+                "name": "General"
+            }),
+        };
+
+        let (parsed_channel, _push) = translate_record(&rec).expect("channel.created should be supported");
+        assert_eq!(parsed_channel.0, channel_id);
+    }
+
+    #[test]
+    fn translate_channels_created_alias_is_supported() {
+        let channel_id = uuid::Uuid::new_v4();
+        let rec = OutboxEventRow {
+            id: OutboxId(uuid::Uuid::new_v4()),
+            server_id: ServerId(uuid::Uuid::new_v4()),
+            topic: "channels.created".to_string(),
+            payload_json: json!({"channel_id": channel_id}),
+        };
+
+        let (parsed_channel, _push) = translate_record(&rec).expect("channels.created alias should be supported");
+        assert_eq!(parsed_channel.0, channel_id);
+    }
 }
