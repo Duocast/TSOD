@@ -402,8 +402,16 @@ fn server_push(payload: pb::server_to_client::Payload) -> pb::ServerToClient {
         session_id: None,
         sent_at: Some(now_ts()),
         error: None,
+        event_seq: now_seq(),
         payload: Some(payload),
     }
+}
+
+fn now_seq() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 fn now_ts() -> pb::Timestamp {

@@ -33,6 +33,7 @@ message ClientToServer {
     Hello hello = 10;
     AuthRequest auth_request = 11;
     ResumeSessionRequest resume_session_request = 12;
+    GetInitialStateSnapshotRequest get_initial_state_snapshot_request = 13;
 
     // Channel ops
     JoinChannelRequest join_channel_request = 20;
@@ -136,12 +137,14 @@ message ServerToClient {
   SessionId session_id = 2;      // may be set on hello/auth responses
   Timestamp sent_at = 3;
   Error error = 4;               // set for failed responses; unset for success/push
+  uint64 event_seq = 5;          // optional monotonic sequence for server push ordering
 
   oneof payload {
     // Auth / session
     HelloAck hello_ack = 10;
     AuthResponse auth_response = 11;
     ResumeSessionResponse resume_session_response = 12;
+    InitialStateSnapshot initial_state_snapshot = 13;
 
     // Channel ops
     JoinChannelResponse join_channel_response = 20;
@@ -248,6 +251,34 @@ message ServerToClient {
     GetDmHistoryResponse get_dm_history_response = 183;
     CloseDmChannelResponse close_dm_channel_response = 184;
   }
+}
+
+message GetInitialStateSnapshotRequest {}
+
+message InitialStateSnapshot {
+  ServerId server_id = 1;
+  string server_name = 2;
+
+  UserId self_user_id = 3;
+  string self_display_name = 4;
+
+  repeated ChannelSnapshot channels = 5;
+
+  // Members panel semantics (v1): members are channel-scoped and keyed by channel_id.
+  // TODO: add explicit server-wide presence if the product requires a global member list.
+  repeated ChannelMembersSnapshot channel_members = 6;
+
+  ChannelId default_channel_id = 7;
+  uint64 snapshot_version = 8;
+}
+
+message ChannelSnapshot {
+  ChannelInfo info = 1;
+}
+
+message ChannelMembersSnapshot {
+  ChannelId channel_id = 1;
+  repeated ChannelMember members = 2;
 }
 
 message ServerHint {

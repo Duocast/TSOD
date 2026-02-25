@@ -17,11 +17,30 @@ const MAX_CTRL_MSG: usize = 256 * 1024;
 /// Keep this fairly low-level; app layer can transform into UI state.
 #[derive(Clone, Debug)]
 pub enum PushEvent {
-    Presence(pb::PresenceEvent),
-    Chat(pb::ChatEvent),
-    Moderation(pb::ModerationEvent),
-    ChannelCreated(pb::CreateChannelResponse),
-    ServerHint(pb::ServerHint),
+    Presence {
+        event: pb::PresenceEvent,
+        event_seq: u64,
+    },
+    Chat {
+        event: pb::ChatEvent,
+        event_seq: u64,
+    },
+    Moderation {
+        event: pb::ModerationEvent,
+        event_seq: u64,
+    },
+    ChannelCreated {
+        event: pb::CreateChannelResponse,
+        event_seq: u64,
+    },
+    ServerHint {
+        hint: pb::ServerHint,
+        event_seq: u64,
+    },
+    Snapshot {
+        snapshot: pb::InitialStateSnapshot,
+        event_seq: u64,
+    },
     Unknown(pb::ServerToClient),
 }
 
@@ -29,6 +48,7 @@ pub enum PushEvent {
 pub struct AuthInfo {
     pub user_id: String,
     pub session_id: String,
+    pub server_id: String,
 }
 
 #[derive(Clone, Debug)]
@@ -160,6 +180,7 @@ impl ControlDispatcher {
             Some(pb::server_to_client::Payload::AuthResponse(a)) => Ok(AuthInfo {
                 user_id: a.user_id.map(|u| u.value).unwrap_or_default(),
                 session_id,
+                server_id: a.server_id.map(|sid| sid.value).unwrap_or_default(),
             }),
             _ => Err(anyhow!("expected AuthResponse")),
         }
@@ -191,6 +212,25 @@ impl ControlDispatcher {
                 })
             }
             _ => Err(anyhow!("expected JoinChannelResponse")),
+        }
+    }
+
+    pub async fn get_initial_state_snapshot(&self) -> Result<pb::InitialStateSnapshot> {
+        let req = pb::GetInitialStateSnapshotRequest {};
+        let resp = self
+            .send_request(
+                pb::client_to_server::Payload::GetInitialStateSnapshotRequest(req),
+                Duration::from_secs(5),
+            )
+            .await??;
+
+        if let Some(err) = resp.error {
+            return Err(anyhow!("get_initial_state_snapshot error: {:?}", err));
+        }
+
+        match resp.payload {
+            Some(pb::server_to_client::Payload::InitialStateSnapshot(snapshot)) => Ok(snapshot),
+            _ => Err(anyhow!("expected InitialStateSnapshot")),
         }
     }
 
@@ -470,13 +510,34 @@ async fn fail_all_pending(
 
 fn classify_push(msg: pb::ServerToClient) -> PushEvent {
     match msg.payload {
-        Some(pb::server_to_client::Payload::PresenceEvent(e)) => PushEvent::Presence(e),
-        Some(pb::server_to_client::Payload::ChatEvent(e)) => PushEvent::Chat(e),
-        Some(pb::server_to_client::Payload::ModerationEvent(e)) => PushEvent::Moderation(e),
+        Some(pb::server_to_client::Payload::PresenceEvent(e)) => PushEvent::Presence {
+            event: e,
+            event_seq: msg.event_seq,
+        },
+        Some(pb::server_to_client::Payload::ChatEvent(e)) => PushEvent::Chat {
+            event: e,
+            event_seq: msg.event_seq,
+        },
+        Some(pb::server_to_client::Payload::ModerationEvent(e)) => PushEvent::Moderation {
+            event: e,
+            event_seq: msg.event_seq,
+        },
         Some(pb::server_to_client::Payload::CreateChannelResponse(cr)) => {
-            PushEvent::ChannelCreated(cr)
+            PushEvent::ChannelCreated {
+                event: cr,
+                event_seq: msg.event_seq,
+            }
         }
-        Some(pb::server_to_client::Payload::ServerHint(h)) => PushEvent::ServerHint(h),
+        Some(pb::server_to_client::Payload::ServerHint(h)) => PushEvent::ServerHint {
+            hint: h,
+            event_seq: msg.event_seq,
+        },
+        Some(pb::server_to_client::Payload::InitialStateSnapshot(snapshot)) => {
+            PushEvent::Snapshot {
+                snapshot,
+                event_seq: msg.event_seq,
+            }
+        }
         _ => PushEvent::Unknown(msg),
     }
 }
