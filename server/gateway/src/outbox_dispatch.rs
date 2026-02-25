@@ -67,7 +67,10 @@ async fn handle_record(
 ) -> Result<()> {
     let (channel_id, push) = translate_record(&rec)?;
 
-    let recipients = if rec.topic == "channel.created" || rec.topic == "channels.created" {
+    let recipients = if matches!(
+        rec.topic.as_str(),
+        "channel.created" | "channels.created" | "channel.renamed" | "channel.deleted"
+    ) {
         hub.connected_users()
     } else {
         membership.members_of(channel_id).unwrap_or_default()
@@ -79,6 +82,7 @@ async fn handle_record(
         channel_id = %channel_id.0,
         server_id = %rec.server_id.0,
         fanout = recipients.len(),
+        event_seq = push.event_seq,
         "dispatching outbox event"
     );
 
@@ -282,20 +286,72 @@ fn translate_record(rec: &OutboxEventRow) -> Result<(ChannelId, pb::ServerToClie
                 .and_then(Value::as_str)
                 .unwrap_or("New Channel")
                 .to_string();
-
-            let state = pb::ChannelState {
-                channel_id: Some(pb::ChannelId {
-                    value: channel_id.0.to_string(),
-                }),
-                name,
-                members: vec![],
-                ..Default::default()
-            };
+            let parent_channel_id = rec
+                .payload_json
+                .get("parent_channel_id")
+                .and_then(Value::as_str)
+                .map(|value| pb::ChannelId {
+                    value: value.to_string(),
+                });
 
             Ok((
                 channel_id,
-                server_push(pb::server_to_client::Payload::CreateChannelResponse(
-                    pb::CreateChannelResponse { state: Some(state) },
+                server_push(pb::server_to_client::Payload::ChannelCreatedPush(
+                    pb::ChannelCreatedPush {
+                        channel: Some(pb::ChannelInfo {
+                            channel_id: Some(pb::ChannelId {
+                                value: channel_id.0.to_string(),
+                            }),
+                            name,
+                            parent_channel_id,
+                            ..Default::default()
+                        }),
+                    },
+                )),
+            ))
+        }
+        "channel.renamed" => {
+            let channel_id = parse_channel_id_field(&rec.payload_json, "channel_id")?;
+            let name = rec
+                .payload_json
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("Renamed Channel")
+                .to_string();
+            let parent_channel_id = rec
+                .payload_json
+                .get("parent_channel_id")
+                .and_then(Value::as_str)
+                .map(|value| pb::ChannelId {
+                    value: value.to_string(),
+                });
+
+            Ok((
+                channel_id,
+                server_push(pb::server_to_client::Payload::ChannelRenamedPush(
+                    pb::ChannelRenamedPush {
+                        channel: Some(pb::ChannelInfo {
+                            channel_id: Some(pb::ChannelId {
+                                value: channel_id.0.to_string(),
+                            }),
+                            name,
+                            parent_channel_id,
+                            ..Default::default()
+                        }),
+                    },
+                )),
+            ))
+        }
+        "channel.deleted" => {
+            let channel_id = parse_channel_id_field(&rec.payload_json, "channel_id")?;
+            Ok((
+                channel_id,
+                server_push(pb::server_to_client::Payload::ChannelDeletedPush(
+                    pb::ChannelDeletedPush {
+                        channel_id: Some(pb::ChannelId {
+                            value: channel_id.0.to_string(),
+                        }),
+                    },
                 )),
             ))
         }
@@ -334,7 +390,7 @@ fn apply_cache_side_effects(membership: &MembershipCache, rec: &OutboxEventRow) 
                 .unwrap_or(false);
             membership.update_mute(user_id, channel_id, muted);
         }
-        "channel.created" | "channels.created" => {
+        "channel.created" | "channels.created" | "channel.renamed" | "channel.deleted" => {
             // no membership side-effects; event is still consumed/acked.
         }
         _ => {}
@@ -447,9 +503,9 @@ mod tests {
             translate_record(&rec).expect("channel.created should be supported");
         assert_eq!(parsed_channel.0, channel_id);
         match push.payload {
-            Some(pb::server_to_client::Payload::CreateChannelResponse(cr)) => {
-                let state = cr.state.expect("state");
-                assert_eq!(state.name, "General");
+            Some(pb::server_to_client::Payload::ChannelCreatedPush(cr)) => {
+                let channel = cr.channel.expect("channel");
+                assert_eq!(channel.name, "General");
             }
             other => panic!("unexpected payload: {:?}", other),
         }

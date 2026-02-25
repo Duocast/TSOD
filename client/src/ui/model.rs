@@ -1,6 +1,6 @@
 //! Application state model for the GUI.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use tracing::debug;
 
 /// Maximum number of chat messages to retain per channel.
@@ -96,9 +96,15 @@ pub enum UiEvent {
 
     // Channel management
     ChannelCreated(ChannelEntry),
+    ChannelRenamed(ChannelEntry),
+    ChannelDeleted {
+        channel_id: String,
+    },
+    SetLastEventSeq(u64),
 
     // Loopback
     SetLoopbackActive(bool),
+    SetDefaultChannelId(Option<String>),
 
     // Settings loaded from disk
     SettingsLoaded(Box<AppSettings>),
@@ -123,6 +129,14 @@ pub enum UiIntent {
         codec: u8,
         quality: u32,
         user_limit: u32,
+        parent_channel_id: Option<String>,
+    },
+    RenameChannel {
+        channel_id: String,
+        new_name: String,
+    },
+    DeleteChannel {
+        channel_id: String,
     },
     TogglePtt,
     PttDown,
@@ -691,6 +705,15 @@ pub struct UiModel {
     pub create_channel_quality: u32,
     pub create_channel_user_limit: u32,
     pub create_channel_tab: usize,
+    pub create_channel_parent_id: Option<String>,
+    pub rename_channel_target_id: Option<String>,
+    pub rename_channel_name: String,
+    pub show_rename_channel: bool,
+    pub delete_channel_target_id: Option<String>,
+    pub show_delete_channel_confirm: bool,
+    pub channel_collapsed: HashMap<String, bool>,
+    pub default_channel_id: Option<String>,
+    pub last_event_seq: u64,
 
     // User popup
     pub show_user_popup: bool,
@@ -810,6 +833,15 @@ impl Default for UiModel {
             create_channel_quality: 64,
             create_channel_user_limit: 0,
             create_channel_tab: 0,
+            create_channel_parent_id: None,
+            rename_channel_target_id: None,
+            rename_channel_name: String::new(),
+            show_rename_channel: false,
+            delete_channel_target_id: None,
+            show_delete_channel_confirm: false,
+            channel_collapsed: HashMap::new(),
+            default_channel_id: None,
+            last_event_seq: 0,
             show_user_popup: false,
             show_away_message_dialog: false,
             show_set_avatar_dialog: false,
@@ -876,6 +908,12 @@ impl UiModel {
             }
             UiEvent::SetChannels(chs) => {
                 self.channels = chs;
+                let live_ids: HashSet<_> = self.channels.iter().map(|c| c.id.clone()).collect();
+                self.channel_collapsed
+                    .retain(|channel_id, _| live_ids.contains(channel_id));
+                for channel_id in live_ids {
+                    self.channel_collapsed.entry(channel_id).or_insert(false);
+                }
                 self.refresh_selected_channel_name();
             }
             UiEvent::UpdateChannelMembers {
@@ -1010,15 +1048,73 @@ impl UiModel {
                 if let Some(existing) = self.channels.iter_mut().find(|ch| ch.id == entry.id) {
                     *existing = entry;
                 } else {
+                    self.channel_collapsed
+                        .entry(entry.id.clone())
+                        .or_insert(false);
                     self.channels.push(entry);
                 }
                 self.refresh_selected_channel_name();
+            }
+            UiEvent::ChannelRenamed(entry) => {
+                if let Some(existing) = self.channels.iter_mut().find(|ch| ch.id == entry.id) {
+                    *existing = entry;
+                } else {
+                    self.channel_collapsed
+                        .entry(entry.id.clone())
+                        .or_insert(false);
+                    self.channels.push(entry);
+                }
+                self.refresh_selected_channel_name();
+            }
+            UiEvent::ChannelDeleted { channel_id } => {
+                let mut removed = HashSet::new();
+                removed.insert(channel_id.clone());
+                loop {
+                    let mut changed = false;
+                    for channel in &self.channels {
+                        if let Some(parent_id) = &channel.parent_id {
+                            if removed.contains(parent_id) && removed.insert(channel.id.clone()) {
+                                changed = true;
+                            }
+                        }
+                    }
+                    if !changed {
+                        break;
+                    }
+                }
+
+                self.channels.retain(|ch| !removed.contains(&ch.id));
+                for removed_id in &removed {
+                    self.members.remove(removed_id);
+                    self.messages.remove(removed_id);
+                    self.typing_users.remove(removed_id);
+                    self.channel_collapsed.remove(removed_id);
+                }
+
+                if self
+                    .selected_channel
+                    .as_ref()
+                    .is_some_and(|selected| removed.contains(selected))
+                {
+                    self.selected_channel = self
+                        .default_channel_id
+                        .clone()
+                        .filter(|candidate| self.channels.iter().any(|ch| ch.id == *candidate))
+                        .or_else(|| self.channels.first().map(|ch| ch.id.clone()));
+                    self.refresh_selected_channel_name();
+                }
+            }
+            UiEvent::SetLastEventSeq(seq) => {
+                self.last_event_seq = seq;
             }
             UiEvent::SetLoopbackActive(active) => {
                 self.loopback_active = active;
                 if !active {
                     self.mic_test_waveform.clear();
                 }
+            }
+            UiEvent::SetDefaultChannelId(channel_id) => {
+                self.default_channel_id = channel_id;
             }
             UiEvent::SettingsLoaded(s) => {
                 self.settings = *s.clone();
@@ -1341,6 +1437,154 @@ mod tests {
             model.channels.iter().find(|c| c.id == "c1").unwrap().name,
             "General-2"
         );
+    }
+
+    #[test]
+    fn channel_renamed_updates_name_without_duplicate() {
+        let mut model = UiModel::new();
+        model.apply_event(UiEvent::SetChannels(vec![ChannelEntry {
+            id: "c1".into(),
+            name: "General".into(),
+            channel_type: ChannelType::Voice,
+            parent_id: None,
+            position: 0,
+            member_count: 0,
+            user_limit: 0,
+        }]));
+
+        model.apply_event(UiEvent::ChannelRenamed(ChannelEntry {
+            id: "c1".into(),
+            name: "Lobby".into(),
+            channel_type: ChannelType::Voice,
+            parent_id: None,
+            position: 0,
+            member_count: 0,
+            user_limit: 0,
+        }));
+
+        assert_eq!(model.channels.len(), 1);
+        assert_eq!(model.channels[0].name, "Lobby");
+    }
+
+    #[test]
+    fn channel_delete_removes_and_falls_back_selection() {
+        let mut model = UiModel::new();
+        model.apply_event(UiEvent::SetChannels(vec![
+            ChannelEntry {
+                id: "default".into(),
+                name: "Default".into(),
+                channel_type: ChannelType::Voice,
+                parent_id: None,
+                position: 0,
+                member_count: 0,
+                user_limit: 0,
+            },
+            ChannelEntry {
+                id: "c1".into(),
+                name: "General".into(),
+                channel_type: ChannelType::Voice,
+                parent_id: None,
+                position: 0,
+                member_count: 0,
+                user_limit: 0,
+            },
+            ChannelEntry {
+                id: "c1-child".into(),
+                name: "General Child".into(),
+                channel_type: ChannelType::Voice,
+                parent_id: Some("c1".into()),
+                position: 0,
+                member_count: 0,
+                user_limit: 0,
+            },
+        ]));
+        model.apply_event(UiEvent::SetDefaultChannelId(Some("default".into())));
+        model.apply_event(UiEvent::SetChannelName("c1".into()));
+
+        model.apply_event(UiEvent::ChannelDeleted {
+            channel_id: "c1".into(),
+        });
+
+        assert!(model.channels.iter().all(|ch| ch.id != "c1"));
+        assert!(model.channels.iter().all(|ch| ch.id != "c1-child"));
+        assert_eq!(model.selected_channel.as_deref(), Some("default"));
+    }
+
+    #[test]
+    fn sub_channel_keeps_parent_relationship_and_collapse_state_persists() {
+        let mut model = UiModel::new();
+        model.apply_event(UiEvent::SetChannels(vec![ChannelEntry {
+            id: "parent".into(),
+            name: "Parent".into(),
+            channel_type: ChannelType::Category,
+            parent_id: None,
+            position: 0,
+            member_count: 0,
+            user_limit: 0,
+        }]));
+        model.channel_collapsed.insert("parent".into(), true);
+
+        model.apply_event(UiEvent::ChannelCreated(ChannelEntry {
+            id: "child".into(),
+            name: "Child".into(),
+            channel_type: ChannelType::Voice,
+            parent_id: Some("parent".into()),
+            position: 0,
+            member_count: 0,
+            user_limit: 0,
+        }));
+
+        assert_eq!(
+            model
+                .channels
+                .iter()
+                .find(|ch| ch.id == "child")
+                .and_then(|ch| ch.parent_id.as_deref()),
+            Some("parent")
+        );
+        assert_eq!(model.channel_collapsed.get("parent"), Some(&true));
+    }
+
+    #[test]
+    fn snapshot_then_rename_delete_yields_expected_channels() {
+        let mut model = UiModel::new();
+        model.apply_event(UiEvent::SetChannels(vec![
+            ChannelEntry {
+                id: "c1".into(),
+                name: "General".into(),
+                channel_type: ChannelType::Voice,
+                parent_id: None,
+                position: 0,
+                member_count: 0,
+                user_limit: 0,
+            },
+            ChannelEntry {
+                id: "c2".into(),
+                name: "Music".into(),
+                channel_type: ChannelType::Voice,
+                parent_id: None,
+                position: 0,
+                member_count: 0,
+                user_limit: 0,
+            },
+        ]));
+
+        model.apply_event(UiEvent::ChannelRenamed(ChannelEntry {
+            id: "c1".into(),
+            name: "Lobby".into(),
+            channel_type: ChannelType::Voice,
+            parent_id: None,
+            position: 0,
+            member_count: 0,
+            user_limit: 0,
+        }));
+        model.apply_event(UiEvent::ChannelDeleted {
+            channel_id: "c2".into(),
+        });
+
+        assert_eq!(model.channels.len(), 1);
+        assert_eq!(model.channels[0].id, "c1");
+        assert_eq!(model.channels[0].name, "Lobby");
     }
 
     #[test]

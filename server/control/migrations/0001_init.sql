@@ -3,7 +3,7 @@ CREATE TABLE IF NOT EXISTS channels (
   id            UUID PRIMARY KEY,
   server_id     UUID NOT NULL,
   name          TEXT NOT NULL,
-  parent_id     UUID NULL REFERENCES channels(id) ON DELETE SET NULL,
+  parent_id     UUID NULL REFERENCES channels(id) ON DELETE CASCADE,
   max_members   INTEGER NULL,
   max_talkers   INTEGER NULL,
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),

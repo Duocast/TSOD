@@ -15,6 +15,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                 .clicked()
             {
                 model.show_create_channel = true;
+                model.create_channel_parent_id = None;
                 model.create_channel_name.clear();
                 model.create_channel_description.clear();
                 model.create_channel_type = 0;
@@ -28,6 +29,21 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
     ui.separator();
 
     egui::ScrollArea::vertical().show(ui, |ui| {
+        ui.interact(
+            ui.max_rect(),
+            ui.id().with("channels_panel_context"),
+            egui::Sense::click(),
+        )
+        .context_menu(|ui| {
+            if ui.button("Create channel").clicked() {
+                model.show_create_channel = true;
+                model.create_channel_parent_id = None;
+                model.create_channel_name.clear();
+                model.create_channel_description.clear();
+                ui.close_menu();
+            }
+        });
+
         // Clone channel data to avoid borrow conflicts with &mut model in show_channel
         let channels: Vec<_> = model.channels.clone();
 
@@ -43,35 +59,13 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
             .cloned()
             .collect();
 
-        // Show ungrouped channels first
         for ch in &ungrouped {
-            show_channel(ui, ch, model, tx_intent);
+            show_channel(ui, ch, model, tx_intent, &channels);
         }
 
         // Show categories with their children
         for cat in &categories {
-            let id = egui::Id::new(&cat.id);
-            let cat_name = cat.name.clone();
-            let cat_id = cat.id.clone();
-            egui::CollapsingHeader::new(
-                egui::RichText::new(&cat_name)
-                    .strong()
-                    .color(theme::text_dim())
-                    .size(11.0),
-            )
-            .id_salt(id)
-            .default_open(true)
-            .show(ui, |ui| {
-                let children: Vec<_> = channels
-                    .iter()
-                    .filter(|c| c.parent_id.as_deref() == Some(cat_id.as_str()))
-                    .cloned()
-                    .collect();
-
-                for ch in &children {
-                    show_channel(ui, ch, model, tx_intent);
-                }
-            });
+            show_channel(ui, cat, model, tx_intent, &channels);
         }
 
         // If no channels exist, show placeholder
@@ -98,74 +92,211 @@ pub fn show_create_channel_dialog(
     }
 
     let mut open = true;
-    egui::Window::new("Create Channel")
-        .open(&mut open)
-        .collapsible(false)
-        .resizable(false)
-        .default_width(420.0)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .show(ctx, |ui| {
-            // Tab bar
-            ui.horizontal(|ui| {
-                if ui
-                    .selectable_label(model.create_channel_tab == 0, "Standard")
-                    .clicked()
-                {
-                    model.create_channel_tab = 0;
-                }
-                ui.separator();
-                if ui
-                    .selectable_label(model.create_channel_tab == 1, "Audio")
-                    .clicked()
-                {
-                    model.create_channel_tab = 1;
-                }
-            });
+    egui::Window::new(if model.create_channel_parent_id.is_some() {
+        "Create Sub-channel"
+    } else {
+        "Create Channel"
+    })
+    .open(&mut open)
+    .collapsible(false)
+    .resizable(false)
+    .default_width(420.0)
+    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+    .show(ctx, |ui| {
+        // Tab bar
+        ui.horizontal(|ui| {
+            if ui
+                .selectable_label(model.create_channel_tab == 0, "Standard")
+                .clicked()
+            {
+                model.create_channel_tab = 0;
+            }
             ui.separator();
-            ui.add_space(4.0);
+            if ui
+                .selectable_label(model.create_channel_tab == 1, "Audio")
+                .clicked()
+            {
+                model.create_channel_tab = 1;
+            }
+        });
+        ui.separator();
+        ui.add_space(4.0);
 
-            match model.create_channel_tab {
-                0 => show_create_tab_standard(ui, model),
-                1 => show_create_tab_audio(ui, model),
-                _ => {}
+        match model.create_channel_tab {
+            0 => show_create_tab_standard(ui, model),
+            1 => show_create_tab_audio(ui, model),
+            _ => {}
+        }
+
+        ui.add_space(12.0);
+        ui.separator();
+        ui.add_space(4.0);
+
+        // Action buttons
+        ui.horizontal(|ui| {
+            let name = model.create_channel_name.trim().to_string();
+            let can_create = !name.is_empty();
+
+            if ui
+                .add_enabled(can_create, egui::Button::new("Create"))
+                .clicked()
+            {
+                let ch_type = model.create_channel_type as u8;
+                let codec = model.create_channel_codec as u8;
+                let quality = model.create_channel_quality;
+                let user_limit = model.create_channel_user_limit;
+                let description = model.create_channel_description.trim().to_string();
+                let _ = tx_intent.send(UiIntent::CreateChannel {
+                    name,
+                    description,
+                    channel_type: ch_type,
+                    codec,
+                    quality,
+                    user_limit,
+                    parent_channel_id: model.create_channel_parent_id.clone(),
+                });
+                model.show_create_channel = false;
             }
 
-            ui.add_space(12.0);
-            ui.separator();
-            ui.add_space(4.0);
-
-            // Action buttons
-            ui.horizontal(|ui| {
-                let name = model.create_channel_name.trim().to_string();
-                let can_create = !name.is_empty();
-
-                if ui
-                    .add_enabled(can_create, egui::Button::new("Create"))
-                    .clicked()
-                {
-                    let ch_type = model.create_channel_type as u8;
-                    let codec = model.create_channel_codec as u8;
-                    let quality = model.create_channel_quality;
-                    let user_limit = model.create_channel_user_limit;
-                    let description = model.create_channel_description.trim().to_string();
-                    let _ = tx_intent.send(UiIntent::CreateChannel {
-                        name,
-                        description,
-                        channel_type: ch_type,
-                        codec,
-                        quality,
-                        user_limit,
-                    });
-                    model.show_create_channel = false;
-                }
-
-                if ui.button("Cancel").clicked() {
-                    model.show_create_channel = false;
-                }
-            });
+            if ui.button("Cancel").clicked() {
+                model.show_create_channel = false;
+            }
         });
+    });
     if !open {
         model.show_create_channel = false;
+    }
+}
+
+pub fn show_channel_dialogs(
+    ctx: &egui::Context,
+    model: &mut UiModel,
+    tx_intent: &Sender<UiIntent>,
+) {
+    if model.show_rename_channel {
+        let mut open = true;
+        egui::Window::new("Edit Channel")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label("New channel name");
+                ui.text_edit_singleline(&mut model.rename_channel_name);
+                ui.horizontal(|ui| {
+                    if ui.button("Save").clicked() {
+                        let new_name = model.rename_channel_name.trim().to_string();
+                        if !new_name.is_empty() && new_name.len() <= 64 {
+                            if let Some(channel_id) = model.rename_channel_target_id.clone() {
+                                let _ = tx_intent.send(UiIntent::RenameChannel {
+                                    channel_id,
+                                    new_name,
+                                });
+                            }
+                            model.show_rename_channel = false;
+                        }
+                    }
+                    if ui.button("Cancel").clicked() {
+                        model.show_rename_channel = false;
+                    }
+                });
+            });
+        if !open {
+            model.show_rename_channel = false;
+        }
+    }
+
+    if model.show_delete_channel_confirm {
+        let mut open = true;
+        egui::Window::new("Delete Channel")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label("Delete channel? This will also remove all sub-channels.");
+                ui.horizontal(|ui| {
+                    if ui.button("Delete").clicked() {
+                        if let Some(channel_id) = model.delete_channel_target_id.clone() {
+                            let _ = tx_intent.send(UiIntent::DeleteChannel { channel_id });
+                        }
+                        model.show_delete_channel_confirm = false;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        model.show_delete_channel_confirm = false;
+                    }
+                });
+            });
+        if !open {
+            model.show_delete_channel_confirm = false;
+        }
+    }
+}
+
+fn show_channel(
+    ui: &mut egui::Ui,
+    ch: &crate::ui::model::ChannelEntry,
+    model: &mut UiModel,
+    tx_intent: &Sender<UiIntent>,
+    all_channels: &[crate::ui::model::ChannelEntry],
+) {
+    let is_selected = model.selected_channel.as_deref() == Some(ch.id.as_str());
+    let children: Vec<_> = all_channels
+        .iter()
+        .filter(|candidate| candidate.parent_id.as_deref() == Some(ch.id.as_str()))
+        .collect();
+    let has_children = !children.is_empty();
+    let collapsed = *model.channel_collapsed.get(&ch.id).unwrap_or(&false);
+
+    ui.horizontal(|ui| {
+        if has_children {
+            let icon = if collapsed { "▶" } else { "▼" };
+            if ui.small_button(icon).clicked() {
+                model.channel_collapsed.insert(ch.id.clone(), !collapsed);
+            }
+        } else {
+            ui.add_space(20.0);
+        }
+
+        let response = ui.selectable_label(is_selected, &ch.name);
+        if response.clicked() {
+            let _ = tx_intent.send(UiIntent::JoinChannel {
+                channel_id: ch.id.clone(),
+            });
+        }
+
+        response.context_menu(|ui| {
+            if ui.button("Switch to channel").clicked() {
+                let _ = tx_intent.send(UiIntent::JoinChannel {
+                    channel_id: ch.id.clone(),
+                });
+                ui.close_menu();
+            }
+            if ui.button("Edit channel").clicked() {
+                model.rename_channel_target_id = Some(ch.id.clone());
+                model.rename_channel_name = ch.name.clone();
+                model.show_rename_channel = true;
+                ui.close_menu();
+            }
+            if ui.button("Delete channel").clicked() {
+                model.delete_channel_target_id = Some(ch.id.clone());
+                model.show_delete_channel_confirm = true;
+                ui.close_menu();
+            }
+            if ui.button("Create sub-channel").clicked() {
+                model.show_create_channel = true;
+                model.create_channel_parent_id = Some(ch.id.clone());
+                model.create_channel_name.clear();
+                model.create_channel_description.clear();
+                ui.close_menu();
+            }
+        });
+    });
+
+    if has_children && !collapsed {
+        ui.indent(ui.id().with(format!("indent-{}", ch.id)), |ui| {
+            for child in children {
+                show_channel(ui, child, model, tx_intent, all_channels);
+            }
+        });
     }
 }
 
@@ -330,52 +461,4 @@ fn show_create_tab_audio(ui: &mut egui::Ui, model: &mut UiModel) {
         .small()
         .color(theme::text_dim()),
     );
-}
-
-fn show_channel(
-    ui: &mut egui::Ui,
-    ch: &crate::ui::model::ChannelEntry,
-    model: &mut UiModel,
-    tx_intent: &Sender<UiIntent>,
-) {
-    let is_selected = model.selected_channel.as_deref() == Some(ch.id.as_str());
-    let icon = match ch.channel_type {
-        ChannelType::Text => "#",
-        ChannelType::Voice => "🔊",
-        ChannelType::Category => ">",
-    };
-
-    let text_color = if is_selected {
-        theme::text_color()
-    } else {
-        theme::text_dim()
-    };
-
-    let label = format!("{} {}", icon, ch.name);
-
-    let response = ui.selectable_label(is_selected, egui::RichText::new(&label).color(text_color));
-
-    if response.clicked() {
-        model.selected_channel = Some(ch.id.clone());
-        model.selected_channel_name = ch.name.clone();
-        let _ = tx_intent.send(UiIntent::JoinChannel {
-            channel_id: ch.id.clone(),
-        });
-    }
-
-    // Show member count for voice channels
-    if ch.channel_type == ChannelType::Voice && ch.member_count > 0 {
-        ui.indent(ch.id.as_str(), |ui| {
-            let count_text = if ch.user_limit > 0 {
-                format!("{}/{}", ch.member_count, ch.user_limit)
-            } else {
-                format!("{}", ch.member_count)
-            };
-            ui.label(
-                egui::RichText::new(count_text)
-                    .small()
-                    .color(theme::text_muted()),
-            );
-        });
-    }
 }

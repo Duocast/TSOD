@@ -30,7 +30,15 @@ pub enum PushEvent {
         event_seq: u64,
     },
     ChannelCreated {
-        event: pb::CreateChannelResponse,
+        event: pb::ChannelCreatedPush,
+        event_seq: u64,
+    },
+    ChannelRenamed {
+        event: pb::ChannelRenamedPush,
+        event_seq: u64,
+    },
+    ChannelDeleted {
+        event: pb::ChannelDeletedPush,
         event_seq: u64,
     },
     ServerHint {
@@ -275,6 +283,7 @@ impl ControlDispatcher {
         channel_type: u8,
         bitrate: u32,
         user_limit: u32,
+        parent_channel_id: Option<&str>,
     ) -> Result<String> {
         let ch_type = match channel_type {
             1 => pb::ChannelType::Text as i32,
@@ -286,6 +295,9 @@ impl ControlDispatcher {
             channel_type: ch_type,
             bitrate,
             user_limit,
+            parent_channel_id: parent_channel_id.map(|value| pb::ChannelId {
+                value: value.to_string(),
+            }),
             ..Default::default()
         };
         let resp = self
@@ -309,6 +321,43 @@ impl ControlDispatcher {
             }
             _ => Err(anyhow!("expected CreateChannelResponse")),
         }
+    }
+
+    pub async fn rename_channel(&self, channel_id: &str, new_name: &str) -> Result<()> {
+        let req = pb::RenameChannelRequest {
+            channel_id: Some(pb::ChannelId {
+                value: channel_id.into(),
+            }),
+            new_name: new_name.into(),
+        };
+        let resp = self
+            .send_request(
+                pb::client_to_server::Payload::RenameChannelRequest(req),
+                Duration::from_secs(5),
+            )
+            .await??;
+        if let Some(err) = resp.error {
+            return Err(anyhow!("rename_channel error: {:?}", err));
+        }
+        Ok(())
+    }
+
+    pub async fn delete_channel(&self, channel_id: &str) -> Result<()> {
+        let req = pb::DeleteChannelRequest {
+            channel_id: Some(pb::ChannelId {
+                value: channel_id.into(),
+            }),
+        };
+        let resp = self
+            .send_request(
+                pb::client_to_server::Payload::DeleteChannelRequest(req),
+                Duration::from_secs(5),
+            )
+            .await??;
+        if let Some(err) = resp.error {
+            return Err(anyhow!("delete_channel error: {:?}", err));
+        }
+        Ok(())
     }
 
     pub async fn send_chat(&self, channel_id: &str, text: &str) -> Result<()> {
@@ -522,12 +571,18 @@ fn classify_push(msg: pb::ServerToClient) -> PushEvent {
             event: e,
             event_seq: msg.event_seq,
         },
-        Some(pb::server_to_client::Payload::CreateChannelResponse(cr)) => {
-            PushEvent::ChannelCreated {
-                event: cr,
-                event_seq: msg.event_seq,
-            }
-        }
+        Some(pb::server_to_client::Payload::ChannelCreatedPush(ev)) => PushEvent::ChannelCreated {
+            event: ev,
+            event_seq: msg.event_seq,
+        },
+        Some(pb::server_to_client::Payload::ChannelRenamedPush(ev)) => PushEvent::ChannelRenamed {
+            event: ev,
+            event_seq: msg.event_seq,
+        },
+        Some(pb::server_to_client::Payload::ChannelDeletedPush(ev)) => PushEvent::ChannelDeleted {
+            event: ev,
+            event_seq: msg.event_seq,
+        },
         Some(pb::server_to_client::Payload::ServerHint(h)) => PushEvent::ServerHint {
             hint: h,
             event_seq: msg.event_seq,

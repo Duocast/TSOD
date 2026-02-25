@@ -553,6 +553,7 @@ impl eframe::App for VpApp {
 
         // Create channel dialog (floating)
         panels::server_tree::show_create_channel_dialog(ctx, &mut self.model, &self.tx_intent);
+        panels::server_tree::show_channel_dialogs(ctx, &mut self.model, &self.tx_intent);
 
         // Central panel: connection status + chat messages + input
         egui::CentralPanel::default().show(ctx, |ui| {
