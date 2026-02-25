@@ -278,6 +278,7 @@ pub struct AppSettings {
 
     // ─── Security ───
     pub identity_nickname: String,
+    pub last_server_host: String,
     pub auto_connect: bool,
     pub auto_reconnect: bool,
     pub reconnect_delay_sec: u32,
@@ -362,6 +363,7 @@ impl Default for AppSettings {
 
             // Security
             identity_nickname: String::new(),
+            last_server_host: String::new(),
             auto_connect: false,
             auto_reconnect: true,
             reconnect_delay_sec: 5,
@@ -1125,6 +1127,11 @@ impl UiModel {
             self.nick = nick.to_string();
             self.connection_nickname_draft = nick.to_string();
         }
+
+        let host = self.settings.last_server_host.trim();
+        if !host.is_empty() {
+            self.connection_host_draft = host.to_string();
+        }
     }
 
     /// Get messages for the currently selected channel.
@@ -1161,11 +1168,13 @@ mod tests {
     fn sync_settings_updates_nick_and_connection_nickname() {
         let mut model = UiModel::new();
         model.settings.identity_nickname = "Overdose".into();
+        model.settings.last_server_host = "192.168.1.120".into();
 
         model.sync_settings_to_runtime();
 
         assert_eq!(model.nick, "Overdose");
         assert_eq!(model.connection_nickname_draft, "Overdose");
+        assert_eq!(model.connection_host_draft, "192.168.1.120");
     }
 
     #[test]
