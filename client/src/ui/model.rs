@@ -836,7 +836,8 @@ impl UiModel {
             UiEvent::SetAuthed(a) => self.authed = a,
             UiEvent::SetChannelName(n) => {
                 self.selected_channel = Some(n.clone());
-                self.selected_channel_name = n;
+                self.selected_channel_name =
+                    self.channel_name_for_id(&n).map(str::to_owned).unwrap_or(n);
             }
             UiEvent::SetNick(n) => {
                 self.nick = n.clone();
@@ -871,7 +872,10 @@ impl UiModel {
                     self.connection_details.pop_front();
                 }
             }
-            UiEvent::SetChannels(chs) => self.channels = chs,
+            UiEvent::SetChannels(chs) => {
+                self.channels = chs;
+                self.refresh_selected_channel_name();
+            }
             UiEvent::UpdateChannelMembers {
                 channel_id,
                 members,
@@ -884,8 +888,45 @@ impl UiModel {
                     &msg.author_id,
                     &msg.author_name,
                 );
+                let local_user_id = self.user_id.clone();
                 let ch = msg.channel_id.clone();
                 let msgs = self.messages.entry(ch).or_default();
+
+                if !msg.message_id.trim().is_empty()
+                    && msgs
+                        .iter()
+                        .any(|existing| existing.message_id == msg.message_id)
+                {
+                    debug!(
+                        message_id = %msg.message_id,
+                        author_user_id = %msg.author_id,
+                        channel_id = %msg.channel_id,
+                        "chat dedupe hit (existing canonical message_id)"
+                    );
+                    return;
+                }
+
+                if !msg.message_id.starts_with("local-") {
+                    if let Some(local_idx) =
+                        Self::find_matching_optimistic_index(msgs, &msg, &local_user_id)
+                    {
+                        debug!(
+                            message_id = %msg.message_id,
+                            author_user_id = %msg.author_id,
+                            channel_id = %msg.channel_id,
+                            "chat reconcile optimistic local echo with canonical message"
+                        );
+                        msgs[local_idx] = msg;
+                        return;
+                    }
+                }
+
+                debug!(
+                    message_id = %msg.message_id,
+                    author_user_id = %msg.author_id,
+                    channel_id = %msg.channel_id,
+                    "chat dedupe miss (appending message)"
+                );
                 msgs.push_back(msg);
                 if msgs.len() > MAX_MESSAGES_PER_CHANNEL {
                     msgs.pop_front();
@@ -969,6 +1010,7 @@ impl UiModel {
                 } else {
                     self.channels.push(entry);
                 }
+                self.refresh_selected_channel_name();
             }
             UiEvent::SetLoopbackActive(active) => {
                 self.loopback_active = active;
@@ -998,6 +1040,45 @@ impl UiModel {
         {
             self.notifications.pop_front();
         }
+    }
+
+    fn channel_name_for_id(&self, channel_id: &str) -> Option<&str> {
+        self.channels
+            .iter()
+            .find(|channel| channel.id == channel_id)
+            .map(|channel| channel.name.as_str())
+    }
+
+    fn refresh_selected_channel_name(&mut self) {
+        if let Some(selected_channel_id) = self.selected_channel.clone() {
+            self.selected_channel_name = self
+                .channel_name_for_id(&selected_channel_id)
+                .map(str::to_owned)
+                .unwrap_or(selected_channel_id);
+        }
+    }
+
+    fn find_matching_optimistic_index(
+        messages: &VecDeque<ChatMessage>,
+        incoming: &ChatMessage,
+        local_user_id: &str,
+    ) -> Option<usize> {
+        const OPTIMISTIC_RECONCILE_WINDOW_MS: i64 = 30_000;
+
+        if local_user_id.trim().is_empty()
+            || incoming.author_id.trim().is_empty()
+            || incoming.author_id != local_user_id
+        {
+            return None;
+        }
+
+        messages.iter().position(|existing| {
+            existing.message_id.starts_with("local-")
+                && existing.channel_id == incoming.channel_id
+                && existing.author_id == incoming.author_id
+                && existing.text == incoming.text
+                && (incoming.timestamp - existing.timestamp).abs() <= OPTIMISTIC_RECONCILE_WINDOW_MS
+        })
     }
 
     fn resolve_message_author_name(
@@ -1215,5 +1296,123 @@ mod tests {
             model.channels.iter().find(|c| c.id == "c1").unwrap().name,
             "General-2"
         );
+    }
+
+    #[test]
+    fn dedupes_by_canonical_message_id() {
+        let mut model = UiModel::new();
+        model.user_id = "local-user".into();
+
+        let message = ChatMessage {
+            message_id: "msg-1".into(),
+            channel_id: "lounge-1".into(),
+            author_id: "remote-user".into(),
+            author_name: "Dresk".into(),
+            text: "hello".into(),
+            timestamp: 1_710_000_000_000,
+            attachments: vec![],
+            reply_to: None,
+            reactions: vec![],
+            pinned: false,
+            edited: false,
+        };
+
+        model.apply_event(UiEvent::MessageReceived(message.clone()));
+        model.apply_event(UiEvent::MessageReceived(message));
+
+        assert_eq!(model.messages.get("lounge-1").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn reconciles_optimistic_local_echo_with_server_message() {
+        let mut model = UiModel::new();
+        model.user_id = "local-user".into();
+
+        model.apply_event(UiEvent::MessageReceived(ChatMessage {
+            message_id: "local-1".into(),
+            channel_id: "lounge-1".into(),
+            author_id: "local-user".into(),
+            author_name: "Overdose".into(),
+            text: "indeed".into(),
+            timestamp: 1_710_000_000_000,
+            attachments: vec![],
+            reply_to: None,
+            reactions: vec![],
+            pinned: false,
+            edited: false,
+        }));
+
+        model.apply_event(UiEvent::MessageReceived(ChatMessage {
+            message_id: "msg-123".into(),
+            channel_id: "lounge-1".into(),
+            author_id: "local-user".into(),
+            author_name: "Overdose".into(),
+            text: "indeed".into(),
+            timestamp: 1_710_000_005_000,
+            attachments: vec![],
+            reply_to: None,
+            reactions: vec![],
+            pinned: false,
+            edited: false,
+        }));
+
+        let messages = model.messages.get("lounge-1").unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].message_id, "msg-123");
+    }
+
+    #[test]
+    fn keeps_intentional_duplicate_text_messages_as_separate_entries() {
+        let mut model = UiModel::new();
+        model.user_id = "local-user".into();
+
+        model.apply_event(UiEvent::MessageReceived(ChatMessage {
+            message_id: "msg-1".into(),
+            channel_id: "lounge-1".into(),
+            author_id: "local-user".into(),
+            author_name: "Overdose".into(),
+            text: "indeed".into(),
+            timestamp: 1_710_000_000_000,
+            attachments: vec![],
+            reply_to: None,
+            reactions: vec![],
+            pinned: false,
+            edited: false,
+        }));
+        model.apply_event(UiEvent::MessageReceived(ChatMessage {
+            message_id: "msg-2".into(),
+            channel_id: "lounge-1".into(),
+            author_id: "local-user".into(),
+            author_name: "Overdose".into(),
+            text: "indeed".into(),
+            timestamp: 1_710_000_001_000,
+            attachments: vec![],
+            reply_to: None,
+            reactions: vec![],
+            pinned: false,
+            edited: false,
+        }));
+
+        assert_eq!(model.messages.get("lounge-1").unwrap().len(), 2);
+    }
+
+    #[test]
+    fn set_channel_name_prefers_human_readable_channel_name() {
+        let mut model = UiModel::new();
+        model.channels.push(ChannelEntry {
+            id: "430e12d2-4547-411f-b2b9-434644d8abe0".into(),
+            name: "Lounge 1".into(),
+            channel_type: ChannelType::Text,
+            parent_id: None,
+            position: 0,
+            member_count: 0,
+            user_limit: 0,
+        });
+
+        model.apply_event(UiEvent::SetChannelName(
+            "430e12d2-4547-411f-b2b9-434644d8abe0".into(),
+        ));
+
+        assert_eq!(model.selected_channel_name, "Lounge 1");
     }
 }

@@ -478,12 +478,21 @@ async fn connect_and_run_session(
                                         unix_ms() as i64
                                     });
 
+                                    let message_id = mp
+                                        .message_id
+                                        .as_ref()
+                                        .map(|m| m.value.clone())
+                                        .unwrap_or_default();
+                                    debug!(
+                                        message_id = %message_id,
+                                        author_user_id = %author_id,
+                                        channel_id = %channel_id,
+                                        "received message_posted push event"
+                                    );
+
                                     let _ = tx_event.send(UiEvent::MessageReceived(
                                         ui::model::ChatMessage {
-                                            message_id: mp
-                                                .message_id
-                                                .map(|m| m.value)
-                                                .unwrap_or_default(),
+                                            message_id,
                                             channel_id,
                                             author_name: author_id.clone(),
                                             author_id,
@@ -759,9 +768,16 @@ async fn connect_and_run_session(
                             if let Some(ref ch) = active_channel {
                                 // Optimistic local echo
                                 let now_ms = unix_ms() as i64;
+                                let local_message_id = format!("local-{now_ms}");
+                                debug!(
+                                    message_id = %local_message_id,
+                                    author_user_id = %local_user_id,
+                                    channel_id = %ch,
+                                    "sending chat message (optimistic local echo)"
+                                );
                                 let _ = tx_event.send(UiEvent::MessageReceived(
                                     ui::model::ChatMessage {
-                                        message_id: format!("local-{now_ms}"),
+                                        message_id: local_message_id,
                                         channel_id: ch.clone(),
                                         author_id: local_user_id.clone(),
                                         author_name: cfg.display_name.clone(),

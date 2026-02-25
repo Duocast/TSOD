@@ -5,6 +5,7 @@ use crate::ui::theme;
 use chrono::{DateTime, Days, Local, NaiveDate, TimeZone};
 use crossbeam_channel::Sender;
 use eframe::egui;
+use tracing::debug;
 
 const MESSAGE_GROUP_WINDOW_MS: i64 = 5 * 60 * 1000;
 
@@ -160,18 +161,59 @@ fn show_date_separator(ui: &mut egui::Ui, date: NaiveDate) {
 }
 
 fn should_group_messages(previous: &ChatMessage, current: &ChatMessage) -> bool {
-    if previous.author_id != current.author_id {
+    let previous_author = canonical_author_key(previous);
+    let current_author = canonical_author_key(current);
+    if previous_author != current_author {
+        debug!(
+            previous_author,
+            current_author,
+            previous_message_id = %previous.message_id,
+            current_message_id = %current.message_id,
+            grouped = false,
+            "chat grouping decision"
+        );
         return false;
     }
 
     let previous_day = message_day(previous.timestamp);
     let current_day = message_day(current.timestamp);
     if previous_day.is_none() || current_day.is_none() || previous_day != current_day {
+        debug!(
+            previous_author,
+            current_author,
+            previous_message_id = %previous.message_id,
+            current_message_id = %current.message_id,
+            grouped = false,
+            "chat grouping decision"
+        );
         return false;
     }
 
     let elapsed = current.timestamp - previous.timestamp;
-    (0..=MESSAGE_GROUP_WINDOW_MS).contains(&elapsed)
+    let grouped = (0..=MESSAGE_GROUP_WINDOW_MS).contains(&elapsed);
+    debug!(
+        previous_author,
+        current_author,
+        previous_message_id = %previous.message_id,
+        current_message_id = %current.message_id,
+        grouped,
+        "chat grouping decision"
+    );
+    grouped
+}
+
+fn canonical_author_key(message: &ChatMessage) -> String {
+    let author_id = message.author_id.trim();
+    if !author_id.is_empty() {
+        return format!("id:{author_id}");
+    }
+
+    let author_name = message.author_name.trim();
+    if !author_name.is_empty() {
+        return format!("name:{author_name}:{}", message.message_id);
+    }
+
+    format!("message:{}", message.message_id)
 }
 
 fn message_day(unix_millis: i64) -> Option<NaiveDate> {
@@ -352,6 +394,26 @@ mod tests {
             &msg("u1", now),
             &msg("u1", now + MESSAGE_GROUP_WINDOW_MS + 1)
         ));
+    }
+
+    #[test]
+    fn author_change_within_window_starts_new_group() {
+        let now = Local::now().timestamp_millis();
+        assert!(!should_group_messages(
+            &msg("dresk-id", now),
+            &msg("overdose-id", now + 30_000)
+        ));
+    }
+
+    #[test]
+    fn same_text_different_author_is_not_grouped() {
+        let now = Local::now().timestamp_millis();
+        let mut first = msg("dresk-id", now);
+        let mut second = msg("overdose-id", now + 5_000);
+        first.text = "indeed".into();
+        second.text = "indeed".into();
+
+        assert!(!should_group_messages(&first, &second));
     }
 
     #[test]
