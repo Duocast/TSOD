@@ -921,7 +921,11 @@ impl UiModel {
             }
             UiEvent::MemberJoined { channel_id, member } => {
                 let members = self.members.entry(channel_id).or_default();
-                members.push(member);
+                if let Some(existing) = members.iter_mut().find(|m| m.user_id == member.user_id) {
+                    *existing = member;
+                } else {
+                    members.push(member);
+                }
             }
             UiEvent::MemberLeft {
                 channel_id,
@@ -960,7 +964,11 @@ impl UiModel {
                 self.output_devices = output_devices;
             }
             UiEvent::ChannelCreated(entry) => {
-                self.channels.push(entry);
+                if let Some(existing) = self.channels.iter_mut().find(|ch| ch.id == entry.id) {
+                    *existing = entry;
+                } else {
+                    self.channels.push(entry);
+                }
             }
             UiEvent::SetLoopbackActive(active) => {
                 self.loopback_active = active;
@@ -1142,5 +1150,70 @@ mod tests {
             .map(|m| m.author_name.clone())
             .unwrap();
         assert_eq!(fallback, "LocalNick");
+    }
+    #[test]
+    fn member_joined_updates_existing_member_instead_of_dup() {
+        let mut model = UiModel::new();
+        model.apply_event(UiEvent::MemberJoined {
+            channel_id: "c1".into(),
+            member: MemberEntry {
+                user_id: "u1".into(),
+                display_name: "Old".into(),
+                muted: false,
+                deafened: false,
+                self_muted: false,
+                self_deafened: false,
+                streaming: false,
+                speaking: false,
+                avatar_url: None,
+            },
+        });
+        model.apply_event(UiEvent::MemberJoined {
+            channel_id: "c1".into(),
+            member: MemberEntry {
+                user_id: "u1".into(),
+                display_name: "New".into(),
+                muted: false,
+                deafened: false,
+                self_muted: false,
+                self_deafened: false,
+                streaming: false,
+                speaking: false,
+                avatar_url: None,
+            },
+        });
+
+        let members = model.members.get("c1").expect("members");
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].display_name, "New");
+    }
+
+    #[test]
+    fn channel_created_updates_existing_channel_instead_of_dup() {
+        let mut model = UiModel::new();
+        model.apply_event(UiEvent::ChannelCreated(ChannelEntry {
+            id: "c1".into(),
+            name: "General".into(),
+            channel_type: ChannelType::Voice,
+            parent_id: None,
+            position: 0,
+            member_count: 0,
+            user_limit: 0,
+        }));
+        model.apply_event(UiEvent::ChannelCreated(ChannelEntry {
+            id: "c1".into(),
+            name: "General-2".into(),
+            channel_type: ChannelType::Voice,
+            parent_id: None,
+            position: 0,
+            member_count: 0,
+            user_limit: 0,
+        }));
+
+        assert_eq!(model.channels.iter().filter(|c| c.id == "c1").count(), 1);
+        assert_eq!(
+            model.channels.iter().find(|c| c.id == "c1").unwrap().name,
+            "General-2"
+        );
     }
 }

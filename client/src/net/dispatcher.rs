@@ -20,6 +20,7 @@ pub enum PushEvent {
     Presence(pb::PresenceEvent),
     Chat(pb::ChatEvent),
     Moderation(pb::ModerationEvent),
+    ChannelCreated(pb::CreateChannelResponse),
     ServerHint(pb::ServerHint),
     Unknown(pb::ServerToClient),
 }
@@ -427,8 +428,16 @@ async fn dispatcher_task(
                 }
             }
             r = &mut reader => {
-                if let Err(e) = r {
-                    warn!("control reader join error: {}", e);
+                match r {
+                    Ok(Ok(())) => {
+                        warn!("control reader stopped cleanly");
+                    }
+                    Ok(Err(e)) => {
+                        warn!("control reader stream error: {:#}", e);
+                    }
+                    Err(e) => {
+                        warn!("control reader join error: {}", e);
+                    }
                 }
                 fail_all_pending(&pending).await;
                 break;
@@ -453,6 +462,9 @@ fn classify_push(msg: pb::ServerToClient) -> PushEvent {
         Some(pb::server_to_client::Payload::PresenceEvent(e)) => PushEvent::Presence(e),
         Some(pb::server_to_client::Payload::ChatEvent(e)) => PushEvent::Chat(e),
         Some(pb::server_to_client::Payload::ModerationEvent(e)) => PushEvent::Moderation(e),
+        Some(pb::server_to_client::Payload::CreateChannelResponse(cr)) => {
+            PushEvent::ChannelCreated(cr)
+        }
         Some(pb::server_to_client::Payload::ServerHint(h)) => PushEvent::ServerHint(h),
         _ => PushEvent::Unknown(msg),
     }

@@ -30,7 +30,7 @@ use std::sync::{
 };
 use tokio::sync::{watch, Mutex};
 use tokio::time::{sleep, Duration, Instant};
-use tracing::{info, warn, Level};
+use tracing::{debug, info, warn, Level};
 use tracing_subscriber::EnvFilter;
 use ui::{UiEvent, UiIntent, VpApp};
 
@@ -538,6 +538,7 @@ async fn connect_and_run_session(
                                             .as_ref()
                                             .map(|u| u.value.clone())
                                             .unwrap_or_default();
+                                        debug!(channel_id=%channel_id.value, user_id=%user_id, "received member-joined push event");
                                         let _ = tx_event.send(UiEvent::MemberJoined {
                                             channel_id: channel_id.value,
                                             member: ui::model::MemberEntry {
@@ -555,6 +556,7 @@ async fn connect_and_run_session(
                                     }
                                 }
                                 pb::presence_event::Kind::MemberLeft(ml) => {
+                                    debug!(channel_id=%ml.channel_id.as_ref().map(|c| c.value.clone()).unwrap_or_default(), user_id=%ml.user_id.as_ref().map(|u| u.value.clone()).unwrap_or_default(), "received member-left push event");
                                     let _ = tx_event.send(UiEvent::MemberLeft {
                                         channel_id: ml
                                             .channel_id
@@ -574,6 +576,24 @@ async fn connect_and_run_session(
                     }
                     PushEvent::Moderation(m) => {
                         let _ = tx_event.send(UiEvent::AppendLog(format!("[moderation] {:?}", m)));
+                    }
+                    PushEvent::ChannelCreated(cr) => {
+                        if let Some(state) = cr.state {
+                            if let Some(ch_id) = state.channel_id {
+                                debug!(channel_id=%ch_id.value, name=%state.name, "received channel-created push event");
+                                let _ = tx_event.send(UiEvent::ChannelCreated(
+                                    ui::model::ChannelEntry {
+                                        id: ch_id.value,
+                                        name: state.name,
+                                        channel_type: ui::model::ChannelType::Voice,
+                                        parent_id: None,
+                                        position: 0,
+                                        member_count: 0,
+                                        user_limit: 0,
+                                    },
+                                ));
+                            }
+                        }
                     }
                     PushEvent::ServerHint(h) => {
                         let mut parts = vec![];

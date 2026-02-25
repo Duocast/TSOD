@@ -1,5 +1,5 @@
 use std::{
-    collections::hash_map::DefaultHasher,
+    collections::{hash_map::DefaultHasher, HashSet},
     hash::{Hash, Hasher},
     sync::Arc,
 };
@@ -16,7 +16,7 @@ use vp_media::voice_forwarder::{DatagramTx, MembershipProvider, SessionRegistry}
 
 #[derive(Clone)]
 pub struct PushHub {
-    inner: Arc<DashMap<UserId, mpsc::Sender<pb::ServerToClient>>>,
+    inner: Arc<DashMap<(UserId, String), mpsc::Sender<pb::ServerToClient>>>,
 }
 
 impl PushHub {
@@ -26,20 +26,26 @@ impl PushHub {
         }
     }
 
-    pub fn register(&self, user: UserId, tx: mpsc::Sender<pb::ServerToClient>) {
-        self.inner.insert(user, tx);
+    pub fn register(&self, user: UserId, session_id: &str, tx: mpsc::Sender<pb::ServerToClient>) {
+        self.inner.insert((user, session_id.to_string()), tx);
     }
 
-    pub fn unregister(&self, user: UserId) {
-        self.inner.remove(&user);
+    pub fn unregister(&self, user: UserId, session_id: &str) {
+        self.inner.remove(&(user, session_id.to_string()));
     }
 
     pub async fn send_to(&self, user: UserId, msg: pb::ServerToClient) {
-        if let Some(entry) = self.inner.get(&user) {
-            let _ = entry.send(msg).await;
+        let targets = self
+            .inner
+            .iter()
+            .filter(|entry| entry.key().0 == user)
+            .map(|entry| entry.value().clone())
+            .collect::<Vec<_>>();
+        for tx in targets {
+            let _ = tx.send(msg.clone()).await;
         }
     }
-    
+
     pub async fn send(&self, user: UserId, msg: pb::ServerToClient) {
         self.send_to(user, msg).await;
     }
@@ -48,6 +54,14 @@ impl PushHub {
         for u in users {
             self.send_to(*u, msg.clone()).await;
         }
+    }
+
+    pub fn connected_users(&self) -> Vec<UserId> {
+        let mut set = HashSet::new();
+        for entry in self.inner.iter() {
+            set.insert(entry.key().0);
+        }
+        set.into_iter().collect()
     }
 }
 
@@ -211,6 +225,42 @@ impl MembershipProvider for MembershipCache {
             .get(&channel)
             .map(|e| e.max_talkers)
             .unwrap_or(4)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PushHub;
+    use crate::proto::voiceplatform::v1 as pb;
+    use tokio::sync::mpsc;
+    use vp_control::ids::UserId;
+
+    #[tokio::test]
+    async fn pushhub_sends_to_all_sessions_for_same_user() {
+        let hub = PushHub::new();
+        let user = UserId(uuid::Uuid::new_v4());
+        let (tx1, mut rx1) = mpsc::channel::<pb::ServerToClient>(4);
+        let (tx2, mut rx2) = mpsc::channel::<pb::ServerToClient>(4);
+
+        hub.register(user, "s1", tx1);
+        hub.register(user, "s2", tx2);
+
+        hub.send_to(
+            user,
+            pb::ServerToClient {
+                payload: Some(pb::server_to_client::Payload::ServerHint(
+                    pb::ServerHint::default(),
+                )),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        assert!(rx1.recv().await.is_some());
+        assert!(rx2.recv().await.is_some());
+
+        hub.unregister(user, "s1");
+        hub.unregister(user, "s2");
     }
 }
 
