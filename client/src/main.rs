@@ -1099,17 +1099,17 @@ impl Backoff {
 fn make_endpoint_with_optional_pinning(cfg: &Config) -> Result<quinn::Endpoint> {
     if let Ok(pin_hex) = std::env::var("VP_TLS_PIN_SHA256_HEX") {
         let pin = hex_to_32(&pin_hex)?;
-        return make_pinned_endpoint(pin);
+        return make_pinned_endpoint(pin, &cfg.alpn);
     }
 
     if let Some(ref ca_path) = cfg.ca_cert_pem {
-        return net::quic::make_ca_endpoint(ca_path);
+        return net::quic::make_ca_endpoint(ca_path, &cfg.alpn);
     }
 
-    net::quic::make_endpoint()
+    net::quic::make_endpoint(&cfg.alpn)
 }
 
-fn make_pinned_endpoint(pin_sha256: [u8; 32]) -> Result<quinn::Endpoint> {
+fn make_pinned_endpoint(pin_sha256: [u8; 32], alpn: &str) -> Result<quinn::Endpoint> {
     use quinn::{ClientConfig, Endpoint};
     use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
     use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
@@ -1163,10 +1163,11 @@ fn make_pinned_endpoint(pin_sha256: [u8; 32]) -> Result<quinn::Endpoint> {
         }
     }
 
-    let crypto = rustls::ClientConfig::builder()
+    let mut crypto = rustls::ClientConfig::builder()
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(Pinner { pin: pin_sha256 }))
         .with_no_client_auth();
+    crypto.alpn_protocols = vec![alpn.as_bytes().to_vec()];
 
     let mut endpoint = Endpoint::client("[::]:0".parse::<SocketAddr>()?)?;
     endpoint.set_default_client_config(ClientConfig::new(Arc::new(

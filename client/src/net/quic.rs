@@ -5,21 +5,22 @@ use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, SignatureScheme};
 use std::{net::SocketAddr, sync::Arc};
 
-pub fn make_endpoint() -> Result<Endpoint> {
+pub fn make_endpoint(alpn: &str) -> Result<Endpoint> {
     let mut endpoint = Endpoint::client("[::]:0".parse::<SocketAddr>()?)?;
-    endpoint.set_default_client_config(make_client_config()?);
+    endpoint.set_default_client_config(make_client_config(alpn)?);
     Ok(endpoint)
 }
 
-pub fn make_ca_endpoint(ca_cert_path: &str) -> Result<Endpoint> {
+pub fn make_ca_endpoint(ca_cert_path: &str, alpn: &str) -> Result<Endpoint> {
     let ca_pem = std::fs::read(ca_cert_path)?;
     let mut root_store = rustls::RootCertStore::empty();
     for cert in rustls_pemfile::certs(&mut &ca_pem[..]) {
         root_store.add(cert?)?;
     }
-    let crypto = rustls::ClientConfig::builder()
+    let mut crypto = rustls::ClientConfig::builder()
         .with_root_certificates(root_store)
         .with_no_client_auth();
+    crypto.alpn_protocols = vec![alpn.as_bytes().to_vec()];
 
     let mut endpoint = Endpoint::client("[::]:0".parse::<SocketAddr>()?)?;
     endpoint.set_default_client_config(ClientConfig::new(Arc::new(
@@ -28,12 +29,13 @@ pub fn make_ca_endpoint(ca_cert_path: &str) -> Result<Endpoint> {
     Ok(endpoint)
 }
 
-fn make_client_config() -> Result<ClientConfig> {
+fn make_client_config(alpn: &str) -> Result<ClientConfig> {
     // Dev-mode: accept any cert (NOT production). Replace with pinning/CA.
-    let crypto = rustls::ClientConfig::builder()
+    let mut crypto = rustls::ClientConfig::builder()
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(AcceptAnyCert))
         .with_no_client_auth();
+    crypto.alpn_protocols = vec![alpn.as_bytes().to_vec()];
 
     Ok(ClientConfig::new(Arc::new(
         quinn::crypto::rustls::QuicClientConfig::try_from(crypto)?,

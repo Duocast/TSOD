@@ -95,6 +95,15 @@ async fn main() -> Result<()> {
         .with_no_client_auth()
         .with_single_cert(certs, key)?;
     rustls.alpn_protocols = vec![cfg.alpn.as_bytes().to_vec()];
+    info!(
+        expected_alpn = %cfg.alpn,
+        advertised_alpns = ?rustls
+            .alpn_protocols
+            .iter()
+            .map(|p| String::from_utf8_lossy(p).to_string())
+            .collect::<Vec<_>>(),
+        "configured QUIC/TLS ALPN"
+    );
 
     let mut server_config = ServerConfig::with_crypto(Arc::new(
         quinn::crypto::rustls::QuicServerConfig::try_from(rustls)?,
