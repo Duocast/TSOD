@@ -272,35 +272,69 @@ fn show_channel(
     let (row_rect, row_response) =
         ui.allocate_exact_size(egui::vec2(row_width, row_height), egui::Sense::click());
 
-    let inner_response = ui
-        .allocate_ui_at_rect(row_rect, |ui| {
-            ui.horizontal(|ui| {
-                ui.set_height(row_height);
+    let rounding = egui::Rounding::same(4.0);
+    let visuals = ui.visuals();
+    if is_selected {
+        ui.painter().rect_filled(
+            row_rect,
+            rounding,
+            visuals.selection.bg_fill.linear_multiply(0.45),
+        );
+    } else if row_response.hovered() {
+        ui.painter().rect_filled(
+            row_rect,
+            rounding,
+            visuals.widgets.hovered.bg_fill.linear_multiply(0.35),
+        );
+    }
 
-                if has_children {
-                    let icon = if collapsed { "▶" } else { "▼" };
-                    if ui.small_button(icon).clicked() {
-                        model.channel_collapsed.insert(ch.id.clone(), !collapsed);
-                    }
-                } else {
-                    ui.add_space(20.0);
-                }
+    let indent = 20.0;
+    let triangle_rect = egui::Rect::from_min_size(
+        row_rect.min + egui::vec2(2.0, 0.0),
+        egui::vec2(indent - 2.0, row_rect.height()),
+    );
 
-                let response = ui.selectable_label(is_selected, &ch.name);
-                if response.clicked() {
-                    let _ = tx_intent.send(UiIntent::JoinChannel {
-                        channel_id: ch.id.clone(),
-                    });
-                }
-            })
-            .response
-        })
-        .response;
+    if has_children {
+        let icon = if collapsed { "▶" } else { "▼" };
+        ui.painter().text(
+            triangle_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            icon,
+            egui::FontId::proportional(12.0),
+            theme::text_muted(),
+        );
+    }
 
-    let response = row_response.union(inner_response);
+    let text_color = if is_selected {
+        visuals.strong_text_color()
+    } else {
+        theme::text_color()
+    };
+    ui.painter().text(
+        row_rect.left_center() + egui::vec2(indent + 2.0, 0.0),
+        egui::Align2::LEFT_CENTER,
+        &ch.name,
+        egui::TextStyle::Button.resolve(ui.style()),
+        text_color,
+    );
+
+    if row_response.clicked_by(egui::PointerButton::Primary) {
+        let clicked_triangle = has_children
+            && row_response
+                .interact_pointer_pos()
+                .is_some_and(|pos| triangle_rect.contains(pos));
+
+        if clicked_triangle {
+            model.channel_collapsed.insert(ch.id.clone(), !collapsed);
+        } else {
+            let _ = tx_intent.send(UiIntent::JoinChannel {
+                channel_id: ch.id.clone(),
+            });
+        }
+    }
 
     #[cfg(debug_assertions)]
-    if response.secondary_clicked() {
+    if row_response.secondary_clicked() {
         tracing::debug!(
             target: "ui::channels_panel",
             channel_id = %ch.id,
@@ -309,7 +343,7 @@ fn show_channel(
         );
     }
 
-    response.context_menu(|ui| {
+    row_response.context_menu(|ui| {
         if ui.button("Switch to channel").clicked() {
             let _ = tx_intent.send(UiIntent::JoinChannel {
                 channel_id: ch.id.clone(),
