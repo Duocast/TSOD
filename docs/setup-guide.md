@@ -195,13 +195,16 @@ IP.1   = 192.168.1.100
 IP.2   = 127.0.0.1
 # Hostname
 DNS.1  = tsod-server
-# DDNS hostname (if configured for external access)
-# DNS.2 = tsod.example.com
+# Public IP (if clients connect by IP)
+IP.3   = 136.38.142.63
+# DDNS/public hostname (recommended for external access)
+DNS.2  = tsod.example.com
 EOF
 ```
 
-> **Important:** Edit `IP.1` to match your server's actual LAN IP. If you set
-> up DDNS for external access (see Part 4), uncomment and set `DNS.2`.
+> **Important:** Edit SAN entries to match every address/name clients use.
+> Include LAN IP, loopback, local hostname, and external public IP and/or DDNS
+> hostname as needed.
 
 Generate the server key and certificate signing request:
 
@@ -823,6 +826,23 @@ vp-gateway \
   --tls-key-pem /etc/tsod/tls/server.key
 ```
 
+### Server command (self-signed cert with explicit SANs)
+
+```bash
+vp-gateway \
+  --listen 0.0.0.0:4433 \
+  --database-url "postgres://vp:PASSWORD@localhost/vp" \
+  --tls-self-signed-san 192.168.1.100 \
+  --tls-self-signed-san 127.0.0.1 \
+  --tls-self-signed-san tsod-server \
+  --tls-self-signed-san 136.38.142.63 \
+  --tls-self-signed-san tsod.example.com
+```
+
+> Only used when `--tls-cert-pem` / `--tls-key-pem` are omitted. Built-in SANs
+> always include `localhost`, `127.0.0.1`, and `::1`; the extra SANs above are
+> appended for LAN/public access.
+
 ### Client command (LAN)
 
 ```powershell
@@ -842,6 +862,7 @@ vp-client.exe --server tsod.duckdns.org:4433 --server-name tsod-server --ca-cert
 --database-url        PostgreSQL URL (or VP_DATABASE_URL env var)
 --tls-cert-pem        Path to TLS certificate PEM
 --tls-key-pem         Path to TLS private key PEM
+--tls-self-signed-san  Extra SAN entry for generated self-signed cert (repeatable)
 --alpn                ALPN protocol (default: vp-control/1)
 --default-server-id   Server UUID (default: 00000000-0000-0000-0000-0000000000aa)
 --metrics-listen      Metrics bind address (default: 0.0.0.0:9100)

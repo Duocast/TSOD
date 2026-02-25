@@ -19,6 +19,12 @@ pub struct Config {
     #[arg(long)]
     pub tls_key_pem: Option<String>,
 
+    /// Extra Subject Alternative Names (SANs) for generated self-signed certs.
+    /// Repeat the flag for multiple values (IP or DNS), e.g.:
+    /// --tls-self-signed-san 192.168.1.220 --tls-self-signed-san 136.38.142.63
+    #[arg(long = "tls-self-signed-san")]
+    pub tls_self_signed_sans: Vec<String>,
+
     /// Postgres connection URL (required for control-plane operations)
     #[arg(long, env = "VP_DATABASE_URL")]
     pub database_url: String,
