@@ -1,6 +1,7 @@
 //! Application state model for the GUI.
 
 use std::collections::{HashMap, VecDeque};
+use tracing::debug;
 
 /// Maximum number of chat messages to retain per channel.
 const MAX_MESSAGES_PER_CHANNEL: usize = 500;
@@ -811,7 +812,12 @@ impl UiModel {
             } => {
                 self.members.insert(channel_id, members);
             }
-            UiEvent::MessageReceived(msg) => {
+            UiEvent::MessageReceived(mut msg) => {
+                msg.author_name = self.resolve_message_author_name(
+                    &msg.channel_id,
+                    &msg.author_id,
+                    &msg.author_name,
+                );
                 let ch = msg.channel_id.clone();
                 let msgs = self.messages.entry(ch).or_default();
                 msgs.push_back(msg);
@@ -920,6 +926,63 @@ impl UiModel {
         }
     }
 
+    fn resolve_message_author_name(
+        &self,
+        channel_id: &str,
+        author_id: &str,
+        fallback_author_name: &str,
+    ) -> String {
+        let member_name = self.members.get(channel_id).and_then(|members| {
+            members
+                .iter()
+                .find(|member| {
+                    member.user_id == author_id && !member.display_name.trim().is_empty()
+                })
+                .map(|member| member.display_name.trim().to_string())
+        });
+        if let Some(name) = member_name {
+            debug!(
+                author_user_id = author_id,
+                channel_id,
+                member_lookup = "hit",
+                chosen_source = "member.display_name",
+                "resolved chat message author"
+            );
+            return name;
+        }
+
+        if !fallback_author_name.trim().is_empty() {
+            debug!(
+                author_user_id = author_id,
+                channel_id,
+                member_lookup = "miss",
+                chosen_source = "user_profile.display_name",
+                "resolved chat message author"
+            );
+            return fallback_author_name.trim().to_string();
+        }
+
+        if !author_id.trim().is_empty() {
+            debug!(
+                author_user_id = author_id,
+                channel_id,
+                member_lookup = "miss",
+                chosen_source = "username_or_login",
+                "resolved chat message author"
+            );
+            return author_id.trim().to_string();
+        }
+
+        debug!(
+            author_user_id = author_id,
+            channel_id,
+            member_lookup = "miss",
+            chosen_source = "default_user",
+            "resolved chat message author"
+        );
+        "User".to_string()
+    }
+
     /// Sync persisted settings into runtime model state.
     pub fn sync_settings_to_runtime(&mut self) {
         self.ptt_enabled = self.settings.capture_mode == CaptureMode::PushToTalk;
@@ -953,5 +1016,82 @@ impl UiModel {
             .and_then(|ch| self.typing_users.get(ch))
             .map(|typers| typers.iter().map(|(name, _)| name.as_str()).collect())
             .unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn member(user_id: &str, display_name: &str) -> MemberEntry {
+        MemberEntry {
+            user_id: user_id.into(),
+            display_name: display_name.into(),
+            muted: false,
+            deafened: false,
+            self_muted: false,
+            self_deafened: false,
+            streaming: false,
+            speaking: false,
+            avatar_url: None,
+        }
+    }
+
+    #[test]
+    fn prefers_member_nickname_over_profile_name_for_same_author() {
+        let mut model = UiModel::new();
+        model.user_id = "self-user".into();
+        model
+            .members
+            .insert("lounge-1".into(), vec![member("self-user", "Overdose")]);
+
+        model.apply_event(UiEvent::MessageReceived(ChatMessage {
+            message_id: "m1".into(),
+            channel_id: "lounge-1".into(),
+            author_id: "self-user".into(),
+            author_name: "dev".into(),
+            text: "hello".into(),
+            timestamp: 1_710_000_000_000,
+            attachments: vec![],
+            reply_to: None,
+            reactions: vec![],
+            pinned: false,
+            edited: false,
+        }));
+
+        let name = model
+            .messages
+            .get("lounge-1")
+            .and_then(|msgs| msgs.back())
+            .map(|m| m.author_name.clone())
+            .unwrap();
+        assert_eq!(name, "Overdose");
+    }
+
+    #[test]
+    fn falls_back_to_profile_name_when_member_nickname_missing() {
+        let mut model = UiModel::new();
+
+        model.apply_event(UiEvent::MessageReceived(ChatMessage {
+            message_id: "m2".into(),
+            channel_id: "lounge-1".into(),
+            author_id: "self-user".into(),
+            author_name: "dev".into(),
+            text: "hello".into(),
+            timestamp: 1_710_000_000_000,
+            attachments: vec![],
+            reply_to: None,
+            reactions: vec![],
+            pinned: false,
+            edited: false,
+        }));
+
+        let name = model
+            .messages
+            .get("lounge-1")
+            .and_then(|msgs| msgs.back())
+            .map(|m| m.author_name.clone())
+            .unwrap();
+        assert_eq!(name, "dev");
     }
 }

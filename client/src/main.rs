@@ -350,10 +350,20 @@ async fn connect_and_run_session(
     let (send, recv) = conn.open_bi().await.context("open control stream")?;
     let dispatcher = ControlDispatcher::start(send, recv, shutdown_rx.clone());
 
-    dispatcher
+    let auth_info = dispatcher
         .hello_auth(&cfg.alpn, &cfg.dev_token)
         .await
         .context("hello/auth")?;
+
+    if !auth_info.user_id.is_empty() {
+        let _ = tx_event.send(UiEvent::SetUserId(auth_info.user_id.clone()));
+    }
+
+    let local_user_id = if auth_info.user_id.trim().is_empty() {
+        cfg.display_name.clone()
+    } else {
+        auth_info.user_id.clone()
+    };
 
     // Server push consumer
     let mut push_rx = dispatcher.take_push_receiver().await;
@@ -363,32 +373,46 @@ async fn connect_and_run_session(
             while let Some(ev) = push_rx.recv().await {
                 match ev {
                     PushEvent::Chat(c) => {
+                        let event_at_millis = c.at.as_ref().map(|t| t.unix_millis);
                         if let Some(kind) = c.kind {
                             match kind {
                                 pb::chat_event::Kind::MessagePosted(mp) => {
-                                    let author = mp
+                                    let author_id = mp
                                         .author_user_id
                                         .as_ref()
-                                        .map(|u| u.value.as_str())
-                                        .unwrap_or("unknown");
+                                        .map(|u| u.value.clone())
+                                        .unwrap_or_default();
+                                    let channel_id = mp
+                                        .channel_id
+                                        .as_ref()
+                                        .map(|c| c.value.clone())
+                                        .unwrap_or_default();
+                                    let timestamp = event_at_millis.unwrap_or_else(|| {
+                                        let missing = [
+                                            ("message.author_user_id", author_id.is_empty()),
+                                            ("chat_event.at", event_at_millis.is_none()),
+                                        ]
+                                        .into_iter()
+                                        .filter_map(|(name, miss)| miss.then_some(name))
+                                        .collect::<Vec<_>>();
+                                        let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                            "[chat] missing metadata for message_posted fields={}",
+                                            missing.join(", ")
+                                        )));
+                                        unix_ms() as i64
+                                    });
+
                                     let _ = tx_event.send(UiEvent::MessageReceived(
                                         ui::model::ChatMessage {
                                             message_id: mp
                                                 .message_id
                                                 .map(|m| m.value)
                                                 .unwrap_or_default(),
-                                            channel_id: mp
-                                                .channel_id
-                                                .map(|c| c.value)
-                                                .unwrap_or_default(),
-                                            author_id: author.to_string(),
-                                            author_name: author.to_string(),
+                                            channel_id,
+                                            author_name: String::new(),
+                                            author_id,
                                             text: mp.text.clone(),
-                                            timestamp: mp
-                                                .edited_at
-                                                .as_ref()
-                                                .map(|t| t.unix_millis)
-                                                .unwrap_or(0),
+                                            timestamp,
                                             attachments: Vec::new(),
                                             reply_to: mp.reply_to_message_id.map(|r| r.value),
                                             reactions: Vec::new(),
@@ -427,8 +451,50 @@ async fn connect_and_run_session(
                         }
                     }
                     PushEvent::Presence(p) => {
-                        let _ =
-                            tx_event.send(UiEvent::AppendLog(format!("[presence] {:?}", p.kind)));
+                        if let Some(kind) = p.kind {
+                            match kind {
+                                pb::presence_event::Kind::MemberJoined(mj) => {
+                                    if let (Some(channel_id), Some(member)) =
+                                        (mj.channel_id, mj.member)
+                                    {
+                                        let user_id = member
+                                            .user_id
+                                            .as_ref()
+                                            .map(|u| u.value.clone())
+                                            .unwrap_or_default();
+                                        let _ = tx_event.send(UiEvent::MemberJoined {
+                                            channel_id: channel_id.value,
+                                            member: ui::model::MemberEntry {
+                                                user_id,
+                                                display_name: member.display_name,
+                                                muted: member.muted,
+                                                deafened: member.deafened,
+                                                self_muted: member.self_muted,
+                                                self_deafened: member.self_deafened,
+                                                streaming: member.streaming,
+                                                speaking: false,
+                                                avatar_url: None,
+                                            },
+                                        });
+                                    }
+                                }
+                                pb::presence_event::Kind::MemberLeft(ml) => {
+                                    let _ = tx_event.send(UiEvent::MemberLeft {
+                                        channel_id: ml
+                                            .channel_id
+                                            .map(|c| c.value)
+                                            .unwrap_or_default(),
+                                        user_id: ml.user_id.map(|u| u.value).unwrap_or_default(),
+                                    });
+                                }
+                                other => {
+                                    let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                        "[presence] {:?}",
+                                        other
+                                    )));
+                                }
+                            }
+                        }
                     }
                     PushEvent::Moderation(m) => {
                         let _ = tx_event.send(UiEvent::AppendLog(format!("[moderation] {:?}", m)));
@@ -460,10 +526,32 @@ async fn connect_and_run_session(
     let _ = tx_event.send(UiEvent::SetAuthed(true));
     let _ = tx_event.send(UiEvent::AppendLog("[net] authed".into()));
 
+    let mut initial_active_channel: Option<String> = cfg.channel_id.clone();
+
     if let Some(ch) = cfg.channel_id.as_deref() {
         match dispatcher.join_channel(ch).await {
-            Ok(()) => {
-                let _ = tx_event.send(UiEvent::SetChannelName(ch.to_string()));
+            Ok(state) => {
+                let resolved_channel_id = state.channel_id.clone();
+                let _ = tx_event.send(UiEvent::SetChannelName(resolved_channel_id.clone()));
+                let _ = tx_event.send(UiEvent::UpdateChannelMembers {
+                    channel_id: resolved_channel_id,
+                    members: state
+                        .members
+                        .into_iter()
+                        .map(|m| ui::model::MemberEntry {
+                            user_id: m.user_id.map(|u| u.value).unwrap_or_default(),
+                            display_name: m.display_name,
+                            muted: m.muted,
+                            deafened: m.deafened,
+                            self_muted: m.self_muted,
+                            self_deafened: m.self_deafened,
+                            streaming: m.streaming,
+                            speaking: false,
+                            avatar_url: None,
+                        })
+                        .collect(),
+                });
+                initial_active_channel = Some(state.channel_id);
                 let _ = tx_event.send(UiEvent::AppendLog(format!("[ctl] joined channel {ch}")));
             }
             Err(e) => {
@@ -514,7 +602,7 @@ async fn connect_and_run_session(
     });
 
     // Track the active channel (for SendChat and other channel-scoped operations)
-    let mut active_channel: Option<String> = cfg.channel_id.clone();
+    let mut active_channel: Option<String> = initial_active_channel;
 
     tokio::pin!(ctl_keepalive);
     loop {
@@ -564,7 +652,7 @@ async fn connect_and_run_session(
                                     ui::model::ChatMessage {
                                         message_id: format!("local-{now_ms}"),
                                         channel_id: ch.clone(),
-                                        author_id: cfg.display_name.clone(),
+                                        author_id: local_user_id.clone(),
                                         author_name: cfg.display_name.clone(),
                                         text: text.clone(),
                                         timestamp: now_ms,
@@ -588,9 +676,27 @@ async fn connect_and_run_session(
                         }
                         UiIntent::JoinChannel { channel_id } => {
                             match dispatcher.join_channel(&channel_id).await {
-                                Ok(()) => {
-                                    active_channel = Some(channel_id.clone());
-                                    let _ = tx_event.send(UiEvent::SetChannelName(channel_id.clone()));
+                                Ok(state) => {
+                                    active_channel = Some(state.channel_id.clone());
+                                    let _ = tx_event.send(UiEvent::SetChannelName(state.channel_id.clone()));
+                                    let _ = tx_event.send(UiEvent::UpdateChannelMembers {
+                                        channel_id: state.channel_id,
+                                        members: state
+                                            .members
+                                            .into_iter()
+                                            .map(|m| ui::model::MemberEntry {
+                                                user_id: m.user_id.map(|u| u.value).unwrap_or_default(),
+                                                display_name: m.display_name,
+                                                muted: m.muted,
+                                                deafened: m.deafened,
+                                                self_muted: m.self_muted,
+                                                self_deafened: m.self_deafened,
+                                                streaming: m.streaming,
+                                                speaking: false,
+                                                avatar_url: None,
+                                            })
+                                            .collect(),
+                                    });
                                     let _ = tx_event.send(UiEvent::AppendLog(
                                         format!("[ctl] joined channel {channel_id}"),
                                     ));
