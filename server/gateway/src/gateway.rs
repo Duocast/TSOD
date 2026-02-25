@@ -15,7 +15,7 @@ use crate::{
 
 use vp_control::ids::{ChannelId, ServerId, UserId};
 use vp_control::model::{ChannelCreate, JoinChannel, SendMessage};
-use vp_control::{ControlService, PgControlRepo, RequestContext};
+use vp_control::{ControlRepo, ControlService, PgControlRepo, RequestContext};
 use vp_media::voice_forwarder::VoiceForwarder;
 
 const CONTROL_STREAM_MAX_MSG: usize = 256 * 1024; // 256KB
@@ -122,6 +122,33 @@ impl Gateway {
             "authenticated"
         );
 
+        let snapshot = self
+            .build_initial_snapshot(server_id, user_id, &identity.display_name)
+            .await?;
+        debug!(
+            session_id = %session_id,
+            server_id = %server_id.0,
+            user_id = %user_id.0,
+            channel_count = snapshot.channels.len(),
+            member_scope_count = snapshot.channel_members.len(),
+            "sending post-auth authoritative snapshot"
+        );
+        let snapshot_push = pb::ServerToClient {
+            request_id: None,
+            session_id: Some(pb::SessionId {
+                value: session_id.clone(),
+            }),
+            sent_at: Some(now_ts()),
+            error: None,
+            event_seq: unix_ms_u64(),
+            payload: Some(pb::server_to_client::Payload::InitialStateSnapshot(
+                snapshot,
+            )),
+        };
+        write_delimited(&mut send, &snapshot_push)
+            .await
+            .context("write InitialStateSnapshot push")?;
+
         // Control stream writes are performed inline in this task.
 
         let (push_tx, mut push_rx) = mpsc::channel::<pb::ServerToClient>(1024);
@@ -173,6 +200,7 @@ impl Gateway {
                     }),
                     sent_at: Some(now_ts()),
                     error: None,
+                    event_seq: 0,
                     payload: Some(pb::server_to_client::Payload::Pong(pb::Pong {
                         nonce: p.nonce,
                         server_time: Some(now_ts()),
@@ -271,6 +299,7 @@ impl Gateway {
                         }),
                         sent_at: Some(now_ts()),
                         error: None,
+                        event_seq: 0,
                         payload: Some(pb::server_to_client::Payload::JoinChannelResponse(
                             pb::JoinChannelResponse { state: Some(state) },
                         )),
@@ -299,6 +328,7 @@ impl Gateway {
                         }),
                         sent_at: Some(now_ts()),
                         error: None,
+                        event_seq: 0,
                         payload: Some(pb::server_to_client::Payload::LeaveChannelResponse(
                             pb::LeaveChannelResponse {
                                 channel_id: Some(pb::ChannelId {
@@ -348,6 +378,7 @@ impl Gateway {
                         }),
                         sent_at: Some(now_ts()),
                         error: None,
+                        event_seq: 0,
                         payload: Some(pb::server_to_client::Payload::CreateChannelResponse(
                             pb::CreateChannelResponse { state: Some(state) },
                         )),
@@ -396,6 +427,7 @@ impl Gateway {
                         }),
                         sent_at: Some(now_ts()),
                         error: None,
+                        event_seq: 0,
                         payload: None,
                     };
                     if let Err(e) = write_delimited(&mut send, &resp).await {
@@ -428,7 +460,37 @@ impl Gateway {
                         }),
                         sent_at: Some(now_ts()),
                         error: None,
+                        event_seq: 0,
                         payload: None,
+                    };
+                    if let Err(e) = write_delimited(&mut send, &resp).await {
+                        warn!("control write failed: {:#}", e);
+                        break;
+                    }
+                }
+                Some(pb::client_to_server::Payload::GetInitialStateSnapshotRequest(_)) => {
+                    let snapshot = self
+                        .build_initial_snapshot(server_id, user_id, &identity.display_name)
+                        .await?;
+                    debug!(
+                        session_id = %session_id,
+                        server_id = %server_id.0,
+                        user_id = %user_id.0,
+                        channel_count = snapshot.channels.len(),
+                        member_scope_count = snapshot.channel_members.len(),
+                        "responding with authoritative snapshot"
+                    );
+                    let resp = pb::ServerToClient {
+                        request_id: req_id,
+                        session_id: Some(pb::SessionId {
+                            value: session_id.clone(),
+                        }),
+                        sent_at: Some(now_ts()),
+                        error: None,
+                        event_seq: snapshot.snapshot_version,
+                        payload: Some(pb::server_to_client::Payload::InitialStateSnapshot(
+                            snapshot,
+                        )),
                     };
                     if let Err(e) = write_delimited(&mut send, &resp).await {
                         warn!("control write failed: {:#}", e);
@@ -479,6 +541,7 @@ impl Gateway {
             }),
             sent_at: Some(now_ts()),
             error: None,
+            event_seq: 0,
             payload: Some(pb::server_to_client::Payload::HelloAck(ack)),
         };
 
@@ -526,6 +589,7 @@ impl Gateway {
             }),
             sent_at: Some(now_ts()),
             error: None,
+            event_seq: 0,
             payload: Some(pb::server_to_client::Payload::AuthResponse(auth_resp)),
         };
 
@@ -533,6 +597,97 @@ impl Gateway {
             .await
             .context("write AuthResponse")?;
         Ok(identity)
+    }
+}
+
+impl Gateway {
+    async fn build_initial_snapshot(
+        &self,
+        server_id: ServerId,
+        user_id: UserId,
+        self_display_name: &str,
+    ) -> Result<pb::InitialStateSnapshot> {
+        let mut tx = self.control.repo().tx().await?;
+        let channels =
+            <PgControlRepo as ControlRepo>::list_channels(self.control.repo(), &mut tx, server_id)
+                .await?;
+
+        let mut channel_snapshots = Vec::with_capacity(channels.len());
+        let mut members_scoped = Vec::with_capacity(channels.len());
+        let mut default_channel_id = None;
+
+        for (idx, channel) in channels.iter().enumerate() {
+            if idx == 0 {
+                default_channel_id = Some(pb::ChannelId {
+                    value: channel.id.0.to_string(),
+                });
+            }
+
+            channel_snapshots.push(pb::ChannelSnapshot {
+                info: Some(pb::ChannelInfo {
+                    channel_id: Some(pb::ChannelId {
+                        value: channel.id.0.to_string(),
+                    }),
+                    name: channel.name.clone(),
+                    parent_channel_id: channel.parent_id.map(|pid| pb::ChannelId {
+                        value: pid.0.to_string(),
+                    }),
+                    user_limit: channel.max_members.unwrap_or_default().max(0) as u32,
+                    ..Default::default()
+                }),
+            });
+
+            let members = <PgControlRepo as ControlRepo>::list_members(
+                self.control.repo(),
+                &mut tx,
+                server_id,
+                channel.id,
+            )
+            .await?;
+            let pb_members = members
+                .into_iter()
+                .map(|m| pb::ChannelMember {
+                    user_id: Some(pb::UserId {
+                        value: m.user_id.0.to_string(),
+                    }),
+                    display_name: m.display_name,
+                    muted: m.muted,
+                    deafened: m.deafened,
+                    ..Default::default()
+                })
+                .collect::<Vec<_>>();
+
+            members_scoped.push(pb::ChannelMembersSnapshot {
+                channel_id: Some(pb::ChannelId {
+                    value: channel.id.0.to_string(),
+                }),
+                members: pb_members,
+            });
+        }
+        tx.commit().await?;
+
+        info!(
+            server_id = %server_id.0,
+            auth_user_id = %user_id.0,
+            channels = channel_snapshots.len(),
+            members_scopes = members_scoped.len(),
+            "initial snapshot prepared"
+        );
+
+        Ok(pb::InitialStateSnapshot {
+            server_id: Some(pb::ServerId {
+                value: server_id.0.to_string(),
+            }),
+            server_name: "TSOD".to_string(),
+            self_user_id: Some(pb::UserId {
+                value: user_id.0.to_string(),
+            }),
+            self_display_name: self_display_name.to_string(),
+            channels: channel_snapshots,
+            channel_members: members_scoped,
+            default_channel_id,
+            snapshot_version: unix_ms_u64(),
+        })
     }
 }
 
@@ -557,6 +712,13 @@ fn now_ts() -> pb::Timestamp {
         .unwrap_or_default()
         .as_millis() as i64;
     pb::Timestamp { unix_millis: ms }
+}
+
+fn unix_ms_u64() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 #[cfg(test)]

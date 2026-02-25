@@ -343,6 +343,116 @@ async fn app_task(
     Ok(())
 }
 
+fn maybe_note_event_gap(tx_event: &Sender<UiEvent>, event_seq: u64) {
+    if event_seq == 0 {
+        let _ = tx_event.send(UiEvent::AppendLog(
+            "[sync] TODO: push event missing sequence metadata; trigger forced resync on suspected gaps"
+                .into(),
+        ));
+    }
+}
+
+fn apply_authoritative_snapshot(
+    snapshot: &pb::InitialStateSnapshot,
+    tx_event: &Sender<UiEvent>,
+    requested_channel_id: Option<&str>,
+) {
+    let channels = snapshot
+        .channels
+        .iter()
+        .filter_map(|ch| ch.info.as_ref())
+        .map(|info| ui::model::ChannelEntry {
+            id: info
+                .channel_id
+                .as_ref()
+                .map(|id| id.value.clone())
+                .unwrap_or_default(),
+            name: info.name.clone(),
+            channel_type: ui::model::ChannelType::Voice,
+            parent_id: info.parent_channel_id.as_ref().map(|pid| pid.value.clone()),
+            position: info.position,
+            member_count: 0,
+            user_limit: info.user_limit,
+        })
+        .collect::<Vec<_>>();
+
+    let _ = tx_event.send(UiEvent::SetChannels(channels.clone()));
+
+    for scope in &snapshot.channel_members {
+        let channel_id = scope
+            .channel_id
+            .as_ref()
+            .map(|id| id.value.clone())
+            .unwrap_or_default();
+        let members = scope
+            .members
+            .iter()
+            .map(|m| ui::model::MemberEntry {
+                user_id: m
+                    .user_id
+                    .as_ref()
+                    .map(|u| u.value.clone())
+                    .unwrap_or_default(),
+                display_name: m.display_name.clone(),
+                muted: m.muted,
+                deafened: m.deafened,
+                self_muted: m.self_muted,
+                self_deafened: m.self_deafened,
+                streaming: m.streaming,
+                speaking: false,
+                avatar_url: None,
+            })
+            .collect::<Vec<_>>();
+        let _ = tx_event.send(UiEvent::UpdateChannelMembers {
+            channel_id,
+            members,
+        });
+    }
+
+    let selected = choose_initial_selected_channel(snapshot, requested_channel_id);
+    if let Some(selected_channel) = selected {
+        let _ = tx_event.send(UiEvent::SetChannelName(selected_channel));
+    }
+
+    let _ = tx_event.send(UiEvent::AppendLog(format!(
+        "[sync] authoritative snapshot applied server_id={} auth_user_id={} channels={} member_scopes={} members_semantics=selected-channel scoped",
+        snapshot.server_id.as_ref().map(|sid| sid.value.clone()).unwrap_or_default(),
+        snapshot.self_user_id.as_ref().map(|u| u.value.clone()).unwrap_or_default(),
+        snapshot.channels.len(),
+        snapshot.channel_members.len(),
+    )));
+}
+
+fn choose_initial_selected_channel(
+    snapshot: &pb::InitialStateSnapshot,
+    requested_channel_id: Option<&str>,
+) -> Option<String> {
+    if let Some(requested) = requested_channel_id {
+        if snapshot.channels.iter().any(|channel| {
+            channel
+                .info
+                .as_ref()
+                .and_then(|info| info.channel_id.as_ref())
+                .is_some_and(|cid| cid.value == requested)
+        }) {
+            return Some(requested.to_string());
+        }
+    }
+
+    snapshot
+        .default_channel_id
+        .as_ref()
+        .map(|id| id.value.clone())
+        .or_else(|| {
+            snapshot
+                .channels
+                .first()
+                .and_then(|channel| channel.info.as_ref())
+                .and_then(|info| info.channel_id.as_ref())
+                .map(|id| id.value.clone())
+        })
+}
+
 fn split_server_host_port(server: &str) -> (String, u16) {
     if let Some((host, port_text)) = server.rsplit_once(':') {
         if let Ok(port) = port_text.parse::<u16>() {
@@ -486,7 +596,11 @@ async fn connect_and_run_session(
         tokio::spawn(async move {
             while let Some(ev) = push_rx.recv().await {
                 match ev {
-                    PushEvent::Chat(c) => {
+                    PushEvent::Chat {
+                        event: c,
+                        event_seq,
+                    } => {
+                        maybe_note_event_gap(&tx_event, event_seq);
                         let event_at_millis = c.at.as_ref().map(|t| t.unix_millis);
                         if let Some(kind) = c.kind {
                             match kind {
@@ -573,7 +687,11 @@ async fn connect_and_run_session(
                             }
                         }
                     }
-                    PushEvent::Presence(p) => {
+                    PushEvent::Presence {
+                        event: p,
+                        event_seq,
+                    } => {
+                        maybe_note_event_gap(&tx_event, event_seq);
                         if let Some(kind) = p.kind {
                             match kind {
                                 pb::presence_event::Kind::MemberJoined(mj) => {
@@ -626,10 +744,18 @@ async fn connect_and_run_session(
                             }
                         }
                     }
-                    PushEvent::Moderation(m) => {
+                    PushEvent::Moderation {
+                        event: m,
+                        event_seq,
+                    } => {
+                        maybe_note_event_gap(&tx_event, event_seq);
                         let _ = tx_event.send(UiEvent::AppendLog(format!("[moderation] {:?}", m)));
                     }
-                    PushEvent::ChannelCreated(cr) => {
+                    PushEvent::ChannelCreated {
+                        event: cr,
+                        event_seq,
+                    } => {
+                        maybe_note_event_gap(&tx_event, event_seq);
                         if let Some(state) = cr.state {
                             if let Some(ch_id) = state.channel_id {
                                 debug!(channel_id=%ch_id.value, name=%state.name, "received channel-created push event");
@@ -647,7 +773,8 @@ async fn connect_and_run_session(
                             }
                         }
                     }
-                    PushEvent::ServerHint(h) => {
+                    PushEvent::ServerHint { hint: h, event_seq } => {
+                        maybe_note_event_gap(&tx_event, event_seq);
                         let mut parts = vec![];
                         if h.receiver_report_interval_ms != 0 {
                             parts.push(format!("rr={}ms", h.receiver_report_interval_ms));
@@ -665,6 +792,19 @@ async fn connect_and_run_session(
                         };
                         let _ = tx_event.send(UiEvent::AppendLog(format!("[hint] {msg}")));
                     }
+                    PushEvent::Snapshot {
+                        snapshot,
+                        event_seq,
+                    } => {
+                        maybe_note_event_gap(&tx_event, event_seq);
+                        let _ = tx_event.send(UiEvent::AppendLog(format!(
+                            "[sync] received snapshot push server_id={} channels={} member_scopes={} self_user_id={}",
+                            snapshot.server_id.as_ref().map(|sid| sid.value.clone()).unwrap_or_default(),
+                            snapshot.channels.len(),
+                            snapshot.channel_members.len(),
+                            snapshot.self_user_id.as_ref().map(|u| u.value.clone()).unwrap_or_default(),
+                        )));
+                    }
                     PushEvent::Unknown(_) => {}
                 }
             }
@@ -678,45 +818,16 @@ async fn connect_and_run_session(
         "Syncing initial state",
     );
 
-    let mut initial_active_channel: Option<String> = cfg.channel_id.clone();
+    let initial_active_channel: Option<String> = cfg.channel_id.clone();
 
-    if let Some(ch) = cfg.channel_id.as_deref() {
-        match dispatcher.join_channel(ch).await {
-            Ok(state) => {
-                for member in &state.members {
-                    debug!(
-                        channel_id = %ch,
-                        user_id = %member.user_id.as_ref().map(|u| u.value.clone()).unwrap_or_default(),
-                        display_name = %member.display_name,
-                        "join/member upsert snapshot"
-                    );
-                }
-                let _ = tx_event.send(UiEvent::SetChannelName(ch.to_string()));
-                let _ = tx_event.send(UiEvent::UpdateChannelMembers {
-                    channel_id: ch.to_string(),
-                    members: state
-                        .members
-                        .into_iter()
-                        .map(|m| ui::model::MemberEntry {
-                            user_id: m.user_id.map(|u| u.value).unwrap_or_default(),
-                            display_name: m.display_name,
-                            muted: m.muted,
-                            deafened: m.deafened,
-                            self_muted: m.self_muted,
-                            self_deafened: m.self_deafened,
-                            streaming: m.streaming,
-                            speaking: false,
-                            avatar_url: None,
-                        })
-                        .collect(),
-                });
-                let _ = tx_event.send(UiEvent::AppendLog(format!("[ctl] joined channel {ch}")));
-            }
-            Err(e) => {
-                let _ = tx_event.send(UiEvent::AppendLog(format!("[ctl] join failed: {e:#}")));
-            }
-        }
-    }
+    let snapshot = dispatcher
+        .get_initial_state_snapshot()
+        .await
+        .context("get_initial_state_snapshot")?;
+    apply_authoritative_snapshot(&snapshot, tx_event, initial_active_channel.as_deref());
+
+    let selected_after_sync =
+        choose_initial_selected_channel(&snapshot, initial_active_channel.as_deref());
 
     set_connection_stage(
         tx_event,
@@ -766,7 +877,7 @@ async fn connect_and_run_session(
     });
 
     // Track the active channel (for SendChat and other channel-scoped operations)
-    let mut active_channel: Option<String> = initial_active_channel;
+    let mut active_channel: Option<String> = selected_after_sync;
 
     tokio::pin!(ctl_keepalive);
     loop {
@@ -1480,4 +1591,108 @@ fn hex_to_32(s: &str) -> Result<[u8; 32]> {
         out[i] = b;
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{apply_authoritative_snapshot, choose_initial_selected_channel};
+    use crate::{
+        proto::voiceplatform::v1 as pb,
+        ui::{model::ChannelType, UiEvent},
+    };
+    use crossbeam_channel::bounded;
+
+    #[test]
+    fn choose_initial_selected_channel_preserves_requested_when_present() {
+        let requested = "channel-b";
+        let snapshot = pb::InitialStateSnapshot {
+            channels: vec![
+                pb::ChannelSnapshot {
+                    info: Some(pb::ChannelInfo {
+                        channel_id: Some(pb::ChannelId {
+                            value: "channel-a".into(),
+                        }),
+                        name: "General".into(),
+                        ..Default::default()
+                    }),
+                },
+                pb::ChannelSnapshot {
+                    info: Some(pb::ChannelInfo {
+                        channel_id: Some(pb::ChannelId {
+                            value: requested.into(),
+                        }),
+                        name: "Gaming".into(),
+                        ..Default::default()
+                    }),
+                },
+            ],
+            default_channel_id: Some(pb::ChannelId {
+                value: "channel-a".into(),
+            }),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            choose_initial_selected_channel(&snapshot, Some(requested)),
+            Some(requested.to_string())
+        );
+    }
+
+    #[test]
+    fn apply_authoritative_snapshot_sets_channel_and_members_lists() {
+        let snapshot = pb::InitialStateSnapshot {
+            server_id: Some(pb::ServerId {
+                value: "server-1".into(),
+            }),
+            self_user_id: Some(pb::UserId {
+                value: "user-1".into(),
+            }),
+            channels: vec![pb::ChannelSnapshot {
+                info: Some(pb::ChannelInfo {
+                    channel_id: Some(pb::ChannelId {
+                        value: "channel-a".into(),
+                    }),
+                    name: "General".into(),
+                    ..Default::default()
+                }),
+            }],
+            channel_members: vec![pb::ChannelMembersSnapshot {
+                channel_id: Some(pb::ChannelId {
+                    value: "channel-a".into(),
+                }),
+                members: vec![pb::ChannelMember {
+                    user_id: Some(pb::UserId {
+                        value: "user-2".into(),
+                    }),
+                    display_name: "Alice".into(),
+                    ..Default::default()
+                }],
+            }],
+            default_channel_id: Some(pb::ChannelId {
+                value: "channel-a".into(),
+            }),
+            ..Default::default()
+        };
+
+        let (tx, rx) = bounded::<UiEvent>(16);
+        apply_authoritative_snapshot(&snapshot, &tx, None);
+
+        let events = rx.try_iter().collect::<Vec<_>>();
+        assert!(events.iter().any(|ev| matches!(
+            ev,
+            UiEvent::SetChannels(channels)
+                if channels.len() == 1
+                    && channels[0].id == "channel-a"
+                    && channels[0].name == "General"
+                    && matches!(channels[0].channel_type, ChannelType::Voice)
+        )));
+        assert!(events.iter().any(|ev| matches!(
+            ev,
+            UiEvent::UpdateChannelMembers { channel_id, members }
+                if channel_id == "channel-a"
+                    && members.len() == 1
+                    && members[0].user_id == "user-2"
+                    && members[0].display_name == "Alice"
+        )));
+    }
 }
