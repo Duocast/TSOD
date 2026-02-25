@@ -134,6 +134,7 @@ async fn main() -> Result<()> {
         cfg.alpn,
         control,
         sessions,
+        push,
         membership,
         forwarder,
     );

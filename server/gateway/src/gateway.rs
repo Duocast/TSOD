@@ -1,13 +1,16 @@
 use anyhow::{anyhow, Context, Result};
-use tokio::time::{timeout, Duration};
-use tracing::{info, warn};
 use std::sync::Arc;
+use tokio::{
+    sync::mpsc,
+    time::{timeout, Duration},
+};
+use tracing::{debug, info, warn};
 
 use crate::{
     auth::{AuthProvider, AuthedIdentity},
     frame::{read_delimited, write_delimited},
     proto::voiceplatform::v1 as pb,
-state::{MembershipCache, QuinnDatagramTx, Sessions},
+    state::{MembershipCache, PushHub, QuinnDatagramTx, Sessions},
 };
 
 use vp_control::ids::{ChannelId, ServerId, UserId};
@@ -24,6 +27,7 @@ pub struct Gateway {
     alpn: Vec<u8>,
     control: Arc<ControlService<PgControlRepo>>,
     sessions: Sessions,
+    push: PushHub,
     membership: MembershipCache,
     voice: Arc<VoiceForwarder>,
 }
@@ -34,6 +38,7 @@ impl Gateway {
         alpn: String,
         control: Arc<ControlService<PgControlRepo>>,
         sessions: Sessions,
+        push: PushHub,
         membership: MembershipCache,
         voice: Arc<VoiceForwarder>,
     ) -> Self {
@@ -42,6 +47,7 @@ impl Gateway {
             alpn: alpn.into_bytes(),
             control,
             sessions,
+            push,
             membership,
             voice,
         }
@@ -49,11 +55,14 @@ impl Gateway {
 
     pub async fn serve(self, endpoint: quinn::Endpoint) -> Result<()> {
         info!(expected_alpn = %String::from_utf8_lossy(&self.alpn), "gateway listening");
-    
+
         loop {
-            let incoming = endpoint.accept().await.ok_or_else(|| anyhow!("endpoint closed"))?;
+            let incoming = endpoint
+                .accept()
+                .await
+                .ok_or_else(|| anyhow!("endpoint closed"))?;
             let gw = self.clone();
-    
+
             tokio::spawn(async move {
                 if let Err(e) = gw.handle_conn(incoming).await {
                     warn!("conn ended with error: {:#}", e);
@@ -109,6 +118,9 @@ impl Gateway {
 
         // Control stream writes are performed inline in this task.
 
+        let (push_tx, mut push_rx) = mpsc::channel::<pb::ServerToClient>(1024);
+        self.push.register(user_id, push_tx);
+
         // Register push + datagram
         self.sessions
             .register(user_id, Arc::new(QuinnDatagramTx::new(conn.clone())));
@@ -127,9 +139,24 @@ impl Gateway {
             }
         });
 
-        // Request loop
+        // Request + push loop
         loop {
-            let msg: pb::ClientToServer = read_delimited(&mut recv, CONTROL_STREAM_MAX_MSG).await?;
+            let msg: pb::ClientToServer = tokio::select! {
+                push = push_rx.recv() => {
+                    match push {
+                        Some(push_msg) => {
+                            debug!(user_id=%user_id.0, "sending server push to client session");
+                            if let Err(e) = write_delimited(&mut send, &push_msg).await {
+                                warn!("control push write failed: {:#}", e);
+                                break;
+                            }
+                            continue;
+                        }
+                        None => break,
+                    }
+                }
+                read = read_delimited(&mut recv, CONTROL_STREAM_MAX_MSG) => read?,
+            };
 
             // Ping
             if let Some(pb::client_to_server::Payload::Ping(p)) = msg.payload {
@@ -207,10 +234,14 @@ impl Gateway {
 
                     let resp = pb::ServerToClient {
                         request_id: req_id,
-                        session_id: Some(pb::SessionId { value: session_id.clone() }),
+                        session_id: Some(pb::SessionId {
+                            value: session_id.clone(),
+                        }),
                         sent_at: Some(now_ts()),
                         error: None,
-                        payload: Some(pb::server_to_client::Payload::JoinChannelResponse(pb::JoinChannelResponse { state: Some(state) })),
+                        payload: Some(pb::server_to_client::Payload::JoinChannelResponse(
+                            pb::JoinChannelResponse { state: Some(state) },
+                        )),
                     };
                     if let Err(e) = write_delimited(&mut send, &resp).await {
                         warn!("control write failed: {:#}", e);
@@ -238,7 +269,9 @@ impl Gateway {
                         error: None,
                         payload: Some(pb::server_to_client::Payload::LeaveChannelResponse(
                             pb::LeaveChannelResponse {
-                                channel_id: Some(pb::ChannelId { value: ch.0.to_string() }),
+                                channel_id: Some(pb::ChannelId {
+                                    value: ch.0.to_string(),
+                                }),
                             },
                         )),
                     };
@@ -338,17 +371,27 @@ impl Gateway {
                 }
                 Some(pb::client_to_server::Payload::ModerationActionRequest(r)) => {
                     let ch = parse_channel_id(r.channel_id.as_ref())?;
-                    let target = r.target_user_id.as_ref().ok_or_else(|| anyhow!("target_user_id missing"))?;
-                    let target = UserId(uuid::Uuid::parse_str(&target.value).context("invalid target_user_id")?);
+                    let target = r
+                        .target_user_id
+                        .as_ref()
+                        .ok_or_else(|| anyhow!("target_user_id missing"))?;
+                    let target = UserId(
+                        uuid::Uuid::parse_str(&target.value).context("invalid target_user_id")?,
+                    );
 
                     if let Some(pb::moderation_action_request::Action::Mute(m)) = r.action {
-                        let _ = self.control.set_voice_mute(&ctx, ch, target, m.muted, None).await?;
+                        let _ = self
+                            .control
+                            .set_voice_mute(&ctx, ch, target, m.muted, None)
+                            .await?;
                         self.membership.update_mute(target, ch, m.muted);
                     }
 
                     let resp = pb::ServerToClient {
                         request_id: req_id,
-                        session_id: Some(pb::SessionId { value: session_id.clone() }),
+                        session_id: Some(pb::SessionId {
+                            value: session_id.clone(),
+                        }),
                         sent_at: Some(now_ts()),
                         error: None,
                         payload: None,
@@ -362,7 +405,10 @@ impl Gateway {
                     // Ignore other messages for now.
                 }
             }
-        };
+        }
+
+        self.push.unregister(user_id);
+        self.sessions.unregister(user_id);
 
         Ok(())
     }
@@ -372,7 +418,9 @@ impl Gateway {
         send: &mut quinn::SendStream,
         recv: &mut quinn::RecvStream,
     ) -> Result<(String, Option<pb::ClientCaps>)> {
-        let req: pb::ClientToServer = read_delimited(recv, CONTROL_STREAM_MAX_MSG).await.context("read Hello envelope")?;
+        let req: pb::ClientToServer = read_delimited(recv, CONTROL_STREAM_MAX_MSG)
+            .await
+            .context("read Hello envelope")?;
 
         let hello = match req.payload {
             Some(pb::client_to_server::Payload::Hello(h)) => h,
@@ -382,7 +430,9 @@ impl Gateway {
         let session_id = uuid::Uuid::new_v4().to_string();
 
         let ack = pb::HelloAck {
-            session_id: Some(pb::SessionId { value: session_id.clone() }),
+            session_id: Some(pb::SessionId {
+                value: session_id.clone(),
+            }),
             max_message_size_bytes: 64 * 1024,
             max_upload_size_bytes: 50 * 1024 * 1024,
             ping_interval_ms: 15_000,
@@ -390,13 +440,17 @@ impl Gateway {
 
         let resp = pb::ServerToClient {
             request_id: req.request_id,
-            session_id: Some(pb::SessionId { value: session_id.clone() }),
+            session_id: Some(pb::SessionId {
+                value: session_id.clone(),
+            }),
             sent_at: Some(now_ts()),
             error: None,
             payload: Some(pb::server_to_client::Payload::HelloAck(ack)),
         };
 
-        write_delimited(send, &resp).await.context("write HelloAck")?;
+        write_delimited(send, &resp)
+            .await
+            .context("write HelloAck")?;
         Ok((session_id, hello.caps))
     }
 
@@ -406,7 +460,9 @@ impl Gateway {
         recv: &mut quinn::RecvStream,
         session_id: &str,
     ) -> Result<AuthedIdentity> {
-        let req: pb::ClientToServer = read_delimited(recv, CONTROL_STREAM_MAX_MSG).await.context("read Auth envelope")?;
+        let req: pb::ClientToServer = read_delimited(recv, CONTROL_STREAM_MAX_MSG)
+            .await
+            .context("read Auth envelope")?;
 
         let auth_req = match req.payload {
             Some(pb::client_to_server::Payload::AuthRequest(a)) => a,
@@ -414,29 +470,37 @@ impl Gateway {
         };
 
         let mut identity = self.auth.authenticate(&auth_req).context("auth failed")?;
-        if let Some(preferred) = normalize_preferred_display_name(&auth_req.preferred_display_name) {
+        if let Some(preferred) = normalize_preferred_display_name(&auth_req.preferred_display_name)
+        {
             identity.display_name = preferred;
         }
 
         let auth_resp = pb::AuthResponse {
-            user_id: Some(pb::UserId { value: identity.user_id.clone() }),
-            server_id: Some(pb::ServerId { value: identity.server_id.clone() }),
+            user_id: Some(pb::UserId {
+                value: identity.user_id.clone(),
+            }),
+            server_id: Some(pb::ServerId {
+                value: identity.server_id.clone(),
+            }),
             is_admin: identity.is_admin,
         };
 
         let resp = pb::ServerToClient {
             request_id: req.request_id,
-            session_id: Some(pb::SessionId { value: session_id.to_string() }),
+            session_id: Some(pb::SessionId {
+                value: session_id.to_string(),
+            }),
             sent_at: Some(now_ts()),
             error: None,
             payload: Some(pb::server_to_client::Payload::AuthResponse(auth_resp)),
         };
 
-        write_delimited(send, &resp).await.context("write AuthResponse")?;
+        write_delimited(send, &resp)
+            .await
+            .context("write AuthResponse")?;
         Ok(identity)
     }
 }
-
 
 fn normalize_preferred_display_name(value: &str) -> Option<String> {
     let trimmed = value.trim();
@@ -448,7 +512,9 @@ fn normalize_preferred_display_name(value: &str) -> Option<String> {
 
 fn parse_channel_id(ch: Option<&pb::ChannelId>) -> Result<ChannelId> {
     let ch = ch.ok_or_else(|| anyhow!("channel_id missing"))?;
-    Ok(ChannelId(uuid::Uuid::parse_str(&ch.value).context("invalid channel_id")?))
+    Ok(ChannelId(
+        uuid::Uuid::parse_str(&ch.value).context("invalid channel_id")?,
+    ))
 }
 
 fn now_ts() -> pb::Timestamp {
@@ -458,7 +524,6 @@ fn now_ts() -> pb::Timestamp {
         .as_millis() as i64;
     pb::Timestamp { unix_millis: ms }
 }
-
 
 #[cfg(test)]
 mod tests {

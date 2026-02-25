@@ -20,6 +20,7 @@ pub enum PushEvent {
     Presence(pb::PresenceEvent),
     Chat(pb::ChatEvent),
     Moderation(pb::ModerationEvent),
+    ChannelCreated(pb::CreateChannelResponse),
     ServerHint(pb::ServerHint),
     Unknown(pb::ServerToClient),
 }
@@ -453,6 +454,9 @@ fn classify_push(msg: pb::ServerToClient) -> PushEvent {
         Some(pb::server_to_client::Payload::PresenceEvent(e)) => PushEvent::Presence(e),
         Some(pb::server_to_client::Payload::ChatEvent(e)) => PushEvent::Chat(e),
         Some(pb::server_to_client::Payload::ModerationEvent(e)) => PushEvent::Moderation(e),
+        Some(pb::server_to_client::Payload::CreateChannelResponse(cr)) => {
+            PushEvent::ChannelCreated(cr)
+        }
         Some(pb::server_to_client::Payload::ServerHint(h)) => PushEvent::ServerHint(h),
         _ => PushEvent::Unknown(msg),
     }

@@ -39,7 +39,7 @@ impl PushHub {
             let _ = entry.send(msg).await;
         }
     }
-    
+
     pub async fn send(&self, user: UserId, msg: pb::ServerToClient) {
         self.send_to(user, msg).await;
     }
@@ -48,6 +48,10 @@ impl PushHub {
         for u in users {
             self.send_to(*u, msg.clone()).await;
         }
+    }
+
+    pub fn connected_users(&self) -> Vec<UserId> {
+        self.inner.iter().map(|entry| *entry.key()).collect()
     }
 }
 
