@@ -1,5 +1,5 @@
 use std::{
-    collections::{hash_map::DefaultHasher, HashSet},
+    collections::hash_map::DefaultHasher,
     hash::{Hash, Hasher},
     sync::Arc,
 };
@@ -57,7 +57,10 @@ impl PushHub {
     }
 
     pub fn connected_users(&self) -> Vec<UserId> {
-        self.inner.iter().map(|entry| *entry.key()).collect()
+        self.inner
+            .iter()
+            .map(|entry| entry.key().0)
+            .collect()
     }
 }
 

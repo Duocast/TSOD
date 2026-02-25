@@ -119,7 +119,7 @@ impl Gateway {
         // Control stream writes are performed inline in this task.
 
         let (push_tx, mut push_rx) = mpsc::channel::<pb::ServerToClient>(1024);
-        self.push.register(user_id, push_tx);
+        self.push.register(user_id, &session_id, push_tx);
 
         // Register push + datagram
         self.sessions
@@ -410,7 +410,7 @@ impl Gateway {
             }
         }
 
-        self.push.unregister(user_id);
+        self.push.unregister(user_id, &session_id);
         self.sessions.unregister(user_id);
 
         Ok(())
