@@ -1349,19 +1349,10 @@ fn page_security(ui: &mut egui::Ui, s: &mut AppSettings) -> bool {
     let mut dirty = false;
 
     section(ui, "Identity");
-
-    ui.horizontal(|ui: &mut egui::Ui| {
-        ui.label("Nickname:");
-        let prev = s.identity_nickname.clone();
-        ui.add(
-            egui::TextEdit::singleline(&mut s.identity_nickname)
-                .desired_width(200.0)
-                .hint_text("Your display name"),
-        );
-        if s.identity_nickname != prev {
-            dirty = true;
-        }
-    });
+    hint(
+        ui,
+        "Nickname is configured from the Connections window and used when connecting/joining channels.",
+    );
 
     section(ui, "Connection");
 

@@ -413,7 +413,10 @@ impl Gateway {
             _ => return Err(anyhow!("expected AuthRequest as second message")),
         };
 
-        let identity = self.auth.authenticate(&auth_req).context("auth failed")?;
+        let mut identity = self.auth.authenticate(&auth_req).context("auth failed")?;
+        if let Some(preferred) = normalize_preferred_display_name(&auth_req.preferred_display_name) {
+            identity.display_name = preferred;
+        }
 
         let auth_resp = pb::AuthResponse {
             user_id: Some(pb::UserId { value: identity.user_id.clone() }),
@@ -434,6 +437,15 @@ impl Gateway {
     }
 }
 
+
+fn normalize_preferred_display_name(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.chars().take(64).collect())
+}
+
 fn parse_channel_id(ch: Option<&pb::ChannelId>) -> Result<ChannelId> {
     let ch = ch.ok_or_else(|| anyhow!("channel_id missing"))?;
     Ok(ChannelId(uuid::Uuid::parse_str(&ch.value).context("invalid channel_id")?))
@@ -445,4 +457,23 @@ fn now_ts() -> pb::Timestamp {
         .unwrap_or_default()
         .as_millis() as i64;
     pb::Timestamp { unix_millis: ms }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_preferred_display_name;
+
+    #[test]
+    fn preferred_display_name_is_trimmed_and_limited() {
+        assert_eq!(normalize_preferred_display_name("   "), None);
+        assert_eq!(
+            normalize_preferred_display_name("  Overdose  "),
+            Some("Overdose".to_string())
+        );
+
+        let long = "x".repeat(80);
+        let normalized = normalize_preferred_display_name(&long).unwrap();
+        assert_eq!(normalized.len(), 64);
+    }
 }

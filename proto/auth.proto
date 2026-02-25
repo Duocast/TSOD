@@ -27,6 +27,10 @@ message HelloAck {
 }
 
 message AuthRequest {
+  // Optional nickname to use for channel membership display name.
+  // If unset, server falls back to auth-provider display name.
+  string preferred_display_name = 3;
+
   oneof method {
     DevTokenAuth dev_token = 1;
     OidcTokenAuth oidc_token = 2;

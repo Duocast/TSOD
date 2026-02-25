@@ -149,6 +149,10 @@ async fn app_task(
 
     // Load persisted settings and send to UI
     let saved_settings = settings_io::load_settings();
+    if !saved_settings.identity_nickname.trim().is_empty() {
+        cfg.display_name = saved_settings.identity_nickname.trim().to_string();
+        let _ = tx_event.send(UiEvent::SetNick(cfg.display_name.clone()));
+    }
     let _ = tx_event.send(UiEvent::SettingsLoaded(Box::new(saved_settings.clone())));
 
     // Audio constants
@@ -268,9 +272,15 @@ async fn app_task(
                             UiIntent::SaveSettings(ref settings) => {
                                 let _ = settings_io::save_settings(settings);
                             }
-                            UiIntent::ConnectToServer { host, port } => {
+                            UiIntent::ConnectToServer {
+                                host,
+                                port,
+                                nickname,
+                            } => {
                                 cfg.server = format!("{host}:{port}");
                                 cfg.server_name = host.clone();
+                                cfg.display_name = nickname.clone();
+                                let _ = tx_event.send(UiEvent::SetNick(nickname.clone()));
                                 let _ = tx_event.send(UiEvent::SetServerAddress { host, port });
                                 let _ = tx_event.send(UiEvent::AppendLog(format!(
                                     "[net] target server updated: {}",
@@ -351,7 +361,7 @@ async fn connect_and_run_session(
     let dispatcher = ControlDispatcher::start(send, recv, shutdown_rx.clone());
 
     let auth_info = dispatcher
-        .hello_auth(&cfg.alpn, &cfg.dev_token)
+        .hello_auth(&cfg.alpn, &cfg.dev_token, &cfg.display_name)
         .await
         .context("hello/auth")?;
 
@@ -610,7 +620,10 @@ async fn connect_and_run_session(
                 while let Ok(intent) = rx_intent.try_recv() {
                     match intent {
                         UiIntent::Quit => return Ok(()),
-                        UiIntent::ConnectToServer { host, port } => {
+                        UiIntent::ConnectToServer { host, port, nickname } => {
+                            cfg.display_name = nickname.clone();
+                            let _ = tx_event.send(UiEvent::SetNick(nickname));
+
                             let new_server = format!("{host}:{port}");
                             if cfg.server != new_server {
                                 cfg.server = new_server.clone();

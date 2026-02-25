@@ -276,6 +276,19 @@ impl eframe::App for VpApp {
                             egui::TextEdit::singleline(&mut self.model.connection_port_draft),
                         );
                     });
+                    ui.horizontal(|ui| {
+                        ui.label("Nickname");
+                        ui.add_sized(
+                            [ui.available_width() - 70.0, 24.0],
+                            egui::TextEdit::singleline(&mut self.model.connection_nickname_draft)
+                                .hint_text("Nickname used when connecting/joining channels"),
+                        );
+                    });
+                    ui.label(
+                        egui::RichText::new("Nickname used when connecting/joining channels")
+                            .small()
+                            .color(theme::text_muted()),
+                    );
 
                     if !self.model.connection_error.is_empty() {
                         ui.colored_label(theme::COLOR_DANGER, &self.model.connection_error);
@@ -285,14 +298,25 @@ impl eframe::App for VpApp {
                     if ui.button("Connect").clicked() {
                         let host = self.model.connection_host_draft.trim().to_string();
                         let port_text = self.model.connection_port_draft.trim();
+                        let nickname = self.model.connection_nickname_draft.trim().to_string();
 
                         if host.is_empty() {
                             self.model.connection_error = "Host/IP cannot be empty.".to_string();
+                        } else if nickname.is_empty() {
+                            self.model.connection_error = "Nickname cannot be empty.".to_string();
                         } else if let Ok(port) = port_text.parse::<u16>() {
                             self.model.connection_error.clear();
-                            let _ = self
-                                .tx_intent
-                                .send(UiIntent::ConnectToServer { host, port });
+                            self.model.settings.identity_nickname = nickname.clone();
+                            self.model.settings_draft.identity_nickname = nickname.clone();
+                            let _ = crate::settings_io::save_settings(&self.model.settings);
+                            let _ = self.tx_intent.send(UiIntent::SaveSettings(Box::new(
+                                self.model.settings.clone(),
+                            )));
+                            let _ = self.tx_intent.send(UiIntent::ConnectToServer {
+                                host,
+                                port,
+                                nickname,
+                            });
                         } else {
                             self.model.connection_error =
                                 "Port must be a number between 1 and 65535.".to_string();
