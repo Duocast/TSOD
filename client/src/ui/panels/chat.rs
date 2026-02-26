@@ -158,18 +158,21 @@ fn handle_drag_and_drop(
         (
             i.raw.hovered_files.clone(),
             i.raw.dropped_files.clone(),
-            i.pointer.hover_pos(),
+            i.pointer.hover_pos().or_else(|| i.pointer.latest_pos()),
         )
     });
 
     // Check if pointer is inside the chat panel area
     let pointer_in_chat = pointer_pos.is_some_and(|pos| chat_rect.contains(pos));
+    let was_drag_hovering = model.drag_hovering;
 
     // Update hover state: files hovering AND pointer over chat panel
     model.drag_hovering = !hovered_files.is_empty() && pointer_in_chat;
 
     // Process dropped files
-    if !dropped_files.is_empty() && pointer_in_chat {
+    let drop_targeted_chat = pointer_in_chat || (!dropped_files.is_empty() && was_drag_hovering);
+
+    if !dropped_files.is_empty() && drop_targeted_chat {
         // Set overlay hold timer (visible briefly after drop)
         model.drag_overlay_until =
             Some(Instant::now() + Duration::from_millis(OVERLAY_HOLD_MS + OVERLAY_FADE_MS));
@@ -252,10 +255,8 @@ fn show_drag_overlay(ui: &mut egui::Ui, model: &mut UiModel, chat_rect: egui::Re
     // Center card dimensions
     let card_width = 360.0_f32.min(chat_rect.width() - 40.0);
     let card_height = 200.0;
-    let card_rect = egui::Rect::from_center_size(
-        chat_rect.center(),
-        egui::vec2(card_width, card_height),
-    );
+    let card_rect =
+        egui::Rect::from_center_size(chat_rect.center(), egui::vec2(card_width, card_height));
 
     // Card background
     let card_bg = egui::Color32::from_rgba_premultiplied(
@@ -406,7 +407,11 @@ fn draw_dashed_rect(
                 std::f32::consts::FRAC_PI_2 * 3.0,
             ),
             2 => (rect.right() - r, rect.bottom() - r, 0.0),
-            _ => (rect.left() + r, rect.bottom() - r, std::f32::consts::FRAC_PI_2),
+            _ => (
+                rect.left() + r,
+                rect.bottom() - r,
+                std::f32::consts::FRAC_PI_2,
+            ),
         };
         let angle_step = std::f32::consts::FRAC_PI_2 / segments as f32;
         for s in (0..segments).step_by(2) {
@@ -545,29 +550,26 @@ fn show_attachment_preview_strip(ui: &mut egui::Ui, model: &mut UiModel) {
                                     );
 
                                     ui.label(
-                                        egui::RichText::new(truncate_filename(
-                                            &file.filename,
-                                            16,
-                                        ))
-                                        .small()
-                                        .color(if has_error {
-                                            theme::COLOR_DANGER
-                                        } else {
-                                            theme::text_color()
-                                        }),
+                                        egui::RichText::new(truncate_filename(&file.filename, 16))
+                                            .small()
+                                            .color(if has_error {
+                                                theme::COLOR_DANGER
+                                            } else {
+                                                theme::text_color()
+                                            }),
                                     );
 
                                     let detail = file
                                         .error
                                         .clone()
                                         .unwrap_or_else(|| format_size(file.size_bytes));
-                                    ui.label(
-                                        egui::RichText::new(detail).small().color(if has_error {
+                                    ui.label(egui::RichText::new(detail).small().color(
+                                        if has_error {
                                             theme::COLOR_DANGER
                                         } else {
                                             theme::text_muted()
-                                        }),
-                                    );
+                                        },
+                                    ));
 
                                     ui.horizontal(|ui: &mut egui::Ui| {
                                         if ui
@@ -671,12 +673,7 @@ fn detect_mime_type(path: &Path, raw_mime: &str) -> String {
     .to_string()
 }
 
-fn show_message(
-    ui: &mut egui::Ui,
-    msg: &ChatMessage,
-    grouped: bool,
-    tx_intent: &Sender<UiIntent>,
-) {
+fn show_message(ui: &mut egui::Ui, msg: &ChatMessage, grouped: bool, tx_intent: &Sender<UiIntent>) {
     ui.horizontal(|ui| {
         if !grouped {
             // Full message with author + timestamp
@@ -1008,10 +1005,8 @@ fn show_notifications(ui: &mut egui::Ui, model: &UiModel) {
             crate::ui::model::NotificationKind::Info => theme::COLOR_ACCENT,
         };
 
-        let notif_rect = egui::Rect::from_min_size(
-            egui::pos2(rect.right() - 300.0, y),
-            egui::vec2(280.0, 30.0),
-        );
+        let notif_rect =
+            egui::Rect::from_min_size(egui::pos2(rect.right() - 300.0, y), egui::vec2(280.0, 30.0));
         ui.painter()
             .rect_filled(notif_rect, 6.0, color.linear_multiply(0.9));
         ui.painter().text(
