@@ -115,6 +115,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                                 ui,
                                 &mut model.settings_draft,
                                 &model.output_devices,
+                                &model.playback_modes,
                                 model.connected,
                                 tx_intent,
                             ),
@@ -661,6 +662,7 @@ fn page_playback(
     ui: &mut egui::Ui,
     s: &mut AppSettings,
     output_devices: &[String],
+    playback_modes: &[String],
     connected: bool,
     tx_intent: &Sender<UiIntent>,
 ) -> bool {
@@ -702,6 +704,32 @@ fn page_playback(
     hint(
         ui,
         &format!("{} output device(s) detected", output_devices.len()),
+    );
+
+    ui.horizontal(|ui: &mut egui::Ui| {
+        ui.label("Playback Mode:");
+        egui::ComboBox::from_id_salt("playback_mode")
+            .selected_text(&s.playback_mode)
+            .width(300.0)
+            .show_ui(ui, |ui: &mut egui::Ui| {
+                let mut changed = false;
+                for mode in playback_modes {
+                    if ui
+                        .selectable_value(&mut s.playback_mode, mode.clone(), mode.as_str())
+                        .changed()
+                    {
+                        changed = true;
+                    }
+                }
+                if changed {
+                    dirty = true;
+                    let _ = tx_intent.send(UiIntent::SetPlaybackMode(s.playback_mode.clone()));
+                }
+            });
+    });
+    hint(
+        ui,
+        "Playback mode options are detected automatically for this client.",
     );
 
     section(ui, "Volume");

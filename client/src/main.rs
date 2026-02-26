@@ -284,9 +284,11 @@ async fn app_task(
     // Enumerate and report audio devices to the UI
     let input_devices = audio::capture::enumerate_input_devices();
     let output_devices = audio::playout::enumerate_output_devices();
+    let playback_modes = audio::playout::enumerate_playback_modes();
     let _ = tx_event.send(UiEvent::SetAudioDevices {
         input_devices,
         output_devices,
+        playback_modes,
     });
 
     // Load persisted settings and send to UI
@@ -319,6 +321,7 @@ async fn app_task(
     let selected_audio = Arc::new(Mutex::new(AudioSelection {
         input_device: normalize_device_name(&saved_settings.capture_device),
         output_device: normalize_device_name(&saved_settings.playback_device),
+        playback_mode: normalize_playback_mode(&saved_settings.playback_mode),
     }));
 
     // Audio pipeline
@@ -342,6 +345,7 @@ async fn app_task(
         sample_rate,
         channels,
         initial_selection.output_device.as_deref(),
+        initial_selection.playback_mode.as_deref(),
     )?)));
 
     // DSP pipeline
@@ -537,6 +541,28 @@ async fn app_task(
                                     "Connection attempt cancelled",
                                 );
                             }
+                            UiIntent::SetPlaybackMode(mode) => {
+                                {
+                                    let mut state = selected_audio.lock().await;
+                                    state.playback_mode = normalize_playback_mode(&mode);
+                                }
+
+                                if let Err(e) = restart_audio_streams(
+                                    &capture,
+                                    &playout,
+                                    &selected_audio,
+                                    tx_event,
+                                    sample_rate,
+                                    channels,
+                                    frame_ms,
+                                )
+                                .await
+                                {
+                                    let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                        "[audio] failed to switch playback mode: {e:#}"
+                                    )));
+                                }
+                            }
                             UiIntent::SetAwayMessage { message } => {
                                 let _ = tx_event.send(UiEvent::SetAwayMessage(message.clone()));
                                 let text = if message.trim().is_empty() {
@@ -705,11 +731,21 @@ fn choose_initial_selected_channel(
 struct AudioSelection {
     input_device: Option<String>,
     output_device: Option<String>,
+    playback_mode: Option<String>,
 }
 
 fn normalize_device_name(name: &str) -> Option<String> {
     let trimmed = name.trim();
     if trimmed.is_empty() || trimmed == "(system default)" {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn normalize_playback_mode(mode: &str) -> Option<String> {
+    let trimmed = mode.trim();
+    if trimmed.is_empty() || trimmed == audio::playout::PLAYBACK_MODE_AUTO {
         None
     } else {
         Some(trimmed.to_string())
@@ -740,14 +776,20 @@ fn start_playout_with_fallback(
     sample_rate: u32,
     channels: u16,
     preferred_device: Option<&str>,
+    preferred_mode: Option<&str>,
 ) -> Result<audio::playout::Playout> {
     if let Some(device) = preferred_device {
-        match audio::playout::Playout::start_with_device(sample_rate, channels, Some(device)) {
+        match audio::playout::Playout::start_with_mode(
+            sample_rate,
+            channels,
+            Some(device),
+            preferred_mode,
+        ) {
             Ok(playout) => return Ok(playout),
             Err(_) => {}
         }
     }
-    audio::playout::Playout::start_with_device(sample_rate, channels, None)
+    audio::playout::Playout::start_with_mode(sample_rate, channels, None, preferred_mode)
 }
 
 async fn restart_audio_streams(
@@ -762,11 +804,13 @@ async fn restart_audio_streams(
     let selected = selection.lock().await.clone();
     let preferred_input = selected.input_device.as_deref();
     let preferred_output = selected.output_device.as_deref();
+    let preferred_mode = selected.playback_mode.as_deref();
 
     let new_capture = start_capture_with_fallback(sample_rate, channels, frame_ms, preferred_input)
         .context("restart capture")?;
-    let new_playout = start_playout_with_fallback(sample_rate, channels, preferred_output)
-        .context("restart playout")?;
+    let new_playout =
+        start_playout_with_fallback(sample_rate, channels, preferred_output, preferred_mode)
+            .context("restart playout")?;
 
     {
         let mut cap = capture.write().await;
@@ -778,7 +822,7 @@ async fn restart_audio_streams(
     }
 
     let _ = tx_event.send(UiEvent::AppendLog(format!(
-        "[audio] streams restarted (input={}, output={})",
+        "[audio] streams restarted (input={}, output={}, mode={})",
         selected
             .input_device
             .as_deref()
@@ -786,7 +830,11 @@ async fn restart_audio_streams(
         selected
             .output_device
             .as_deref()
-            .unwrap_or("(system default)")
+            .unwrap_or("(system default)"),
+        selected
+            .playback_mode
+            .as_deref()
+            .unwrap_or(audio::playout::PLAYBACK_MODE_AUTO)
     )));
 
     Ok(())
@@ -1779,6 +1827,28 @@ async fn connect_and_run_session(
                                 )));
                             }
                         }
+                        UiIntent::SetPlaybackMode(mode) => {
+                            {
+                                let mut state = selected_audio.lock().await;
+                                state.playback_mode = normalize_playback_mode(&mode);
+                            }
+
+                            if let Err(e) = restart_audio_streams(
+                                &capture,
+                                &playout,
+                                &selected_audio,
+                                tx_event,
+                                sample_rate,
+                                channels,
+                                frame_ms,
+                            )
+                            .await
+                            {
+                                let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                    "[audio] failed to switch playback mode: {e:#}"
+                                )));
+                            }
+                        }
                         UiIntent::SetAwayMessage { message } => {
                             let _ = tx_event.send(UiEvent::SetAwayMessage(message.clone()));
                             match dispatcher.set_away_message(&message).await {
@@ -1845,6 +1915,7 @@ async fn connect_and_run_session(
                                 let mut state = selected_audio.lock().await;
                                 state.input_device = normalize_device_name(&settings.capture_device);
                                 state.output_device = normalize_device_name(&settings.playback_device);
+                                state.playback_mode = normalize_playback_mode(&settings.playback_mode);
                             }
 
                             if let Err(e) = restart_audio_streams(
