@@ -420,6 +420,7 @@ async fn app_task(
             per_user_audio.clone(),
             loopback_active.clone(),
             session_voice_active.clone(),
+            voice_counters.clone(),
             audio_runtime.clone(),
             sample_rate,
             channels,
