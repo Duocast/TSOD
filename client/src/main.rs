@@ -40,7 +40,7 @@ use tokio::sync::{watch, Mutex, RwLock};
 use tokio::time::{sleep, Duration, Instant};
 use tracing::{debug, warn, Level};
 use tracing_subscriber::EnvFilter;
-use ui::model::FecMode;
+use ui::model::{FecMode, PerUserAudioSettings};
 use ui::{UiEvent, UiIntent, VpApp};
 
 #[cfg(debug_assertions)]
@@ -336,6 +336,9 @@ async fn app_task(
     // Shared gain values (stored as u32 bits of f32, default 1.0)
     let input_gain = Arc::new(std::sync::atomic::AtomicU32::new(f32_to_u32(1.0)));
     let output_gain = Arc::new(std::sync::atomic::AtomicU32::new(f32_to_u32(1.0)));
+    let per_user_audio = Arc::new(std::sync::RwLock::new(
+        saved_settings.per_user_audio.clone(),
+    ));
     let loopback_active = Arc::new(AtomicBool::new(false));
     let session_voice_active = Arc::new(AtomicBool::new(false));
     let active_voice_channel_route = Arc::new(AtomicU32::new(0));
@@ -369,6 +372,7 @@ async fn app_task(
             self_deafened.clone(),
             input_gain.clone(),
             output_gain.clone(),
+            per_user_audio.clone(),
             loopback_active.clone(),
             session_voice_active.clone(),
             audio_runtime.clone(),
@@ -763,6 +767,7 @@ async fn connect_and_run_session(
     self_deafened: Arc<AtomicBool>,
     input_gain: Arc<std::sync::atomic::AtomicU32>,
     output_gain: Arc<std::sync::atomic::AtomicU32>,
+    per_user_audio: Arc<std::sync::RwLock<HashMap<String, PerUserAudioSettings>>>,
     loopback_active: Arc<AtomicBool>,
     session_voice_active: Arc<AtomicBool>,
     audio_runtime: AudioRuntimeSettings,
@@ -1270,6 +1275,7 @@ async fn connect_and_run_session(
         capture_dsp.clone(),
         self_deafened.clone(),
         output_gain.clone(),
+        per_user_audio.clone(),
         audio_runtime.clone(),
         tx_event.clone(),
         voice_die_tx.clone(),
@@ -1597,6 +1603,16 @@ async fn connect_and_run_session(
                         UiIntent::SetOutputGain(gain) => {
                             output_gain.store(f32_to_u32(gain), Ordering::Relaxed);
                         }
+                        UiIntent::SetUserOutputGain { user_id, gain } => {
+                            if let Ok(mut per_user) = per_user_audio.write() {
+                                per_user.entry(user_id).or_default().gain = gain.clamp(0.0, 2.0);
+                            }
+                        }
+                        UiIntent::SetUserLocalMute { user_id, muted } => {
+                            if let Ok(mut per_user) = per_user_audio.write() {
+                                per_user.entry(user_id).or_default().muted = muted;
+                            }
+                        }
                         UiIntent::ToggleLoopback => {
                             let new = !loopback_active.load(Ordering::Relaxed);
                             loopback_active.store(new, Ordering::Relaxed);
@@ -1693,6 +1709,9 @@ async fn connect_and_run_session(
                             }
                             input_gain.store(f32_to_u32(settings.input_gain), Ordering::Relaxed);
                             output_gain.store(f32_to_u32(settings.output_gain), Ordering::Relaxed);
+                            if let Ok(mut per_user) = per_user_audio.write() {
+                                *per_user = settings.per_user_audio.clone();
+                            }
                             audio_runtime.apply(settings);
                             {
                                 let mut enc = encoder.lock().await;
@@ -2031,6 +2050,7 @@ async fn voice_recv_loop(
     capture_dsp: Option<Arc<Mutex<audio::dsp::CaptureDsp>>>,
     self_deafened: Arc<AtomicBool>,
     output_gain: Arc<std::sync::atomic::AtomicU32>,
+    per_user_audio: Arc<std::sync::RwLock<HashMap<String, PerUserAudioSettings>>>,
     audio_runtime: AudioRuntimeSettings,
     tx_event: Sender<UiEvent>,
     voice_die_tx: watch::Sender<bool>,
@@ -2118,7 +2138,7 @@ async fn voice_recv_loop(
                                 frame_present = true;
                                 stream.plc_frames = 0;
                                 for (acc, sample) in mix_out[..n].iter_mut().zip(stream.pcm_out[..n].iter()) {
-                                    let scaled = *sample as f32 * stream.gain;
+                                    let scaled = *sample as f32 * stream.effective_gain(&per_user_audio);
                                     frame_level = frame_level.max((scaled.abs() / 32768.0).min(1.0));
                                     *acc += scaled;
                                 }
@@ -2144,7 +2164,7 @@ async fn voice_recv_loop(
                                 stream.plc_frames += 1;
                                 frame_present = true;
                                 for (acc, sample) in mix_out[..n].iter_mut().zip(stream.pcm_out[..n].iter()) {
-                                    let scaled = *sample as f32 * stream.gain;
+                                    let scaled = *sample as f32 * stream.effective_gain(&per_user_audio);
                                     frame_level = frame_level.max((scaled.abs() / 32768.0).min(1.0));
                                     *acc += scaled;
                                 }
@@ -2164,7 +2184,7 @@ async fn voice_recv_loop(
                                     stream.plc_frames += 1;
                                     frame_present = true;
                                     for (acc, sample) in mix_out[..n].iter_mut().zip(stream.pcm_out[..n].iter()) {
-                                        let scaled = *sample as f32 * stream.gain;
+                                        let scaled = *sample as f32 * stream.effective_gain(&per_user_audio);
                                         frame_level = frame_level.max((scaled.abs() / 32768.0).min(1.0));
                                         *acc += scaled;
                                     }
@@ -2286,7 +2306,6 @@ struct InboundStreamState {
     decoder: audio::opus::OpusDecoder,
     pcm_out: Vec<i16>,
     user_id: Option<String>,
-    gain: f32,
     level: f32,
     last_packet_ts_ms: u32,
     last_packet_wall_ms: u64,
@@ -2305,7 +2324,6 @@ impl InboundStreamState {
                 .expect("inbound opus decoder init"),
             pcm_out: vec![0i16; frame_samples],
             user_id: None,
-            gain: 1.0,
             level: 0.0,
             last_packet_ts_ms: 0,
             last_packet_wall_ms: 0,
@@ -2313,6 +2331,30 @@ impl InboundStreamState {
             plc_frames: 0,
             speaking: false,
         }
+    }
+}
+
+impl InboundStreamState {
+    fn effective_gain(
+        &self,
+        per_user_audio: &std::sync::RwLock<HashMap<String, PerUserAudioSettings>>,
+    ) -> f32 {
+        let Some(user_id) = self.user_id.as_ref() else {
+            return 1.0;
+        };
+        let Ok(per_user) = per_user_audio.read() else {
+            return 1.0;
+        };
+        per_user
+            .get(user_id)
+            .map(|settings| {
+                if settings.muted {
+                    0.0
+                } else {
+                    settings.gain.clamp(0.0, 2.0)
+                }
+            })
+            .unwrap_or(1.0)
     }
 }
 
