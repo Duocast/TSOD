@@ -1,15 +1,26 @@
 //! Acoustic Echo Cancellation (AEC) using `sonora-aec3`.
 
 use anyhow::Result;
+use sonora_aec3::block::Block;
+use sonora_aec3::block_framer::BlockFramer;
 use sonora_aec3::block_processor::BlockProcessor;
 use sonora_aec3::config::EchoCanceller3Config;
+use sonora_aec3::frame_blocker::FrameBlocker;
+use std::collections::VecDeque;
 
-const TEN_MS_AT_48K: usize = 480;
+const INTERNAL_SAMPLE_RATE: u32 = 16_000;
+const SUBFRAME_SAMPLES_16K: usize = 80;
+const SUBFRAME_SAMPLES_48K: usize = SUBFRAME_SAMPLES_16K * 3;
 
 pub struct Aec {
     inner: BlockProcessor,
-    render_buf: Vec<i16>,
-    capture_buf: Vec<i16>,
+    render_in: VecDeque<i16>,
+    capture_in: VecDeque<i16>,
+    capture_out: VecDeque<i16>,
+    render_blocker: FrameBlocker,
+    capture_blocker: FrameBlocker,
+    capture_framer: BlockFramer,
+    capture_framer_seeded: bool,
 }
 
 impl Aec {
@@ -17,41 +28,90 @@ impl Aec {
         anyhow::ensure!(sample_rate == 48_000, "AEC requires 48kHz audio");
 
         let config = EchoCanceller3Config::default();
-        let inner = BlockProcessor::new(&config, sample_rate as usize, 1, 1);
+        let inner = BlockProcessor::new(&config, INTERNAL_SAMPLE_RATE as usize, 1, 1);
 
         Ok(Self {
             inner,
-            render_buf: Vec::with_capacity(TEN_MS_AT_48K),
-            capture_buf: Vec::with_capacity(TEN_MS_AT_48K),
+            render_in: VecDeque::with_capacity(6 * SUBFRAME_SAMPLES_48K),
+            capture_in: VecDeque::with_capacity(6 * SUBFRAME_SAMPLES_48K),
+            capture_out: VecDeque::with_capacity(6 * SUBFRAME_SAMPLES_48K),
+            render_blocker: FrameBlocker::new(1, 1),
+            capture_blocker: FrameBlocker::new(1, 1),
+            capture_framer: BlockFramer::new(1, 1),
+            capture_framer_seeded: false,
         })
     }
 
     pub fn feed_reference(&mut self, reference: &[i16]) {
-        self.render_buf.extend_from_slice(reference);
-        while self.render_buf.len() >= TEN_MS_AT_48K {
-            let _frame: Vec<i16> = self.render_buf.drain(..TEN_MS_AT_48K).collect();
-            // TODO: convert frame to Block and inner.buffer_render
+        self.render_in.extend(reference.iter().copied());
+        while self.render_in.len() >= SUBFRAME_SAMPLES_48K {
+            let subframe_16k = Self::pop_and_downsample_48k_to_16k(&mut self.render_in);
+            let mut block = Block::new(1, 1);
+            let subframe_view = vec![vec![subframe_16k.as_slice()]];
+            self.render_blocker
+                .insert_sub_frame_and_extract_block(&subframe_view, &mut block);
+            self.inner.buffer_render(&block);
+
+            if self.render_blocker.is_block_available() {
+                let mut extra = Block::new(1, 1);
+                self.render_blocker.extract_block(&mut extra);
+                self.inner.buffer_render(&extra);
+            }
         }
     }
 
     pub fn process(&mut self, capture: &mut [i16]) {
-        self.capture_buf.extend_from_slice(capture);
-        let mut out = Vec::with_capacity(self.capture_buf.len());
+        let original = capture.to_vec();
+        self.capture_in.extend(capture.iter().copied());
 
-        while self.capture_buf.len() >= TEN_MS_AT_48K {
-            let frame: Vec<i16> = self.capture_buf.drain(..TEN_MS_AT_48K).collect();
-            // TODO: convert to Block, process, convert back
-            out.extend(frame);
+        while self.capture_in.len() >= SUBFRAME_SAMPLES_48K {
+            let subframe_16k = Self::pop_and_downsample_48k_to_16k(&mut self.capture_in);
+            let mut block = Block::new(1, 1);
+            let subframe_view = vec![vec![subframe_16k.as_slice()]];
+            self.capture_blocker
+                .insert_sub_frame_and_extract_block(&subframe_view, &mut block);
+            self.inner.process_capture(false, false, None, &mut block);
+            self.push_capture_block(block);
+
+            if self.capture_blocker.is_block_available() {
+                let mut extra = Block::new(1, 1);
+                self.capture_blocker.extract_block(&mut extra);
+                self.inner.process_capture(false, false, None, &mut extra);
+                self.push_capture_block(extra);
+            }
         }
 
-        let tail = self.capture_buf.len();
-        if tail > 0 {
-            let start = capture.len().saturating_sub(tail);
-            out.extend_from_slice(&capture[start..]);
+        for (idx, sample) in capture.iter_mut().enumerate() {
+            *sample = self.capture_out.pop_front().unwrap_or(original[idx]);
+        }
+    }
+
+    fn push_capture_block(&mut self, block: Block) {
+        if !self.capture_framer_seeded {
+            self.capture_framer.insert_block(&block);
+            self.capture_framer_seeded = true;
+            return;
         }
 
-        if out.len() == capture.len() {
-            capture.copy_from_slice(&out);
+        let mut framed = vec![vec![vec![0.0f32; SUBFRAME_SAMPLES_16K]; 1]; 1];
+        self.capture_framer
+            .insert_block_and_extract_sub_frame(&block, &mut framed);
+        for &s in &framed[0][0] {
+            let s16 = s.clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+            self.capture_out.push_back(s16);
+            self.capture_out.push_back(s16);
+            self.capture_out.push_back(s16);
         }
+    }
+
+    fn pop_and_downsample_48k_to_16k(queue: &mut VecDeque<i16>) -> Vec<f32> {
+        let mut out = Vec::with_capacity(SUBFRAME_SAMPLES_16K);
+        for _ in 0..SUBFRAME_SAMPLES_16K {
+            let a = queue.pop_front().unwrap_or_default() as i32;
+            let b = queue.pop_front().unwrap_or_default() as i32;
+            let c = queue.pop_front().unwrap_or_default() as i32;
+            out.push(((a + b + c) as f32) / 3.0);
+        }
+        out
     }
 }

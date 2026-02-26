@@ -501,6 +501,8 @@ fn page_capture(
         .changed()
     {
         dirty = true;
+        let _ = tx_intent.send(UiIntent::SetEchoCancellation(s.echo_cancellation));
+        let _ = tx_intent.send(UiIntent::SaveSettings(Box::new(s.clone())));
     }
     hint(
         ui,

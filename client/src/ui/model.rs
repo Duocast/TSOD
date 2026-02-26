@@ -238,6 +238,7 @@ pub enum UiIntent {
     // Settings: Audio
     SetNoiseSuppression(bool),
     SetAgcEnabled(bool),
+    SetEchoCancellation(bool),
     SetVadThreshold(f32),
     SetInputDevice(String),
     SetOutputDevice(String),
