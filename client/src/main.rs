@@ -1020,6 +1020,7 @@ async fn connect_and_run_session(
         capture_dsp.clone(),
         self_deafened.clone(),
         output_gain.clone(),
+        tx_event.clone(),
         voice_die_tx.clone(),
     ));
 
@@ -1650,94 +1651,165 @@ async fn voice_recv_loop(
     capture_dsp: Option<Arc<Mutex<audio::dsp::CaptureDsp>>>,
     self_deafened: Arc<AtomicBool>,
     output_gain: Arc<std::sync::atomic::AtomicU32>,
+    tx_event: Sender<UiEvent>,
     voice_die_tx: watch::Sender<bool>,
 ) {
+    const SPEAKING_HANGOVER_MS: u64 = 350;
+    const STREAM_IDLE_DROP_MS: u64 = 10_000;
+    const PLC_MAX_FRAMES: usize = 5;
+
     let sample_rate = 48_000u32;
     let channels = 1usize;
     let frame_ms = 20u32;
     let frame_samples = (sample_rate as usize * frame_ms as usize / 1000) * channels;
 
     let mut streams = HashMap::<StreamKey, InboundStreamState>::new();
+    let mut tick = tokio::time::interval(Duration::from_millis(frame_ms as u64));
 
     loop {
-        let d = match conn.read_datagram().await {
-            Ok(d) => d,
-            Err(_e) => {
-                let _ = voice_die_tx.send(true);
-                return;
-            }
-        };
-
-        if self_deafened.load(Ordering::Relaxed) {
-            continue;
-        }
-
-        let packet = match parse_voice_payload(&d) {
-            Some(v) => v,
-            None => continue,
-        };
-
-        let stream = streams
-            .entry(packet.stream_key())
-            .or_insert_with(|| InboundStreamState::new(sample_rate, channels as u8, 64));
-        if stream.last_ts_ms != 0 {
-            let gap = packet.ts_ms.wrapping_sub(stream.last_ts_ms);
-            if gap > 10_000 {
-                stream.jitter.set_expected(packet.seq);
-            }
-        }
-        stream.last_ts_ms = packet.ts_ms;
-        stream.jitter.push(packet.seq, packet.payload.to_vec());
-
-        let mut mix_out = vec![0i32; frame_samples];
-        let mut active_frames = 0usize;
-
-        for stream in streams.values_mut() {
-            let mut decoded_any = false;
-            while let Some(frame) = stream.jitter.pop_ready() {
-                let n = match stream.decoder.decode(&frame, &mut stream.pcm_out) {
-                    Ok(n) => n,
-                    Err(_) => continue,
+        tokio::select! {
+            datagram = conn.read_datagram() => {
+                let d = match datagram {
+                    Ok(d) => d,
+                    Err(_e) => {
+                        let _ = voice_die_tx.send(true);
+                        return;
+                    }
                 };
-                if n == 0 {
+
+                if self_deafened.load(Ordering::Relaxed) {
                     continue;
                 }
-                decoded_any = true;
-                active_frames += 1;
-                for (acc, sample) in mix_out[..n].iter_mut().zip(stream.pcm_out[..n].iter()) {
-                    *acc += *sample as i32;
+
+                let packet = match parse_voice_payload(&d) {
+                    Some(v) => v,
+                    None => continue,
+                };
+
+                let now_ms = unix_ms();
+                let stream = streams
+                    .entry(packet.stream_key())
+                    .or_insert_with(|| InboundStreamState::new(sample_rate, channels as u8, 64));
+                if stream.last_packet_ts_ms != 0 {
+                    let gap = packet.ts_ms.wrapping_sub(stream.last_packet_ts_ms);
+                    if gap > 10_000 {
+                        stream.jitter.set_expected(packet.seq);
+                    }
                 }
+                stream.last_packet_ts_ms = packet.ts_ms;
+                stream.last_packet_wall_ms = now_ms;
+                if let Some(user_id) = packet.sender_user_id {
+                    stream.user_id = Some(user_id.to_string());
+                }
+                stream.jitter.push(packet.seq, packet.payload.to_vec());
             }
-            stream.talk_active = decoded_any;
-        }
+            _ = tick.tick() => {
+                if self_deafened.load(Ordering::Relaxed) {
+                    continue;
+                }
 
-        streams.retain(|_, stream| {
-            let age = packet.ts_ms.wrapping_sub(stream.last_ts_ms);
-            stream.talk_active || age < 10_000
-        });
+                let now_ms = unix_ms();
+                let mut mix_out = vec![0f32; frame_samples];
+                let mut mixed_streams = 0usize;
 
-        if active_frames == 0 {
-            continue;
-        }
+                for stream in streams.values_mut() {
+                    let mut frame_present = false;
+                    let mut frame_level = 0.0_f32;
 
-        let mut mixed_pcm = vec![0i16; frame_samples];
-        for (dst, sample) in mixed_pcm.iter_mut().zip(mix_out.iter()) {
-            *dst = (*sample).clamp(-32768, 32767) as i16;
-        }
+                    if let Some(frame) = stream.jitter.pop_ready() {
+                        let n = match stream.decoder.decode(&frame, &mut stream.pcm_out) {
+                            Ok(n) => n,
+                            Err(_) => 0,
+                        };
+                        if n > 0 {
+                            frame_present = true;
+                            stream.last_good_pcm[..n].copy_from_slice(&stream.pcm_out[..n]);
+                            stream.plc_frames = 0;
+                            for (acc, sample) in mix_out[..n].iter_mut().zip(stream.pcm_out[..n].iter()) {
+                                let scaled = *sample as f32 * stream.gain;
+                                frame_level = frame_level.max((scaled.abs() / 32768.0).min(1.0));
+                                *acc += scaled;
+                            }
+                            mixed_streams += 1;
+                        }
+                    } else if stream.plc_frames < PLC_MAX_FRAMES && stream.last_packet_wall_ms != 0 {
+                        let since_packet = now_ms.saturating_sub(stream.last_packet_wall_ms);
+                        if since_packet <= (PLC_MAX_FRAMES as u64 * frame_ms as u64) {
+                            stream.plc_frames += 1;
+                            frame_present = true;
+                            for (acc, sample) in mix_out.iter_mut().zip(stream.last_good_pcm.iter()) {
+                                let scaled = *sample as f32 * stream.gain * 0.85;
+                                frame_level = frame_level.max((scaled.abs() / 32768.0).min(1.0));
+                                *acc += scaled;
+                            }
+                            mixed_streams += 1;
+                        }
+                    }
 
-        let gain = u32_to_f32(output_gain.load(Ordering::Relaxed));
-        if (gain - 1.0).abs() > 0.001 {
-            for s in mixed_pcm.iter_mut() {
-                *s = (*s as f32 * gain).clamp(-32768.0, 32767.0) as i16;
+                    if frame_present {
+                        stream.last_frame_wall_ms = now_ms;
+                        stream.speaking = true;
+                    }
+
+                    let speaking_now = now_ms.saturating_sub(stream.last_frame_wall_ms) <= SPEAKING_HANGOVER_MS;
+                    if speaking_now != stream.speaking {
+                        stream.speaking = speaking_now;
+                        if let Some(user_id) = stream.user_id.as_ref() {
+                            let _ = tx_event.send(UiEvent::VoiceActivity {
+                                user_id: user_id.clone(),
+                                speaking: speaking_now,
+                            });
+                        }
+                    }
+
+                    stream.level = if speaking_now { frame_level.max(stream.level * 0.75) } else { 0.0 };
+                    if let Some(user_id) = stream.user_id.as_ref() {
+                        let _ = tx_event.send(UiEvent::VoiceMeter {
+                            user_id: user_id.clone(),
+                            level: stream.level,
+                        });
+                    }
+                }
+
+                streams.retain(|_, stream| {
+                    let idle = now_ms.saturating_sub(stream.last_packet_wall_ms);
+                    if idle >= STREAM_IDLE_DROP_MS {
+                        if stream.speaking {
+                            if let Some(user_id) = stream.user_id.as_ref() {
+                                let _ = tx_event.send(UiEvent::VoiceActivity { user_id: user_id.clone(), speaking: false });
+                            }
+                        }
+                        return false;
+                    }
+                    true
+                });
+
+                if mixed_streams == 0 {
+                    continue;
+                }
+
+                let mut mixed_pcm = vec![0i16; frame_samples];
+                for (dst, sample) in mixed_pcm.iter_mut().zip(mix_out.iter()) {
+                    let x = *sample / 32768.0;
+                    let soft = (x / (1.0 + x.abs())).clamp(-1.0, 1.0);
+                    *dst = (soft * 32768.0) as i16;
+                }
+
+                let gain = u32_to_f32(output_gain.load(Ordering::Relaxed));
+                if (gain - 1.0).abs() > 0.001 {
+                    for s in mixed_pcm.iter_mut() {
+                        *s = (*s as f32 * gain).clamp(-32768.0, 32767.0) as i16;
+                    }
+                }
+
+                if let Some(ref dsp) = capture_dsp {
+                    let mut d = dsp.lock().await;
+                    d.feed_echo_reference(&mixed_pcm);
+                }
+
+                playout.push_pcm(&mixed_pcm);
             }
         }
-
-        if let Some(ref dsp) = capture_dsp {
-            let mut d = dsp.lock().await;
-            d.feed_echo_reference(&mixed_pcm);
-        }
-
-        playout.push_pcm(&mixed_pcm);
     }
 }
 
@@ -1745,8 +1817,15 @@ struct InboundStreamState {
     jitter: audio::jitter::JitterBuffer,
     decoder: audio::opus::OpusDecoder,
     pcm_out: Vec<i16>,
-    last_ts_ms: u32,
-    talk_active: bool,
+    last_good_pcm: Vec<i16>,
+    user_id: Option<String>,
+    gain: f32,
+    level: f32,
+    last_packet_ts_ms: u32,
+    last_packet_wall_ms: u64,
+    last_frame_wall_ms: u64,
+    plc_frames: usize,
+    speaking: bool,
 }
 
 impl InboundStreamState {
@@ -1758,8 +1837,15 @@ impl InboundStreamState {
             decoder: audio::opus::OpusDecoder::new(sample_rate, channels)
                 .expect("inbound opus decoder init"),
             pcm_out: vec![0i16; frame_samples],
-            last_ts_ms: 0,
-            talk_active: false,
+            last_good_pcm: vec![0i16; frame_samples],
+            user_id: None,
+            gain: 1.0,
+            level: 0.0,
+            last_packet_ts_ms: 0,
+            last_packet_wall_ms: 0,
+            last_frame_wall_ms: 0,
+            plc_frames: 0,
+            speaking: false,
         }
     }
 }

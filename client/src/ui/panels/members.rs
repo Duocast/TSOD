@@ -34,6 +34,12 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                 .copied()
                 .unwrap_or(false)
                 || member.speaking;
+            let voice_level = model
+                .voice_levels
+                .get(&member.user_id)
+                .copied()
+                .unwrap_or(0.0)
+                .clamp(0.0, 1.0);
             let row_height = ui.spacing().interact_size.y.max(36.0);
             let row_width = ui.available_width().max(1.0);
             let (row_rect, response) =
@@ -78,6 +84,32 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                     center,
                     radius + 2.0,
                     egui::Stroke::new(2.0, theme::COLOR_VOICE_ACTIVE),
+                );
+            }
+
+            let meter_width = 72.0;
+            let meter_height = 5.0;
+            let meter_bg = egui::Rect::from_min_size(
+                egui::pos2(
+                    row_rect.right() - meter_width - 8.0,
+                    row_rect.center().y - meter_height * 0.5,
+                ),
+                egui::vec2(meter_width, meter_height),
+            );
+            ui.painter()
+                .rect_filled(meter_bg, egui::Rounding::same(2.0), theme::bg_light());
+            if voice_level > 0.0 {
+                let meter_fg = egui::Rect::from_min_max(
+                    meter_bg.min,
+                    egui::pos2(
+                        meter_bg.min.x + meter_bg.width() * voice_level,
+                        meter_bg.max.y,
+                    ),
+                );
+                ui.painter().rect_filled(
+                    meter_fg,
+                    egui::Rounding::same(2.0),
+                    theme::COLOR_VOICE_ACTIVE,
                 );
             }
 

@@ -82,6 +82,10 @@ pub enum UiEvent {
         user_id: String,
         speaking: bool,
     },
+    VoiceMeter {
+        user_id: String,
+        level: f32,
+    },
 
     // Telemetry
     TelemetryUpdate(TelemetryData),
@@ -671,6 +675,7 @@ pub struct UiModel {
     // Members (keyed by channel_id, with each channel list deduped by user_id)
     pub members: HashMap<String, Vec<MemberEntry>>,
     pub speaking_users: HashMap<String, bool>,
+    pub voice_levels: HashMap<String, f32>,
 
     // Chat (keyed by channel_id)
     pub messages: HashMap<String, VecDeque<ChatMessage>>,
@@ -843,6 +848,7 @@ impl Default for UiModel {
             selected_channel_name: String::new(),
             members: HashMap::new(),
             speaking_users: HashMap::new(),
+            voice_levels: HashMap::new(),
             messages: HashMap::new(),
             chat_input: String::new(),
             chat_input_focused: false,
@@ -1148,6 +1154,9 @@ impl UiModel {
             UiEvent::MicTestWaveform(samples) => self.mic_test_waveform = samples,
             UiEvent::VoiceActivity { user_id, speaking } => {
                 self.speaking_users.insert(user_id, speaking);
+            }
+            UiEvent::VoiceMeter { user_id, level } => {
+                self.voice_levels.insert(user_id, level.clamp(0.0, 1.0));
             }
             UiEvent::TelemetryUpdate(t) => self.telemetry = t,
             UiEvent::PokeReceived { from_name, message } => {
