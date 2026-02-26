@@ -1996,6 +1996,7 @@ async fn voice_recv_loop(
     const SPEAKING_HANGOVER_MS: u64 = 350;
     const STREAM_IDLE_DROP_MS: u64 = 10_000;
     const PLC_MAX_FRAMES: usize = 5;
+    const JITTER_MISSING_WAIT_MS: u64 = 40;
 
     let sample_rate = 48_000u32;
     let channels = 1usize;
@@ -2055,7 +2056,11 @@ async fn voice_recv_loop(
                     let mut frame_present = false;
                     let mut frame_level = 0.0_f32;
 
-                    if let Some(frame) = stream.jitter.pop_ready() {
+                    let ready = stream
+                        .jitter
+                        .pop_ready(now_ms, JITTER_MISSING_WAIT_MS);
+
+                    if let audio::jitter::PopResult::Frame(frame) = ready {
                         let n = match stream.decoder.decode(&frame, &mut stream.pcm_out) {
                             Ok(n) => n,
                             Err(_) => 0,
@@ -2071,6 +2076,18 @@ async fn voice_recv_loop(
                             }
                             mixed_streams += 1;
                         }
+                    } else if matches!(ready, audio::jitter::PopResult::Missing)
+                        && stream.last_packet_wall_ms != 0
+                        && stream.plc_frames < PLC_MAX_FRAMES
+                    {
+                        stream.plc_frames += 1;
+                        frame_present = true;
+                        for (acc, sample) in mix_out.iter_mut().zip(stream.last_good_pcm.iter()) {
+                            let scaled = *sample as f32 * stream.gain * 0.85;
+                            frame_level = frame_level.max((scaled.abs() / 32768.0).min(1.0));
+                            *acc += scaled;
+                        }
+                        mixed_streams += 1;
                     } else if stream.plc_frames < PLC_MAX_FRAMES && stream.last_packet_wall_ms != 0 {
                         let since_packet = now_ms.saturating_sub(stream.last_packet_wall_ms);
                         if since_packet <= (PLC_MAX_FRAMES as u64 * frame_ms as u64) {
