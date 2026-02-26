@@ -536,13 +536,8 @@ fn json_attachments_to_pb(v: Value) -> Vec<pb::AttachmentRef> {
                 width: o.get("width").and_then(Value::as_u64).unwrap_or(0) as u32,
                 height: o.get("height").and_then(Value::as_u64).unwrap_or(0) as u32,
                 duration_ms: o.get("duration_ms").and_then(Value::as_u64).unwrap_or(0),
-                download_url: o
-                    .get("download_url")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string(),
-                thumbnail_url: o
-                    .get("thumbnail_url")
+                sha256: o
+                    .get("sha256")
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_string(),

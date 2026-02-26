@@ -26,6 +26,7 @@ fn main() {
         "videocall.proto",
         "encryption.proto",
         "dm.proto",
+        "media.proto",
         "control.proto",
     ];
 

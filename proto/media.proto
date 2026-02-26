@@ -1,0 +1,72 @@
+syntax = "proto3";
+
+package voiceplatform.v1;
+
+import "common.proto";
+
+message UploadInit {
+  ChannelId channel_id = 1;
+  string filename = 2;
+  string mime = 3;
+  uint64 size_bytes = 4;
+}
+
+message UploadReady {
+  AssetId attachment_id = 1;
+  uint32 max_chunk = 2;
+}
+
+message UploadComplete {
+  AssetId attachment_id = 1;
+  uint64 size_bytes = 2;
+  string sha256 = 3;
+  string mime = 4;
+  string filename = 5;
+}
+
+message DownloadRequest {
+  AssetId attachment_id = 1;
+}
+
+message DownloadMeta {
+  string mime = 1;
+  string filename = 2;
+  uint64 size_bytes = 3;
+  string sha256 = 4;
+  bool safe_inline = 5;
+}
+
+message ThumbRequest {
+  AssetId attachment_id = 1;
+  uint32 w = 2;
+  uint32 h = 3;
+  string mode = 4;
+  string format = 5;
+}
+
+message ThumbMeta {
+  string mime = 1;
+  uint64 size_bytes = 2;
+}
+
+message MediaError {
+  string message = 1;
+}
+
+message MediaRequest {
+  oneof payload {
+    UploadInit upload_init = 1;
+    DownloadRequest download_request = 2;
+    ThumbRequest thumb_request = 3;
+  }
+}
+
+message MediaResponse {
+  oneof payload {
+    UploadReady upload_ready = 1;
+    UploadComplete upload_complete = 2;
+    DownloadMeta download_meta = 3;
+    ThumbMeta thumb_meta = 4;
+    MediaError error = 100;
+  }
+}

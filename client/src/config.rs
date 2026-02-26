@@ -22,18 +22,9 @@ pub struct Config {
     #[arg(long, env = "VP_SERVER_NAME", default_value = "localhost")]
     pub server_name: String,
 
-    /// Path to CA certificate PEM for server validation.
-    /// If unset, uses insecure dev mode (accept any cert).
-    #[arg(long, env = "VP_CA_CERT_PEM")]
-    pub ca_cert_pem: Option<String>,
-
-    /// Base URL for attachment upload/download HTTP service.
-    #[arg(
-        long,
-        env = "VP_UPLOAD_BASE_URL",
-        default_value = "http://127.0.0.1:8081"
-    )]
-    pub upload_base_url: String,
+    /// Path to CA certificate PEM for server validation (required).
+    #[arg(long, env = "VP_CA_CERT_PEM", default_value = "")]
+    pub ca_cert_pem: String,
 
     /// Max upload size in MB (client-side precheck).
     #[arg(long, env = "VP_MAX_UPLOAD_MB", default_value_t = 25)]
@@ -59,8 +50,10 @@ pub struct Config {
 impl Config {
     pub fn load() -> Self {
         let mut cfg = Self::parse();
-        if cfg.ca_cert_pem.is_none() {
-            cfg.ca_cert_pem = find_local_ca_cert();
+        if cfg.ca_cert_pem.trim().is_empty() {
+            if let Some(path) = find_local_ca_cert() {
+                cfg.ca_cert_pem = path;
+            }
         }
         cfg
     }

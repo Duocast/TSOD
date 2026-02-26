@@ -21,6 +21,7 @@ fn main() {
         "chat.proto",
         "moderation.proto",
         "telemetry.proto",
+        "media.proto",
         "control.proto",
     ];
 
