@@ -109,15 +109,9 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
             } else {
                 ("Voice: not in voice channel", theme::text_muted())
             };
-            ui.label(
-                egui::RichText::new(voice_state.0)
-                    .size(11.0)
-                    .color(voice_state.1),
-            );
+            let btn_size = egui::vec2(26.0, 22.0);
 
-            ui.add_space(4.0);
-
-            // Bottom row: action buttons
+            // Keep voice status and controls on one row so controls remain visible.
             ui.horizontal(|ui: &mut egui::Ui| {
                 let btn_size = egui::vec2(30.0, 24.0);
 
