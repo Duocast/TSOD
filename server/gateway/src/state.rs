@@ -1,9 +1,4 @@
-use std::{
-    collections::hash_map::DefaultHasher,
-    collections::HashSet,
-    hash::{Hash, Hasher},
-    sync::Arc,
-};
+use std::{collections::HashSet, sync::Arc};
 
 use anyhow::Result;
 use bytes::Bytes;
@@ -70,9 +65,7 @@ impl PushHub {
 }
 
 pub fn channel_route_key(channel_id: ChannelId) -> u32 {
-    let mut h = DefaultHasher::new();
-    channel_id.0.hash(&mut h);
-    (h.finish() & 0xFFFF_FFFF) as u32
+    vp_route_hash::channel_route_hash(channel_id.0)
 }
 
 #[derive(Clone)]

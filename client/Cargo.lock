@@ -4931,6 +4931,14 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "vp-route-hash",
+]
+
+[[package]]
+name = "vp-route-hash"
+version = "0.1.0"
+dependencies = [
+ "uuid",
 ]
 
 [[package]]
