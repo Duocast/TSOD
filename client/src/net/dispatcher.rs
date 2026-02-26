@@ -688,7 +688,7 @@ fn default_caps(alpn: &str) -> pb::ClientCaps {
         }),
         features: Some(pb::FeatureCaps {
             supports_quic_datagrams: true,
-            supports_voice_fec: false,
+            supports_voice_fec: true,
             supports_streaming: false,
             supports_drag_drop_upload: true,
             supports_relay_mode: false,

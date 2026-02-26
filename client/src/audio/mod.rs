@@ -3,3 +3,4 @@ pub mod jitter;
 pub mod opus;
 pub mod playout;
 pub mod dsp;
+pub(crate) mod resample;

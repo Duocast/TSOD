@@ -67,6 +67,9 @@ async fn handle_record(
 ) -> Result<()> {
     let (channel_id, push) = translate_record(&rec)?;
 
+    // NOTE: For poke.received we resolve a single UserId. This is correct
+    // because PushHub::send fans out to *all* sessions for that user (see
+    // state.rs:send_to), so every connected session receives the notification.
     let recipients = if rec.topic == "poke.received" {
         vec![parse_user_id_field(&rec.payload_json, "target_user_id")?]
     } else if matches!(
