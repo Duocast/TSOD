@@ -14,6 +14,12 @@ pub struct JitterBuffer {
 }
 
 impl JitterBuffer {
+    #[inline]
+    fn seq_before(a: u32, b: u32) -> bool {
+        const HALF_RANGE: u32 = 1 << 31;
+        a != b && b.wrapping_sub(a) < HALF_RANGE
+    }
+
     pub fn new(max_frames: usize) -> Self {
         Self {
             max_frames,
@@ -24,6 +30,10 @@ impl JitterBuffer {
     }
 
     pub fn push(&mut self, seq: u32, payload: Vec<u8>) {
+        if Self::seq_before(seq, self.expected_seq) {
+            return;
+        }
+
         if self.buf.is_empty() {
             self.expected_seq = seq;
             self.expected_wait_started_ms = None;
@@ -39,6 +49,14 @@ impl JitterBuffer {
     }
 
     pub fn pop_ready(&mut self, now_ms: u64, max_wait_ms: u64) -> PopResult {
+        while let Some((&min_seq, _)) = self.buf.iter().next() {
+            if Self::seq_before(min_seq, self.expected_seq) {
+                self.buf.remove(&min_seq);
+                continue;
+            }
+            break;
+        }
+
         if let Some(p) = self.buf.remove(&self.expected_seq) {
             self.expected_seq = self.expected_seq.wrapping_add(1);
             self.expected_wait_started_ms = None;
@@ -54,7 +72,7 @@ impl JitterBuffer {
                 }
             };
 
-            if timed_out || min_seq != self.expected_seq {
+            if timed_out || min_seq > self.expected_seq {
                 self.expected_seq = self.expected_seq.wrapping_add(1);
                 self.expected_wait_started_ms = Some(now_ms);
                 return PopResult::Missing;
@@ -118,5 +136,31 @@ mod tests {
         assert!(matches!(jitter.pop_ready(1_010, 40), PopResult::Waiting));
         assert!(matches!(jitter.pop_ready(1_051, 40), PopResult::Missing));
         assert!(matches!(jitter.pop_ready(1_052, 40), PopResult::Frame(_)));
+    }
+
+    #[test]
+    fn drops_late_packet_without_missing_loop() {
+        let mut jitter = JitterBuffer::new(4);
+        jitter.push(10, vec![1]);
+        assert!(matches!(jitter.pop_ready(1_000, 40), PopResult::Frame(_)));
+
+        jitter.push(9, vec![9]);
+        jitter.push(11, vec![2]);
+
+        assert!(matches!(jitter.pop_ready(1_010, 40), PopResult::Frame(_)));
+        assert!(matches!(jitter.pop_ready(1_011, 40), PopResult::Waiting));
+    }
+
+    #[test]
+    fn handles_wrap_around_sequence_ordering() {
+        let mut jitter = JitterBuffer::new(4);
+        jitter.set_expected(u32::MAX - 1);
+        jitter.push(u32::MAX - 2, vec![1]);
+        jitter.push(u32::MAX - 1, vec![2]);
+        jitter.push(0, vec![3]);
+
+        assert!(matches!(jitter.pop_ready(1_000, 40), PopResult::Frame(_)));
+        assert!(matches!(jitter.pop_ready(1_001, 40), PopResult::Missing));
+        assert!(matches!(jitter.pop_ready(1_002, 40), PopResult::Frame(_)));
     }
 }
