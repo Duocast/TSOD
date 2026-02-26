@@ -2787,7 +2787,6 @@ dependencies = [
  "prost",
  "prost-build",
  "quinn",
- "rand 0.8.5",
  "rcgen",
  "ring",
  "rustls",

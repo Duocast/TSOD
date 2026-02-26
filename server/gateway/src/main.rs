@@ -22,7 +22,7 @@ use tracing::{info, Level};
 use tracing_subscriber::EnvFilter;
 use vp_metrics::{MetricsConfig, MetricsServer};
 
-use crate::auth::DevAuthProvider;
+use crate::auth::DeviceAuthProvider;
 use crate::metrics_adapter::voice_metrics;
 use crate::outbox_dispatch::{run_outbox_dispatcher, OutboxDispatcherConfig};
 use crate::state::{MembershipCache, PushHub, Sessions};
@@ -153,9 +153,9 @@ async fn main() -> Result<()> {
     info!("listening on {}", endpoint.local_addr()?);
 
     let auth_provider: Arc<dyn auth::AuthProvider> = if cfg.dev_mode {
-        Arc::new(DevAuthProvider::default())
+        Arc::new(DeviceAuthProvider::new(pool.clone()))
     } else {
-        Arc::new(DevAuthProvider::default())
+        Arc::new(DeviceAuthProvider::new(pool.clone()))
     };
 
     let gw = Gateway::new(

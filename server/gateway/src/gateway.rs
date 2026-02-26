@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Context, Result};
+use ring::rand::SecureRandom;
 use std::sync::Arc;
 use tokio::{
     sync::mpsc,
@@ -634,7 +635,10 @@ impl Gateway {
 
         let session_id = uuid::Uuid::new_v4().to_string();
 
-        let auth_challenge: [u8; 32] = rand::random();
+        let mut auth_challenge = [0u8; 32];
+        ring::rand::SystemRandom::new()
+            .fill(&mut auth_challenge)
+            .map_err(|_| anyhow::anyhow!("failed to generate auth challenge"))?;
 
         let ack = pb::HelloAck {
             session_id: Some(pb::SessionId {
