@@ -366,6 +366,7 @@ async fn app_task(
     // Shared self-mute/deafen state for the audio pipeline
     let self_muted = Arc::new(AtomicBool::new(false));
     let self_deafened = Arc::new(AtomicBool::new(false));
+    let server_deafened = Arc::new(AtomicBool::new(false));
 
     // Shared gain values (stored as u32 bits of f32, default 1.0)
     let input_gain = Arc::new(std::sync::atomic::AtomicU32::new(f32_to_u32(1.0)));
@@ -415,6 +416,7 @@ async fn app_task(
             ptt_active.clone(),
             self_muted.clone(),
             self_deafened.clone(),
+            server_deafened.clone(),
             input_gain.clone(),
             output_gain.clone(),
             per_user_audio.clone(),
@@ -811,6 +813,7 @@ async fn connect_and_run_session(
     ptt_active: Arc<AtomicBool>,
     self_muted: Arc<AtomicBool>,
     self_deafened: Arc<AtomicBool>,
+    server_deafened: Arc<AtomicBool>,
     input_gain: Arc<std::sync::atomic::AtomicU32>,
     output_gain: Arc<std::sync::atomic::AtomicU32>,
     per_user_audio: Arc<std::sync::RwLock<HashMap<String, PerUserAudioSettings>>>,
@@ -825,6 +828,7 @@ async fn connect_and_run_session(
 ) -> Result<()> {
     let _ = tx_event.send(UiEvent::SetConnected(false));
     let _ = tx_event.send(UiEvent::SetAuthed(false));
+    server_deafened.store(false, Ordering::Relaxed);
 
     set_connection_stage(
         tx_event,
@@ -938,6 +942,13 @@ async fn connect_and_run_session(
         .get_initial_state_snapshot()
         .await
         .context("get_initial_state_snapshot")?;
+    let initially_server_deafened = snapshot.channel_members.iter().any(|scope| {
+        scope.members.iter().any(|member| {
+            member.user_id.as_ref().map(|u| u.value.as_str()) == Some(local_user_id.as_str())
+                && member.deafened
+        })
+    });
+    server_deafened.store(initially_server_deafened, Ordering::Relaxed);
     apply_authoritative_snapshot(&snapshot, tx_event, initial_active_channel.as_deref());
 
     // Server push consumer
@@ -1078,6 +1089,8 @@ async fn connect_and_run_session(
                                             "received member-joined push event"
                                         );
                                         if user_id == local_user_id {
+                                            server_deafened
+                                                .store(member.deafened, Ordering::Relaxed);
                                             let route = uuid::Uuid::parse_str(&channel_id.value)
                                                 .map(vp_route_hash::channel_route_hash)
                                                 .unwrap_or(0);
@@ -1110,6 +1123,7 @@ async fn connect_and_run_session(
                                         .unwrap_or_default();
                                     debug!(channel_id=%ml.channel_id.as_ref().map(|c| c.value.clone()).unwrap_or_default(), user_id=%left_user, "received member-left push event");
                                     if left_user == local_user_id {
+                                        server_deafened.store(false, Ordering::Relaxed);
                                         active_voice_channel_route.store(0, Ordering::Relaxed);
                                         let _ = tx_event.send(UiEvent::SetActiveVoiceRoute(0));
                                         let _ = tx_event.send(UiEvent::AppendLog(
@@ -1126,12 +1140,20 @@ async fn connect_and_run_session(
                                     });
                                 }
                                 pb::presence_event::Kind::MemberVoiceStateChanged(vs) => {
+                                    let user_id = vs
+                                        .user_id
+                                        .as_ref()
+                                        .map(|u| u.value.clone())
+                                        .unwrap_or_default();
+                                    if user_id == local_user_id {
+                                        server_deafened.store(vs.deafened, Ordering::Relaxed);
+                                    }
                                     let _ = tx_event.send(UiEvent::MemberVoiceStateUpdated {
                                         channel_id: vs
                                             .channel_id
                                             .map(|c| c.value)
                                             .unwrap_or_default(),
-                                        user_id: vs.user_id.map(|u| u.value).unwrap_or_default(),
+                                        user_id,
                                         muted: vs.muted,
                                         deafened: vs.deafened,
                                         self_muted: vs.self_muted,
@@ -1315,6 +1337,8 @@ async fn connect_and_run_session(
         active_voice_channel_route.clone(),
         ptt_active.clone(),
         self_muted.clone(),
+        self_deafened.clone(),
+        server_deafened.clone(),
         input_gain.clone(),
         loopback_active.clone(),
         audio_runtime.clone(),
@@ -1329,6 +1353,7 @@ async fn connect_and_run_session(
         playout.clone(),
         capture_dsp.clone(),
         self_deafened.clone(),
+        server_deafened.clone(),
         output_gain.clone(),
         per_user_audio.clone(),
         audio_runtime.clone(),
@@ -1535,6 +1560,16 @@ async fn connect_and_run_session(
                                         );
                                     }
                                     active_channel = Some(channel_id.clone());
+                                    if let Some(local_member) =
+                                        state.members.iter().find(|m| {
+                                            m.user_id
+                                                .as_ref()
+                                                .map(|u| u.value.as_str())
+                                                == Some(local_user_id.as_str())
+                                        })
+                                    {
+                                        server_deafened.store(local_member.deafened, Ordering::Relaxed);
+                                    }
                                     let route = uuid::Uuid::parse_str(&channel_id)
                                         .map(vp_route_hash::channel_route_hash)
                                         .unwrap_or(0);
@@ -1579,6 +1614,7 @@ async fn connect_and_run_session(
                                 }
                             }
                             active_channel = None;
+                            server_deafened.store(false, Ordering::Relaxed);
                             active_voice_channel_route.store(0, Ordering::Relaxed);
                             let _ = tx_event.send(UiEvent::SetActiveVoiceRoute(0));
                         }
@@ -2085,6 +2121,8 @@ async fn voice_send_loop(
     active_voice_channel_route: Arc<AtomicU32>,
     ptt_active: Arc<AtomicBool>,
     self_muted: Arc<AtomicBool>,
+    self_deafened: Arc<AtomicBool>,
+    server_deafened: Arc<AtomicBool>,
     input_gain: Arc<std::sync::atomic::AtomicU32>,
     loopback_active: Arc<AtomicBool>,
     audio_runtime: AudioRuntimeSettings,
@@ -2139,6 +2177,8 @@ async fn voice_send_loop(
 
         let can_send = active_voice_channel_route.load(Ordering::Relaxed) != 0
             && !self_muted.load(Ordering::Relaxed)
+            && !self_deafened.load(Ordering::Relaxed)
+            && !server_deafened.load(Ordering::Relaxed)
             && (!push_to_talk || ptt_active.load(Ordering::Relaxed));
         if !can_send {
             if last_local_speaking {
@@ -2242,6 +2282,7 @@ async fn voice_recv_loop(
     playout: Arc<RwLock<Arc<audio::playout::Playout>>>,
     capture_dsp: Option<Arc<Mutex<audio::dsp::CaptureDsp>>>,
     self_deafened: Arc<AtomicBool>,
+    server_deafened: Arc<AtomicBool>,
     output_gain: Arc<std::sync::atomic::AtomicU32>,
     per_user_audio: Arc<std::sync::RwLock<HashMap<String, PerUserAudioSettings>>>,
     audio_runtime: AudioRuntimeSettings,
@@ -2279,7 +2320,7 @@ async fn voice_recv_loop(
                     }
                 };
 
-                if self_deafened.load(Ordering::Relaxed) {
+                if self_deafened.load(Ordering::Relaxed) || server_deafened.load(Ordering::Relaxed) {
                     continue;
                 }
 
@@ -2312,7 +2353,7 @@ async fn voice_recv_loop(
                 stream.jitter.push(packet.seq, packet.payload.to_vec());
             }
             _ = tick.tick() => {
-                if self_deafened.load(Ordering::Relaxed) {
+                if self_deafened.load(Ordering::Relaxed) || server_deafened.load(Ordering::Relaxed) {
                     continue;
                 }
 
