@@ -1997,6 +1997,7 @@ async fn voice_recv_loop(
     const STREAM_IDLE_DROP_MS: u64 = 10_000;
     const PLC_MAX_FRAMES: usize = 5;
     const JITTER_MISSING_WAIT_MS: u64 = 40;
+    const OPUS_USE_INBAND_FEC: bool = false;
 
     let sample_rate = 48_000u32;
     let channels = 1usize;
@@ -2060,46 +2061,71 @@ async fn voice_recv_loop(
                         .jitter
                         .pop_ready(now_ms, JITTER_MISSING_WAIT_MS);
 
-                    if let audio::jitter::PopResult::Frame(frame) = ready {
-                        let n = match stream.decoder.decode(&frame, &mut stream.pcm_out) {
-                            Ok(n) => n,
-                            Err(_) => 0,
-                        };
-                        if n > 0 {
-                            frame_present = true;
-                            stream.last_good_pcm[..n].copy_from_slice(&stream.pcm_out[..n]);
-                            stream.plc_frames = 0;
-                            for (acc, sample) in mix_out[..n].iter_mut().zip(stream.pcm_out[..n].iter()) {
-                                let scaled = *sample as f32 * stream.gain;
-                                frame_level = frame_level.max((scaled.abs() / 32768.0).min(1.0));
-                                *acc += scaled;
+                    match ready {
+                        audio::jitter::PopResult::Frame(frame) => {
+                            let n = match stream.decoder.decode(&frame, &mut stream.pcm_out) {
+                                Ok(n) => n,
+                                Err(_) => 0,
+                            };
+                            if n > 0 {
+                                frame_present = true;
+                                stream.plc_frames = 0;
+                                for (acc, sample) in mix_out[..n].iter_mut().zip(stream.pcm_out[..n].iter()) {
+                                    let scaled = *sample as f32 * stream.gain;
+                                    frame_level = frame_level.max((scaled.abs() / 32768.0).min(1.0));
+                                    *acc += scaled;
+                                }
+                                mixed_streams += 1;
                             }
-                            mixed_streams += 1;
                         }
-                    } else if matches!(ready, audio::jitter::PopResult::Missing)
-                        && stream.last_packet_wall_ms != 0
-                        && stream.plc_frames < PLC_MAX_FRAMES
-                    {
-                        stream.plc_frames += 1;
-                        frame_present = true;
-                        for (acc, sample) in mix_out.iter_mut().zip(stream.last_good_pcm.iter()) {
-                            let scaled = *sample as f32 * stream.gain * 0.85;
-                            frame_level = frame_level.max((scaled.abs() / 32768.0).min(1.0));
-                            *acc += scaled;
-                        }
-                        mixed_streams += 1;
-                    } else if stream.plc_frames < PLC_MAX_FRAMES && stream.last_packet_wall_ms != 0 {
-                        let since_packet = now_ms.saturating_sub(stream.last_packet_wall_ms);
-                        if since_packet <= (PLC_MAX_FRAMES as u64 * frame_ms as u64) {
-                            stream.plc_frames += 1;
-                            frame_present = true;
-                            for (acc, sample) in mix_out.iter_mut().zip(stream.last_good_pcm.iter()) {
-                                let scaled = *sample as f32 * stream.gain * 0.85;
-                                frame_level = frame_level.max((scaled.abs() / 32768.0).min(1.0));
-                                *acc += scaled;
+                        audio::jitter::PopResult::Missing
+                            if stream.last_packet_wall_ms != 0 && stream.plc_frames < PLC_MAX_FRAMES =>
+                        {
+                            let n = if OPUS_USE_INBAND_FEC {
+                                match stream.jitter.peek_expected() {
+                                    Some(next_frame) => stream
+                                        .decoder
+                                        .decode_fec(next_frame, &mut stream.pcm_out)
+                                        .or_else(|_| stream.decoder.decode_plc(&mut stream.pcm_out))
+                                        .unwrap_or(0),
+                                    None => stream.decoder.decode_plc(&mut stream.pcm_out).unwrap_or(0),
+                                }
+                            } else {
+                                stream.decoder.decode_plc(&mut stream.pcm_out).unwrap_or(0)
+                            };
+                            if n > 0 {
+                                stream.plc_frames += 1;
+                                frame_present = true;
+                                for (acc, sample) in mix_out[..n].iter_mut().zip(stream.pcm_out[..n].iter()) {
+                                    let scaled = *sample as f32 * stream.gain;
+                                    frame_level = frame_level.max((scaled.abs() / 32768.0).min(1.0));
+                                    *acc += scaled;
+                                }
+                                mixed_streams += 1;
                             }
-                            mixed_streams += 1;
                         }
+                        audio::jitter::PopResult::Waiting
+                            if stream.plc_frames < PLC_MAX_FRAMES && stream.last_packet_wall_ms != 0 =>
+                        {
+                            let since_packet = now_ms.saturating_sub(stream.last_packet_wall_ms);
+                            if since_packet <= (PLC_MAX_FRAMES as u64 * frame_ms as u64) {
+                                let n = match stream.decoder.decode_plc(&mut stream.pcm_out) {
+                                    Ok(n) => n,
+                                    Err(_) => 0,
+                                };
+                                if n > 0 {
+                                    stream.plc_frames += 1;
+                                    frame_present = true;
+                                    for (acc, sample) in mix_out[..n].iter_mut().zip(stream.pcm_out[..n].iter()) {
+                                        let scaled = *sample as f32 * stream.gain;
+                                        frame_level = frame_level.max((scaled.abs() / 32768.0).min(1.0));
+                                        *acc += scaled;
+                                    }
+                                    mixed_streams += 1;
+                                }
+                            }
+                        }
+                        _ => {}
                     }
 
                     if frame_present {
@@ -2212,7 +2238,6 @@ struct InboundStreamState {
     jitter: audio::jitter::JitterBuffer,
     decoder: audio::opus::OpusDecoder,
     pcm_out: Vec<i16>,
-    last_good_pcm: Vec<i16>,
     user_id: Option<String>,
     gain: f32,
     level: f32,
@@ -2232,7 +2257,6 @@ impl InboundStreamState {
             decoder: audio::opus::OpusDecoder::new(sample_rate, channels)
                 .expect("inbound opus decoder init"),
             pcm_out: vec![0i16; frame_samples],
-            last_good_pcm: vec![0i16; frame_samples],
             user_id: None,
             gain: 1.0,
             level: 0.0,
