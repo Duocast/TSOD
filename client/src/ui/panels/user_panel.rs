@@ -119,13 +119,13 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
 
             // Bottom row: action buttons
             ui.horizontal(|ui: &mut egui::Ui| {
-                let btn_size = egui::vec2(36.0, 28.0);
+                let btn_size = egui::vec2(30.0, 24.0);
 
                 let away_btn = ui.add_sized(
                     btn_size,
                     egui::Button::new(
-                        egui::RichText::new("AWAY")
-                            .size(9.0)
+                        egui::RichText::new("🌙")
+                            .size(13.0)
                             .color(theme::text_color())
                             .strong(),
                     )
@@ -152,23 +152,22 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                 } else {
                     theme::text_color()
                 };
-                let mute_icon = if model.self_muted {
-                    "🎙️🚫"
-                } else {
-                    "🎙️"
-                };
+                let mute_icon = if model.self_muted { "🎤" } else { "🎙" };
 
-                let mute_btn = ui.add_enabled(
-                    in_voice_channel,
-                    egui::Button::new(
-                        egui::RichText::new(mute_icon)
-                            .size(12.0)
-                            .color(mute_text_color)
-                            .strong(),
+                let mute_btn = ui.add_enabled_ui(in_voice_channel, |ui| {
+                    ui.add_sized(
+                        btn_size,
+                        egui::Button::new(
+                            egui::RichText::new(mute_icon)
+                                .size(12.0)
+                                .color(mute_text_color)
+                                .strong(),
+                        )
+                        .fill(mute_fill)
+                        .rounding(4.0),
                     )
-                    .fill(mute_fill)
-                    .rounding(4.0),
-                );
+                });
+                let mute_btn = mute_btn.inner;
                 if mute_btn.clicked() {
                     model.self_muted = !model.self_muted;
                     let _ = tx_intent.send(UiIntent::ToggleSelfMute);
@@ -199,17 +198,20 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                 };
                 let deafen_icon = if model.self_deafened { "🔇" } else { "🔊" };
 
-                let deafen_btn = ui.add_enabled(
-                    in_voice_channel,
-                    egui::Button::new(
-                        egui::RichText::new(deafen_icon)
-                            .size(12.0)
-                            .color(deafen_text_color)
-                            .strong(),
+                let deafen_btn = ui.add_enabled_ui(in_voice_channel, |ui| {
+                    ui.add_sized(
+                        btn_size,
+                        egui::Button::new(
+                            egui::RichText::new(deafen_icon)
+                                .size(12.0)
+                                .color(deafen_text_color)
+                                .strong(),
+                        )
+                        .fill(deafen_fill)
+                        .rounding(4.0),
                     )
-                    .fill(deafen_fill)
-                    .rounding(4.0),
-                );
+                });
+                let deafen_btn = deafen_btn.inner;
                 if deafen_btn.clicked() {
                     model.self_deafened = !model.self_deafened;
                     let _ = tx_intent.send(UiIntent::ToggleSelfDeafen);
