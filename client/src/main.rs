@@ -551,7 +551,7 @@ async fn app_task(
                                     &capture,
                                     &playout,
                                     &selected_audio,
-                                    tx_event,
+                                    &tx_event,
                                     sample_rate,
                                     channels,
                                     frame_ms,

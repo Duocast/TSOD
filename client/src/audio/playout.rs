@@ -156,7 +156,6 @@ mod linux {
                 channels,
                 cons,
                 preferred_device,
-                preferred_mode,
             )?;
             Ok(Self {
                 _thread: None,

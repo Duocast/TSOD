@@ -102,15 +102,13 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
             ui.add_space(6.0);
 
             let in_voice_channel = model.active_voice_channel_route != 0;
-            let voice_state = if !model.connected {
+            let _voice_state = if !model.connected {
                 ("Voice: disconnected", theme::COLOR_OFFLINE)
             } else if in_voice_channel {
                 ("Voice: connected", theme::COLOR_ONLINE)
             } else {
                 ("Voice: not in voice channel", theme::text_muted())
             };
-            let btn_size = egui::vec2(26.0, 22.0);
-
             // Keep voice status and controls on one row so controls remain visible.
             ui.horizontal(|ui: &mut egui::Ui| {
                 let btn_size = egui::vec2(30.0, 24.0);
