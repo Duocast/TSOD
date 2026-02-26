@@ -50,7 +50,7 @@ impl OpusDecoder {
     }
 
     pub fn decode_plc(&mut self, pcm_out: &mut [i16]) -> Result<usize> {
-        Ok(self.dec.decode(None::<&[u8]>, pcm_out, false)?)
+        Ok(self.dec.decode(&[], pcm_out, false)?)
     }
 
     pub fn decode_fec(&mut self, data: &[u8], pcm_out: &mut [i16]) -> Result<usize> {
