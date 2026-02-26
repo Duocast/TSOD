@@ -21,6 +21,9 @@ pub struct Aec {
     capture_blocker: FrameBlocker,
     capture_framer: BlockFramer,
     capture_framer_seeded: bool,
+    original_capture: Vec<i16>,
+    subframe_16k: Vec<f32>,
+    framed_subframe: Vec<Vec<Vec<f32>>>,
 }
 
 impl Aec {
@@ -39,15 +42,18 @@ impl Aec {
             capture_blocker: FrameBlocker::new(1, 1),
             capture_framer: BlockFramer::new(1, 1),
             capture_framer_seeded: false,
+            original_capture: Vec::new(),
+            subframe_16k: vec![0.0; SUBFRAME_SAMPLES_16K],
+            framed_subframe: vec![vec![vec![0.0f32; SUBFRAME_SAMPLES_16K]; 1]; 1],
         })
     }
 
     pub fn feed_reference(&mut self, reference: &[i16]) {
         self.render_in.extend(reference.iter().copied());
         while self.render_in.len() >= SUBFRAME_SAMPLES_48K {
-            let subframe_16k = Self::pop_and_downsample_48k_to_16k(&mut self.render_in);
+            Self::pop_and_downsample_48k_to_16k(&mut self.render_in, &mut self.subframe_16k);
             let mut block = Block::new(1, 1);
-            let subframe_view = vec![vec![subframe_16k.as_slice()]];
+            let subframe_view = vec![vec![self.subframe_16k.as_slice()]];
             self.render_blocker
                 .insert_sub_frame_and_extract_block(&subframe_view, &mut block);
             self.inner.buffer_render(&block);
@@ -61,13 +67,14 @@ impl Aec {
     }
 
     pub fn process(&mut self, capture: &mut [i16]) {
-        let original = capture.to_vec();
+        self.original_capture.clear();
+        self.original_capture.extend_from_slice(capture);
         self.capture_in.extend(capture.iter().copied());
 
         while self.capture_in.len() >= SUBFRAME_SAMPLES_48K {
-            let subframe_16k = Self::pop_and_downsample_48k_to_16k(&mut self.capture_in);
+            Self::pop_and_downsample_48k_to_16k(&mut self.capture_in, &mut self.subframe_16k);
             let mut block = Block::new(1, 1);
-            let subframe_view = vec![vec![subframe_16k.as_slice()]];
+            let subframe_view = vec![vec![self.subframe_16k.as_slice()]];
             self.capture_blocker
                 .insert_sub_frame_and_extract_block(&subframe_view, &mut block);
             self.inner.process_capture(false, false, None, &mut block);
@@ -82,7 +89,10 @@ impl Aec {
         }
 
         for (idx, sample) in capture.iter_mut().enumerate() {
-            *sample = self.capture_out.pop_front().unwrap_or(original[idx]);
+            *sample = self
+                .capture_out
+                .pop_front()
+                .unwrap_or(self.original_capture[idx]);
         }
     }
 
@@ -93,10 +103,9 @@ impl Aec {
             return;
         }
 
-        let mut framed = vec![vec![vec![0.0f32; SUBFRAME_SAMPLES_16K]; 1]; 1];
         self.capture_framer
-            .insert_block_and_extract_sub_frame(&block, &mut framed);
-        for &s in &framed[0][0] {
+            .insert_block_and_extract_sub_frame(&block, &mut self.framed_subframe);
+        for &s in &self.framed_subframe[0][0] {
             let s16 = s.clamp(i16::MIN as f32, i16::MAX as f32) as i16;
             self.capture_out.push_back(s16);
             self.capture_out.push_back(s16);
@@ -104,14 +113,12 @@ impl Aec {
         }
     }
 
-    fn pop_and_downsample_48k_to_16k(queue: &mut VecDeque<i16>) -> Vec<f32> {
-        let mut out = Vec::with_capacity(SUBFRAME_SAMPLES_16K);
-        for _ in 0..SUBFRAME_SAMPLES_16K {
+    fn pop_and_downsample_48k_to_16k(queue: &mut VecDeque<i16>, out_buf: &mut [f32]) {
+        for out in out_buf.iter_mut() {
             let a = queue.pop_front().unwrap_or_default() as i32;
             let b = queue.pop_front().unwrap_or_default() as i32;
             let c = queue.pop_front().unwrap_or_default() as i32;
-            out.push(((a + b + c) as f32) / 3.0);
+            *out = ((a + b + c) as f32) / 3.0;
         }
-        out
     }
 }

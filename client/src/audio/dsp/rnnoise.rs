@@ -10,6 +10,8 @@ pub struct Denoiser {
     last_vad: f32,
     /// Temporary buffer for f32 conversion (480 samples).
     f32_buf: Vec<f32>,
+    /// Reused denoised output frame buffer (480 samples).
+    output_buf: Vec<f32>,
 }
 
 impl Denoiser {
@@ -18,6 +20,7 @@ impl Denoiser {
             state: DenoiseState::new(),
             last_vad: 0.0,
             f32_buf: vec![0.0; DenoiseState::FRAME_SIZE],
+            output_buf: vec![0.0; DenoiseState::FRAME_SIZE],
         }
     }
 
@@ -39,9 +42,10 @@ impl Denoiser {
             }
 
             // Denoise in-place, get VAD
-            let mut output = vec![0.0f32; frame_size];
-            vad = self.state.process_frame(&mut output, &self.f32_buf);
-            self.f32_buf.copy_from_slice(&output);
+            vad = self
+                .state
+                .process_frame(&mut self.output_buf[..frame_size], &self.f32_buf);
+            self.f32_buf[..frame_size].copy_from_slice(&self.output_buf[..frame_size]);
 
             // f32 → i16 (clamp)
             for (i, out) in self.f32_buf.iter().enumerate() {

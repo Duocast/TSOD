@@ -24,6 +24,7 @@ pub struct CaptureDsp {
     #[cfg(feature = "aec")]
     aec: Option<aec::Aec>,
     echo_cancellation_enabled: bool,
+    echo_ref_scratch: Vec<i16>,
 }
 
 impl CaptureDsp {
@@ -40,6 +41,7 @@ impl CaptureDsp {
             #[cfg(feature = "aec")]
             aec: Some(aec::Aec::new(sample_rate)?),
             echo_cancellation_enabled: false,
+            echo_ref_scratch: Vec::with_capacity(960),
         })
     }
 
@@ -107,7 +109,9 @@ impl CaptureDsp {
         #[cfg(feature = "aec")]
         if self.echo_cancellation_enabled {
             if let Some(aec) = self.aec.as_mut() {
-                aec.feed_reference(pcm);
+                self.echo_ref_scratch.clear();
+                self.echo_ref_scratch.extend_from_slice(pcm);
+                aec.feed_reference(&self.echo_ref_scratch);
             }
         }
     }
@@ -116,17 +120,22 @@ impl CaptureDsp {
 /// DSP pipeline for the playout (speaker) path.
 pub struct PlayoutDsp {
     agc: agc::Agc,
+    frame_scratch: Vec<i16>,
 }
 
 impl PlayoutDsp {
     pub fn new() -> Self {
         Self {
             agc: agc::Agc::new(-14.0, 0.2),
+            frame_scratch: Vec::with_capacity(960),
         }
     }
 
     /// Normalize playout volume.
     pub fn process_frame(&mut self, pcm: &mut [i16]) {
-        self.agc.process(pcm);
+        self.frame_scratch.clear();
+        self.frame_scratch.extend_from_slice(pcm);
+        self.agc.process(&mut self.frame_scratch);
+        pcm.copy_from_slice(&self.frame_scratch);
     }
 }
