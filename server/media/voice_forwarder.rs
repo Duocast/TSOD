@@ -113,8 +113,6 @@ pub struct VoiceForwarderConfig {
     pub per_receiver_queue: usize,
     /// How long a sender is considered an "active talker" since last packet.
     pub talker_activity_window: Duration,
-    /// Acceptable clock skew of sender timestamp (ms).
-    pub max_ts_skew_ms: u32,
     /// Whether to require VAD flag to count as talker (reduces false talker occupancy).
     pub vad_required_for_talker: bool,
 }
@@ -128,7 +126,6 @@ impl Default for VoiceForwarderConfig {
             sender_bps_limit: 512 * 1024, // 512kbps per sender max
             per_receiver_queue: 256,
             talker_activity_window: Duration::from_millis(800),
-            max_ts_skew_ms: 2_000,
             vad_required_for_talker: false,
         }
     }
@@ -191,14 +188,8 @@ impl VoiceForwarder {
             }
         };
 
-        // Timestamp sanity (prevents weirdness, not security)
-        if !parsed.ts_sane(self.cfg.max_ts_skew_ms) {
-            self.metrics.inc_drop_invalid();
-            return;
-        }
-
         // Per-sender rate limiting
-        if !self.allow_rate(sender, datagram.len() as u32).await {
+        if !self.allow_rate(sender, datagram.len() as u32, parsed.ts_ms).await {
             self.metrics.inc_drop_rate_limited();
             return;
         }
@@ -293,9 +284,13 @@ impl VoiceForwarder {
     }
 
     /// Token bucket-ish per sender (pps + bps).
-    async fn allow_rate(&self, sender: UserId, bytes: u32) -> bool {
+    async fn allow_rate(&self, sender: UserId, bytes: u32, ts_ms: u32) -> bool {
         let mut map = self.rate.write().await;
         let st = map.entry(sender).or_insert_with(RateState::new);
+
+        if !st.check_monotonic_ts(ts_ms) {
+            return false;
+        }
 
         st.refill(self.cfg.sender_pps_limit, self.cfg.sender_bps_limit);
 
@@ -400,13 +395,6 @@ impl VoicePacket {
         })
     }
 
-    fn ts_sane(&self, max_skew_ms: u32) -> bool {
-        // We don't have sender clock sync; this just rejects wildly bogus ts (0, huge jumps).
-        // For production you can do per-sender monotonic checks in RateState.
-        let now = (unix_ms() & 0xFFFF_FFFF) as u32;
-        let diff = now.wrapping_sub(self.ts_ms);
-        diff <= max_skew_ms || (u32::MAX - diff) <= max_skew_ms
-    }
 }
 
 /// Per-sender limiter state.
@@ -447,10 +435,9 @@ impl RateState {
         self.last = now;
     }
 
-    #[allow(dead_code)]
     fn check_monotonic_ts(&mut self, ts: u32) -> bool {
         if let Some(prev) = self.last_ts_ms {
-            // allow wrap; reject huge backwards jumps
+            // Allow wrap; reject huge backwards jumps.
             let diff = ts.wrapping_sub(prev);
             if diff > 10_000 && diff < (u32::MAX - 10_000) {
                 return false;
@@ -514,14 +501,6 @@ impl TalkerSet {
             }
         }
     }
-}
-
-fn unix_ms() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
 }
 
 #[cfg(test)]
