@@ -456,10 +456,13 @@ fn apply_cache_side_effects(membership: &MembershipCache, rec: &OutboxEventRow) 
             let channel_id = parse_channel_id_field(&rec.payload_json, "channel_id")?;
             let user_id = parse_user_id_field(&rec.payload_json, "user_id")?;
             membership.set_user(user_id, channel_id, false);
+            membership.add_channel_member(channel_id, user_id);
         }
         "presence.member_left" => {
+            let channel_id = parse_channel_id_field(&rec.payload_json, "channel_id")?;
             let user_id = parse_user_id_field(&rec.payload_json, "user_id")?;
             membership.remove_user(user_id);
+            membership.remove_channel_member(channel_id, user_id);
         }
         "presence.voice_state_changed" => {
             let channel_id = parse_channel_id_field(&rec.payload_json, "channel_id")?;
@@ -576,8 +579,10 @@ fn now_ts() -> pb::Timestamp {
 
 #[cfg(test)]
 mod tests {
-    use super::translate_record;
+
+    use super::{apply_cache_side_effects, translate_record};
     use crate::proto::voiceplatform::v1 as pb;
+    use crate::state::MembershipCache;
     use serde_json::json;
     use vp_control::ids::{OutboxId, ServerId};
     use vp_control::model::OutboxEventRow;
@@ -620,5 +625,46 @@ mod tests {
         let (parsed_channel, _push) =
             translate_record(&rec).expect("channels.created alias should be supported");
         assert_eq!(parsed_channel.0, channel_id);
+    }
+
+    #[test]
+    fn member_join_left_side_effects_update_channel_members() {
+        let membership = MembershipCache::new();
+        let channel_id = uuid::Uuid::new_v4();
+        let user_id = uuid::Uuid::new_v4();
+
+        membership.set_channel(vp_control::ids::ChannelId(channel_id), 4, vec![]);
+
+        let joined = OutboxEventRow {
+            id: OutboxId(uuid::Uuid::new_v4()),
+            server_id: ServerId(uuid::Uuid::new_v4()),
+            topic: "presence.member_joined".to_string(),
+            payload_json: json!({
+                "channel_id": channel_id,
+                "user_id": user_id
+            }),
+        };
+        apply_cache_side_effects(&membership, &joined).expect("join side effects should apply");
+
+        let members = membership
+            .members_of(vp_control::ids::ChannelId(channel_id))
+            .expect("channel should exist in cache");
+        assert_eq!(members, vec![vp_control::ids::UserId(user_id)]);
+
+        let left = OutboxEventRow {
+            id: OutboxId(uuid::Uuid::new_v4()),
+            server_id: ServerId(uuid::Uuid::new_v4()),
+            topic: "presence.member_left".to_string(),
+            payload_json: json!({
+                "channel_id": channel_id,
+                "user_id": user_id
+            }),
+        };
+        apply_cache_side_effects(&membership, &left).expect("left side effects should apply");
+
+        let members = membership
+            .members_of(vp_control::ids::ChannelId(channel_id))
+            .expect("channel should exist in cache");
+        assert!(members.is_empty());
     }
 }

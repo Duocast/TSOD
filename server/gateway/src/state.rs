@@ -171,6 +171,20 @@ impl MembershipCache {
         self.users.remove(&user);
     }
 
+    pub fn add_channel_member(&self, channel: ChannelId, user: UserId) {
+        if let Some(mut runtime) = self.channels.get_mut(&channel) {
+            if !runtime.members.contains(&user) {
+                runtime.members.push(user);
+            }
+        }
+    }
+
+    pub fn remove_channel_member(&self, channel: ChannelId, user: UserId) {
+        if let Some(mut runtime) = self.channels.get_mut(&channel) {
+            runtime.members.retain(|member| *member != user);
+        }
+    }
+
     pub fn update_mute(&self, user: UserId, channel: ChannelId, muted: bool) {
         self.users.insert(
             user,
@@ -227,10 +241,10 @@ impl MembershipProvider for MembershipCache {
 
 #[cfg(test)]
 mod tests {
-    use super::PushHub;
+    use super::{MembershipCache, PushHub};
     use crate::proto::voiceplatform::v1 as pb;
     use tokio::sync::mpsc;
-    use vp_control::ids::UserId;
+    use vp_control::ids::{ChannelId, UserId};
 
     #[tokio::test]
     async fn pushhub_sends_to_all_sessions_for_same_user() {
@@ -258,6 +272,28 @@ mod tests {
 
         hub.unregister(user, "s1");
         hub.unregister(user, "s2");
+    }
+
+    #[test]
+    fn membership_cache_updates_channel_members() {
+        let membership = MembershipCache::new();
+        let channel = ChannelId(uuid::Uuid::new_v4());
+        let user = UserId(uuid::Uuid::new_v4());
+
+        membership.set_channel(channel, 4, vec![]);
+        membership.add_channel_member(channel, user);
+        membership.add_channel_member(channel, user);
+
+        let members = membership
+            .members_of(channel)
+            .expect("channel should exist in cache");
+        assert_eq!(members, vec![user]);
+
+        membership.remove_channel_member(channel, user);
+        let members = membership
+            .members_of(channel)
+            .expect("channel should exist in cache");
+        assert!(members.is_empty());
     }
 }
 
