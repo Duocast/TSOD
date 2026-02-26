@@ -255,9 +255,20 @@ impl VoiceForwarder {
     async fn enqueue_to_receiver(&self, receiver: UserId, datagram: Bytes) -> bool {
         // Fast path: sender exists
         if let Some(tx) = self.send_loops.read().await.get(&receiver).cloned() {
-            return tx.try_send(datagram).is_ok();
+            match tx.try_send(datagram) {
+                Ok(()) => return true,
+                Err(mpsc::error::TrySendError::Full(_)) => return false,
+                Err(mpsc::error::TrySendError::Closed(datagram)) => {
+                    self.send_loops.write().await.remove(&receiver);
+                    return self.enqueue_slow_path(receiver, datagram).await;
+                }
+            }
         }
 
+        self.enqueue_slow_path(receiver, datagram).await
+    }
+
+    async fn enqueue_slow_path(&self, receiver: UserId, datagram: Bytes) -> bool {
         // Slow path: create send loop if session exists
         let Some(dtx) = self.sessions.get_datagram_tx(receiver).await else {
             return false;
