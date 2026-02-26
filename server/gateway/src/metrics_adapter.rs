@@ -36,7 +36,7 @@ impl VoiceMetrics for GatewayVoiceMetrics {
         self.inner.drop_reason("talker_limit");
     }
     fn inc_drop_send_queue_full(&self) {
-        self.inner.drop_reason("send_queue_full");
+        self.inner.enqueue_drop();
     }
     fn inc_forwarded(&self, fanout: usize) {
         self.inner.forwarded(fanout);

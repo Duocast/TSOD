@@ -30,8 +30,40 @@ pub fn show(ui: &mut egui::Ui, model: &UiModel) {
             ui.label(format!("{} ms", t.jitter_ms));
             ui.end_row();
 
-            ui.label("Goodput:");
-            ui.label(format_bitrate(t.goodput_bps));
+            ui.label("RX Bitrate:");
+            ui.label(format!(
+                "{} ({}/s)",
+                format_bitrate(t.rx_bitrate_bps),
+                t.rx_pps
+            ));
+            ui.end_row();
+
+            ui.label("TX Bitrate:");
+            ui.label(format!(
+                "{} ({}/s)",
+                format_bitrate(t.tx_bitrate_bps),
+                t.tx_pps
+            ));
+            ui.end_row();
+
+            ui.label("Jitter Buffer:");
+            ui.label(format!("{} pkts", t.jitter_buffer_depth));
+            ui.end_row();
+
+            ui.label("Late/Lost:");
+            ui.label(format!("{}/{}", t.late_packets, t.lost_packets));
+            ui.end_row();
+
+            ui.label("Concealment:");
+            ui.label(format!("{} frames", t.concealment_frames));
+            ui.end_row();
+
+            ui.label("Peak Stream Level:");
+            ui.label(format!("{:.0}%", t.peak_stream_level * 100.0));
+            ui.end_row();
+
+            ui.label("Server Send-Queue Drops:");
+            ui.label(t.send_queue_drop_count.to_string());
             ui.end_row();
 
             ui.label("Playout Delay:");

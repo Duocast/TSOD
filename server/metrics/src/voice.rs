@@ -10,7 +10,10 @@ pub struct VoiceMetricsImpl {
 
 impl VoiceMetricsImpl {
     pub fn new(namespace: &'static str, policy: LabelPolicy) -> Self {
-        Self { ns: namespace, policy }
+        Self {
+            ns: namespace,
+            policy,
+        }
     }
 
     #[inline]
@@ -41,6 +44,7 @@ impl VoiceMetricsImpl {
     #[inline]
     pub fn enqueue_drop(&self) {
         self.drop_reason("send_queue_full");
+        counter!(format!("{}_voice_send_queue_drops_total", self.ns)).increment(1);
     }
 
     #[inline]
@@ -95,7 +99,7 @@ pub mod adapter {
             self.drop_reason("talker_limit");
         }
         fn inc_drop_send_queue_full(&self) {
-            self.drop_reason("send_queue_full");
+            self.enqueue_drop();
         }
         fn inc_forwarded(&self, fanout: usize) {
             self.forwarded(fanout);

@@ -31,7 +31,7 @@ use std::collections::HashMap;
 #[cfg(debug_assertions)]
 use std::collections::HashSet;
 use std::sync::{
-    atomic::{AtomicBool, AtomicU32, Ordering},
+    atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     Arc,
 };
 #[cfg(debug_assertions)]
@@ -101,6 +101,40 @@ impl AudioRuntimeSettings {
             .store(settings.fec_mode as u32, Ordering::Relaxed);
         self.fec_strength
             .store(settings.fec_strength as u32, Ordering::Relaxed);
+    }
+}
+
+#[derive(Default)]
+struct VoiceTelemetryCounters {
+    tx_packets: AtomicU64,
+    tx_bytes: AtomicU64,
+    rx_packets: AtomicU64,
+    rx_bytes: AtomicU64,
+    late_packets: AtomicU64,
+    lost_packets: AtomicU64,
+    concealment_frames: AtomicU64,
+    jitter_buffer_depth: AtomicU64,
+    peak_stream_level_bits: AtomicU32,
+}
+
+impl VoiceTelemetryCounters {
+    fn observe_peak_stream_level(&self, level: f32) {
+        let mut current = self.peak_stream_level_bits.load(Ordering::Relaxed);
+        loop {
+            let cur = f32::from_bits(current);
+            if level <= cur {
+                break;
+            }
+            match self.peak_stream_level_bits.compare_exchange_weak(
+                current,
+                level.to_bits(),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(next) => current = next,
+            }
+        }
     }
 }
 
@@ -342,6 +376,17 @@ async fn app_task(
     let loopback_active = Arc::new(AtomicBool::new(false));
     let session_voice_active = Arc::new(AtomicBool::new(false));
     let active_voice_channel_route = Arc::new(AtomicU32::new(0));
+    let voice_counters = Arc::new(VoiceTelemetryCounters::default());
+    let send_queue_drop_count = Arc::new(AtomicU32::new(0));
+
+    let _telemetry = tokio::spawn(emit_telemetry_loop(
+        tx_event.clone(),
+        capture_dsp.clone(),
+        voice_counters.clone(),
+        send_queue_drop_count.clone(),
+        running.clone(),
+        shutdown_rx.clone(),
+    ));
 
     let _mic_test = tokio::spawn(mic_test_loop(
         capture.clone(),
@@ -770,6 +815,7 @@ async fn connect_and_run_session(
     per_user_audio: Arc<std::sync::RwLock<HashMap<String, PerUserAudioSettings>>>,
     loopback_active: Arc<AtomicBool>,
     session_voice_active: Arc<AtomicBool>,
+    voice_counters: Arc<VoiceTelemetryCounters>,
     audio_runtime: AudioRuntimeSettings,
     sample_rate: u32,
     channels: u16,
@@ -1265,6 +1311,7 @@ async fn connect_and_run_session(
         input_gain.clone(),
         loopback_active.clone(),
         audio_runtime.clone(),
+        voice_counters.clone(),
         cfg.push_to_talk,
         voice_die_tx.clone(),
     ));
@@ -1278,6 +1325,7 @@ async fn connect_and_run_session(
         per_user_audio.clone(),
         audio_runtime.clone(),
         tx_event.clone(),
+        voice_counters.clone(),
         voice_die_tx.clone(),
     ));
 
@@ -1875,6 +1923,90 @@ async fn upload_attachment_quic(
     }
 }
 
+async fn emit_telemetry_loop(
+    tx_event: Sender<UiEvent>,
+    capture_dsp: Option<Arc<Mutex<audio::dsp::CaptureDsp>>>,
+    counters: Arc<VoiceTelemetryCounters>,
+    send_queue_drop_count: Arc<AtomicU32>,
+    running: Arc<AtomicBool>,
+    mut shutdown_rx: watch::Receiver<bool>,
+) {
+    let mut tick = tokio::time::interval(Duration::from_secs(1));
+
+    let mut prev_tx_packets = 0u64;
+    let mut prev_tx_bytes = 0u64;
+    let mut prev_rx_packets = 0u64;
+    let mut prev_rx_bytes = 0u64;
+    let mut prev_late = 0u64;
+    let mut prev_lost = 0u64;
+    let mut prev_conceal = 0u64;
+
+    while running.load(Ordering::Relaxed) && !*shutdown_rx.borrow() {
+        tokio::select! {
+            _ = shutdown_rx.changed() => {
+                if *shutdown_rx.borrow() {
+                    break;
+                }
+            }
+            _ = tick.tick() => {}
+        }
+
+        let tx_packets = counters.tx_packets.load(Ordering::Relaxed);
+        let tx_bytes = counters.tx_bytes.load(Ordering::Relaxed);
+        let rx_packets = counters.rx_packets.load(Ordering::Relaxed);
+        let rx_bytes = counters.rx_bytes.load(Ordering::Relaxed);
+        let late = counters.late_packets.load(Ordering::Relaxed);
+        let lost = counters.lost_packets.load(Ordering::Relaxed);
+        let conceal = counters.concealment_frames.load(Ordering::Relaxed);
+        let jitter_buffer_depth = counters.jitter_buffer_depth.load(Ordering::Relaxed) as u32;
+        let peak_stream_level = f32::from_bits(
+            counters
+                .peak_stream_level_bits
+                .swap(0.0f32.to_bits(), Ordering::Relaxed),
+        );
+
+        let tx_pps = tx_packets.saturating_sub(prev_tx_packets) as u32;
+        let rx_pps = rx_packets.saturating_sub(prev_rx_packets) as u32;
+        let tx_bitrate_bps = (tx_bytes.saturating_sub(prev_tx_bytes) * 8) as u32;
+        let rx_bitrate_bps = (rx_bytes.saturating_sub(prev_rx_bytes) * 8) as u32;
+
+        prev_tx_packets = tx_packets;
+        prev_tx_bytes = tx_bytes;
+        prev_rx_packets = rx_packets;
+        prev_rx_bytes = rx_bytes;
+
+        let late_delta = late.saturating_sub(prev_late) as u32;
+        let lost_delta = lost.saturating_sub(prev_lost) as u32;
+        let conceal_delta = conceal.saturating_sub(prev_conceal) as u32;
+
+        prev_late = late;
+        prev_lost = lost;
+        prev_conceal = conceal;
+
+        let vad_probability = if let Some(ref dsp) = capture_dsp {
+            let d = dsp.lock().await;
+            d.last_vad_probability()
+        } else {
+            0.0
+        };
+
+        let _ = tx_event.send(UiEvent::TelemetryUpdate(ui::model::TelemetryData {
+            tx_bitrate_bps,
+            rx_bitrate_bps,
+            tx_pps,
+            rx_pps,
+            jitter_buffer_depth,
+            late_packets: late_delta,
+            lost_packets: lost_delta,
+            concealment_frames: conceal_delta,
+            peak_stream_level,
+            send_queue_drop_count: send_queue_drop_count.load(Ordering::Relaxed),
+            vad_probability,
+            ..Default::default()
+        }));
+    }
+}
+
 async fn mic_test_loop(
     capture: Arc<RwLock<Arc<audio::capture::Capture>>>,
     playout: Arc<RwLock<Arc<audio::playout::Playout>>>,
@@ -1936,6 +2068,7 @@ async fn voice_send_loop(
     input_gain: Arc<std::sync::atomic::AtomicU32>,
     loopback_active: Arc<AtomicBool>,
     audio_runtime: AudioRuntimeSettings,
+    voice_counters: Arc<VoiceTelemetryCounters>,
     push_to_talk: bool,
     voice_die_tx: watch::Sender<bool>,
 ) {
@@ -2037,6 +2170,11 @@ async fn voice_send_loop(
         );
         seq = seq.wrapping_add(1);
 
+        voice_counters.tx_packets.fetch_add(1, Ordering::Relaxed);
+        voice_counters
+            .tx_bytes
+            .fetch_add(d.len() as u64, Ordering::Relaxed);
+
         if conn.send_datagram(d).is_err() {
             let _ = voice_die_tx.send(true);
             return;
@@ -2053,6 +2191,7 @@ async fn voice_recv_loop(
     per_user_audio: Arc<std::sync::RwLock<HashMap<String, PerUserAudioSettings>>>,
     audio_runtime: AudioRuntimeSettings,
     tx_event: Sender<UiEvent>,
+    voice_counters: Arc<VoiceTelemetryCounters>,
     voice_die_tx: watch::Sender<bool>,
 ) {
     const SPEAKING_HANGOVER_MS: u64 = 350;
@@ -2094,6 +2233,9 @@ async fn voice_recv_loop(
                     None => continue,
                 };
 
+                voice_counters.rx_packets.fetch_add(1, Ordering::Relaxed);
+                voice_counters.rx_bytes.fetch_add(d.len() as u64, Ordering::Relaxed);
+
                 let now_ms = unix_ms();
                 let stream = streams
                     .entry(packet.stream_key())
@@ -2102,6 +2244,9 @@ async fn voice_recv_loop(
                     let gap = packet.ts_ms.wrapping_sub(stream.last_packet_ts_ms);
                     if gap > 10_000 {
                         stream.jitter.set_expected(packet.seq);
+                    }
+                    if packet.seq < stream.jitter.expected_seq() {
+                        voice_counters.late_packets.fetch_add(1, Ordering::Relaxed);
                     }
                 }
                 stream.last_packet_ts_ms = packet.ts_ms;
@@ -2122,6 +2267,9 @@ async fn voice_recv_loop(
 
                 for stream in streams.values_mut() {
                     let mut frame_present = false;
+                    voice_counters
+                        .jitter_buffer_depth
+                        .fetch_max(stream.jitter.depth() as u64, Ordering::Relaxed);
                     let mut frame_level = 0.0_f32;
 
                     let ready = stream
@@ -2148,6 +2296,7 @@ async fn voice_recv_loop(
                         audio::jitter::PopResult::Missing
                             if stream.last_packet_wall_ms != 0 && stream.plc_frames < PLC_MAX_FRAMES =>
                         {
+                            voice_counters.lost_packets.fetch_add(1, Ordering::Relaxed);
                             let n = if opus_use_inband_fec {
                                 match stream.jitter.peek_expected() {
                                     Some(next_frame) => stream
@@ -2162,6 +2311,7 @@ async fn voice_recv_loop(
                             };
                             if n > 0 {
                                 stream.plc_frames += 1;
+                                voice_counters.concealment_frames.fetch_add(1, Ordering::Relaxed);
                                 frame_present = true;
                                 for (acc, sample) in mix_out[..n].iter_mut().zip(stream.pcm_out[..n].iter()) {
                                     let scaled = *sample as f32 * stream.effective_gain(&per_user_audio);
@@ -2182,6 +2332,7 @@ async fn voice_recv_loop(
                                 };
                                 if n > 0 {
                                     stream.plc_frames += 1;
+                                    voice_counters.concealment_frames.fetch_add(1, Ordering::Relaxed);
                                     frame_present = true;
                                     for (acc, sample) in mix_out[..n].iter_mut().zip(stream.pcm_out[..n].iter()) {
                                         let scaled = *sample as f32 * stream.effective_gain(&per_user_audio);
@@ -2212,6 +2363,7 @@ async fn voice_recv_loop(
                     }
 
                     stream.level = if speaking_now { frame_level.max(stream.level * 0.75) } else { 0.0 };
+                    voice_counters.observe_peak_stream_level(stream.level);
                     if let Some(user_id) = stream.user_id.as_ref() {
                         let _ = tx_event.send(UiEvent::VoiceMeter {
                             user_id: user_id.clone(),
