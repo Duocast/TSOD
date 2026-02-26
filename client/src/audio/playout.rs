@@ -3,7 +3,10 @@ use ringbuf::{
     traits::{Producer, Split},
     HeapProd, HeapRb,
 };
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 
 pub struct Playout {
     backend: PlayoutBackend,
@@ -21,16 +24,24 @@ unsafe impl Sync for Playout {}
 
 impl Playout {
     pub fn start(sample_rate: u32, channels: u16) -> Result<Self> {
+        Self::start_with_device(sample_rate, channels, None)
+    }
+
+    pub fn start_with_device(
+        sample_rate: u32,
+        channels: u16,
+        preferred_device: Option<&str>,
+    ) -> Result<Self> {
         let rb = HeapRb::<i16>::new(sample_rate as usize * channels as usize);
         let (prod, cons) = rb.split();
 
         #[cfg(target_os = "linux")]
-        let backend = PlayoutBackend::start(sample_rate, channels, cons)?;
+        let backend = PlayoutBackend::start(sample_rate, channels, cons, preferred_device)?;
 
         #[cfg(not(target_os = "linux"))]
         let backend = {
             let cons = Arc::new(Mutex::new(cons));
-            PlayoutBackend::start(sample_rate, channels, cons)?
+            PlayoutBackend::start(sample_rate, channels, cons, preferred_device)?
         };
 
         let prod = Arc::new(Mutex::new(prod));
@@ -45,6 +56,10 @@ impl Playout {
                 let _ = p.try_push(s);
             }
         }
+    }
+
+    pub fn is_healthy(&self) -> bool {
+        self.backend.is_healthy()
     }
 }
 
@@ -64,7 +79,12 @@ mod linux {
     }
 
     impl LinuxPlayout {
-        pub fn start(sample_rate: u32, channels: u16, cons: HeapCons<i16>) -> Result<Self> {
+        pub fn start(
+            sample_rate: u32,
+            channels: u16,
+            cons: HeapCons<i16>,
+            _preferred_device: Option<&str>,
+        ) -> Result<Self> {
             let thread = std::thread::Builder::new()
                 .name("tsod-pipewire-playout".to_string())
                 .spawn(move || {
@@ -80,6 +100,10 @@ mod linux {
         pub fn enumerate_output_devices() -> Vec<String> {
             vec!["PipeWire default output".to_string()]
         }
+
+        pub fn is_healthy(&self) -> bool {
+            true
+        }
     }
 
     fn run_pipewire_playout(
@@ -89,8 +113,7 @@ mod linux {
     ) -> Result<()> {
         pw::init();
 
-        let mainloop =
-            pw::main_loop::MainLoopBox::new(None).context("create PipeWire mainloop")?;
+        let mainloop = pw::main_loop::MainLoopBox::new(None).context("create PipeWire mainloop")?;
         let context = pw::context::ContextBox::new(mainloop.loop_(), None)
             .context("create PipeWire context")?;
         let core = context.connect(None).context("connect PipeWire core")?;
@@ -196,6 +219,7 @@ mod non_linux {
 
     pub struct CpalPlayout {
         _stream: cpal::Stream,
+        unhealthy: Arc<AtomicBool>,
     }
 
     impl CpalPlayout {
@@ -203,13 +227,20 @@ mod non_linux {
             sample_rate: u32,
             channels: u16,
             cons: Arc<Mutex<HeapCons<i16>>>,
+            preferred_device: Option<&str>,
         ) -> Result<Self> {
             let host = cpal::default_host();
-            let dev = host
-                .default_output_device()
-                .ok_or(anyhow!("no output device"))?;
+            let dev = if let Some(name) = preferred_device {
+                find_output_device_by_name(&host, name)
+                    .with_context(|| format!("output device '{name}' not found"))?
+            } else {
+                host.default_output_device()
+                    .ok_or(anyhow!("no output device"))?
+            };
             let (stream_cfg, actual_channels) =
                 compatible_output_config(&dev, sample_rate, channels)?;
+            let unhealthy = Arc::new(AtomicBool::new(false));
+            let unhealthy_cb = unhealthy.clone();
 
             let target_ch = channels;
             let stream = dev.build_output_stream(
@@ -230,11 +261,17 @@ mod non_linux {
                         }
                     }
                 },
-                move |err| eprintln!("playout err: {err}"),
+                move |err| {
+                    unhealthy_cb.store(true, Ordering::Relaxed);
+                    eprintln!("playout err: {err}")
+                },
                 None,
             )?;
             stream.play()?;
-            Ok(Self { _stream: stream })
+            Ok(Self {
+                _stream: stream,
+                unhealthy,
+            })
         }
 
         pub fn enumerate_output_devices() -> Vec<String> {
@@ -243,6 +280,17 @@ mod non_linux {
                 .map(|devs| devs.filter_map(|d| d.name().ok()).collect())
                 .unwrap_or_default()
         }
+
+        pub fn is_healthy(&self) -> bool {
+            !self.unhealthy.load(Ordering::Relaxed)
+        }
+    }
+
+    fn find_output_device_by_name(host: &cpal::Host, name: &str) -> Result<cpal::Device> {
+        let mut devices = host.output_devices().context("enumerate output devices")?;
+        devices
+            .find(|dev| dev.name().ok().as_deref() == Some(name))
+            .ok_or_else(|| anyhow!("no matching output device"))
     }
 
     fn compatible_output_config(
