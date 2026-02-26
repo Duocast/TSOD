@@ -124,21 +124,21 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                 theme::text_color(),
             );
 
-            let mut status_parts = Vec::new();
+            let mut status_parts: Vec<String> = Vec::new();
             if member.muted {
-                status_parts.push("🔇 server-muted");
+                status_parts.push("🔇 server-muted".into());
             }
             if member.self_muted {
-                status_parts.push("🎙️ self-muted");
+                status_parts.push("🎙️ self-muted".into());
             }
             if member.deafened {
-                status_parts.push("🚫🔊 server-deafened");
+                status_parts.push("🚫🔊 server-deafened".into());
             }
             if member.self_deafened {
-                status_parts.push("🔈 self-deafened");
+                status_parts.push("🔈 self-deafened".into());
             }
             if member.streaming {
-                status_parts.push("📺 streaming");
+                status_parts.push("📺 streaming".into());
             }
             if !member.away_message.trim().is_empty() {
                 status_parts.push(format!("🌙 Away: {}", member.away_message.trim()));

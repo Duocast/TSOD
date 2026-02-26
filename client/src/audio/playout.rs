@@ -477,54 +477,6 @@ mod linux {
 }
 
 #[cfg(not(target_os = "linux"))]
-type PlayoutBackend = non_linux::CpalPlayout;
-
-unsafe impl Send for Playout {}
-unsafe impl Sync for Playout {}
-
-impl Playout {
-    pub fn start(sample_rate: u32, channels: u16) -> Result<Self> {
-        Self::start_with_device(sample_rate, channels, None)
-    }
-
-    pub fn start_with_device(
-        sample_rate: u32,
-        channels: u16,
-        preferred_device: Option<&str>,
-    ) -> Result<Self> {
-        let rb = HeapRb::<i16>::new(sample_rate as usize * channels as usize);
-        let (prod, cons) = rb.split();
-
-        #[cfg(target_os = "linux")]
-        let backend = PlayoutBackend::start(sample_rate, channels, cons, preferred_device)?;
-
-        #[cfg(not(target_os = "linux"))]
-        let backend = PlayoutBackend::start(sample_rate, channels, cons, preferred_device)?;
-
-        Ok(Self {
-            backend,
-            prod: UnsafeCell::new(prod),
-        })
-    }
-
-    pub fn push_pcm(&self, pcm: &[i16]) {
-        let _ = &self.backend;
-        let prod = unsafe { &mut *self.prod.get() };
-        for &s in pcm {
-            let _ = prod.try_push(s);
-        }
-    }
-
-    pub fn is_healthy(&self) -> bool {
-        self.backend.is_healthy()
-    }
-}
-
-pub fn enumerate_output_devices() -> Vec<String> {
-    PlayoutBackend::enumerate_output_devices()
-}
-
-#[cfg(not(target_os = "linux"))]
 mod non_linux {
     use anyhow::{anyhow, Context, Result};
     use cpal::{
