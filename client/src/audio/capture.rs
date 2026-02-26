@@ -151,7 +151,8 @@ mod linux {
         let Ok(context) = pw::context::ContextBox::new(mainloop.loop_(), None) else {
             return false;
         };
-        context.connect(None).is_ok()
+        let result = context.connect(None).is_ok();
+        result
     }
 
     fn run_pipewire_capture(
