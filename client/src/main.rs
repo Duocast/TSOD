@@ -2314,6 +2314,8 @@ async fn voice_recv_loop(
 
     let mut streams = HashMap::<StreamKey, InboundStreamState>::new();
     let mut tick = tokio::time::interval(Duration::from_millis(frame_ms as u64));
+    let mut mix_out = vec![0f32; frame_samples];
+    let mut mixed_pcm = vec![0i16; frame_samples];
 
     loop {
         tokio::select! {
@@ -2364,7 +2366,7 @@ async fn voice_recv_loop(
                 }
 
                 let now_ms = unix_ms();
-                let mut mix_out = vec![0f32; frame_samples];
+                mix_out.fill(0.0);
                 let mut mixed_streams = 0usize;
 
                 for stream in streams.values_mut() {
@@ -2489,7 +2491,7 @@ async fn voice_recv_loop(
                 });
 
                 let speaking_streams = streams.values().filter(|s| s.speaking).count();
-                let mut mixed_pcm = vec![0i16; frame_samples];
+                mixed_pcm.fill(0);
 
                 if mixed_streams > 0 {
                     for (dst, sample) in mixed_pcm.iter_mut().zip(mix_out.iter()) {
