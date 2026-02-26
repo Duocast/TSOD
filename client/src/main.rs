@@ -27,6 +27,7 @@ use net::voice_datagram::{
     make_voice_datagram, VOICE_FORWARDED_HDR_LEN, VOICE_HDR_LEN, VOICE_VERSION,
 };
 use proto::voiceplatform::v1 as pb;
+use std::collections::HashMap;
 #[cfg(debug_assertions)]
 use std::collections::HashSet;
 use std::sync::{
@@ -200,7 +201,7 @@ async fn app_task(
     let frame_ms = 20u32;
 
     // Audio pipeline
-    let codec = Arc::new(Mutex::new(audio::opus::OpusCodec::new(
+    let encoder = Arc::new(Mutex::new(audio::opus::OpusEncoder::new(
         sample_rate,
         channels as u8,
     )?));
@@ -210,7 +211,6 @@ async fn app_task(
         frame_ms,
     )?);
     let playout = Arc::new(audio::playout::Playout::start(sample_rate, channels)?);
-    let jitter = Arc::new(Mutex::new(audio::jitter::JitterBuffer::new(64)));
 
     // DSP pipeline
     let dsp_enabled = !cfg.no_noise_suppression;
@@ -260,10 +260,9 @@ async fn app_task(
             &mut cfg,
             &tx_event,
             &rx_intent,
-            codec.clone(),
+            encoder.clone(),
             capture.clone(),
             playout.clone(),
-            jitter.clone(),
             capture_dsp.clone(),
             active_voice_channel_route.clone(),
             ptt_active.clone(),
@@ -509,10 +508,9 @@ async fn connect_and_run_session(
     cfg: &mut Config,
     tx_event: &Sender<UiEvent>,
     rx_intent: &Receiver<UiIntent>,
-    codec: Arc<Mutex<audio::opus::OpusCodec>>,
+    encoder: Arc<Mutex<audio::opus::OpusEncoder>>,
     capture: Arc<audio::capture::Capture>,
     playout: Arc<audio::playout::Playout>,
-    jitter: Arc<Mutex<audio::jitter::JitterBuffer>>,
     capture_dsp: Option<Arc<Mutex<audio::dsp::CaptureDsp>>>,
     active_voice_channel_route: Arc<AtomicU32>,
     ptt_active: Arc<AtomicBool>,
@@ -1002,7 +1000,7 @@ async fn connect_and_run_session(
 
     let _voice_send = tokio::spawn(voice_send_loop(
         conn.clone(),
-        codec.clone(),
+        encoder.clone(),
         capture.clone(),
         playout.clone(),
         capture_dsp.clone(),
@@ -1018,9 +1016,7 @@ async fn connect_and_run_session(
 
     let _voice_recv = tokio::spawn(voice_recv_loop(
         conn.clone(),
-        codec.clone(),
         playout.clone(),
-        jitter.clone(),
         capture_dsp.clone(),
         self_deafened.clone(),
         output_gain.clone(),
@@ -1550,7 +1546,7 @@ async fn mic_test_loop(
 
 async fn voice_send_loop(
     conn: quinn::Connection,
-    codec: Arc<Mutex<audio::opus::OpusCodec>>,
+    encoder: Arc<Mutex<audio::opus::OpusEncoder>>,
     capture: Arc<audio::capture::Capture>,
     playout: Arc<audio::playout::Playout>,
     capture_dsp: Option<Arc<Mutex<audio::dsp::CaptureDsp>>>,
@@ -1624,7 +1620,7 @@ async fn voice_send_loop(
             continue;
         }
 
-        let n = match codec.lock().await.encode(&pcm, &mut enc_out) {
+        let n = match encoder.lock().await.encode(&pcm, &mut enc_out) {
             Ok(n) => n,
             Err(_) => continue,
         };
@@ -1650,9 +1646,7 @@ async fn voice_send_loop(
 
 async fn voice_recv_loop(
     conn: quinn::Connection,
-    codec: Arc<Mutex<audio::opus::OpusCodec>>,
     playout: Arc<audio::playout::Playout>,
-    jitter: Arc<Mutex<audio::jitter::JitterBuffer>>,
     capture_dsp: Option<Arc<Mutex<audio::dsp::CaptureDsp>>>,
     self_deafened: Arc<AtomicBool>,
     output_gain: Arc<std::sync::atomic::AtomicU32>,
@@ -1663,7 +1657,7 @@ async fn voice_recv_loop(
     let frame_ms = 20u32;
     let frame_samples = (sample_rate as usize * frame_ms as usize / 1000) * channels;
 
-    let mut pcm_out = vec![0i16; frame_samples];
+    let mut streams = HashMap::<StreamKey, InboundStreamState>::new();
 
     loop {
         let d = match conn.read_datagram().await {
@@ -1674,7 +1668,6 @@ async fn voice_recv_loop(
             }
         };
 
-        // Skip playout when self-deafened (still receive to keep connection alive)
         if self_deafened.load(Ordering::Relaxed) {
             continue;
         }
@@ -1684,43 +1677,114 @@ async fn voice_recv_loop(
             None => continue,
         };
 
-        let _ = (packet.sender_user_id, packet.channel_id);
-        jitter
-            .lock()
-            .await
-            .push(packet.seq, packet.payload.to_vec());
-
-        while let Some(frame) = jitter.lock().await.pop_ready() {
-            let n = match codec.lock().await.decode(&frame, &mut pcm_out) {
-                Ok(n) => n,
-                Err(_) => continue,
-            };
-
-            if n > 0 {
-                // Apply output gain
-                let gain = u32_to_f32(output_gain.load(Ordering::Relaxed));
-                if (gain - 1.0).abs() > 0.001 {
-                    for s in pcm_out[..n].iter_mut() {
-                        *s = (*s as f32 * gain).clamp(-32768.0, 32767.0) as i16;
-                    }
-                }
-
-                if let Some(ref dsp) = capture_dsp {
-                    let mut d = dsp.lock().await;
-                    d.feed_echo_reference(&pcm_out[..n]);
-                }
-
-                playout.push_pcm(&pcm_out[..n]);
+        let stream = streams
+            .entry(packet.stream_key())
+            .or_insert_with(|| InboundStreamState::new(sample_rate, channels as u8, 64));
+        if stream.last_ts_ms != 0 {
+            let gap = packet.ts_ms.wrapping_sub(stream.last_ts_ms);
+            if gap > 10_000 {
+                stream.jitter.set_expected(packet.seq);
             }
         }
+        stream.last_ts_ms = packet.ts_ms;
+        stream.jitter.push(packet.seq, packet.payload.to_vec());
+
+        let mut mix_out = vec![0i32; frame_samples];
+        let mut active_frames = 0usize;
+
+        for stream in streams.values_mut() {
+            let mut decoded_any = false;
+            while let Some(frame) = stream.jitter.pop_ready() {
+                let n = match stream.decoder.decode(&frame, &mut stream.pcm_out) {
+                    Ok(n) => n,
+                    Err(_) => continue,
+                };
+                if n == 0 {
+                    continue;
+                }
+                decoded_any = true;
+                active_frames += 1;
+                for (acc, sample) in mix_out[..n].iter_mut().zip(stream.pcm_out[..n].iter()) {
+                    *acc += *sample as i32;
+                }
+            }
+            stream.talk_active = decoded_any;
+        }
+
+        streams.retain(|_, stream| {
+            let age = packet.ts_ms.wrapping_sub(stream.last_ts_ms);
+            stream.talk_active || age < 10_000
+        });
+
+        if active_frames == 0 {
+            continue;
+        }
+
+        let mut mixed_pcm = vec![0i16; frame_samples];
+        for (dst, sample) in mixed_pcm.iter_mut().zip(mix_out.iter()) {
+            *dst = (*sample).clamp(-32768, 32767) as i16;
+        }
+
+        let gain = u32_to_f32(output_gain.load(Ordering::Relaxed));
+        if (gain - 1.0).abs() > 0.001 {
+            for s in mixed_pcm.iter_mut() {
+                *s = (*s as f32 * gain).clamp(-32768.0, 32767.0) as i16;
+            }
+        }
+
+        if let Some(ref dsp) = capture_dsp {
+            let mut d = dsp.lock().await;
+            d.feed_echo_reference(&mixed_pcm);
+        }
+
+        playout.push_pcm(&mixed_pcm);
     }
+}
+
+struct InboundStreamState {
+    jitter: audio::jitter::JitterBuffer,
+    decoder: audio::opus::OpusDecoder,
+    pcm_out: Vec<i16>,
+    last_ts_ms: u32,
+    talk_active: bool,
+}
+
+impl InboundStreamState {
+    fn new(sample_rate: u32, channels: u8, max_frames: usize) -> Self {
+        let channel_count = channels as usize;
+        let frame_samples = (sample_rate as usize * 20 / 1000) * channel_count;
+        Self {
+            jitter: audio::jitter::JitterBuffer::new(max_frames),
+            decoder: audio::opus::OpusDecoder::new(sample_rate, channels)
+                .expect("inbound opus decoder init"),
+            pcm_out: vec![0i16; frame_samples],
+            last_ts_ms: 0,
+            talk_active: false,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+enum StreamKey {
+    Sender(uuid::Uuid),
+    Ssrc(u32),
 }
 
 struct InboundVoice<'a> {
     sender_user_id: Option<uuid::Uuid>,
     channel_id: Option<uuid::Uuid>,
+    ssrc: u32,
     seq: u32,
+    ts_ms: u32,
     payload: &'a [u8],
+}
+
+impl InboundVoice<'_> {
+    fn stream_key(&self) -> StreamKey {
+        self.sender_user_id
+            .map(StreamKey::Sender)
+            .unwrap_or(StreamKey::Ssrc(self.ssrc))
+    }
 }
 
 fn parse_voice_payload(d: &Bytes) -> Option<InboundVoice<'_>> {
@@ -1734,13 +1798,17 @@ fn parse_voice_payload(d: &Bytes) -> Option<InboundVoice<'_>> {
     if d.len() <= hdr_len {
         return None;
     }
+    let ssrc = u32::from_be_bytes([d[8], d[9], d[10], d[11]]);
     let seq = u32::from_be_bytes([d[12], d[13], d[14], d[15]]);
+    let ts_ms = u32::from_be_bytes([d[16], d[17], d[18], d[19]]);
 
     match hdr_len {
         VOICE_HDR_LEN => Some(InboundVoice {
             sender_user_id: None,
             channel_id: None,
+            ssrc,
             seq,
+            ts_ms,
             payload: &d[hdr_len..],
         }),
         VOICE_FORWARDED_HDR_LEN => {
@@ -1749,7 +1817,9 @@ fn parse_voice_payload(d: &Bytes) -> Option<InboundVoice<'_>> {
             Some(InboundVoice {
                 sender_user_id,
                 channel_id,
+                ssrc,
                 seq,
+                ts_ms,
                 payload: &d[hdr_len..],
             })
         }
