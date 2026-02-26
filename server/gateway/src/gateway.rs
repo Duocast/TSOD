@@ -11,6 +11,7 @@ use tracing::{debug, info, warn};
 use crate::{
     auth::{AuthProvider, AuthedIdentity},
     frame::{read_delimited, write_delimited},
+    media::MediaService,
     proto::voiceplatform::v1 as pb,
     state::{MembershipCache, PushHub, QuinnDatagramTx, Sessions},
 };
@@ -32,6 +33,7 @@ pub struct Gateway {
     push: PushHub,
     membership: MembershipCache,
     voice: Arc<VoiceForwarder>,
+    media: Arc<MediaService>,
 }
 
 impl Gateway {
@@ -43,6 +45,7 @@ impl Gateway {
         push: PushHub,
         membership: MembershipCache,
         voice: Arc<VoiceForwarder>,
+        media: Arc<MediaService>,
     ) -> Self {
         Self {
             auth,
@@ -52,6 +55,7 @@ impl Gateway {
             push,
             membership,
             voice,
+            media,
         }
     }
 
@@ -187,6 +191,24 @@ impl Gateway {
             user_id,
             is_admin: identity.is_admin,
         };
+
+        let media = self.media.clone();
+        let conn_media = conn.clone();
+        tokio::spawn(async move {
+            loop {
+                match conn_media.accept_bi().await {
+                    Ok((send_s, recv_s)) => {
+                        let media = media.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = media.handle_stream(send_s, recv_s, user_id).await {
+                                warn!("media stream failed: {:#}", e);
+                            }
+                        });
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
 
         // Request + push loop
         let res: Result<()> = async {
@@ -476,8 +498,7 @@ impl Gateway {
                                     "width": a.width,
                                     "height": a.height,
                                     "duration_ms": a.duration_ms,
-                                    "download_url": a.download_url,
-                                    "thumbnail_url": a.thumbnail_url,
+                                    "sha256": a.sha256,
                                 })
                             })
                             .collect(),

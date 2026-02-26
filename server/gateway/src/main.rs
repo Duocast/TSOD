@@ -2,11 +2,11 @@ mod auth;
 mod config;
 mod frame;
 mod gateway;
+mod media;
 mod metrics_adapter;
 mod outbox_dispatch;
 mod state;
 mod tls;
-mod upload_http;
 
 pub mod proto;
 
@@ -26,8 +26,6 @@ use crate::auth::DeviceAuthProvider;
 use crate::metrics_adapter::voice_metrics;
 use crate::outbox_dispatch::{run_outbox_dispatcher, OutboxDispatcherConfig};
 use crate::state::{MembershipCache, PushHub, Sessions};
-
-use crate::upload_http::{UploadHttpConfig, UploadHttpServer};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -51,13 +49,6 @@ async fn main() -> Result<()> {
         let _ = ms.serve().await;
     });
 
-    let allowed_mime = cfg
-        .upload_allowed_mime
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect::<std::collections::HashSet<_>>();
-
     // Postgres
     let pool = PgPoolOptions::new()
         .max_connections(32)
@@ -67,24 +58,14 @@ async fn main() -> Result<()> {
     // Migrations (control-plane schema)
     sqlx::migrate!("../control/migrations").run(&pool).await?;
 
-    tokio::spawn({
-        let upload_server = UploadHttpServer::new(
-            UploadHttpConfig {
-                listen: cfg.upload_listen.clone(),
-                public_base: cfg.upload_public_base.clone(),
-                upload_dir: std::path::PathBuf::from(&cfg.upload_dir),
-                max_file_size_bytes: cfg.upload_max_mb * 1024 * 1024,
-                allowed_mime,
-                default_server_id: vp_control::ids::ServerId(uuid::Uuid::parse_str(
-                    &cfg.default_server_id,
-                )?),
-            },
+    let media = Arc::new(
+        media::MediaService::new(
             pool.clone(),
-        );
-        async move {
-            let _ = upload_server.serve().await;
-        }
-    });
+            std::path::PathBuf::from("./data/uploads"),
+            vp_control::ids::ServerId(uuid::Uuid::parse_str(&cfg.default_server_id)?),
+        )
+        .await?,
+    );
 
     let repo = vp_control::PgControlRepo::new(pool.clone());
     let control = Arc::new(vp_control::ControlService::new(repo.clone()));
@@ -166,6 +147,7 @@ async fn main() -> Result<()> {
         push,
         membership,
         forwarder,
+        media,
     );
 
     tokio::select! {

@@ -19,9 +19,7 @@ message AttachmentRef {
   uint32 height = 6;
   uint64 duration_ms = 7; // for audio/video
 
-  // URLs (populated by server after upload completes)
-  string download_url = 8;
-  string thumbnail_url = 9;
+  string sha256 = 8;
 }
 
 // ── Reactions ──────────────────────────────────────────────────────────

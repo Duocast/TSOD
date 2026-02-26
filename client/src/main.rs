@@ -25,7 +25,6 @@ use identity::DeviceIdentity;
 use net::dispatcher::{ControlDispatcher, PushEvent};
 use net::voice_datagram::{make_voice_datagram, VOICE_HDR_LEN, VOICE_VERSION};
 use proto::voiceplatform::v1 as pb;
-use serde::Deserialize;
 #[cfg(debug_assertions)]
 use std::collections::HashSet;
 use std::sync::{
@@ -716,12 +715,8 @@ async fn connect_and_run_session(
                                                     filename: a.filename,
                                                     mime_type: a.mime_type,
                                                     size_bytes: a.size_bytes,
-                                                    download_url: a.download_url,
-                                                    thumbnail_url: if a.thumbnail_url.is_empty() {
-                                                        None
-                                                    } else {
-                                                        Some(a.thumbnail_url)
-                                                    },
+                                                    download_url: String::new(),
+                                                    thumbnail_url: None,
                                                 })
                                                 .collect(),
                                             reply_to: mp.reply_to_message_id.map(|r| r.value),
@@ -1091,10 +1086,9 @@ async fn connect_and_run_session(
                                 for attachment in &attachments {
                                     let result: anyhow::Result<()> = async {
                                         if attachment.asset_id.starts_with('/') {
-                                            let uploaded = upload_attachment(
-                                                &cfg.upload_base_url,
+                                            let uploaded = upload_attachment_quic(
+                                                &conn,
                                                 ch,
-                                                &local_user_id,
                                                 attachment,
                                             )
                                             .await?;
@@ -1142,8 +1136,7 @@ async fn connect_and_run_session(
                                         filename: a.filename,
                                         mime_type: a.mime_type,
                                         size_bytes: a.size_bytes,
-                                        download_url: a.download_url,
-                                        thumbnail_url: a.thumbnail_url.unwrap_or_default(),
+                                        sha256: String::new(),
                                         ..Default::default()
                                     })
                                     .collect();
@@ -1426,104 +1419,64 @@ async fn connect_and_run_session(
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct UploadResponse {
-    attachment_id: String,
-    download_url: String,
-    content_type: String,
-    size_bytes: u64,
-    filename: String,
-}
-
-fn parse_http_base_url(base: &str) -> anyhow::Result<(String, u16)> {
-    let trimmed = base.trim();
-    let without_scheme = trimmed
-        .strip_prefix("http://")
-        .ok_or_else(|| anyhow!("only http:// upload_base_url is supported in this build"))?;
-    let host_port = without_scheme.split('/').next().unwrap_or(without_scheme);
-    let mut parts = host_port.splitn(2, ':');
-    let host = parts.next().unwrap_or_default().to_string();
-    let port = parts
-        .next()
-        .map(|p| p.parse::<u16>())
-        .transpose()
-        .context("invalid upload port")?
-        .unwrap_or(80);
-    if host.is_empty() {
-        return Err(anyhow!("invalid upload host"));
-    }
-    Ok((host, port))
-}
-
-async fn upload_attachment(
-    upload_base_url: &str,
+async fn upload_attachment_quic(
+    conn: &quinn::Connection,
     channel_id: &str,
-    uploader_user_id: &str,
     attachment: &ui::model::AttachmentData,
 ) -> anyhow::Result<ui::model::AttachmentData> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpStream;
 
-    let path = attachment.asset_id.clone();
-    let bytes = tokio::task::spawn_blocking(move || std::fs::read(&path))
+    let (mut send, mut recv) = conn.open_bi().await.context("open media stream")?;
+    let mut file = tokio::fs::File::open(&attachment.asset_id)
         .await
-        .context("spawn_blocking join")?
-        .with_context(|| format!("read attachment bytes: {}", attachment.asset_id))?;
+        .with_context(|| format!("open attachment: {}", attachment.asset_id))?;
+    let size_bytes = file.metadata().await?.len();
 
-    let (host, port) = parse_http_base_url(upload_base_url)?;
-    let mut stream = TcpStream::connect((host.as_str(), port))
-        .await
-        .context("connect upload server")?;
-
-    let request_head = format!(
-        "POST /upload HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\nx-filename: {}\r\nx-content-type: {}\r\nx-channel-id: {}\r\nx-uploader-user-id: {}\r\n\r\n",
-        bytes.len(),
-        attachment.filename,
-        attachment.mime_type,
-        channel_id,
-        uploader_user_id
-    );
-
-    stream
-        .write_all(request_head.as_bytes())
-        .await
-        .context("write upload headers")?;
-    stream
-        .write_all(&bytes)
-        .await
-        .context("write upload body")?;
-
-    let mut raw = Vec::new();
-    stream
-        .read_to_end(&mut raw)
-        .await
-        .context("read upload response")?;
-
-    let sep = b"\r\n\r\n";
-    let Some(idx) = raw.windows(sep.len()).position(|w| w == sep) else {
-        return Err(anyhow!("malformed upload response"));
+    let init = pb::MediaRequest {
+        payload: Some(pb::media_request::Payload::UploadInit(pb::UploadInit {
+            channel_id: Some(pb::ChannelId {
+                value: channel_id.to_string(),
+            }),
+            filename: attachment.filename.clone(),
+            mime: attachment.mime_type.clone(),
+            size_bytes,
+        })),
     };
-    let head = String::from_utf8_lossy(&raw[..idx]);
-    let body = &raw[idx + sep.len()..];
+    net::frame::write_delimited(&mut send, &init).await?;
 
-    let status_ok = head
-        .lines()
-        .next()
-        .map(|line| line.contains(" 200 "))
-        .unwrap_or(false);
-    if !status_ok {
-        return Err(anyhow!("upload failed: {}", String::from_utf8_lossy(body)));
+    let ready: pb::MediaResponse = net::frame::read_delimited(&mut recv, 64 * 1024).await?;
+    let max_chunk = match ready.payload {
+        Some(pb::media_response::Payload::UploadReady(r)) => usize::max(r.max_chunk as usize, 4096),
+        Some(pb::media_response::Payload::Error(e)) => {
+            return Err(anyhow!("media upload rejected: {}", e.message))
+        }
+        _ => return Err(anyhow!("unexpected media upload response")),
+    };
+
+    let mut buf = vec![0u8; max_chunk];
+    loop {
+        let n = file.read(&mut buf).await?;
+        if n == 0 {
+            break;
+        }
+        send.write_all(&buf[..n]).await?;
     }
 
-    let payload: UploadResponse = serde_json::from_slice(body).context("decode upload response")?;
-    Ok(ui::model::AttachmentData {
-        asset_id: payload.attachment_id,
-        filename: payload.filename,
-        mime_type: payload.content_type,
-        size_bytes: payload.size_bytes,
-        download_url: payload.download_url,
-        thumbnail_url: None,
-    })
+    let complete: pb::MediaResponse = net::frame::read_delimited(&mut recv, 64 * 1024).await?;
+    match complete.payload {
+        Some(pb::media_response::Payload::UploadComplete(done)) => Ok(ui::model::AttachmentData {
+            asset_id: done.attachment_id.map(|a| a.value).unwrap_or_default(),
+            filename: done.filename,
+            mime_type: done.mime,
+            size_bytes: done.size_bytes,
+            download_url: String::new(),
+            thumbnail_url: None,
+        }),
+        Some(pb::media_response::Payload::Error(e)) => {
+            Err(anyhow!("media upload failed: {}", e.message))
+        }
+        _ => Err(anyhow!("unexpected media upload completion")),
+    }
 }
 
 async fn mic_test_loop(
@@ -1845,11 +1798,13 @@ fn make_endpoint_with_optional_pinning(cfg: &Config) -> Result<quinn::Endpoint> 
         return make_pinned_endpoint(pin, &cfg.alpn);
     }
 
-    if let Some(ref ca_path) = cfg.ca_cert_pem {
-        return net::quic::make_ca_endpoint(ca_path, &cfg.alpn);
+    if cfg.ca_cert_pem.trim().is_empty() {
+        return Err(anyhow!(
+            "VP_CA_CERT_PEM (or --ca-cert-pem) is required in this build"
+        ));
     }
 
-    net::quic::make_endpoint(&cfg.alpn)
+    net::quic::make_ca_endpoint(&cfg.ca_cert_pem, &cfg.alpn)
 }
 
 fn make_pinned_endpoint(pin_sha256: [u8; 32], alpn: &str) -> Result<quinn::Endpoint> {
