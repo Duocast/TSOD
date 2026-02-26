@@ -2,7 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use ring::rand::SystemRandom;
 use ring::signature::{Ed25519KeyPair, KeyPair};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
 pub struct DeviceIdentity {
@@ -20,8 +20,8 @@ struct StoredDeviceIdentity {
 impl DeviceIdentity {
     pub fn load_or_create() -> Result<Self> {
         let path = identity_path();
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            if let Ok(stored) = serde_json::from_str::<StoredDeviceIdentity>(&content) {
+        if let Ok(content) = std::fs::read(&path) {
+            if let Ok(stored) = serde_json::from_slice::<StoredDeviceIdentity>(&content) {
                 let key = Ed25519KeyPair::from_pkcs8(&stored.pkcs8)
                     .map_err(|_| anyhow!("invalid stored device key"))?;
                 return Ok(Self {
@@ -46,8 +46,7 @@ impl DeviceIdentity {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("create identity dir {}", parent.display()))?;
         }
-        std::fs::write(&path, serde_json::to_vec_pretty(&stored)?)
-            .with_context(|| format!("write identity file {}", path.display()))?;
+        write_identity_file_atomically(&path, &stored)?;
 
         Ok(Self {
             device_id: stored.device_id,
@@ -64,6 +63,40 @@ impl DeviceIdentity {
         payload.extend_from_slice(session_id.as_bytes());
         Ok(key.sign(&payload).as_ref().to_vec())
     }
+}
+
+fn write_identity_file_atomically(path: &Path, stored: &StoredDeviceIdentity) -> Result<()> {
+    let bytes = serde_json::to_vec_pretty(stored)?;
+    let tmp_path = path.with_extension("json.tmp");
+
+    #[cfg(unix)]
+    {
+        use std::fs::OpenOptions;
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let mut file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp_path)
+            .with_context(|| format!("open temp identity file {}", tmp_path.display()))?;
+        file.write_all(&bytes)
+            .with_context(|| format!("write temp identity file {}", tmp_path.display()))?;
+        file.sync_all()
+            .with_context(|| format!("sync temp identity file {}", tmp_path.display()))?;
+    }
+
+    #[cfg(not(unix))]
+    {
+        std::fs::write(&tmp_path, &bytes)
+            .with_context(|| format!("write temp identity file {}", tmp_path.display()))?;
+    }
+
+    std::fs::rename(&tmp_path, path)
+        .with_context(|| format!("rename identity file {}", path.display()))?;
+    Ok(())
 }
 
 fn identity_path() -> PathBuf {
