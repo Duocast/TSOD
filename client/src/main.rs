@@ -958,6 +958,7 @@ async fn connect_and_run_session(
         let mut last_event_seq = snapshot.snapshot_version;
         let local_user_id = local_user_id.clone();
         let active_voice_channel_route = active_voice_channel_route.clone();
+        let server_deafened = server_deafened.clone();
         tokio::spawn(async move {
             while let Some(ev) = push_rx.recv().await {
                 match ev {
