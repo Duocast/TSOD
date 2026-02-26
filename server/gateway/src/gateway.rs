@@ -686,6 +686,7 @@ impl Gateway {
         let mut identity = self
             .auth
             .authenticate(&auth_req, session_id, auth_challenge)
+            .await
             .context("auth failed")?;
         if let Some(preferred) = normalize_preferred_display_name(&auth_req.preferred_display_name)
         {

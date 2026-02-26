@@ -11,8 +11,9 @@ pub struct AuthedIdentity {
     pub is_admin: bool,
 }
 
+#[async_trait::async_trait]
 pub trait AuthProvider: Send + Sync + 'static {
-    fn authenticate(
+    async fn authenticate(
         &self,
         req: &pb::AuthRequest,
         session_id: &str,
@@ -23,16 +24,21 @@ pub trait AuthProvider: Send + Sync + 'static {
 #[derive(Debug, Clone)]
 pub struct DeviceAuthProvider {
     pool: Pool<Postgres>,
+    default_server_id: uuid::Uuid,
 }
 
 impl DeviceAuthProvider {
-    pub fn new(pool: Pool<Postgres>) -> Self {
-        Self { pool }
+    pub fn new(pool: Pool<Postgres>, default_server_id: uuid::Uuid) -> Self {
+        Self {
+            pool,
+            default_server_id,
+        }
     }
 }
 
+#[async_trait::async_trait]
 impl AuthProvider for DeviceAuthProvider {
-    fn authenticate(
+    async fn authenticate(
         &self,
         req: &pb::AuthRequest,
         session_id: &str,
@@ -67,23 +73,18 @@ impl AuthProvider for DeviceAuthProvider {
                     .verify(&signed, &device.signature)
                     .map_err(|_| anyhow!("invalid device signature"))?;
 
-                let pool = self.pool.clone();
-                let pubkey = device.device_pubkey.clone();
-                let user_id = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(async move {
-                        lookup_or_create_user_for_device(&pool, parsed_device_id, &pubkey).await
-                    })
-                })?;
+                let user_id = lookup_or_create_user_for_device(
+                    &self.pool,
+                    parsed_device_id,
+                    &device.device_pubkey,
+                )
+                .await?;
 
-                let is_admin = tokio::task::block_in_place(|| {
-                    let pool = self.pool.clone();
-                    tokio::runtime::Handle::current()
-                        .block_on(async move { is_user_admin(&pool, user_id).await })
-                })?;
+                let is_admin = is_user_admin(&self.pool, user_id).await?;
 
                 Ok(AuthedIdentity {
                     user_id: user_id.to_string(),
-                    server_id: "00000000-0000-0000-0000-0000000000aa".to_string(),
+                    server_id: self.default_server_id.to_string(),
                     display_name: format!("guest-{}", &parsed_device_id.to_string()[..8]),
                     is_admin,
                 })
@@ -102,7 +103,7 @@ async fn lookup_or_create_user_for_device(
 
     let existing = sqlx::query(
         r#"
-        SELECT user_id, device_id
+        SELECT user_id, device_id, revoked_at
         FROM auth_devices
         WHERE pubkey = $1
         FOR UPDATE
@@ -116,8 +117,12 @@ async fn lookup_or_create_user_for_device(
     if let Some(row) = existing {
         let existing_user_id: uuid::Uuid = row.try_get("user_id")?;
         let existing_device_id: uuid::Uuid = row.try_get("device_id")?;
+        let revoked_at: Option<chrono::DateTime<chrono::Utc>> = row.try_get("revoked_at")?;
         if existing_device_id != device_id {
             return Err(anyhow!("device_id mismatch for registered key"));
+        }
+        if revoked_at.is_some() {
+            return Err(anyhow!("device revoked"));
         }
         sqlx::query(
             r#"
@@ -161,7 +166,7 @@ async fn lookup_or_create_user_for_device(
 
     if let Err(err) = insert_res {
         if let sqlx::Error::Database(db_err) = &err {
-            if db_err.constraint() == Some("auth_devices_device_id_key") {
+            if db_err.constraint() == Some("auth_devices_pkey") {
                 return Err(anyhow!(
                     "device_id already registered to another device key"
                 ));
@@ -169,7 +174,7 @@ async fn lookup_or_create_user_for_device(
             if db_err.constraint() == Some("auth_devices_pubkey_key") {
                 let row = sqlx::query(
                     r#"
-                    SELECT user_id, device_id
+                    SELECT user_id, device_id, revoked_at
                     FROM auth_devices
                     WHERE pubkey = $1
                     FOR UPDATE
@@ -181,9 +186,25 @@ async fn lookup_or_create_user_for_device(
                 .context("lookup device by pubkey after conflict")?;
                 let existing_user_id: uuid::Uuid = row.try_get("user_id")?;
                 let existing_device_id: uuid::Uuid = row.try_get("device_id")?;
+                let revoked_at: Option<chrono::DateTime<chrono::Utc>> =
+                    row.try_get("revoked_at")?;
                 if existing_device_id != device_id {
                     return Err(anyhow!("device_id mismatch for registered key"));
                 }
+                if revoked_at.is_some() {
+                    return Err(anyhow!("device revoked"));
+                }
+                sqlx::query(
+                    r#"
+                    UPDATE auth_devices
+                    SET last_seen = now()
+                    WHERE pubkey = $1
+                    "#,
+                )
+                .bind(pubkey)
+                .execute(&mut *tx)
+                .await
+                .context("update device last_seen after conflict")?;
                 tx.commit().await.context("commit conflict device auth")?;
                 return Ok(existing_user_id);
             }

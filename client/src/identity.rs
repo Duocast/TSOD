@@ -67,7 +67,9 @@ impl DeviceIdentity {
 
 fn write_identity_file_atomically(path: &Path, stored: &StoredDeviceIdentity) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(stored)?;
-    let tmp_path = path.with_extension("json.tmp");
+    let pid = std::process::id();
+    let suffix = uuid::Uuid::new_v4();
+    let tmp_path = path.with_file_name(format!("device_identity.json.{pid}.{suffix}.tmp"));
 
     #[cfg(unix)]
     {
@@ -96,6 +98,14 @@ fn write_identity_file_atomically(path: &Path, stored: &StoredDeviceIdentity) ->
 
     std::fs::rename(&tmp_path, path)
         .with_context(|| format!("rename identity file {}", path.display()))?;
+
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        let dir = std::fs::File::open(parent)
+            .with_context(|| format!("open identity dir {}", parent.display()))?;
+        dir.sync_all()
+            .with_context(|| format!("sync identity dir {}", parent.display()))?;
+    }
     Ok(())
 }
 
