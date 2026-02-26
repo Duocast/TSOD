@@ -45,6 +45,56 @@ use ui::{UiEvent, UiIntent, VpApp};
 #[cfg(debug_assertions)]
 static DEBUG_SEEN_AUTH_USER_IDS: OnceLock<StdMutex<HashSet<String>>> = OnceLock::new();
 
+#[derive(Clone)]
+struct AudioRuntimeSettings {
+    output_auto_level: Arc<AtomicBool>,
+    comfort_noise: Arc<AtomicBool>,
+    comfort_noise_level: Arc<AtomicU32>,
+    ducking_enabled: Arc<AtomicBool>,
+    ducking_attenuation_db: Arc<AtomicU32>,
+    typing_attenuation: Arc<AtomicBool>,
+    denoise_attenuation_db: Arc<AtomicU32>,
+}
+
+impl AudioRuntimeSettings {
+    fn from_app_settings(settings: &ui::model::AppSettings) -> Self {
+        Self {
+            output_auto_level: Arc::new(AtomicBool::new(settings.output_auto_level)),
+            comfort_noise: Arc::new(AtomicBool::new(settings.comfort_noise)),
+            comfort_noise_level: Arc::new(AtomicU32::new(f32_to_u32(settings.comfort_noise_level))),
+            ducking_enabled: Arc::new(AtomicBool::new(settings.ducking_enabled)),
+            ducking_attenuation_db: Arc::new(AtomicU32::new(f32_to_u32(
+                settings.ducking_attenuation_db as f32,
+            ))),
+            typing_attenuation: Arc::new(AtomicBool::new(settings.typing_attenuation)),
+            denoise_attenuation_db: Arc::new(AtomicU32::new(f32_to_u32(
+                settings.denoise_attenuation_db as f32,
+            ))),
+        }
+    }
+
+    fn apply(&self, settings: &ui::model::AppSettings) {
+        self.output_auto_level
+            .store(settings.output_auto_level, Ordering::Relaxed);
+        self.comfort_noise
+            .store(settings.comfort_noise, Ordering::Relaxed);
+        self.comfort_noise_level
+            .store(f32_to_u32(settings.comfort_noise_level), Ordering::Relaxed);
+        self.ducking_enabled
+            .store(settings.ducking_enabled, Ordering::Relaxed);
+        self.ducking_attenuation_db.store(
+            f32_to_u32(settings.ducking_attenuation_db as f32),
+            Ordering::Relaxed,
+        );
+        self.typing_attenuation
+            .store(settings.typing_attenuation, Ordering::Relaxed);
+        self.denoise_attenuation_db.store(
+            f32_to_u32(settings.denoise_attenuation_db as f32),
+            Ordering::Relaxed,
+        );
+    }
+}
+
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env().add_directive(Level::INFO.into()))
@@ -195,6 +245,8 @@ async fn app_task(
     }
     let _ = tx_event.send(UiEvent::SettingsLoaded(Box::new(saved_settings.clone())));
 
+    let audio_runtime = AudioRuntimeSettings::from_app_settings(&saved_settings);
+
     // Audio constants
     let sample_rate = 48_000u32;
     let channels = 1u16;
@@ -285,6 +337,7 @@ async fn app_task(
             output_gain.clone(),
             loopback_active.clone(),
             session_voice_active.clone(),
+            audio_runtime.clone(),
             &mut shutdown_rx,
         )
         .await
@@ -675,6 +728,7 @@ async fn connect_and_run_session(
     output_gain: Arc<std::sync::atomic::AtomicU32>,
     loopback_active: Arc<AtomicBool>,
     session_voice_active: Arc<AtomicBool>,
+    audio_runtime: AudioRuntimeSettings,
     shutdown_rx: &mut watch::Receiver<bool>,
 ) -> Result<()> {
     let _ = tx_event.send(UiEvent::SetConnected(false));
@@ -1165,6 +1219,7 @@ async fn connect_and_run_session(
         self_muted.clone(),
         input_gain.clone(),
         loopback_active.clone(),
+        audio_runtime.clone(),
         cfg.push_to_talk,
         voice_die_tx.clone(),
     ));
@@ -1175,6 +1230,7 @@ async fn connect_and_run_session(
         capture_dsp.clone(),
         self_deafened.clone(),
         output_gain.clone(),
+        audio_runtime.clone(),
         tx_event.clone(),
         voice_die_tx.clone(),
     ));
@@ -1597,6 +1653,7 @@ async fn connect_and_run_session(
                             }
                             input_gain.store(f32_to_u32(settings.input_gain), Ordering::Relaxed);
                             output_gain.store(f32_to_u32(settings.output_gain), Ordering::Relaxed);
+                            audio_runtime.apply(settings);
 
                             // Update PTT mode
                             let is_ptt = settings.capture_mode == ui::model::CaptureMode::PushToTalk;
@@ -1811,6 +1868,7 @@ async fn voice_send_loop(
     self_muted: Arc<AtomicBool>,
     input_gain: Arc<std::sync::atomic::AtomicU32>,
     loopback_active: Arc<AtomicBool>,
+    audio_runtime: AudioRuntimeSettings,
     push_to_talk: bool,
     voice_die_tx: watch::Sender<bool>,
 ) {
@@ -1872,6 +1930,20 @@ async fn voice_send_loop(
             }
         }
 
+        if !is_voice {
+            let mut attenuation_db =
+                u32_to_f32(audio_runtime.denoise_attenuation_db.load(Ordering::Relaxed));
+            if audio_runtime.typing_attenuation.load(Ordering::Relaxed) {
+                attenuation_db = attenuation_db.min(-18.0);
+            }
+            let attn = 10.0_f32.powf((attenuation_db.min(0.0)) / 20.0);
+            if attn < 0.999 {
+                for s in pcm.iter_mut() {
+                    *s = (*s as f32 * attn).clamp(-32768.0, 32767.0) as i16;
+                }
+            }
+        }
+
         // Skip sending if VAD says no voice (and not PTT mode)
         if !push_to_talk && !is_voice {
             continue;
@@ -1907,6 +1979,7 @@ async fn voice_recv_loop(
     capture_dsp: Option<Arc<Mutex<audio::dsp::CaptureDsp>>>,
     self_deafened: Arc<AtomicBool>,
     output_gain: Arc<std::sync::atomic::AtomicU32>,
+    audio_runtime: AudioRuntimeSettings,
     tx_event: Sender<UiEvent>,
     voice_die_tx: watch::Sender<bool>,
 ) {
@@ -2040,21 +2113,59 @@ async fn voice_recv_loop(
                     true
                 });
 
-                if mixed_streams == 0 {
+                let speaking_streams = streams.values().filter(|s| s.speaking).count();
+                let mut mixed_pcm = vec![0i16; frame_samples];
+
+                if mixed_streams > 0 {
+                    for (dst, sample) in mixed_pcm.iter_mut().zip(mix_out.iter()) {
+                        let x = *sample / 32768.0;
+                        let soft = (x / (1.0 + x.abs())).clamp(-1.0, 1.0);
+                        *dst = (soft * 32768.0) as i16;
+                    }
+                }
+
+                let mut output_mul = u32_to_f32(output_gain.load(Ordering::Relaxed));
+
+                if audio_runtime.output_auto_level.load(Ordering::Relaxed) && mixed_streams > 0 {
+                    let peak = mixed_pcm
+                        .iter()
+                        .map(|s| (*s as i32).unsigned_abs() as f32 / 32768.0)
+                        .fold(0.0_f32, f32::max);
+                    if peak > 0.001 {
+                        let target_peak = 0.8_f32;
+                        let norm = (target_peak / peak).clamp(0.5, 2.0);
+                        output_mul *= norm;
+                    }
+                }
+
+                if audio_runtime.ducking_enabled.load(Ordering::Relaxed) && speaking_streams > 0 {
+                    let duck_db = u32_to_f32(
+                        audio_runtime
+                            .ducking_attenuation_db
+                            .load(Ordering::Relaxed),
+                    )
+                    .min(0.0);
+                    output_mul *= 10.0_f32.powf(duck_db / 20.0);
+                }
+
+                if mixed_streams == 0 && audio_runtime.comfort_noise.load(Ordering::Relaxed) {
+                    let noise = u32_to_f32(audio_runtime.comfort_noise_level.load(Ordering::Relaxed))
+                        .clamp(0.0, 0.1);
+                    if noise > 0.0 {
+                        for s in mixed_pcm.iter_mut() {
+                            let n = (rand::random::<f32>() * 2.0 - 1.0) * noise * 32767.0;
+                            *s = n as i16;
+                        }
+                    }
+                }
+
+                if mixed_streams == 0 && !audio_runtime.comfort_noise.load(Ordering::Relaxed) {
                     continue;
                 }
 
-                let mut mixed_pcm = vec![0i16; frame_samples];
-                for (dst, sample) in mixed_pcm.iter_mut().zip(mix_out.iter()) {
-                    let x = *sample / 32768.0;
-                    let soft = (x / (1.0 + x.abs())).clamp(-1.0, 1.0);
-                    *dst = (soft * 32768.0) as i16;
-                }
-
-                let gain = u32_to_f32(output_gain.load(Ordering::Relaxed));
-                if (gain - 1.0).abs() > 0.001 {
+                if (output_mul - 1.0).abs() > 0.001 {
                     for s in mixed_pcm.iter_mut() {
-                        *s = (*s as f32 * gain).clamp(-32768.0, 32767.0) as i16;
+                        *s = (*s as f32 * output_mul).clamp(-32768.0, 32767.0) as i16;
                     }
                 }
 
