@@ -1,7 +1,8 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use tokio::time::{timeout, Duration};
 
 use crate::{
+    identity::DeviceIdentity,
     net::frame::{read_delimited, write_delimited},
     proto::voiceplatform::v1 as pb,
 };
@@ -28,29 +29,44 @@ impl ControlClient {
     pub async fn hello_and_auth(
         &mut self,
         alpn: &str,
-        dev_token: &str,
+        device_identity: &DeviceIdentity,
         preferred_display_name: &str,
     ) -> Result<()> {
         let hello = pb::Hello {
             caps: Some(default_caps(alpn)),
             device_id: Some(pb::DeviceId {
-                value: "dev-device".into(),
+                value: device_identity.device_id.clone(),
             }),
         };
         self.send_req(pb::client_to_server::Payload::Hello(hello))
             .await?;
         let resp = self.read_resp().await?;
-        match resp.payload {
+        let (session_id, challenge) = match resp.payload {
             Some(pb::server_to_client::Payload::HelloAck(ack)) => {
-                self.session_id = ack.session_id;
+                self.session_id = ack.session_id.clone();
+                (
+                    ack.session_id
+                        .as_ref()
+                        .map(|s| s.value.clone())
+                        .unwrap_or_default(),
+                    ack.auth_challenge,
+                )
             }
             _ => return Err(anyhow!("expected HelloAck")),
-        }
+        };
+
+        let signature = device_identity
+            .sign_challenge(&challenge, &session_id)
+            .context("sign auth challenge")?;
 
         let auth = pb::AuthRequest {
             preferred_display_name: preferred_display_name.into(),
-            method: Some(pb::auth_request::Method::DevToken(pb::DevTokenAuth {
-                token: dev_token.into(),
+            method: Some(pb::auth_request::Method::Device(pb::DeviceAuth {
+                device_id: Some(pb::DeviceId {
+                    value: device_identity.device_id.clone(),
+                }),
+                device_pubkey: device_identity.public_key.clone(),
+                signature,
             })),
         };
         self.send_req(pb::client_to_server::Payload::AuthRequest(auth))

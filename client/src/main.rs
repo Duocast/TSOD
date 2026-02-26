@@ -11,6 +11,7 @@
 mod app;
 mod audio;
 mod config;
+mod identity;
 mod net;
 mod proto;
 mod settings_io;
@@ -19,11 +20,12 @@ mod ui;
 use anyhow::{anyhow, Context, Result};
 use bytes::Bytes;
 use config::Config;
-use serde::Deserialize;
 use crossbeam_channel::{bounded, Receiver, Sender};
+use identity::DeviceIdentity;
 use net::dispatcher::{ControlDispatcher, PushEvent};
 use net::voice_datagram::{make_voice_datagram, VOICE_HDR_LEN, VOICE_VERSION};
 use proto::voiceplatform::v1 as pb;
+use serde::Deserialize;
 #[cfg(debug_assertions)]
 use std::collections::HashSet;
 use std::sync::{
@@ -560,17 +562,11 @@ async fn connect_and_run_session(
         ui::model::ConnectionStage::Authenticating,
         "Authenticating with gateway",
     );
-    if cfg.dev_token.trim() == "dev" {
-        warn!(
-            "legacy dev token detected on this client; all clients using token=dev authenticate as the same test identity"
-        );
-        let _ = tx_event.send(UiEvent::AppendLog(
-            "[auth] warning: legacy dev token 'dev' maps all clients to one test user_id; use dev:<name> per client".into(),
-        ));
-    }
+    let device_identity =
+        DeviceIdentity::load_or_create().context("load/create device identity")?;
     let auth_started = Instant::now();
     let auth_info = dispatcher
-        .hello_auth(&cfg.alpn, &cfg.dev_token, &cfg.display_name)
+        .hello_auth(&cfg.alpn, &device_identity, &cfg.display_name)
         .await
         .context("hello/auth")?;
     let auth_elapsed = auth_started.elapsed();

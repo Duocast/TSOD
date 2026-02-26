@@ -106,8 +106,10 @@ impl Gateway {
             .context("control accept_bi timeout")?
             .context("accept_bi failed")?;
 
-        let (session_id, _hello_caps) = self.do_hello(&mut send, &mut recv).await?;
-        let identity = self.do_auth(&mut send, &mut recv, &session_id).await?;
+        let (session_id, _hello_caps, auth_challenge) = self.do_hello(&mut send, &mut recv).await?;
+        let identity = self
+            .do_auth(&mut send, &mut recv, &session_id, &auth_challenge)
+            .await?;
 
         let user_id =
             UserId(uuid::Uuid::parse_str(&identity.user_id).context("invalid user_id uuid")?);
@@ -620,7 +622,7 @@ impl Gateway {
         &self,
         send: &mut quinn::SendStream,
         recv: &mut quinn::RecvStream,
-    ) -> Result<(String, Option<pb::ClientCaps>)> {
+    ) -> Result<(String, Option<pb::ClientCaps>, Vec<u8>)> {
         let req: pb::ClientToServer = read_delimited(recv, CONTROL_STREAM_MAX_MSG)
             .await
             .context("read Hello envelope")?;
@@ -632,6 +634,8 @@ impl Gateway {
 
         let session_id = uuid::Uuid::new_v4().to_string();
 
+        let auth_challenge: [u8; 32] = rand::random();
+
         let ack = pb::HelloAck {
             session_id: Some(pb::SessionId {
                 value: session_id.clone(),
@@ -639,6 +643,7 @@ impl Gateway {
             max_message_size_bytes: 64 * 1024,
             max_upload_size_bytes: 50 * 1024 * 1024,
             ping_interval_ms: 15_000,
+            auth_challenge: auth_challenge.to_vec(),
         };
 
         let resp = pb::ServerToClient {
@@ -655,7 +660,7 @@ impl Gateway {
         write_delimited(send, &resp)
             .await
             .context("write HelloAck")?;
-        Ok((session_id, hello.caps))
+        Ok((session_id, hello.caps, auth_challenge.to_vec()))
     }
 
     async fn do_auth(
@@ -663,6 +668,7 @@ impl Gateway {
         send: &mut quinn::SendStream,
         recv: &mut quinn::RecvStream,
         session_id: &str,
+        auth_challenge: &[u8],
     ) -> Result<AuthedIdentity> {
         let req: pb::ClientToServer = read_delimited(recv, CONTROL_STREAM_MAX_MSG)
             .await
@@ -673,7 +679,10 @@ impl Gateway {
             _ => return Err(anyhow!("expected AuthRequest as second message")),
         };
 
-        let mut identity = self.auth.authenticate(&auth_req).context("auth failed")?;
+        let mut identity = self
+            .auth
+            .authenticate(&auth_req, session_id, auth_challenge)
+            .context("auth failed")?;
         if let Some(preferred) = normalize_preferred_display_name(&auth_req.preferred_display_name)
         {
             identity.display_name = preferred;

@@ -153,9 +153,9 @@ async fn main() -> Result<()> {
     info!("listening on {}", endpoint.local_addr()?);
 
     let auth_provider: Arc<dyn auth::AuthProvider> = if cfg.dev_mode {
-        Arc::new(DevAuthProvider)
+        Arc::new(DevAuthProvider::default())
     } else {
-        Arc::new(DevAuthProvider)
+        Arc::new(DevAuthProvider::default())
     };
 
     let gw = Gateway::new(

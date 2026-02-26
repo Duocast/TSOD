@@ -1,16 +1,14 @@
-# Dev auth identity notes
+# Device auth identity notes
 
-## Root cause summary
+Legacy shared `dev` tokens are no longer used for client auth.
 
-When two clients authenticate with the same legacy token (`dev`), the gateway issues the same auth identity (`user_id`) to both sessions.
+Current behavior in dev mode:
+- Each client install creates a local Ed25519 device keypair and a `device_id` UUID.
+- During `HelloAck`, the gateway returns a per-connection `auth_challenge`.
+- The client signs `(auth_challenge || session_id)` and sends `DeviceAuth`.
+- The gateway verifies the signature with `device_pubkey` and maps the key to a stable `user_id`.
 
-- Presence/members are keyed by authenticated `user_id` per channel, so duplicate joins from two sessions collapse into one member row.
-- Chat grouping keys by `author_user_id`, so messages from both sessions group as the same author when `author_user_id` is identical.
-- Nickname/display name can differ between sessions, but that does not change auth identity.
-
-## Operator note
-
-- **Nickname != auth identity**
-- To simulate different users in dev auth, use distinct tokens on each client, for example:
-  - `VP_DEV_TOKEN=dev:overdose`
-  - `VP_DEV_TOKEN=dev:dresk`
+Identity model:
+- `user_id` is stable for a registered device key.
+- `display_name` is presentation only and never changes identity.
+- Different device keys authenticate as different users by default.
