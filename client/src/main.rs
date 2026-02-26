@@ -36,7 +36,7 @@ use std::sync::{
 };
 #[cfg(debug_assertions)]
 use std::sync::{Mutex as StdMutex, OnceLock};
-use tokio::sync::{watch, Mutex};
+use tokio::sync::{watch, Mutex, RwLock};
 use tokio::time::{sleep, Duration, Instant};
 use tracing::{debug, warn, Level};
 use tracing_subscriber::EnvFilter;
@@ -200,17 +200,29 @@ async fn app_task(
     let channels = 1u16;
     let frame_ms = 20u32;
 
+    let selected_audio = Arc::new(Mutex::new(AudioSelection {
+        input_device: normalize_device_name(&saved_settings.capture_device),
+        output_device: normalize_device_name(&saved_settings.playback_device),
+    }));
+
     // Audio pipeline
     let encoder = Arc::new(Mutex::new(audio::opus::OpusEncoder::new(
         sample_rate,
         channels as u8,
     )?));
-    let capture = Arc::new(audio::capture::Capture::start(
+
+    let initial_selection = selected_audio.lock().await.clone();
+    let capture = Arc::new(RwLock::new(Arc::new(start_capture_with_fallback(
         sample_rate,
         channels,
         frame_ms,
-    )?);
-    let playout = Arc::new(audio::playout::Playout::start(sample_rate, channels)?);
+        initial_selection.input_device.as_deref(),
+    )?)));
+    let playout = Arc::new(RwLock::new(Arc::new(start_playout_with_fallback(
+        sample_rate,
+        channels,
+        initial_selection.output_device.as_deref(),
+    )?)));
 
     // DSP pipeline
     let dsp_enabled = !cfg.no_noise_suppression;
@@ -265,6 +277,7 @@ async fn app_task(
             playout.clone(),
             capture_dsp.clone(),
             active_voice_channel_route.clone(),
+            selected_audio.clone(),
             ptt_active.clone(),
             self_muted.clone(),
             self_deafened.clone(),
@@ -305,6 +318,50 @@ async fn app_task(
                             }
                             UiIntent::SetInputGain(gain) => {
                                 input_gain.store(f32_to_u32(gain), Ordering::Relaxed);
+                            }
+                            UiIntent::SetInputDevice(dev) => {
+                                let selected = normalize_device_name(&dev);
+                                {
+                                    let mut state = selected_audio.lock().await;
+                                    state.input_device = selected;
+                                }
+                                if let Err(e) = restart_audio_streams(
+                                    &capture,
+                                    &playout,
+                                    &selected_audio,
+                                    &tx_event,
+                                    sample_rate,
+                                    channels,
+                                    frame_ms,
+                                )
+                                .await
+                                {
+                                    let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                        "[audio] failed to switch input device: {e:#}"
+                                    )));
+                                }
+                            }
+                            UiIntent::SetOutputDevice(dev) => {
+                                let selected = normalize_device_name(&dev);
+                                {
+                                    let mut state = selected_audio.lock().await;
+                                    state.output_device = selected;
+                                }
+                                if let Err(e) = restart_audio_streams(
+                                    &capture,
+                                    &playout,
+                                    &selected_audio,
+                                    &tx_event,
+                                    sample_rate,
+                                    channels,
+                                    frame_ms,
+                                )
+                                .await
+                                {
+                                    let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                        "[audio] failed to switch output device: {e:#}"
+                                    )));
+                                }
                             }
                             UiIntent::SaveSettings(ref settings) => {
                                 let _ = settings_io::save_settings(settings);
@@ -495,6 +552,97 @@ fn choose_initial_selected_channel(
         })
 }
 
+#[derive(Clone, Debug, Default)]
+struct AudioSelection {
+    input_device: Option<String>,
+    output_device: Option<String>,
+}
+
+fn normalize_device_name(name: &str) -> Option<String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() || trimmed == "(system default)" {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn start_capture_with_fallback(
+    sample_rate: u32,
+    channels: u16,
+    frame_ms: u32,
+    preferred_device: Option<&str>,
+) -> Result<audio::capture::Capture> {
+    if let Some(device) = preferred_device {
+        match audio::capture::Capture::start_with_device(
+            sample_rate,
+            channels,
+            frame_ms,
+            Some(device),
+        ) {
+            Ok(capture) => return Ok(capture),
+            Err(_) => {}
+        }
+    }
+    audio::capture::Capture::start_with_device(sample_rate, channels, frame_ms, None)
+}
+
+fn start_playout_with_fallback(
+    sample_rate: u32,
+    channels: u16,
+    preferred_device: Option<&str>,
+) -> Result<audio::playout::Playout> {
+    if let Some(device) = preferred_device {
+        match audio::playout::Playout::start_with_device(sample_rate, channels, Some(device)) {
+            Ok(playout) => return Ok(playout),
+            Err(_) => {}
+        }
+    }
+    audio::playout::Playout::start_with_device(sample_rate, channels, None)
+}
+
+async fn restart_audio_streams(
+    capture: &Arc<RwLock<Arc<audio::capture::Capture>>>,
+    playout: &Arc<RwLock<Arc<audio::playout::Playout>>>,
+    selection: &Arc<Mutex<AudioSelection>>,
+    tx_event: &Sender<UiEvent>,
+    sample_rate: u32,
+    channels: u16,
+    frame_ms: u32,
+) -> Result<()> {
+    let selected = selection.lock().await.clone();
+    let preferred_input = selected.input_device.as_deref();
+    let preferred_output = selected.output_device.as_deref();
+
+    let new_capture = start_capture_with_fallback(sample_rate, channels, frame_ms, preferred_input)
+        .context("restart capture")?;
+    let new_playout = start_playout_with_fallback(sample_rate, channels, preferred_output)
+        .context("restart playout")?;
+
+    {
+        let mut cap = capture.write().await;
+        *cap = Arc::new(new_capture);
+    }
+    {
+        let mut out = playout.write().await;
+        *out = Arc::new(new_playout);
+    }
+
+    let _ = tx_event.send(UiEvent::AppendLog(format!(
+        "[audio] streams restarted (input={}, output={})",
+        selected
+            .input_device
+            .as_deref()
+            .unwrap_or("(system default)"),
+        selected
+            .output_device
+            .as_deref()
+            .unwrap_or("(system default)")
+    )));
+
+    Ok(())
+}
+
 fn split_server_host_port(server: &str) -> (String, u16) {
     if let Some((host, port_text)) = server.rsplit_once(':') {
         if let Ok(port) = port_text.parse::<u16>() {
@@ -509,10 +657,11 @@ async fn connect_and_run_session(
     tx_event: &Sender<UiEvent>,
     rx_intent: &Receiver<UiIntent>,
     encoder: Arc<Mutex<audio::opus::OpusEncoder>>,
-    capture: Arc<audio::capture::Capture>,
-    playout: Arc<audio::playout::Playout>,
+    capture: Arc<RwLock<Arc<audio::capture::Capture>>>,
+    playout: Arc<RwLock<Arc<audio::playout::Playout>>>,
     capture_dsp: Option<Arc<Mutex<audio::dsp::CaptureDsp>>>,
     active_voice_channel_route: Arc<AtomicU32>,
+    selected_audio: Arc<Mutex<AudioSelection>>,
     ptt_active: Arc<AtomicBool>,
     self_muted: Arc<AtomicBool>,
     self_deafened: Arc<AtomicBool>,
@@ -1039,8 +1188,40 @@ async fn connect_and_run_session(
     let mut active_channel: Option<String> = selected_after_sync;
 
     tokio::pin!(ctl_keepalive);
+    let mut audio_health_tick = tokio::time::interval(Duration::from_secs(1));
     loop {
         tokio::select! {
+            _ = audio_health_tick.tick() => {
+                let capture_healthy = {
+                    let cap = capture.read().await;
+                    cap.is_healthy()
+                };
+                let playout_healthy = {
+                    let out = playout.read().await;
+                    out.is_healthy()
+                };
+
+                if !capture_healthy || !playout_healthy {
+                    let _ = tx_event.send(UiEvent::AppendLog(
+                        "[audio] stream error detected; attempting restart".into(),
+                    ));
+                    if let Err(e) = restart_audio_streams(
+                        &capture,
+                        &playout,
+                        &selected_audio,
+                        tx_event,
+                        sample_rate,
+                        channels,
+                        frame_ms,
+                    )
+                    .await
+                    {
+                        let _ = tx_event.send(UiEvent::AppendLog(format!(
+                            "[audio] stream restart failed: {e:#}"
+                        )));
+                    }
+                }
+            }
             // Check for UI intents (non-blocking poll from crossbeam)
             _ = tokio::time::sleep(Duration::from_millis(10)) => {
                 while let Ok(intent) = rx_intent.try_recv() {
@@ -1314,14 +1495,48 @@ async fn connect_and_run_session(
                             ));
                         }
                         UiIntent::SetInputDevice(dev) => {
-                            let _ = tx_event.send(UiEvent::AppendLog(
-                                format!("[audio] input device: {dev}"),
-                            ));
+                            let selected = normalize_device_name(&dev);
+                            {
+                                let mut state = selected_audio.lock().await;
+                                state.input_device = selected;
+                            }
+                            if let Err(e) = restart_audio_streams(
+                                &capture,
+                                &playout,
+                                &selected_audio,
+                                tx_event,
+                                sample_rate,
+                                channels,
+                                frame_ms,
+                            )
+                            .await
+                            {
+                                let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                    "[audio] failed to switch input device: {e:#}"
+                                )));
+                            }
                         }
                         UiIntent::SetOutputDevice(dev) => {
-                            let _ = tx_event.send(UiEvent::AppendLog(
-                                format!("[audio] output device: {dev}"),
-                            ));
+                            let selected = normalize_device_name(&dev);
+                            {
+                                let mut state = selected_audio.lock().await;
+                                state.output_device = selected;
+                            }
+                            if let Err(e) = restart_audio_streams(
+                                &capture,
+                                &playout,
+                                &selected_audio,
+                                tx_event,
+                                sample_rate,
+                                channels,
+                                frame_ms,
+                            )
+                            .await
+                            {
+                                let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                    "[audio] failed to switch output device: {e:#}"
+                                )));
+                            }
                         }
                         UiIntent::SetAwayMessage { message } => {
                             let _ = tx_event.send(UiEvent::SetAwayMessage(message.clone()));
@@ -1372,6 +1587,28 @@ async fn connect_and_run_session(
                             let is_ptt = settings.capture_mode == ui::model::CaptureMode::PushToTalk;
                             let is_continuous = settings.capture_mode == ui::model::CaptureMode::Continuous;
                             ptt_active.store(!is_ptt || is_continuous, Ordering::Relaxed);
+
+                            {
+                                let mut state = selected_audio.lock().await;
+                                state.input_device = normalize_device_name(&settings.capture_device);
+                                state.output_device = normalize_device_name(&settings.playback_device);
+                            }
+
+                            if let Err(e) = restart_audio_streams(
+                                &capture,
+                                &playout,
+                                &selected_audio,
+                                tx_event,
+                                sample_rate,
+                                channels,
+                                frame_ms,
+                            )
+                            .await
+                            {
+                                let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                    "[audio] failed to apply audio device settings: {e:#}"
+                                )));
+                            }
 
                             let _ = tx_event.send(UiEvent::AppendLog(
                                 "[settings] applied".into(),
@@ -1500,8 +1737,8 @@ async fn upload_attachment_quic(
 }
 
 async fn mic_test_loop(
-    capture: Arc<audio::capture::Capture>,
-    playout: Arc<audio::playout::Playout>,
+    capture: Arc<RwLock<Arc<audio::capture::Capture>>>,
+    playout: Arc<RwLock<Arc<audio::playout::Playout>>>,
     tx_event: Sender<UiEvent>,
     input_gain: Arc<std::sync::atomic::AtomicU32>,
     loopback_active: Arc<AtomicBool>,
@@ -1528,7 +1765,8 @@ async fn mic_test_loop(
             continue;
         }
 
-        if !capture.read_frame(&mut pcm) {
+        let capture_stream = capture.read().await.clone();
+        if !capture_stream.read_frame(&mut pcm) {
             continue;
         }
 
@@ -1539,7 +1777,8 @@ async fn mic_test_loop(
             }
         }
 
-        playout.push_pcm(&pcm);
+        let playout_stream = playout.read().await.clone();
+        playout_stream.push_pcm(&pcm);
         let waveform = build_mic_test_waveform(&pcm, 96);
         let _ = tx_event.send(UiEvent::MicTestWaveform(waveform));
     }
@@ -1548,8 +1787,8 @@ async fn mic_test_loop(
 async fn voice_send_loop(
     conn: quinn::Connection,
     encoder: Arc<Mutex<audio::opus::OpusEncoder>>,
-    capture: Arc<audio::capture::Capture>,
-    playout: Arc<audio::playout::Playout>,
+    capture: Arc<RwLock<Arc<audio::capture::Capture>>>,
+    playout: Arc<RwLock<Arc<audio::playout::Playout>>>,
     capture_dsp: Option<Arc<Mutex<audio::dsp::CaptureDsp>>>,
     tx_event: Sender<UiEvent>,
     active_voice_channel_route: Arc<AtomicU32>,
@@ -1577,7 +1816,8 @@ async fn voice_send_loop(
     loop {
         tick.tick().await;
 
-        if !capture.read_frame(&mut pcm) {
+        let capture_stream = capture.read().await.clone();
+        if !capture_stream.read_frame(&mut pcm) {
             continue;
         }
 
@@ -1591,7 +1831,8 @@ async fn voice_send_loop(
 
         // Loopback: feed capture directly to playout for mic testing
         if loopback_active.load(Ordering::Relaxed) {
-            playout.push_pcm(&pcm);
+            let playout_stream = playout.read().await.clone();
+            playout_stream.push_pcm(&pcm);
             let waveform = build_mic_test_waveform(&pcm, 96);
             let _ = tx_event.send(UiEvent::MicTestWaveform(waveform));
         }
@@ -1647,7 +1888,7 @@ async fn voice_send_loop(
 
 async fn voice_recv_loop(
     conn: quinn::Connection,
-    playout: Arc<audio::playout::Playout>,
+    playout: Arc<RwLock<Arc<audio::playout::Playout>>>,
     capture_dsp: Option<Arc<Mutex<audio::dsp::CaptureDsp>>>,
     self_deafened: Arc<AtomicBool>,
     output_gain: Arc<std::sync::atomic::AtomicU32>,
@@ -1807,7 +2048,8 @@ async fn voice_recv_loop(
                     d.feed_echo_reference(&mixed_pcm);
                 }
 
-                playout.push_pcm(&mixed_pcm);
+                let playout_stream = playout.read().await.clone();
+                playout_stream.push_pcm(&mixed_pcm);
             }
         }
     }

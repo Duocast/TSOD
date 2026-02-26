@@ -3,7 +3,10 @@ use ringbuf::{
     traits::{Consumer, Split},
     HeapCons, HeapRb,
 };
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 
 pub struct Capture {
     backend: CaptureBackend,
@@ -22,17 +25,26 @@ unsafe impl Sync for Capture {}
 
 impl Capture {
     pub fn start(sample_rate: u32, channels: u16, frame_ms: u32) -> Result<Self> {
+        Self::start_with_device(sample_rate, channels, frame_ms, None)
+    }
+
+    pub fn start_with_device(
+        sample_rate: u32,
+        channels: u16,
+        frame_ms: u32,
+        preferred_device: Option<&str>,
+    ) -> Result<Self> {
         let frame_samples = (sample_rate as usize * frame_ms as usize / 1000) * channels as usize;
         let rb = HeapRb::<i16>::new(frame_samples * 50);
         let (prod, cons) = rb.split();
 
         #[cfg(target_os = "linux")]
-        let backend = CaptureBackend::start(sample_rate, channels, prod)?;
+        let backend = CaptureBackend::start(sample_rate, channels, prod, preferred_device)?;
 
         #[cfg(not(target_os = "linux"))]
         let backend = {
             let prod = Arc::new(Mutex::new(prod));
-            CaptureBackend::start(sample_rate, channels, prod)?
+            CaptureBackend::start(sample_rate, channels, prod, preferred_device)?
         };
 
         let cons = Arc::new(Mutex::new(cons));
@@ -62,6 +74,10 @@ impl Capture {
         }
         got == out.len()
     }
+
+    pub fn is_healthy(&self) -> bool {
+        self.backend.is_healthy()
+    }
 }
 
 pub fn enumerate_input_devices() -> Vec<String> {
@@ -80,7 +96,12 @@ mod linux {
     }
 
     impl LinuxCapture {
-        pub fn start(sample_rate: u32, channels: u16, prod: HeapProd<i16>) -> Result<Self> {
+        pub fn start(
+            sample_rate: u32,
+            channels: u16,
+            prod: HeapProd<i16>,
+            _preferred_device: Option<&str>,
+        ) -> Result<Self> {
             let thread = std::thread::Builder::new()
                 .name("tsod-pipewire-capture".to_string())
                 .spawn(move || {
@@ -96,6 +117,10 @@ mod linux {
         pub fn enumerate_input_devices() -> Vec<String> {
             vec!["PipeWire default input".to_string()]
         }
+
+        pub fn is_healthy(&self) -> bool {
+            true
+        }
     }
 
     fn run_pipewire_capture(
@@ -105,8 +130,7 @@ mod linux {
     ) -> Result<()> {
         pw::init();
 
-        let mainloop =
-            pw::main_loop::MainLoopBox::new(None).context("create PipeWire mainloop")?;
+        let mainloop = pw::main_loop::MainLoopBox::new(None).context("create PipeWire mainloop")?;
         let context = pw::context::ContextBox::new(mainloop.loop_(), None)
             .context("create PipeWire context")?;
         let core = context.connect(None).context("connect PipeWire core")?;
@@ -211,6 +235,7 @@ mod non_linux {
 
     pub struct CpalCapture {
         _stream: cpal::Stream,
+        unhealthy: Arc<AtomicBool>,
     }
 
     impl CpalCapture {
@@ -218,13 +243,20 @@ mod non_linux {
             sample_rate: u32,
             channels: u16,
             prod: Arc<Mutex<HeapProd<i16>>>,
+            preferred_device: Option<&str>,
         ) -> Result<Self> {
             let host = cpal::default_host();
-            let dev = host
-                .default_input_device()
-                .ok_or(anyhow!("no input device"))?;
+            let dev = if let Some(name) = preferred_device {
+                find_input_device_by_name(&host, name)
+                    .with_context(|| format!("input device '{name}' not found"))?
+            } else {
+                host.default_input_device()
+                    .ok_or(anyhow!("no input device"))?
+            };
             let (stream_cfg, actual_channels) =
                 compatible_input_config(&dev, sample_rate, channels)?;
+            let unhealthy = Arc::new(AtomicBool::new(false));
+            let unhealthy_cb = unhealthy.clone();
 
             let target_ch = channels;
             let stream = dev.build_input_stream(
@@ -244,11 +276,17 @@ mod non_linux {
                         }
                     }
                 },
-                move |err| eprintln!("capture err: {err}"),
+                move |err| {
+                    unhealthy_cb.store(true, Ordering::Relaxed);
+                    eprintln!("capture err: {err}")
+                },
                 None,
             )?;
             stream.play()?;
-            Ok(Self { _stream: stream })
+            Ok(Self {
+                _stream: stream,
+                unhealthy,
+            })
         }
 
         pub fn enumerate_input_devices() -> Vec<String> {
@@ -257,6 +295,17 @@ mod non_linux {
                 .map(|devs| devs.filter_map(|d| d.name().ok()).collect())
                 .unwrap_or_default()
         }
+
+        pub fn is_healthy(&self) -> bool {
+            !self.unhealthy.load(Ordering::Relaxed)
+        }
+    }
+
+    fn find_input_device_by_name(host: &cpal::Host, name: &str) -> Result<cpal::Device> {
+        let mut devices = host.input_devices().context("enumerate input devices")?;
+        devices
+            .find(|dev| dev.name().ok().as_deref() == Some(name))
+            .ok_or_else(|| anyhow!("no matching input device"))
     }
 
     fn compatible_input_config(
