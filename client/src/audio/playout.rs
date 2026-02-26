@@ -10,6 +10,11 @@ pub struct Playout {
     prod: UnsafeCell<HeapProd<i16>>,
 }
 
+pub const PLAYBACK_MODE_AUTO: &str = "Automatically use best mode";
+pub const PLAYBACK_MODE_PIPEWIRE: &str = "PipeWire";
+pub const PLAYBACK_MODE_PULSEAUDIO: &str = "PulseAudio";
+pub const PLAYBACK_MODE_WASAPI: &str = "WASAPI";
+
 #[cfg(target_os = "linux")]
 type PlayoutBackend = linux::LinuxPlayout;
 
@@ -29,14 +34,35 @@ impl Playout {
         channels: u16,
         preferred_device: Option<&str>,
     ) -> Result<Self> {
+        Self::start_with_mode(sample_rate, channels, preferred_device, None)
+    }
+
+    pub fn start_with_mode(
+        sample_rate: u32,
+        channels: u16,
+        preferred_device: Option<&str>,
+        preferred_mode: Option<&str>,
+    ) -> Result<Self> {
         let rb = HeapRb::<i16>::new(sample_rate as usize * channels as usize);
         let (prod, cons) = rb.split();
 
         #[cfg(target_os = "linux")]
-        let backend = PlayoutBackend::start(sample_rate, channels, cons, preferred_device)?;
+        let backend = PlayoutBackend::start(
+            sample_rate,
+            channels,
+            cons,
+            preferred_device,
+            preferred_mode,
+        )?;
 
         #[cfg(not(target_os = "linux"))]
-        let backend = PlayoutBackend::start(sample_rate, channels, cons, preferred_device)?;
+        let backend = PlayoutBackend::start(
+            sample_rate,
+            channels,
+            cons,
+            preferred_device,
+            preferred_mode,
+        )?;
 
         Ok(Self {
             backend,
@@ -59,6 +85,10 @@ impl Playout {
 
 pub fn enumerate_output_devices() -> Vec<String> {
     PlayoutBackend::enumerate_output_devices()
+}
+
+pub fn enumerate_playback_modes() -> Vec<String> {
+    PlayoutBackend::enumerate_playback_modes()
 }
 
 #[cfg(target_os = "linux")]
@@ -91,8 +121,16 @@ mod linux {
             channels: u16,
             cons: HeapCons<i16>,
             preferred_device: Option<&str>,
+            preferred_mode: Option<&str>,
         ) -> Result<Self> {
-            if pipewire_is_available() {
+            let prefer_pipewire = preferred_mode
+                .map(|mode| mode == super::PLAYBACK_MODE_PIPEWIRE)
+                .unwrap_or(false);
+            let prefer_pulse = preferred_mode
+                .map(|mode| mode == super::PLAYBACK_MODE_PULSEAUDIO)
+                .unwrap_or(false);
+
+            if !prefer_pulse && pipewire_is_available() {
                 let thread = std::thread::Builder::new()
                     .name("tsod-pipewire-playout".to_string())
                     .spawn(move || {
@@ -108,8 +146,18 @@ mod linux {
                 });
             }
 
+            if prefer_pipewire {
+                return Err(anyhow!("PipeWire playback mode requested but unavailable"));
+            }
+
             eprintln!("PipeWire unavailable, falling back to PulseAudio playback via CPAL");
-            let pulse = CpalPlayout::start(sample_rate, channels, cons, preferred_device)?;
+            let pulse = CpalPlayout::start(
+                sample_rate,
+                channels,
+                cons,
+                preferred_device,
+                preferred_mode,
+            )?;
             Ok(Self {
                 _thread: None,
                 backend: LinuxPlayoutBackend::Pulse(pulse),
@@ -121,6 +169,17 @@ mod linux {
                 return vec!["PipeWire default output".to_string()];
             }
             CpalPlayout::enumerate_output_devices()
+        }
+
+        pub fn enumerate_playback_modes() -> Vec<String> {
+            let mut modes = vec![super::PLAYBACK_MODE_AUTO.to_string()];
+            if pipewire_is_available() {
+                modes.push(super::PLAYBACK_MODE_PIPEWIRE.to_string());
+            }
+            if !CpalPlayout::enumerate_output_devices().is_empty() {
+                modes.push(super::PLAYBACK_MODE_PULSEAUDIO.to_string());
+            }
+            modes
         }
 
         pub fn is_healthy(&self) -> bool {
@@ -539,6 +598,7 @@ mod non_linux {
             channels: u16,
             cons: HeapCons<i16>,
             preferred_device: Option<&str>,
+            _preferred_mode: Option<&str>,
         ) -> Result<Self> {
             let host = cpal::default_host();
             let dev = if let Some(name) = preferred_device {
@@ -651,6 +711,13 @@ mod non_linux {
 
         pub fn is_healthy(&self) -> bool {
             !self.unhealthy.load(Ordering::Relaxed)
+        }
+
+        pub fn enumerate_playback_modes() -> Vec<String> {
+            vec![
+                super::PLAYBACK_MODE_AUTO.to_string(),
+                super::PLAYBACK_MODE_WASAPI.to_string(),
+            ]
         }
     }
 

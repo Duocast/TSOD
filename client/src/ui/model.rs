@@ -116,6 +116,7 @@ pub enum UiEvent {
     SetAudioDevices {
         input_devices: Vec<String>,
         output_devices: Vec<String>,
+        playback_modes: Vec<String>,
     },
 
     // Channel management
@@ -251,6 +252,7 @@ pub enum UiIntent {
     SetVadThreshold(f32),
     SetInputDevice(String),
     SetOutputDevice(String),
+    SetPlaybackMode(String),
     SetInputGain(f32),
     SetOutputGain(f32),
     SetUserOutputGain {
@@ -294,6 +296,7 @@ pub struct AppSettings {
 
     // ─── Playback ───
     pub playback_device: String,
+    pub playback_mode: String,
     pub output_gain: f32,
     pub per_user_audio: HashMap<String, PerUserAudioSettings>,
     pub output_auto_level: bool,
@@ -383,6 +386,7 @@ impl Default for AppSettings {
 
             // Playback
             playback_device: "(system default)".into(),
+            playback_mode: "Automatically use best mode".into(),
             output_gain: 1.0,
             per_user_audio: HashMap::new(),
             output_auto_level: false,
@@ -796,6 +800,7 @@ pub struct UiModel {
     // Audio devices (enumerated at runtime)
     pub input_devices: Vec<String>,
     pub output_devices: Vec<String>,
+    pub playback_modes: Vec<String>,
 
     // Mic test loopback (runtime)
     pub loopback_active: bool,
@@ -961,6 +966,7 @@ impl Default for UiModel {
             connection_details: VecDeque::new(),
             input_devices: Vec::new(),
             output_devices: Vec::new(),
+            playback_modes: Vec::new(),
             loopback_active: false,
             mic_test_waveform: Vec::new(),
             show_create_channel: false,
@@ -1304,9 +1310,11 @@ impl UiModel {
             UiEvent::SetAudioDevices {
                 input_devices,
                 output_devices,
+                playback_modes,
             } => {
                 self.input_devices = input_devices;
                 self.output_devices = output_devices;
+                self.playback_modes = playback_modes;
             }
             UiEvent::ChannelCreated(entry) => {
                 if let Some(existing) = self.channels.iter_mut().find(|ch| ch.id == entry.id) {
