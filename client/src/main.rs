@@ -145,7 +145,7 @@ async fn app_task(
         "[sys] starting, server={}, sni={}, ca_cert={}",
         cfg.server,
         cfg.server_name,
-        cfg.ca_cert_pem.as_deref().unwrap_or("(insecure dev mode)")
+        if cfg.ca_cert_pem.is_empty() { "(insecure dev mode)" } else { &cfg.ca_cert_pem }
     )));
     let _ = tx_event.send(UiEvent::SetNick(cfg.display_name.clone()));
     let (initial_host, initial_port) = split_server_host_port(&cfg.server);
@@ -1424,7 +1424,7 @@ async fn upload_attachment_quic(
     channel_id: &str,
     attachment: &ui::model::AttachmentData,
 ) -> anyhow::Result<ui::model::AttachmentData> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::AsyncReadExt;
 
     let (mut send, mut recv) = conn.open_bi().await.context("open media stream")?;
     let mut file = tokio::fs::File::open(&attachment.asset_id)
