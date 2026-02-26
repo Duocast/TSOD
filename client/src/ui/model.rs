@@ -677,6 +677,13 @@ pub struct UiModel {
     pub pending_attachments: Vec<PendingAttachment>,
     pub typing_users: HashMap<String, Vec<(String, std::time::Instant)>>,
 
+    // Per-channel drafts (text + attachments preserved on channel switch)
+    pub drafts: HashMap<String, DraftState>,
+
+    // Drag-and-drop overlay state
+    pub drag_hovering: bool,
+    pub drag_overlay_until: Option<std::time::Instant>,
+
     // Voice (runtime state, not persisted)
     pub ptt_enabled: bool,
     pub ptt_active: bool,
@@ -762,6 +769,13 @@ pub struct PendingAttachment {
     pub error: Option<String>,
 }
 
+/// Per-channel draft state preserving unsent text and attachments across channel switches.
+#[derive(Debug, Clone, Default)]
+pub struct DraftState {
+    pub text: String,
+    pub attachments: Vec<PendingAttachment>,
+}
+
 #[derive(Debug, Clone)]
 pub struct Notification {
     pub text: String,
@@ -832,6 +846,9 @@ impl Default for UiModel {
             chat_input_focused: false,
             pending_attachments: Vec::new(),
             typing_users: HashMap::new(),
+            drafts: HashMap::new(),
+            drag_hovering: false,
+            drag_overlay_until: None,
             ptt_enabled: true,
             ptt_active: false,
             self_muted: false,
@@ -896,11 +913,44 @@ impl Default for UiModel {
 }
 
 impl UiModel {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Clear the current channel's draft after a successful send.
+    pub fn clear_current_draft(&mut self) {
+        if let Some(ref ch) = self.selected_channel {
+            self.drafts.remove(ch);
+        }
+    }
+
     pub fn apply_event(&mut self, ev: UiEvent) {
         match ev {
             UiEvent::SetConnected(c) => self.connected = c,
             UiEvent::SetAuthed(a) => self.authed = a,
             UiEvent::SetChannelName(n) => {
+                // Save current channel's draft before switching
+                if let Some(ref old_ch) = self.selected_channel {
+                    if !self.chat_input.is_empty() || !self.pending_attachments.is_empty() {
+                        self.drafts.insert(
+                            old_ch.clone(),
+                            DraftState {
+                                text: std::mem::take(&mut self.chat_input),
+                                attachments: std::mem::take(&mut self.pending_attachments),
+                            },
+                        );
+                    } else {
+                        self.drafts.remove(old_ch);
+                    }
+                }
+                // Load new channel's draft
+                if let Some(draft) = self.drafts.remove(&n) {
+                    self.chat_input = draft.text;
+                    self.pending_attachments = draft.attachments;
+                } else {
+                    self.chat_input.clear();
+                    self.pending_attachments.clear();
+                }
                 self.selected_channel = Some(n.clone());
                 self.selected_channel_name =
                     self.channel_name_for_id(&n).map(str::to_owned).unwrap_or(n);
@@ -1026,6 +1076,11 @@ impl UiModel {
             }
             UiEvent::ClearPendingAttachments => {
                 self.pending_attachments.clear();
+                if let Some(ref ch) = self.selected_channel {
+                    if let Some(draft) = self.drafts.get_mut(ch) {
+                        draft.attachments.clear();
+                    }
+                }
             }
             UiEvent::AttachmentUploadError { path, error } => {
                 if let Some(att) = self.pending_attachments.iter_mut().find(|a| a.path == path) {
