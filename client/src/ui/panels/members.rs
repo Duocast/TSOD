@@ -124,14 +124,20 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
             );
 
             let mut status_parts = Vec::new();
-            if member.muted || member.self_muted {
-                status_parts.push("muted");
+            if member.muted {
+                status_parts.push("🔇 server-muted");
             }
-            if member.deafened || member.self_deafened {
-                status_parts.push("deafened");
+            if member.self_muted {
+                status_parts.push("🎙️ self-muted");
+            }
+            if member.deafened {
+                status_parts.push("🚫🔊 server-deafened");
+            }
+            if member.self_deafened {
+                status_parts.push("🔈 self-deafened");
             }
             if member.streaming {
-                status_parts.push("streaming");
+                status_parts.push("📺 streaming");
             }
             if !status_parts.is_empty() {
                 ui.painter().text(
@@ -147,7 +153,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                 let current_gain = model.user_output_gain(&member.user_id);
                 let mut draft_gain = current_gain;
                 let mut local_muted = model.user_locally_muted(&member.user_id);
-                ui.label("Local audio");
+                ui.label("Local audio controls");
                 if ui.checkbox(&mut local_muted, "Mute for me").changed() {
                     model
                         .settings

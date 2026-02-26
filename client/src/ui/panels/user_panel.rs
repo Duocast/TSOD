@@ -101,6 +101,22 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
 
             ui.add_space(6.0);
 
+            let in_voice_channel = model.active_voice_channel_route != 0;
+            let voice_state = if !model.connected {
+                ("Voice: disconnected", theme::COLOR_OFFLINE)
+            } else if in_voice_channel {
+                ("Voice: connected", theme::COLOR_ONLINE)
+            } else {
+                ("Voice: not in voice channel", theme::text_muted())
+            };
+            ui.label(
+                egui::RichText::new(voice_state.0)
+                    .size(11.0)
+                    .color(voice_state.1),
+            );
+
+            ui.add_space(4.0);
+
             // Bottom row: action buttons
             ui.horizontal(|ui: &mut egui::Ui| {
                 let btn_size = egui::vec2(36.0, 28.0);
@@ -136,13 +152,17 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                 } else {
                     theme::text_color()
                 };
-                let mute_icon = if model.self_muted { "MIC OFF" } else { "MIC" };
+                let mute_icon = if model.self_muted {
+                    "🎙️🚫"
+                } else {
+                    "🎙️"
+                };
 
-                let mute_btn = ui.add_sized(
-                    btn_size,
+                let mute_btn = ui.add_enabled(
+                    in_voice_channel,
                     egui::Button::new(
                         egui::RichText::new(mute_icon)
-                            .size(10.0)
+                            .size(12.0)
                             .color(mute_text_color)
                             .strong(),
                     )
@@ -153,7 +173,11 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                     model.self_muted = !model.self_muted;
                     let _ = tx_intent.send(UiIntent::ToggleSelfMute);
                 }
-                mute_btn.on_hover_text(mute_label);
+                mute_btn.on_hover_text(if in_voice_channel {
+                    mute_label
+                } else {
+                    "Join a voice channel to use mute"
+                });
 
                 ui.add_space(2.0);
 
@@ -173,13 +197,13 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                 } else {
                     theme::text_color()
                 };
-                let deafen_icon = if model.self_deafened { "DEAF" } else { "SOUND" };
+                let deafen_icon = if model.self_deafened { "🔇" } else { "🔊" };
 
-                let deafen_btn = ui.add_sized(
-                    btn_size,
+                let deafen_btn = ui.add_enabled(
+                    in_voice_channel,
                     egui::Button::new(
                         egui::RichText::new(deafen_icon)
-                            .size(10.0)
+                            .size(12.0)
                             .color(deafen_text_color)
                             .strong(),
                     )
@@ -190,7 +214,11 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                     model.self_deafened = !model.self_deafened;
                     let _ = tx_intent.send(UiIntent::ToggleSelfDeafen);
                 }
-                deafen_btn.on_hover_text(deafen_label);
+                deafen_btn.on_hover_text(if in_voice_channel {
+                    deafen_label
+                } else {
+                    "Join a voice channel to use deafen"
+                });
             });
 
             // VAD level bar (when voice is active)

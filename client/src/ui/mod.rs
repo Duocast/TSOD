@@ -246,17 +246,27 @@ impl eframe::App for VpApp {
                             .small()
                             .color(theme::text_dim()),
                     );
+                    let voice_conn = if self.model.active_voice_channel_route != 0 {
+                        ("Voice: connected", theme::COLOR_ONLINE)
+                    } else if self.model.connection_stage.is_in_progress() {
+                        ("Voice: reconnecting", theme::COLOR_MENTION)
+                    } else {
+                        ("Voice: not in voice channel", theme::text_muted())
+                    };
+                    ui.label(
+                        egui::RichText::new(voice_conn.0)
+                            .small()
+                            .color(voice_conn.1),
+                    );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let in_voice_channel = self.model.active_voice_channel_route != 0;
                         if self.model.ptt_enabled {
-                            let ptt_text = if self.model.ptt_active {
-                                "PTT: ON"
+                            let (ptt_text, ptt_color) = if !in_voice_channel {
+                                ("PTT: DISABLED", theme::text_muted())
+                            } else if self.model.ptt_active {
+                                ("PTT: ON", theme::COLOR_ONLINE)
                             } else {
-                                "PTT: OFF"
-                            };
-                            let ptt_color = if self.model.ptt_active {
-                                theme::COLOR_ONLINE
-                            } else {
-                                theme::COLOR_OFFLINE
+                                ("PTT: OFF", theme::COLOR_OFFLINE)
                             };
                             ui.colored_label(ptt_color, egui::RichText::new(ptt_text).small());
                         }
