@@ -112,7 +112,7 @@ pub fn show(ui: &mut egui::Ui, model: &UiModel) {
     });
 }
 
-fn compute_quality_score(rtt_ms: u32, loss_rate: f32, jitter_ms: u32) -> u32 {
+pub(crate) fn compute_quality_score(rtt_ms: u32, loss_rate: f32, jitter_ms: u32) -> u32 {
     let mut score = 100i32;
 
     // RTT penalty
@@ -144,7 +144,7 @@ fn compute_quality_score(rtt_ms: u32, loss_rate: f32, jitter_ms: u32) -> u32 {
     score.clamp(0, 100) as u32
 }
 
-fn format_bitrate(bps: u32) -> String {
+pub(crate) fn format_bitrate(bps: u32) -> String {
     if bps >= 1_000_000 {
         format!("{:.1} Mbps", bps as f64 / 1_000_000.0)
     } else if bps >= 1_000 {

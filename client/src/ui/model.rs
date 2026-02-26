@@ -763,6 +763,9 @@ pub struct UiModel {
     pub vad_level: Option<f32>,
     pub active_voice_channel_route: u32,
     pub voice_session_healthy: bool,
+    pub connection_established_at: Option<std::time::Instant>,
+    pub member_first_seen_at: HashMap<String, std::time::Instant>,
+    pub member_last_active_at: HashMap<String, std::time::Instant>,
 
     // Log
     pub log: VecDeque<String>,
@@ -774,6 +777,9 @@ pub struct UiModel {
     pub show_settings: bool,
     pub show_telemetry: bool,
     pub show_connections: bool,
+    pub show_member_connection_info: bool,
+    pub connection_info_target_user_id: String,
+    pub connection_info_target_display_name: String,
     pub status_line: String,
     pub connection_host_draft: String,
     pub connection_port_draft: String,
@@ -930,11 +936,17 @@ impl Default for UiModel {
             vad_level: None,
             active_voice_channel_route: 0,
             voice_session_healthy: false,
+            connection_established_at: None,
+            member_first_seen_at: HashMap::new(),
+            member_last_active_at: HashMap::new(),
             log: VecDeque::new(),
             telemetry: TelemetryData::default(),
             show_settings: false,
             show_telemetry: false,
             show_connections: false,
+            show_member_connection_info: false,
+            connection_info_target_user_id: String::new(),
+            connection_info_target_display_name: String::new(),
             status_line: String::new(),
             connection_host_draft: "127.0.0.1".into(),
             connection_port_draft: "4433".into(),
@@ -1002,7 +1014,10 @@ impl UiModel {
 
     pub fn apply_event(&mut self, ev: UiEvent) {
         match ev {
-            UiEvent::SetConnected(c) => self.connected = c,
+            UiEvent::SetConnected(c) => {
+                self.connected = c;
+                self.connection_established_at = c.then(std::time::Instant::now);
+            }
             UiEvent::SetAuthed(a) => self.authed = a,
             UiEvent::SetChannelName(n) => {
                 // Save current channel's draft before switching
@@ -1078,6 +1093,12 @@ impl UiModel {
                 channel_id,
                 members,
             } => {
+                let now = std::time::Instant::now();
+                for member in &members {
+                    self.member_first_seen_at
+                        .entry(member.user_id.clone())
+                        .or_insert(now);
+                }
                 self.members.insert(channel_id, members);
             }
             UiEvent::MessageReceived(mut msg) => {
@@ -1177,6 +1198,10 @@ impl UiModel {
                 typers.push((user_name, std::time::Instant::now()));
             }
             UiEvent::MemberJoined { channel_id, member } => {
+                let now = std::time::Instant::now();
+                self.member_first_seen_at
+                    .entry(member.user_id.clone())
+                    .or_insert(now);
                 let members = self.members.entry(channel_id).or_default();
                 if let Some(existing) = members.iter_mut().find(|m| m.user_id == member.user_id) {
                     *existing = member;
@@ -1229,6 +1254,10 @@ impl UiModel {
             UiEvent::VadLevel(v) => self.vad_level = Some(v),
             UiEvent::MicTestWaveform(samples) => self.mic_test_waveform = samples,
             UiEvent::VoiceActivity { user_id, speaking } => {
+                if speaking {
+                    self.member_last_active_at
+                        .insert(user_id.clone(), std::time::Instant::now());
+                }
                 self.speaking_users.insert(user_id, speaking);
             }
             UiEvent::VoiceMeter { user_id, level } => {
