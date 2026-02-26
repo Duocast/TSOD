@@ -589,13 +589,11 @@ async fn app_task(
     Ok(())
 }
 
-fn maybe_note_event_gap(tx_event: &Sender<UiEvent>, event_seq: u64) {
-    if event_seq == 0 {
-        let _ = tx_event.send(UiEvent::AppendLog(
-            "[sync] TODO: push event missing sequence metadata; trigger forced resync on suspected gaps"
-                .into(),
-        ));
-    }
+fn maybe_note_event_gap(_tx_event: &Sender<UiEvent>, _event_seq: u64) {
+    // event_seq == 0 means the server did not stamp this push with a sequence
+    // number; it is treated as unordered and always applied. No user-visible
+    // log entry is emitted here — gap detection for stamped events is handled
+    // inside should_apply_event_seq.
 }
 
 fn should_apply_event_seq(
@@ -604,6 +602,7 @@ fn should_apply_event_seq(
     event_seq: u64,
 ) -> bool {
     if event_seq == 0 {
+        // Server did not stamp this event; apply unconditionally.
         return true;
     }
     if event_seq <= *last_event_seq {
@@ -612,6 +611,14 @@ fn should_apply_event_seq(
             event_seq, *last_event_seq
         )));
         return false;
+    }
+    if *last_event_seq != 0 && event_seq > *last_event_seq + 1 {
+        let _ = tx_event.send(UiEvent::AppendLog(format!(
+            "[sync] event sequence gap detected: expected {} got {} (missed {} events)",
+            *last_event_seq + 1,
+            event_seq,
+            event_seq - *last_event_seq - 1,
+        )));
     }
     *last_event_seq = event_seq;
     let _ = tx_event.send(UiEvent::SetLastEventSeq(event_seq));
@@ -2882,20 +2889,30 @@ fn make_pinned_endpoint(pin_sha256: [u8; 32], alpn: &str) -> Result<quinn::Endpo
 
         fn verify_tls12_signature(
             &self,
-            _message: &[u8],
-            _cert: &CertificateDer<'_>,
-            _dss: &DigitallySignedStruct,
+            message: &[u8],
+            cert: &CertificateDer<'_>,
+            dss: &DigitallySignedStruct,
         ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
-            Ok(HandshakeSignatureValid::assertion())
+            rustls::crypto::verify_tls12_signature(
+                message,
+                cert,
+                dss,
+                &rustls::crypto::ring::default_provider().signature_verification_algorithms,
+            )
         }
 
         fn verify_tls13_signature(
             &self,
-            _message: &[u8],
-            _cert: &CertificateDer<'_>,
-            _dss: &DigitallySignedStruct,
+            message: &[u8],
+            cert: &CertificateDer<'_>,
+            dss: &DigitallySignedStruct,
         ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
-            Ok(HandshakeSignatureValid::assertion())
+            rustls::crypto::verify_tls13_signature(
+                message,
+                cert,
+                dss,
+                &rustls::crypto::ring::default_provider().signature_verification_algorithms,
+            )
         }
 
         fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {

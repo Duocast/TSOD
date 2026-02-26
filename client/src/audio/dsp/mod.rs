@@ -31,7 +31,7 @@ impl CaptureDsp {
     /// Create a new capture DSP pipeline.
     /// `sample_rate` must be 48000 (RNNoise requirement).
     pub fn new(sample_rate: u32) -> Result<Self> {
-        assert_eq!(sample_rate, 48000, "RNNoise requires 48kHz");
+        anyhow::ensure!(sample_rate == 48_000, "RNNoise requires 48kHz, got {sample_rate}");
         Ok(Self {
             agc: agc::Agc::new(-18.0, 0.3),
             denoiser: rnnoise::Denoiser::new(),
