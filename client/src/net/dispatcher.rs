@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::{
     sync::{mpsc, oneshot, watch, Mutex, RwLock},
@@ -7,6 +7,7 @@ use tokio::{
 use tracing::warn;
 
 use crate::{
+    identity::DeviceIdentity,
     net::frame::{read_delimited, write_delimited},
     proto::voiceplatform::v1 as pb,
 };
@@ -136,13 +137,13 @@ impl ControlDispatcher {
     pub async fn hello_auth(
         &self,
         alpn: &str,
-        dev_token: &str,
+        device_identity: &DeviceIdentity,
         preferred_display_name: &str,
     ) -> Result<AuthInfo> {
         let hello = pb::Hello {
             caps: Some(default_caps(alpn)),
             device_id: Some(pb::DeviceId {
-                value: "dev-device".into(),
+                value: device_identity.device_id.clone(),
             }),
         };
         let resp = self
@@ -152,19 +153,33 @@ impl ControlDispatcher {
             )
             .await??;
 
-        match resp.payload {
+        let (session_id, challenge) = match resp.payload {
             Some(pb::server_to_client::Payload::HelloAck(ack)) => {
-                if let Some(sid) = ack.session_id {
-                    *self.inner.session_id.write().await = Some(sid);
+                let sid = ack
+                    .session_id
+                    .as_ref()
+                    .map(|s| s.value.clone())
+                    .unwrap_or_default();
+                if let Some(sid_msg) = ack.session_id {
+                    *self.inner.session_id.write().await = Some(sid_msg);
                 }
+                (sid, ack.auth_challenge)
             }
             _ => return Err(anyhow!("expected HelloAck")),
-        }
+        };
+
+        let signature = device_identity
+            .sign_challenge(&challenge, &session_id)
+            .context("sign auth challenge")?;
 
         let auth = pb::AuthRequest {
             preferred_display_name: preferred_display_name.into(),
-            method: Some(pb::auth_request::Method::DevToken(pb::DevTokenAuth {
-                token: dev_token.into(),
+            method: Some(pb::auth_request::Method::Device(pb::DeviceAuth {
+                device_id: Some(pb::DeviceId {
+                    value: device_identity.device_id.clone(),
+                }),
+                device_pubkey: device_identity.public_key.clone(),
+                signature,
             })),
         };
 

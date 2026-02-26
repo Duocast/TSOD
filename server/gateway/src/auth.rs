@@ -1,53 +1,102 @@
 use anyhow::{anyhow, Result};
-use tracing::warn;
+use std::collections::HashMap;
+use std::sync::Mutex;
 
 use crate::proto::voiceplatform::v1 as pb;
 
 #[derive(Debug, Clone)]
 pub struct AuthedIdentity {
-    pub user_id: String,      // UUID string
-    pub server_id: String,    // UUID string
-    pub display_name: String, // user-visible name
+    pub user_id: String,
+    pub server_id: String,
+    pub display_name: String,
     pub is_admin: bool,
 }
 
 pub trait AuthProvider: Send + Sync + 'static {
-    fn authenticate(&self, req: &pb::AuthRequest) -> Result<AuthedIdentity>;
+    fn authenticate(
+        &self,
+        req: &pb::AuthRequest,
+        session_id: &str,
+        auth_challenge: &[u8],
+    ) -> Result<AuthedIdentity>;
 }
 
 #[derive(Debug, Clone)]
-pub struct DevAuthProvider;
+struct DeviceRecord {
+    user_id: String,
+    device_id: String,
+}
+
+#[derive(Debug, Default)]
+struct DeviceRegistry {
+    by_pubkey: HashMap<Vec<u8>, DeviceRecord>,
+}
+
+#[derive(Debug, Default)]
+pub struct DevAuthProvider {
+    registry: Mutex<DeviceRegistry>,
+}
 
 impl AuthProvider for DevAuthProvider {
-    fn authenticate(&self, req: &pb::AuthRequest) -> Result<AuthedIdentity> {
+    fn authenticate(
+        &self,
+        req: &pb::AuthRequest,
+        session_id: &str,
+        auth_challenge: &[u8],
+    ) -> Result<AuthedIdentity> {
         match req.method.as_ref() {
-            Some(pb::auth_request::Method::DevToken(m)) => {
-                if m.token == "dev" {
-                    warn!(
-                        token = %m.token,
-                        "legacy dev token used; all clients with token=dev map to the same test user_id"
-                    );
-                    Ok(AuthedIdentity {
-                        user_id: "00000000-0000-0000-0000-000000000001".to_string(),
-                        server_id: "00000000-0000-0000-0000-0000000000aa".to_string(),
-                        display_name: "dev".to_string(),
-                        is_admin: true,
-                    })
-                } else if let Some(raw) = m.token.strip_prefix("dev:") {
-                    let key = raw.trim();
-                    if key.is_empty() {
-                        return Err(anyhow!("invalid dev token"));
-                    }
-                    let user = deterministic_dev_user_id(key);
-                    Ok(AuthedIdentity {
-                        user_id: user,
-                        server_id: "00000000-0000-0000-0000-0000000000aa".to_string(),
-                        display_name: key.to_string(),
-                        is_admin: true,
-                    })
-                } else {
-                    Err(anyhow!("invalid dev token"))
+            Some(pb::auth_request::Method::Device(device)) => {
+                let device_id = device
+                    .device_id
+                    .as_ref()
+                    .map(|d| d.value.trim())
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| anyhow!("missing device_id"))?;
+                if uuid::Uuid::parse_str(device_id).is_err() {
+                    return Err(anyhow!("invalid device_id"));
                 }
+                if device.device_pubkey.len() != 32 {
+                    return Err(anyhow!("invalid device_pubkey"));
+                }
+                if device.signature.len() != 64 {
+                    return Err(anyhow!("invalid signature"));
+                }
+
+                let mut signed = Vec::with_capacity(auth_challenge.len() + session_id.len());
+                signed.extend_from_slice(auth_challenge);
+                signed.extend_from_slice(session_id.as_bytes());
+
+                let verifier = ring::signature::UnparsedPublicKey::new(
+                    &ring::signature::ED25519,
+                    &device.device_pubkey,
+                );
+                verifier
+                    .verify(&signed, &device.signature)
+                    .map_err(|_| anyhow!("invalid device signature"))?;
+
+                let mut registry = self
+                    .registry
+                    .lock()
+                    .map_err(|_| anyhow!("registry lock poisoned"))?;
+                let rec = registry
+                    .by_pubkey
+                    .entry(device.device_pubkey.clone())
+                    .or_insert_with(|| DeviceRecord {
+                        user_id: uuid::Uuid::new_v4().to_string(),
+                        device_id: device_id.to_string(),
+                    })
+                    .clone();
+
+                if rec.device_id != device_id {
+                    return Err(anyhow!("device_id mismatch for registered key"));
+                }
+
+                Ok(AuthedIdentity {
+                    user_id: rec.user_id,
+                    server_id: "00000000-0000-0000-0000-0000000000aa".to_string(),
+                    display_name: format!("guest-{}", &rec.device_id[..8]),
+                    is_admin: true,
+                })
             }
             _ => Err(anyhow!("unsupported auth method in dev provider")),
         }
@@ -58,67 +107,84 @@ impl AuthProvider for DevAuthProvider {
 mod tests {
     use super::{AuthProvider, DevAuthProvider};
     use crate::proto::voiceplatform::v1 as pb;
+    use ring::rand::SystemRandom;
+    use ring::signature::{Ed25519KeyPair, KeyPair};
+
+    fn sign_payload(key: &Ed25519KeyPair, challenge: &[u8], session_id: &str) -> Vec<u8> {
+        let mut payload = Vec::with_capacity(challenge.len() + session_id.len());
+        payload.extend_from_slice(challenge);
+        payload.extend_from_slice(session_id.as_bytes());
+        key.sign(&payload).as_ref().to_vec()
+    }
 
     #[test]
-    fn legacy_dev_token_maps_to_single_identity() {
-        let provider = DevAuthProvider;
-        let req_a = pb::AuthRequest {
-            method: Some(pb::auth_request::Method::DevToken(pb::DevTokenAuth {
-                token: "dev".into(),
-            })),
-            ..Default::default()
-        };
-        let req_b = pb::AuthRequest {
-            method: Some(pb::auth_request::Method::DevToken(pb::DevTokenAuth {
-                token: "dev".into(),
+    fn same_device_gets_same_user_id() {
+        let provider = DevAuthProvider::default();
+        let rng = SystemRandom::new();
+        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).expect("pkcs8");
+        let key = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).expect("key");
+        let challenge = b"abc123";
+        let session_id = "session-1";
+        let device_id = "11111111-1111-1111-1111-111111111111";
+
+        let req = pb::AuthRequest {
+            method: Some(pb::auth_request::Method::Device(pb::DeviceAuth {
+                device_id: Some(pb::DeviceId {
+                    value: device_id.to_string(),
+                }),
+                device_pubkey: key.public_key().as_ref().to_vec(),
+                signature: sign_payload(&key, challenge, session_id),
             })),
             ..Default::default()
         };
 
         let a = provider
-            .authenticate(&req_a)
-            .expect("first legacy dev auth");
+            .authenticate(&req, session_id, challenge)
+            .expect("auth a");
         let b = provider
-            .authenticate(&req_b)
-            .expect("second legacy dev auth");
+            .authenticate(&req, session_id, challenge)
+            .expect("auth b");
         assert_eq!(a.user_id, b.user_id);
     }
+
     #[test]
-    fn dev_colon_token_produces_distinct_user_ids() {
-        let provider = DevAuthProvider;
+    fn distinct_devices_get_distinct_user_ids() {
+        let provider = DevAuthProvider::default();
+        let rng = SystemRandom::new();
+        let pkcs8_a = Ed25519KeyPair::generate_pkcs8(&rng).expect("pkcs8 a");
+        let key_a = Ed25519KeyPair::from_pkcs8(pkcs8_a.as_ref()).expect("key a");
+        let pkcs8_b = Ed25519KeyPair::generate_pkcs8(&rng).expect("pkcs8 b");
+        let key_b = Ed25519KeyPair::from_pkcs8(pkcs8_b.as_ref()).expect("key b");
+        let challenge = b"nonce";
+        let session_id = "session-2";
+
         let req_a = pb::AuthRequest {
-            method: Some(pb::auth_request::Method::DevToken(pb::DevTokenAuth {
-                token: "dev:alice".into(),
+            method: Some(pb::auth_request::Method::Device(pb::DeviceAuth {
+                device_id: Some(pb::DeviceId {
+                    value: "22222222-2222-2222-2222-222222222222".to_string(),
+                }),
+                device_pubkey: key_a.public_key().as_ref().to_vec(),
+                signature: sign_payload(&key_a, challenge, session_id),
             })),
             ..Default::default()
         };
         let req_b = pb::AuthRequest {
-            method: Some(pb::auth_request::Method::DevToken(pb::DevTokenAuth {
-                token: "dev:bob".into(),
+            method: Some(pb::auth_request::Method::Device(pb::DeviceAuth {
+                device_id: Some(pb::DeviceId {
+                    value: "33333333-3333-3333-3333-333333333333".to_string(),
+                }),
+                device_pubkey: key_b.public_key().as_ref().to_vec(),
+                signature: sign_payload(&key_b, challenge, session_id),
             })),
             ..Default::default()
         };
 
-        let a = provider.authenticate(&req_a).expect("alice auth");
-        let b = provider.authenticate(&req_b).expect("bob auth");
+        let a = provider
+            .authenticate(&req_a, session_id, challenge)
+            .expect("auth a");
+        let b = provider
+            .authenticate(&req_b, session_id, challenge)
+            .expect("auth b");
         assert_ne!(a.user_id, b.user_id);
     }
-}
-
-fn deterministic_dev_user_id(key: &str) -> String {
-    use std::hash::{Hash, Hasher};
-
-    let mut h1 = std::collections::hash_map::DefaultHasher::new();
-    key.hash(&mut h1);
-    let a = h1.finish() as u128;
-
-    let mut h2 = std::collections::hash_map::DefaultHasher::new();
-    "vp-dev".hash(&mut h2);
-    key.hash(&mut h2);
-    let b = h2.finish() as u128;
-
-    let raw = (a << 64) | b;
-    let bytes = raw.to_be_bytes();
-    let uuid = uuid::Uuid::from_bytes(bytes);
-    uuid.to_string()
 }

@@ -10,9 +10,6 @@ pub struct Config {
     #[arg(long, env = "VP_ALPN", default_value = "vp-control/1")]
     pub alpn: String,
 
-    #[arg(long, env = "VP_DEV_TOKEN", default_value = "dev")]
-    pub dev_token: String,
-
     /// Join this channel UUID on startup.
     #[arg(long)]
     pub channel_id: Option<String>,
