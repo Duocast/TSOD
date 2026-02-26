@@ -1883,15 +1883,19 @@ async fn voice_send_loop(
     let mut pcm = vec![0i16; frame_samples];
     let mut enc_out = vec![0u8; 4000];
 
-    let mut tick = tokio::time::interval(Duration::from_millis(5));
+    let mut tick = tokio::time::interval(Duration::from_millis(frame_ms as u64));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut vad_report_counter = 0u32;
 
     loop {
         tick.tick().await;
 
-        let capture_stream = capture.read().await.clone();
-        if !capture_stream.read_frame(&mut pcm) {
-            continue;
+        loop {
+            let capture_stream = capture.read().await.clone();
+            if capture_stream.read_frame(&mut pcm) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
         }
 
         // Apply input gain
