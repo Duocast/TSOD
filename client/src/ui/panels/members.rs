@@ -1,6 +1,7 @@
 //! Member list panel (right sidebar).
 
 use crate::ui::model::{UiIntent, UiModel};
+use crate::ui::panels::telemetry;
 use crate::ui::theme;
 use crossbeam_channel::Sender;
 use eframe::egui;
@@ -123,21 +124,24 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                 theme::text_color(),
             );
 
-            let mut status_parts = Vec::new();
+            let mut status_parts: Vec<String> = Vec::new();
             if member.muted {
-                status_parts.push("🔇 server-muted");
+                status_parts.push("🔇 server-muted".into());
             }
             if member.self_muted {
-                status_parts.push("🎙️ self-muted");
+                status_parts.push("🎙️ self-muted".into());
             }
             if member.deafened {
-                status_parts.push("🚫🔊 server-deafened");
+                status_parts.push("🚫🔊 server-deafened".into());
             }
             if member.self_deafened {
-                status_parts.push("🔈 self-deafened");
+                status_parts.push("🔈 self-deafened".into());
             }
             if member.streaming {
-                status_parts.push("📺 streaming");
+                status_parts.push("📺 streaming".into());
+            }
+            if !member.away_message.trim().is_empty() {
+                status_parts.push(format!("🌙 Away: {}", member.away_message.trim()));
             }
             if !status_parts.is_empty() {
                 ui.painter().text(
@@ -223,6 +227,13 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                     ui.close_menu();
                 }
                 ui.separator();
+                if ui.button("Get Connection Info").clicked() {
+                    model.show_member_connection_info = true;
+                    model.connection_info_target_user_id = member.user_id.clone();
+                    model.connection_info_target_display_name = member.display_name.clone();
+                    ui.close_menu();
+                }
+                ui.separator();
                 if ui.button("Kick").clicked() {
                     let _ = tx_intent.send(UiIntent::KickUser {
                         user_id: member.user_id.clone(),
@@ -258,5 +269,190 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                     }
                 });
             });
+    }
+
+    if model.show_member_connection_info {
+        let mut open = true;
+        egui::Window::new(format!(
+            "Connection Info — {}",
+            model.connection_info_target_display_name
+        ))
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(true)
+        .default_width(460.0)
+        .show(ui.ctx(), |ui| {
+            let telemetry_data = &model.telemetry;
+            let now = std::time::Instant::now();
+            let connected_for = model
+                .connection_established_at
+                .map(|t| now.saturating_duration_since(t))
+                .unwrap_or_default();
+            let idle_for = model
+                .member_last_active_at
+                .get(&model.connection_info_target_user_id)
+                .map(|t| now.saturating_duration_since(*t))
+                .or_else(|| {
+                    model
+                        .member_first_seen_at
+                        .get(&model.connection_info_target_user_id)
+                        .map(|t| now.saturating_duration_since(*t))
+                })
+                .unwrap_or_default();
+
+            egui::Grid::new("member_connection_info_grid")
+                .num_columns(2)
+                .spacing([20.0, 4.0])
+                .show(ui, |ui| {
+                    ui.label("Client name:");
+                    ui.label("vp-client");
+                    ui.end_row();
+
+                    ui.label("Connection time:");
+                    ui.label(format_duration(connected_for));
+                    ui.end_row();
+
+                    ui.label("Idle time:");
+                    ui.label(format_duration(idle_for));
+                    ui.end_row();
+
+                    ui.label("Ping:");
+                    ui.label(format!("{} ms", telemetry_data.rtt_ms));
+                    ui.end_row();
+
+                    ui.label("Client address:");
+                    ui.label(model.connection_host_draft.as_str());
+                    ui.end_row();
+
+                    ui.label("Packet Loss:");
+                    let loss_color = if telemetry_data.loss_rate > 0.05 {
+                        theme::COLOR_DANGER
+                    } else if telemetry_data.loss_rate > 0.01 {
+                        theme::COLOR_IDLE
+                    } else {
+                        theme::COLOR_ONLINE
+                    };
+                    ui.colored_label(
+                        loss_color,
+                        format!("{:.1}%", telemetry_data.loss_rate * 100.0),
+                    );
+                    ui.end_row();
+
+                    ui.separator();
+                    ui.separator();
+                    ui.end_row();
+
+                    ui.label("Jitter:");
+                    ui.label(format!("{} ms", telemetry_data.jitter_ms));
+                    ui.end_row();
+
+                    ui.label("RX Bitrate:");
+                    ui.label(format!(
+                        "{} ({}/s)",
+                        telemetry::format_bitrate(telemetry_data.rx_bitrate_bps),
+                        telemetry_data.rx_pps
+                    ));
+                    ui.end_row();
+
+                    ui.label("TX Bitrate:");
+                    ui.label(format!(
+                        "{} ({}/s)",
+                        telemetry::format_bitrate(telemetry_data.tx_bitrate_bps),
+                        telemetry_data.tx_pps
+                    ));
+                    ui.end_row();
+
+                    ui.label("Jitter Buffer:");
+                    ui.label(format!("{} pkts", telemetry_data.jitter_buffer_depth));
+                    ui.end_row();
+
+                    ui.label("Late/Lost:");
+                    ui.label(format!(
+                        "{}/{}",
+                        telemetry_data.late_packets, telemetry_data.lost_packets
+                    ));
+                    ui.end_row();
+
+                    ui.label("Concealment:");
+                    ui.label(format!("{} frames", telemetry_data.concealment_frames));
+                    ui.end_row();
+
+                    ui.label("Peak Stream Level:");
+                    ui.label(format!("{:.0}%", telemetry_data.peak_stream_level * 100.0));
+                    ui.end_row();
+
+                    ui.label("Server Send-Queue Drops:");
+                    ui.label(telemetry_data.send_queue_drop_count.to_string());
+                    ui.end_row();
+
+                    ui.label("Playout Delay:");
+                    ui.label(format!("{} ms", telemetry_data.playout_delay_ms));
+                    ui.end_row();
+
+                    ui.label("AGC Gain:");
+                    ui.label(format!("{:.1} dB", telemetry_data.agc_gain_db));
+                    ui.end_row();
+
+                    ui.label("VAD Probability:");
+                    let vad_color = if telemetry_data.vad_probability > 0.5 {
+                        theme::COLOR_ONLINE
+                    } else {
+                        theme::text_muted()
+                    };
+                    ui.colored_label(
+                        vad_color,
+                        format!("{:.0}%", telemetry_data.vad_probability * 100.0),
+                    );
+                    ui.end_row();
+                });
+
+            ui.separator();
+            ui.label(egui::RichText::new("Network Quality").strong().size(13.0));
+            let quality = telemetry::compute_quality_score(
+                telemetry_data.rtt_ms,
+                telemetry_data.loss_rate,
+                telemetry_data.jitter_ms,
+            );
+            let (quality_text, quality_color) = match quality {
+                80..=100 => ("Excellent", theme::COLOR_ONLINE),
+                60..=79 => ("Good", theme::COLOR_ONLINE),
+                40..=59 => ("Fair", theme::COLOR_IDLE),
+                20..=39 => ("Poor", theme::COLOR_DND),
+                _ => ("Bad", theme::COLOR_DANGER),
+            };
+            ui.horizontal(|ui| {
+                let bar_width = 200.0;
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(bar_width, 16.0), egui::Sense::hover());
+                ui.painter()
+                    .rect_filled(rect, 4.0, egui::Color32::from_gray(40));
+                let filled = egui::Rect::from_min_size(
+                    rect.min,
+                    egui::vec2(bar_width * quality as f32 / 100.0, 16.0),
+                );
+                ui.painter().rect_filled(filled, 4.0, quality_color);
+                ui.label(
+                    egui::RichText::new(format!("{quality_text} ({quality}%)"))
+                        .color(quality_color),
+                );
+            });
+        });
+        if !open {
+            model.show_member_connection_info = false;
+        }
+    }
+}
+
+fn format_duration(dur: std::time::Duration) -> String {
+    let total_secs = dur.as_secs();
+    let hours = total_secs / 3600;
+    let minutes = (total_secs % 3600) / 60;
+    let seconds = total_secs % 60;
+    if hours > 0 {
+        format!("{hours}h {minutes}m {seconds}s")
+    } else if minutes > 0 {
+        format!("{minutes}m {seconds}s")
+    } else {
+        format!("{seconds}s")
     }
 }

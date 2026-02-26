@@ -113,117 +113,108 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
 
             // Keep voice status and controls on one row so controls remain visible.
             ui.horizontal(|ui: &mut egui::Ui| {
-                ui.label(
-                    egui::RichText::new(voice_state.0)
-                        .size(11.0)
-                        .color(voice_state.1),
+                let btn_size = egui::vec2(30.0, 24.0);
+
+                let away_btn = ui.add_sized(
+                    btn_size,
+                    egui::Button::new(
+                        egui::RichText::new("🌙")
+                            .size(13.0)
+                            .color(theme::text_color())
+                            .strong(),
+                    )
+                    .fill(theme::bg_light())
+                    .rounding(4.0),
                 );
+                if away_btn.clicked() {
+                    model.show_away_message_dialog = true;
+                    model.away_message_draft = model.away_message.clone();
+                }
+                away_btn.on_hover_text("Set Away Message");
 
-                ui.with_layout(
-                    egui::Layout::right_to_left(egui::Align::Center),
-                    |ui: &mut egui::Ui| {
-                        // Deafen button
-                        let deafen_label = if model.self_deafened {
-                            "Undeafen"
-                        } else {
-                            "Deafen"
-                        };
-                        let deafen_fill = if model.self_deafened {
-                            theme::COLOR_DANGER.linear_multiply(0.3)
-                        } else {
-                            theme::bg_light()
-                        };
-                        let deafen_text_color = if model.self_deafened {
-                            theme::COLOR_DANGER
-                        } else {
-                            theme::text_color()
-                        };
-                        let deafen_icon = if model.self_deafened { "🔇" } else { "🔊" };
+                ui.add_space(2.0);
 
-                        let deafen_btn = ui.add_enabled_ui(in_voice_channel, |ui| {
-                            ui.add_sized(
-                                btn_size,
-                                egui::Button::new(
-                                    egui::RichText::new(deafen_icon)
-                                        .size(11.0)
-                                        .color(deafen_text_color)
-                                        .strong(),
-                                )
-                                .fill(deafen_fill)
-                                .rounding(4.0),
-                            )
-                        });
-                        let deafen_btn = deafen_btn.inner;
-                        if deafen_btn.clicked() {
-                            model.self_deafened = !model.self_deafened;
-                            let _ = tx_intent.send(UiIntent::ToggleSelfDeafen);
-                        }
-                        deafen_btn.on_hover_text(if in_voice_channel {
-                            deafen_label
-                        } else {
-                            "Join a voice channel to use deafen"
-                        });
+                // Mute button
+                let mute_label = if model.self_muted { "Unmute" } else { "Mute" };
+                let mute_fill = if model.self_muted {
+                    theme::COLOR_DANGER.linear_multiply(0.3)
+                } else {
+                    theme::bg_light()
+                };
+                let mute_text_color = if model.self_muted {
+                    theme::COLOR_DANGER
+                } else {
+                    theme::text_color()
+                };
+                let mute_icon = if model.self_muted { "🎤" } else { "🎙" };
 
-                        ui.add_space(2.0);
+                let mute_btn = ui.add_enabled_ui(in_voice_channel, |ui| {
+                    ui.add_sized(
+                        btn_size,
+                        egui::Button::new(
+                            egui::RichText::new(mute_icon)
+                                .size(12.0)
+                                .color(mute_text_color)
+                                .strong(),
+                        )
+                        .fill(mute_fill)
+                        .rounding(4.0),
+                    )
+                });
+                let mute_btn = mute_btn.inner;
+                if mute_btn.clicked() {
+                    model.self_muted = !model.self_muted;
+                    let _ = tx_intent.send(UiIntent::ToggleSelfMute);
+                }
+                mute_btn.on_hover_text(if in_voice_channel {
+                    mute_label
+                } else {
+                    "Join a voice channel to use mute"
+                });
 
-                        // Mute button
-                        let mute_label = if model.self_muted { "Unmute" } else { "Mute" };
-                        let mute_fill = if model.self_muted {
-                            theme::COLOR_DANGER.linear_multiply(0.3)
-                        } else {
-                            theme::bg_light()
-                        };
-                        let mute_text_color = if model.self_muted {
-                            theme::COLOR_DANGER
-                        } else {
-                            theme::text_color()
-                        };
-                        let mute_icon = if model.self_muted { "🎤" } else { "🎙" };
+                ui.add_space(2.0);
 
-                        let mute_btn = ui.add_enabled_ui(in_voice_channel, |ui| {
-                            ui.add_sized(
-                                btn_size,
-                                egui::Button::new(
-                                    egui::RichText::new(mute_icon)
-                                        .size(11.0)
-                                        .color(mute_text_color)
-                                        .strong(),
-                                )
-                                .fill(mute_fill)
-                                .rounding(4.0),
-                            )
-                        });
-                        let mute_btn = mute_btn.inner;
-                        if mute_btn.clicked() {
-                            model.self_muted = !model.self_muted;
-                            let _ = tx_intent.send(UiIntent::ToggleSelfMute);
-                        }
-                        mute_btn.on_hover_text(if in_voice_channel {
-                            mute_label
-                        } else {
-                            "Join a voice channel to use mute"
-                        });
+                // Deafen button
+                let deafen_label = if model.self_deafened {
+                    "Undeafen"
+                } else {
+                    "Deafen"
+                };
+                let deafen_fill = if model.self_deafened {
+                    theme::COLOR_DANGER.linear_multiply(0.3)
+                } else {
+                    theme::bg_light()
+                };
+                let deafen_text_color = if model.self_deafened {
+                    theme::COLOR_DANGER
+                } else {
+                    theme::text_color()
+                };
+                let deafen_icon = if model.self_deafened { "🔇" } else { "🔊" };
 
-                        ui.add_space(2.0);
-
-                        let away_btn = ui.add_sized(
-                            btn_size,
-                            egui::Button::new(
-                                egui::RichText::new("🌙")
-                                    .size(12.0)
-                                    .color(theme::text_color())
-                                    .strong(),
-                            )
-                            .fill(theme::bg_light())
-                            .rounding(4.0),
-                        );
-                        if away_btn.clicked() {
-                            model.show_away_message_dialog = true;
-                            model.away_message_draft = model.away_message.clone();
-                        }
-                        away_btn.on_hover_text("Set Away Message");
-                    },
-                );
+                let deafen_btn = ui.add_enabled_ui(in_voice_channel, |ui| {
+                    ui.add_sized(
+                        btn_size,
+                        egui::Button::new(
+                            egui::RichText::new(deafen_icon)
+                                .size(12.0)
+                                .color(deafen_text_color)
+                                .strong(),
+                        )
+                        .fill(deafen_fill)
+                        .rounding(4.0),
+                    )
+                });
+                let deafen_btn = deafen_btn.inner;
+                if deafen_btn.clicked() {
+                    model.self_deafened = !model.self_deafened;
+                    let _ = tx_intent.send(UiIntent::ToggleSelfDeafen);
+                }
+                deafen_btn.on_hover_text(if in_voice_channel {
+                    deafen_label
+                } else {
+                    "Join a voice channel to use deafen"
+                });
             });
 
             // VAD level bar (when voice is active)

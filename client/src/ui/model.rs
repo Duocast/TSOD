@@ -79,6 +79,10 @@ pub enum UiEvent {
         channel_id: String,
         user_id: String,
     },
+    MemberAwayMessageUpdated {
+        user_id: String,
+        away_message: String,
+    },
 
     // Voice
     VadLevel(f32),
@@ -652,6 +656,7 @@ pub enum ChannelType {
 pub struct MemberEntry {
     pub user_id: String,
     pub display_name: String,
+    pub away_message: String,
     pub muted: bool,
     pub deafened: bool,
     pub self_muted: bool,
@@ -763,6 +768,9 @@ pub struct UiModel {
     pub vad_level: Option<f32>,
     pub active_voice_channel_route: u32,
     pub voice_session_healthy: bool,
+    pub connection_established_at: Option<std::time::Instant>,
+    pub member_first_seen_at: HashMap<String, std::time::Instant>,
+    pub member_last_active_at: HashMap<String, std::time::Instant>,
 
     // Log
     pub log: VecDeque<String>,
@@ -774,6 +782,9 @@ pub struct UiModel {
     pub show_settings: bool,
     pub show_telemetry: bool,
     pub show_connections: bool,
+    pub show_member_connection_info: bool,
+    pub connection_info_target_user_id: String,
+    pub connection_info_target_display_name: String,
     pub status_line: String,
     pub connection_host_draft: String,
     pub connection_port_draft: String,
@@ -930,11 +941,17 @@ impl Default for UiModel {
             vad_level: None,
             active_voice_channel_route: 0,
             voice_session_healthy: false,
+            connection_established_at: None,
+            member_first_seen_at: HashMap::new(),
+            member_last_active_at: HashMap::new(),
             log: VecDeque::new(),
             telemetry: TelemetryData::default(),
             show_settings: false,
             show_telemetry: false,
             show_connections: false,
+            show_member_connection_info: false,
+            connection_info_target_user_id: String::new(),
+            connection_info_target_display_name: String::new(),
             status_line: String::new(),
             connection_host_draft: "127.0.0.1".into(),
             connection_port_draft: "4433".into(),
@@ -1002,7 +1019,10 @@ impl UiModel {
 
     pub fn apply_event(&mut self, ev: UiEvent) {
         match ev {
-            UiEvent::SetConnected(c) => self.connected = c,
+            UiEvent::SetConnected(c) => {
+                self.connected = c;
+                self.connection_established_at = c.then(std::time::Instant::now);
+            }
             UiEvent::SetAuthed(a) => self.authed = a,
             UiEvent::SetChannelName(n) => {
                 // Save current channel's draft before switching
@@ -1045,7 +1065,14 @@ impl UiModel {
                 }
             }
             UiEvent::SetStatus(s) => self.status_line = s,
-            UiEvent::SetAwayMessage(message) => self.away_message = message,
+            UiEvent::SetAwayMessage(message) => {
+                self.away_message = message.clone();
+                for members in self.members.values_mut() {
+                    if let Some(member) = members.iter_mut().find(|m| m.user_id == self.user_id) {
+                        member.away_message = message.clone();
+                    }
+                }
+            }
             UiEvent::SetServerAddress { host, port } => {
                 self.connection_host_draft = host;
                 self.connection_port_draft = port.to_string();
@@ -1078,6 +1105,12 @@ impl UiModel {
                 channel_id,
                 members,
             } => {
+                let now = std::time::Instant::now();
+                for member in &members {
+                    self.member_first_seen_at
+                        .entry(member.user_id.clone())
+                        .or_insert(now);
+                }
                 self.members.insert(channel_id, members);
             }
             UiEvent::MessageReceived(mut msg) => {
@@ -1177,6 +1210,10 @@ impl UiModel {
                 typers.push((user_name, std::time::Instant::now()));
             }
             UiEvent::MemberJoined { channel_id, member } => {
+                let now = std::time::Instant::now();
+                self.member_first_seen_at
+                    .entry(member.user_id.clone())
+                    .or_insert(now);
                 let members = self.members.entry(channel_id).or_default();
                 if let Some(existing) = members.iter_mut().find(|m| m.user_id == member.user_id) {
                     *existing = member;
@@ -1205,6 +1242,16 @@ impl UiModel {
                     self.refresh_selected_channel_name();
                 }
             }
+            UiEvent::MemberAwayMessageUpdated {
+                user_id,
+                away_message,
+            } => {
+                for members in self.members.values_mut() {
+                    if let Some(member) = members.iter_mut().find(|m| m.user_id == user_id) {
+                        member.away_message = away_message.clone();
+                    }
+                }
+            }
             UiEvent::MemberVoiceStateUpdated {
                 channel_id,
                 user_id,
@@ -1229,6 +1276,10 @@ impl UiModel {
             UiEvent::VadLevel(v) => self.vad_level = Some(v),
             UiEvent::MicTestWaveform(samples) => self.mic_test_waveform = samples,
             UiEvent::VoiceActivity { user_id, speaking } => {
+                if speaking {
+                    self.member_last_active_at
+                        .insert(user_id.clone(), std::time::Instant::now());
+                }
                 self.speaking_users.insert(user_id, speaking);
             }
             UiEvent::VoiceMeter { user_id, level } => {
@@ -1516,6 +1567,7 @@ mod tests {
             vec![MemberEntry {
                 user_id: "user-1".into(),
                 display_name: "Overdose".into(),
+                away_message: String::new(),
                 muted: false,
                 deafened: false,
                 self_muted: false,
@@ -1578,6 +1630,7 @@ mod tests {
             member: MemberEntry {
                 user_id: "u-overdose".into(),
                 display_name: "Overdose".into(),
+                away_message: String::new(),
                 muted: false,
                 deafened: false,
                 self_muted: false,
@@ -1592,6 +1645,7 @@ mod tests {
             member: MemberEntry {
                 user_id: "u-dresk".into(),
                 display_name: "Dresk".into(),
+                away_message: String::new(),
                 muted: false,
                 deafened: false,
                 self_muted: false,
@@ -1607,6 +1661,59 @@ mod tests {
     }
 
     #[test]
+    fn set_away_message_updates_local_member_entry() {
+        let mut model = UiModel::new();
+        model.user_id = "local-user".into();
+        model.apply_event(UiEvent::MemberJoined {
+            channel_id: "c1".into(),
+            member: MemberEntry {
+                user_id: "local-user".into(),
+                display_name: "Me".into(),
+                away_message: String::new(),
+                muted: false,
+                deafened: false,
+                self_muted: false,
+                self_deafened: false,
+                streaming: false,
+                speaking: false,
+                avatar_url: None,
+            },
+        });
+
+        model.apply_event(UiEvent::SetAwayMessage("brb".into()));
+
+        let member = &model.members["c1"][0];
+        assert_eq!(member.away_message, "brb");
+    }
+
+    #[test]
+    fn member_away_message_event_updates_matching_member() {
+        let mut model = UiModel::new();
+        model.apply_event(UiEvent::MemberJoined {
+            channel_id: "c1".into(),
+            member: MemberEntry {
+                user_id: "u1".into(),
+                display_name: "Other".into(),
+                away_message: String::new(),
+                muted: false,
+                deafened: false,
+                self_muted: false,
+                self_deafened: false,
+                streaming: false,
+                speaking: false,
+                avatar_url: None,
+            },
+        });
+
+        model.apply_event(UiEvent::MemberAwayMessageUpdated {
+            user_id: "u1".into(),
+            away_message: "Lunch".into(),
+        });
+
+        let member = &model.members["c1"][0];
+        assert_eq!(member.away_message, "Lunch");
+    }
+    #[test]
     fn member_joined_updates_existing_member_instead_of_dup() {
         let mut model = UiModel::new();
         model.apply_event(UiEvent::MemberJoined {
@@ -1614,6 +1721,7 @@ mod tests {
             member: MemberEntry {
                 user_id: "u1".into(),
                 display_name: "Old".into(),
+                away_message: String::new(),
                 muted: false,
                 deafened: false,
                 self_muted: false,
@@ -1628,6 +1736,7 @@ mod tests {
             member: MemberEntry {
                 user_id: "u1".into(),
                 display_name: "New".into(),
+                away_message: String::new(),
                 muted: false,
                 deafened: false,
                 self_muted: false,

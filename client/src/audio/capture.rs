@@ -151,7 +151,8 @@ mod linux {
         let Ok(context) = pw::context::ContextBox::new(mainloop.loop_(), None) else {
             return false;
         };
-        context.connect(None).is_ok()
+        let result = context.connect(None).is_ok();
+        result
     }
 
     fn run_pipewire_capture(
@@ -482,67 +483,6 @@ mod linux {
         )
         .context("build input stream")
     }
-}
-
-#[cfg(not(target_os = "linux"))]
-type CaptureBackend = non_linux::CpalCapture;
-
-unsafe impl Send for Capture {}
-unsafe impl Sync for Capture {}
-
-impl Capture {
-    pub fn start(sample_rate: u32, channels: u16, frame_ms: u32) -> Result<Self> {
-        Self::start_with_device(sample_rate, channels, frame_ms, None)
-    }
-
-    pub fn start_with_device(
-        sample_rate: u32,
-        channels: u16,
-        frame_ms: u32,
-        preferred_device: Option<&str>,
-    ) -> Result<Self> {
-        let frame_samples = (sample_rate as usize * frame_ms as usize / 1000) * channels as usize;
-        let rb = HeapRb::<i16>::new(frame_samples * 50);
-        let (prod, cons) = rb.split();
-
-        #[cfg(target_os = "linux")]
-        let backend = CaptureBackend::start(sample_rate, channels, prod, preferred_device)?;
-
-        #[cfg(not(target_os = "linux"))]
-        let backend = CaptureBackend::start(sample_rate, channels, prod, preferred_device)?;
-
-        Ok(Self {
-            backend,
-            cons: UnsafeCell::new(cons),
-            frame_samples,
-        })
-    }
-
-    pub fn read_frame(&self, out: &mut [i16]) -> bool {
-        let _ = &self.backend;
-        if out.len() != self.frame_samples {
-            return false;
-        }
-        let mut got = 0usize;
-        let cons = unsafe { &mut *self.cons.get() };
-        while got < out.len() {
-            if let Some(v) = cons.try_pop() {
-                out[got] = v;
-                got += 1;
-            } else {
-                break;
-            }
-        }
-        got == out.len()
-    }
-
-    pub fn is_healthy(&self) -> bool {
-        self.backend.is_healthy()
-    }
-}
-
-pub fn enumerate_input_devices() -> Vec<String> {
-    CaptureBackend::enumerate_input_devices()
 }
 
 #[cfg(not(target_os = "linux"))]

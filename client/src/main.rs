@@ -641,6 +641,7 @@ fn apply_authoritative_snapshot(
                     .map(|u| u.value.clone())
                     .unwrap_or_default(),
                 display_name: m.display_name.clone(),
+                away_message: String::new(),
                 muted: m.muted,
                 deafened: m.deafened,
                 self_muted: m.self_muted,
@@ -1105,6 +1106,7 @@ async fn connect_and_run_session(
                                             member: ui::model::MemberEntry {
                                                 user_id,
                                                 display_name: member.display_name,
+                                                away_message: String::new(),
                                                 muted: member.muted,
                                                 deafened: member.deafened,
                                                 self_muted: member.self_muted,
@@ -1162,11 +1164,16 @@ async fn connect_and_run_session(
                                         streaming: vs.streaming,
                                     });
                                 }
-                                other => {
-                                    let _ = tx_event.send(UiEvent::AppendLog(format!(
-                                        "[presence] {:?}",
-                                        other
-                                    )));
+                                pb::presence_event::Kind::UserOnlineStatusChanged(status) => {
+                                    let user_id = status
+                                        .user_id
+                                        .as_ref()
+                                        .map(|u| u.value.clone())
+                                        .unwrap_or_default();
+                                    let _ = tx_event.send(UiEvent::MemberAwayMessageUpdated {
+                                        user_id,
+                                        away_message: status.custom_status_text,
+                                    });
                                 }
                             }
                         }
@@ -1586,6 +1593,7 @@ async fn connect_and_run_session(
                                             .map(|m| ui::model::MemberEntry {
                                                 user_id: m.user_id.map(|u| u.value).unwrap_or_default(),
                                                 display_name: m.display_name,
+                                                away_message: String::new(),
                                                 muted: m.muted,
                                                 deafened: m.deafened,
                                                 self_muted: m.self_muted,
