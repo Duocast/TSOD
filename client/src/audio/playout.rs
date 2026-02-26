@@ -3,11 +3,11 @@ use ringbuf::{
     traits::{Producer, Split},
     HeapProd, HeapRb,
 };
-use std::sync::{Arc, Mutex};
+use std::cell::UnsafeCell;
 
 pub struct Playout {
     backend: PlayoutBackend,
-    prod: Arc<Mutex<HeapProd<i16>>>,
+    prod: UnsafeCell<HeapProd<i16>>,
 }
 
 #[cfg(target_os = "linux")]
@@ -36,22 +36,19 @@ impl Playout {
         let backend = PlayoutBackend::start(sample_rate, channels, cons, preferred_device)?;
 
         #[cfg(not(target_os = "linux"))]
-        let backend = {
-            let cons = Arc::new(Mutex::new(cons));
-            PlayoutBackend::start(sample_rate, channels, cons, preferred_device)?
-        };
+        let backend = PlayoutBackend::start(sample_rate, channels, cons, preferred_device)?;
 
-        let prod = Arc::new(Mutex::new(prod));
-
-        Ok(Self { backend, prod })
+        Ok(Self {
+            backend,
+            prod: UnsafeCell::new(prod),
+        })
     }
 
     pub fn push_pcm(&self, pcm: &[i16]) {
         let _ = &self.backend;
-        if let Ok(mut p) = self.prod.lock() {
-            for &s in pcm {
-                let _ = p.try_push(s);
-            }
+        let prod = unsafe { &mut *self.prod.get() };
+        for &s in pcm {
+            let _ = prod.try_push(s);
         }
     }
 
@@ -216,7 +213,7 @@ mod non_linux {
     use ringbuf::{traits::Consumer, HeapCons};
     use std::sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        Arc,
     };
 
     struct LinearResampler {
@@ -267,7 +264,7 @@ mod non_linux {
         pub fn start(
             sample_rate: u32,
             channels: u16,
-            cons: Arc<Mutex<HeapCons<i16>>>,
+            cons: HeapCons<i16>,
             preferred_device: Option<&str>,
         ) -> Result<Self> {
             let host = cpal::default_host();
@@ -401,7 +398,7 @@ mod non_linux {
         stream_cfg: &cpal::StreamConfig,
         source_rate: u32,
         source_channels: u16,
-        cons: Arc<Mutex<HeapCons<i16>>>,
+        mut cons: HeapCons<i16>,
         unhealthy: Arc<AtomicBool>,
     ) -> Result<cpal::Stream>
     where
@@ -421,23 +418,19 @@ mod non_linux {
                 source_mono.clear();
                 let needed_mono = out.len().div_ceil(target_channels);
 
-                if let Ok(mut c) = cons.lock() {
-                    for _ in 0..needed_mono {
-                        let mut sum = 0.0f32;
-                        let mut count = 0usize;
-                        for _ in 0..source_channels {
-                            match c.try_pop() {
-                                Some(sample) => {
-                                    sum += sample as f32 / i16::MAX as f32;
-                                    count += 1;
-                                }
-                                None => break,
+                for _ in 0..needed_mono {
+                    let mut sum = 0.0f32;
+                    let mut count = 0usize;
+                    for _ in 0..source_channels {
+                        match cons.try_pop() {
+                            Some(sample) => {
+                                sum += sample as f32 / i16::MAX as f32;
+                                count += 1;
                             }
+                            None => break,
                         }
-                        source_mono.push(if count == 0 { 0.0 } else { sum / count as f32 });
                     }
-                } else {
-                    source_mono.resize(needed_mono, 0.0);
+                    source_mono.push(if count == 0 { 0.0 } else { sum / count as f32 });
                 }
 
                 resampled.clear();

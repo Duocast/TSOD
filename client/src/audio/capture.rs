@@ -3,11 +3,11 @@ use ringbuf::{
     traits::{Consumer, Split},
     HeapCons, HeapRb,
 };
-use std::sync::{Arc, Mutex};
+use std::cell::UnsafeCell;
 
 pub struct Capture {
     backend: CaptureBackend,
-    cons: Arc<Mutex<HeapCons<i16>>>,
+    cons: UnsafeCell<HeapCons<i16>>,
     frame_samples: usize,
 }
 
@@ -39,16 +39,11 @@ impl Capture {
         let backend = CaptureBackend::start(sample_rate, channels, prod, preferred_device)?;
 
         #[cfg(not(target_os = "linux"))]
-        let backend = {
-            let prod = Arc::new(Mutex::new(prod));
-            CaptureBackend::start(sample_rate, channels, prod, preferred_device)?
-        };
-
-        let cons = Arc::new(Mutex::new(cons));
+        let backend = CaptureBackend::start(sample_rate, channels, prod, preferred_device)?;
 
         Ok(Self {
             backend,
-            cons,
+            cons: UnsafeCell::new(cons),
             frame_samples,
         })
     }
@@ -59,14 +54,13 @@ impl Capture {
             return false;
         }
         let mut got = 0usize;
-        if let Ok(mut c) = self.cons.lock() {
-            while got < out.len() {
-                if let Some(v) = c.try_pop() {
-                    out[got] = v;
-                    got += 1;
-                } else {
-                    break;
-                }
+        let cons = unsafe { &mut *self.cons.get() };
+        while got < out.len() {
+            if let Some(v) = cons.try_pop() {
+                out[got] = v;
+                got += 1;
+            } else {
+                break;
             }
         }
         got == out.len()
@@ -230,7 +224,7 @@ mod non_linux {
     use ringbuf::{traits::Producer, HeapProd};
     use std::sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        Arc,
     };
 
     struct LinearResampler {
@@ -281,7 +275,7 @@ mod non_linux {
         pub fn start(
             sample_rate: u32,
             channels: u16,
-            prod: Arc<Mutex<HeapProd<i16>>>,
+            prod: HeapProd<i16>,
             preferred_device: Option<&str>,
         ) -> Result<Self> {
             let host = cpal::default_host();
@@ -414,7 +408,7 @@ mod non_linux {
         stream_cfg: &cpal::StreamConfig,
         target_rate: u32,
         target_channels: u16,
-        prod: Arc<Mutex<HeapProd<i16>>>,
+        mut prod: HeapProd<i16>,
         unhealthy: Arc<AtomicBool>,
     ) -> Result<cpal::Stream>
     where
@@ -447,12 +441,10 @@ mod non_linux {
                 resampled.clear();
                 resampler.process(&mono, &mut resampled);
 
-                if let Ok(mut p) = prod.lock() {
-                    for &s in &resampled {
-                        let v = (s.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16;
-                        for _ in 0..target_channels {
-                            let _ = p.try_push(v);
-                        }
+                for &s in &resampled {
+                    let v = (s.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16;
+                    for _ in 0..target_channels {
+                        let _ = prod.try_push(v);
                     }
                 }
             },
