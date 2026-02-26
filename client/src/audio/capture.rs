@@ -312,14 +312,6 @@ mod non_linux {
                     prod,
                     unhealthy_cb,
                 )?,
-                cpal::SampleFormat::I24 => build_input_stream::<cpal::I24>(
-                    &dev,
-                    &stream_cfg.config(),
-                    sample_rate,
-                    channels,
-                    prod,
-                    unhealthy_cb,
-                )?,
                 cpal::SampleFormat::I32 => build_input_stream::<i32>(
                     &dev,
                     &stream_cfg.config(),

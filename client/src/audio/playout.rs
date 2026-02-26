@@ -211,8 +211,7 @@ mod linux {
 mod non_linux {
     use anyhow::{anyhow, Context, Result};
     use cpal::{
-        traits::DeviceTrait, traits::HostTrait, traits::StreamTrait, FromSample, Sample,
-        SizedSample,
+        traits::DeviceTrait, traits::HostTrait, traits::StreamTrait, FromSample, SizedSample,
     };
     use ringbuf::{traits::Consumer, HeapCons};
     use std::sync::{
@@ -293,14 +292,6 @@ mod non_linux {
                     unhealthy_cb,
                 )?,
                 cpal::SampleFormat::I16 => build_output_stream::<i16>(
-                    &dev,
-                    &stream_cfg.config(),
-                    sample_rate,
-                    channels,
-                    cons,
-                    unhealthy_cb,
-                )?,
-                cpal::SampleFormat::I24 => build_output_stream::<cpal::I24>(
                     &dev,
                     &stream_cfg.config(),
                     sample_rate,
