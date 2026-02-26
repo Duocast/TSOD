@@ -286,7 +286,7 @@ impl VoiceForwarder {
         let mut map = self.rate.write().await;
         let st = map.entry(sender).or_insert_with(RateState::new);
 
-        st.refill();
+        st.refill(self.cfg.sender_pps_limit, self.cfg.sender_bps_limit);
 
         if st.tokens_pkts == 0 || st.tokens_bytes < bytes {
             return false;
@@ -418,7 +418,7 @@ impl RateState {
         }
     }
 
-    fn refill(&mut self) {
+    fn refill(&mut self, pps_limit: u32, bps_limit: u32) {
         let now = Instant::now();
         let elapsed = now.duration_since(self.last);
         if elapsed < Duration::from_millis(10) {
@@ -427,12 +427,12 @@ impl RateState {
 
         // Refill proportionally (simple token bucket)
         let secs = elapsed.as_secs_f32();
-        let add_pkts = (secs * 200.0) as u32; // will be overwritten by cfg in integration if desired
-        let add_bytes = (secs * 512_000.0) as u32;
+        let add_pkts = (secs * pps_limit as f32) as u32;
+        let add_bytes = (secs * bps_limit as f32) as u32;
 
         // Cap burst to 1 second worth
-        self.tokens_pkts = (self.tokens_pkts + add_pkts).min(200);
-        self.tokens_bytes = (self.tokens_bytes + add_bytes).min(512_000);
+        self.tokens_pkts = (self.tokens_pkts + add_pkts).min(pps_limit);
+        self.tokens_bytes = (self.tokens_bytes + add_bytes).min(bps_limit);
         self.last = now;
     }
 
@@ -511,4 +511,21 @@ fn unix_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RateState;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn refill_uses_configured_limits() {
+        let mut state = RateState::new();
+        state.last = Instant::now() - Duration::from_secs(1);
+
+        state.refill(50, 1000);
+
+        assert_eq!(state.tokens_pkts, 50);
+        assert_eq!(state.tokens_bytes, 1000);
+    }
 }
