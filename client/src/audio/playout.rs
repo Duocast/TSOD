@@ -21,6 +21,10 @@ type PlayoutBackend = linux::LinuxPlayout;
 #[cfg(not(target_os = "linux"))]
 type PlayoutBackend = non_linux::CpalPlayout;
 
+// SAFETY: The `UnsafeCell<HeapProd<i16>>` is only ever accessed from a single
+// writer thread via `push_pcm`. The consumer half lives on the audio-backend
+// callback thread and never touches `prod`. Because exactly one thread holds a
+// `&mut` reference at any time, the Send + Sync impls are sound.
 unsafe impl Send for Playout {}
 unsafe impl Sync for Playout {}
 
@@ -301,44 +305,7 @@ mod linux {
         Ok(())
     }
 
-    struct LinearResampler {
-        step: f64,
-        phase: f64,
-        history: Vec<f32>,
-    }
-
-    impl LinearResampler {
-        fn new(input_rate: u32, output_rate: u32) -> Self {
-            Self {
-                step: input_rate as f64 / output_rate as f64,
-                phase: 0.0,
-                history: Vec::new(),
-            }
-        }
-
-        fn process(&mut self, input: &[f32], out: &mut Vec<f32>) {
-            if input.is_empty() {
-                return;
-            }
-
-            self.history.extend_from_slice(input);
-            while self.phase + 1.0 < self.history.len() as f64 {
-                let i0 = self.phase.floor() as usize;
-                let i1 = i0 + 1;
-                let frac = (self.phase - i0 as f64) as f32;
-                let s0 = self.history[i0];
-                let s1 = self.history[i1];
-                out.push(s0 + (s1 - s0) * frac);
-                self.phase += self.step;
-            }
-
-            let consumed = self.phase.floor() as usize;
-            if consumed > 0 {
-                self.history.drain(..consumed);
-                self.phase -= consumed as f64;
-            }
-        }
-    }
+    use crate::audio::resample::LinearResampler;
 
     struct CpalPlayout {
         _stream: cpal::Stream,
@@ -547,44 +514,7 @@ mod non_linux {
         Arc,
     };
 
-    struct LinearResampler {
-        step: f64,
-        phase: f64,
-        history: Vec<f32>,
-    }
-
-    impl LinearResampler {
-        fn new(input_rate: u32, output_rate: u32) -> Self {
-            Self {
-                step: input_rate as f64 / output_rate as f64,
-                phase: 0.0,
-                history: Vec::new(),
-            }
-        }
-
-        fn process(&mut self, input: &[f32], out: &mut Vec<f32>) {
-            if input.is_empty() {
-                return;
-            }
-
-            self.history.extend_from_slice(input);
-            while self.phase + 1.0 < self.history.len() as f64 {
-                let i0 = self.phase.floor() as usize;
-                let i1 = i0 + 1;
-                let frac = (self.phase - i0 as f64) as f32;
-                let s0 = self.history[i0];
-                let s1 = self.history[i1];
-                out.push(s0 + (s1 - s0) * frac);
-                self.phase += self.step;
-            }
-
-            let consumed = self.phase.floor() as usize;
-            if consumed > 0 {
-                self.history.drain(..consumed);
-                self.phase -= consumed as f64;
-            }
-        }
-    }
+    use crate::audio::resample::LinearResampler;
 
     pub struct CpalPlayout {
         _stream: cpal::Stream,
