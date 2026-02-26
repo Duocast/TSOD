@@ -2105,6 +2105,7 @@ async fn voice_send_loop(
     let mut tick = tokio::time::interval(Duration::from_millis(frame_ms as u64));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut vad_report_counter = 0u32;
+    let mut stream_ts_ms = 0u32;
 
     loop {
         tick.tick().await;
@@ -2178,17 +2179,16 @@ async fn voice_send_loop(
             Err(_) => continue,
         };
 
-        let ts_ms = (unix_ms() & 0xFFFF_FFFF) as u32;
-
         let d = make_voice_datagram(
             active_voice_channel_route.load(Ordering::Relaxed),
             ssrc,
             seq,
-            ts_ms,
+            stream_ts_ms,
             is_voice,
             &enc_out[..n],
         );
         seq = seq.wrapping_add(1);
+        stream_ts_ms = stream_ts_ms.wrapping_add(frame_ms);
 
         voice_counters.tx_packets.fetch_add(1, Ordering::Relaxed);
         voice_counters
