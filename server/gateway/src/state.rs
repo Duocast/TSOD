@@ -120,6 +120,7 @@ struct UserPresence {
     channel: ChannelId,
     route: u32,
     muted: bool,
+    deafened: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -156,13 +157,14 @@ impl MembershipCache {
         self.set_channel(channel, max_talkers, members);
     }
 
-    pub fn set_user(&self, user: UserId, channel: ChannelId, muted: bool) {
+    pub fn set_user(&self, user: UserId, channel: ChannelId, muted: bool, deafened: bool) {
         self.users.insert(
             user,
             UserPresence {
                 channel,
                 route: channel_route_key(channel),
                 muted,
+                deafened,
             },
         );
     }
@@ -185,15 +187,40 @@ impl MembershipCache {
         }
     }
 
-    pub fn update_mute(&self, user: UserId, channel: ChannelId, muted: bool) {
+    pub fn update_voice_state(
+        &self,
+        user: UserId,
+        channel: ChannelId,
+        muted: bool,
+        deafened: bool,
+    ) {
         self.users.insert(
             user,
             UserPresence {
                 channel,
                 route: channel_route_key(channel),
                 muted,
+                deafened,
             },
         );
+    }
+
+    pub fn update_mute(&self, user: UserId, channel: ChannelId, muted: bool) {
+        let deafened = self
+            .users
+            .get(&user)
+            .map(|entry| entry.deafened)
+            .unwrap_or(false);
+        self.update_voice_state(user, channel, muted, deafened);
+    }
+
+    pub fn update_deafen(&self, user: UserId, channel: ChannelId, deafened: bool) {
+        let muted = self
+            .users
+            .get(&user)
+            .map(|entry| entry.muted)
+            .unwrap_or(false);
+        self.update_voice_state(user, channel, muted, deafened);
     }
 
     pub fn members_of(&self, channel: ChannelId) -> Option<Vec<UserId>> {
@@ -229,6 +256,10 @@ impl MembershipProvider for MembershipCache {
 
     async fn is_muted(&self, _channel: ChannelId, sender: UserId) -> bool {
         self.users.get(&sender).map(|e| e.muted).unwrap_or(false)
+    }
+
+    async fn is_deafened(&self, _channel: ChannelId, user: UserId) -> bool {
+        self.users.get(&user).map(|e| e.deafened).unwrap_or(false)
     }
 
     async fn max_talkers(&self, channel: ChannelId) -> usize {
