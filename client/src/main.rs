@@ -28,7 +28,7 @@ use proto::voiceplatform::v1 as pb;
 #[cfg(debug_assertions)]
 use std::collections::HashSet;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU32, Ordering},
     Arc,
 };
 #[cfg(debug_assertions)]
@@ -229,15 +229,6 @@ async fn app_task(
         d.set_echo_cancellation(saved_settings.echo_cancellation);
     }
 
-    let channel_id_str = cfg.channel_id.clone().unwrap_or_default();
-    let channel_route_hash = if !channel_id_str.is_empty() {
-        uuid::Uuid::parse_str(&channel_id_str)
-            .map(vp_route_hash::channel_route_hash)
-            .unwrap_or(0)
-    } else {
-        0
-    };
-
     // Shared self-mute/deafen state for the audio pipeline
     let self_muted = Arc::new(AtomicBool::new(false));
     let self_deafened = Arc::new(AtomicBool::new(false));
@@ -247,6 +238,7 @@ async fn app_task(
     let output_gain = Arc::new(std::sync::atomic::AtomicU32::new(f32_to_u32(1.0)));
     let loopback_active = Arc::new(AtomicBool::new(false));
     let session_voice_active = Arc::new(AtomicBool::new(false));
+    let active_voice_channel_route = Arc::new(AtomicU32::new(0));
 
     let _mic_test = tokio::spawn(mic_test_loop(
         capture.clone(),
@@ -271,7 +263,7 @@ async fn app_task(
             playout.clone(),
             jitter.clone(),
             capture_dsp.clone(),
-            channel_route_hash,
+            active_voice_channel_route.clone(),
             ptt_active.clone(),
             self_muted.clone(),
             self_deafened.clone(),
@@ -520,7 +512,7 @@ async fn connect_and_run_session(
     playout: Arc<audio::playout::Playout>,
     jitter: Arc<Mutex<audio::jitter::JitterBuffer>>,
     capture_dsp: Option<Arc<Mutex<audio::dsp::CaptureDsp>>>,
-    channel_route_hash: u32,
+    active_voice_channel_route: Arc<AtomicU32>,
     ptt_active: Arc<AtomicBool>,
     self_muted: Arc<AtomicBool>,
     self_deafened: Arc<AtomicBool>,
@@ -653,6 +645,7 @@ async fn connect_and_run_session(
         let tx_event = tx_event.clone();
         let mut last_event_seq = snapshot.snapshot_version;
         let local_user_id = local_user_id.clone();
+        let active_voice_channel_route = active_voice_channel_route.clone();
         tokio::spawn(async move {
             while let Some(ev) = push_rx.recv().await {
                 match ev {
@@ -783,6 +776,13 @@ async fn connect_and_run_session(
                                             display_name = %member.display_name,
                                             "received member-joined push event"
                                         );
+                                        if user_id == local_user_id {
+                                            let route = uuid::Uuid::parse_str(&channel_id.value)
+                                                .map(vp_route_hash::channel_route_hash)
+                                                .unwrap_or(0);
+                                            active_voice_channel_route
+                                                .store(route, Ordering::Relaxed);
+                                        }
                                         let _ = tx_event.send(UiEvent::MemberJoined {
                                             channel_id: channel_id.value,
                                             member: ui::model::MemberEntry {
@@ -807,6 +807,7 @@ async fn connect_and_run_session(
                                         .unwrap_or_default();
                                     debug!(channel_id=%ml.channel_id.as_ref().map(|c| c.value.clone()).unwrap_or_default(), user_id=%left_user, "received member-left push event");
                                     if left_user == local_user_id {
+                                        active_voice_channel_route.store(0, Ordering::Relaxed);
                                         let _ = tx_event.send(UiEvent::AppendLog(
                                             "[moderation] you were removed from this channel"
                                                 .into(),
@@ -979,6 +980,15 @@ async fn connect_and_run_session(
     let selected_after_sync =
         choose_initial_selected_channel(&snapshot, initial_active_channel.as_deref());
 
+    if let Some(channel_id) = selected_after_sync.as_ref() {
+        let route = uuid::Uuid::parse_str(&channel_id)
+            .map(vp_route_hash::channel_route_hash)
+            .unwrap_or(0);
+        active_voice_channel_route.store(route, Ordering::Relaxed);
+    } else {
+        active_voice_channel_route.store(0, Ordering::Relaxed);
+    }
+
     set_connection_stage(
         tx_event,
         ui::model::ConnectionStage::Connected,
@@ -995,7 +1005,7 @@ async fn connect_and_run_session(
         playout.clone(),
         capture_dsp.clone(),
         tx_event.clone(),
-        channel_route_hash,
+        active_voice_channel_route.clone(),
         ptt_active.clone(),
         self_muted.clone(),
         input_gain.clone(),
@@ -1171,6 +1181,10 @@ async fn connect_and_run_session(
                                         );
                                     }
                                     active_channel = Some(channel_id.clone());
+                                    let route = uuid::Uuid::parse_str(&channel_id)
+                                        .map(vp_route_hash::channel_route_hash)
+                                        .unwrap_or(0);
+                                    active_voice_channel_route.store(route, Ordering::Relaxed);
                                     let _ = tx_event.send(UiEvent::SetChannelName(channel_id.clone()));
                                     let _ = tx_event.send(UiEvent::UpdateChannelMembers {
                                         channel_id: channel_id.clone(),
@@ -1210,6 +1224,7 @@ async fn connect_and_run_session(
                                 }
                             }
                             active_channel = None;
+                            active_voice_channel_route.store(0, Ordering::Relaxed);
                         }
                         UiIntent::CreateChannel { name, description, channel_type, codec: _, quality, user_limit, parent_channel_id } => {
                             match dispatcher.create_channel(&name, &description, channel_type, quality * 1000, user_limit, parent_channel_id.as_deref()).await {
@@ -1538,7 +1553,7 @@ async fn voice_send_loop(
     playout: Arc<audio::playout::Playout>,
     capture_dsp: Option<Arc<Mutex<audio::dsp::CaptureDsp>>>,
     tx_event: Sender<UiEvent>,
-    channel_route_hash: u32,
+    active_voice_channel_route: Arc<AtomicU32>,
     ptt_active: Arc<AtomicBool>,
     self_muted: Arc<AtomicBool>,
     input_gain: Arc<std::sync::atomic::AtomicU32>,
@@ -1615,7 +1630,7 @@ async fn voice_send_loop(
         let ts_ms = (unix_ms() & 0xFFFF_FFFF) as u32;
 
         let d = make_voice_datagram(
-            channel_route_hash,
+            active_voice_channel_route.load(Ordering::Relaxed),
             ssrc,
             seq,
             ts_ms,
