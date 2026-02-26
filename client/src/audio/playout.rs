@@ -213,9 +213,48 @@ mod linux {
 #[cfg(not(target_os = "linux"))]
 mod non_linux {
     use anyhow::{anyhow, Context, Result};
-    use cpal::{traits::DeviceTrait, traits::HostTrait, traits::StreamTrait};
+    use cpal::{traits::DeviceTrait, traits::HostTrait, traits::StreamTrait, Sample, SizedSample};
     use ringbuf::{traits::Consumer, HeapCons};
     use std::sync::{Arc, Mutex};
+
+    struct LinearResampler {
+        step: f64,
+        phase: f64,
+        history: Vec<f32>,
+    }
+
+    impl LinearResampler {
+        fn new(input_rate: u32, output_rate: u32) -> Self {
+            Self {
+                step: input_rate as f64 / output_rate as f64,
+                phase: 0.0,
+                history: Vec::new(),
+            }
+        }
+
+        fn process(&mut self, input: &[f32], out: &mut Vec<f32>) {
+            if input.is_empty() {
+                return;
+            }
+
+            self.history.extend_from_slice(input);
+            while self.phase + 1.0 < self.history.len() as f64 {
+                let i0 = self.phase.floor() as usize;
+                let i1 = i0 + 1;
+                let frac = (self.phase - i0 as f64) as f32;
+                let s0 = self.history[i0];
+                let s1 = self.history[i1];
+                out.push(s0 + (s1 - s0) * frac);
+                self.phase += self.step;
+            }
+
+            let consumed = self.phase.floor() as usize;
+            if consumed > 0 {
+                self.history.drain(..consumed);
+                self.phase -= consumed as f64;
+            }
+        }
+    }
 
     pub struct CpalPlayout {
         _stream: cpal::Stream,
@@ -237,36 +276,101 @@ mod non_linux {
                 host.default_output_device()
                     .ok_or(anyhow!("no output device"))?
             };
-            let (stream_cfg, actual_channels) =
-                compatible_output_config(&dev, sample_rate, channels)?;
+            let stream_cfg = native_output_config(&dev)?;
             let unhealthy = Arc::new(AtomicBool::new(false));
             let unhealthy_cb = unhealthy.clone();
 
-            let target_ch = channels;
-            let stream = dev.build_output_stream(
-                &stream_cfg,
-                move |out: &mut [i16], _| {
-                    if let Ok(mut c) = cons.lock() {
-                        if actual_channels == target_ch {
-                            for o in out.iter_mut() {
-                                *o = c.try_pop().unwrap_or(0);
-                            }
-                        } else {
-                            for frame in out.chunks_mut(actual_channels as usize) {
-                                let sample = c.try_pop().unwrap_or(0);
-                                for o in frame.iter_mut() {
-                                    *o = sample;
-                                }
-                            }
-                        }
-                    }
-                },
-                move |err| {
-                    unhealthy_cb.store(true, Ordering::Relaxed);
-                    eprintln!("playout err: {err}")
-                },
-                None,
-            )?;
+            let stream = match stream_cfg.sample_format() {
+                cpal::SampleFormat::I8 => build_output_stream::<i8>(
+                    &dev,
+                    &stream_cfg.config(),
+                    sample_rate,
+                    channels,
+                    cons,
+                    unhealthy_cb,
+                )?,
+                cpal::SampleFormat::I16 => build_output_stream::<i16>(
+                    &dev,
+                    &stream_cfg.config(),
+                    sample_rate,
+                    channels,
+                    cons,
+                    unhealthy_cb,
+                )?,
+                cpal::SampleFormat::I24 => build_output_stream::<cpal::I24>(
+                    &dev,
+                    &stream_cfg.config(),
+                    sample_rate,
+                    channels,
+                    cons,
+                    unhealthy_cb,
+                )?,
+                cpal::SampleFormat::I32 => build_output_stream::<i32>(
+                    &dev,
+                    &stream_cfg.config(),
+                    sample_rate,
+                    channels,
+                    cons,
+                    unhealthy_cb,
+                )?,
+                cpal::SampleFormat::I64 => build_output_stream::<i64>(
+                    &dev,
+                    &stream_cfg.config(),
+                    sample_rate,
+                    channels,
+                    cons,
+                    unhealthy_cb,
+                )?,
+                cpal::SampleFormat::U8 => build_output_stream::<u8>(
+                    &dev,
+                    &stream_cfg.config(),
+                    sample_rate,
+                    channels,
+                    cons,
+                    unhealthy_cb,
+                )?,
+                cpal::SampleFormat::U16 => build_output_stream::<u16>(
+                    &dev,
+                    &stream_cfg.config(),
+                    sample_rate,
+                    channels,
+                    cons,
+                    unhealthy_cb,
+                )?,
+                cpal::SampleFormat::U32 => build_output_stream::<u32>(
+                    &dev,
+                    &stream_cfg.config(),
+                    sample_rate,
+                    channels,
+                    cons,
+                    unhealthy_cb,
+                )?,
+                cpal::SampleFormat::U64 => build_output_stream::<u64>(
+                    &dev,
+                    &stream_cfg.config(),
+                    sample_rate,
+                    channels,
+                    cons,
+                    unhealthy_cb,
+                )?,
+                cpal::SampleFormat::F32 => build_output_stream::<f32>(
+                    &dev,
+                    &stream_cfg.config(),
+                    sample_rate,
+                    channels,
+                    cons,
+                    unhealthy_cb,
+                )?,
+                cpal::SampleFormat::F64 => build_output_stream::<f64>(
+                    &dev,
+                    &stream_cfg.config(),
+                    sample_rate,
+                    channels,
+                    cons,
+                    unhealthy_cb,
+                )?,
+                other => return Err(anyhow!("unsupported output sample format: {other:?}")),
+            };
             stream.play()?;
             Ok(Self {
                 _stream: stream,
@@ -293,51 +397,74 @@ mod non_linux {
             .ok_or_else(|| anyhow!("no matching output device"))
     }
 
-    fn compatible_output_config(
+    fn native_output_config(dev: &cpal::Device) -> Result<cpal::SupportedStreamConfig> {
+        dev.default_output_config()
+            .context("no supported output configuration")
+    }
+
+    fn build_output_stream<T>(
         dev: &cpal::Device,
-        target_rate: u32,
-        target_channels: u16,
-    ) -> Result<(cpal::StreamConfig, u16)> {
-        if let Ok(ranges) = dev.supported_output_configs() {
-            for range in ranges {
-                if range.channels() == target_channels
-                    && range.min_sample_rate().0 <= target_rate
-                    && range.max_sample_rate().0 >= target_rate
-                {
-                    return Ok((
-                        cpal::StreamConfig {
-                            channels: target_channels,
-                            sample_rate: cpal::SampleRate(target_rate),
-                            buffer_size: cpal::BufferSize::Default,
-                        },
-                        target_channels,
-                    ));
-                }
-            }
-        }
+        stream_cfg: &cpal::StreamConfig,
+        source_rate: u32,
+        source_channels: u16,
+        cons: Arc<Mutex<HeapCons<i16>>>,
+        unhealthy: Arc<AtomicBool>,
+    ) -> Result<cpal::Stream>
+    where
+        T: SizedSample + FromSample<f32>,
+    {
+        let target_rate = stream_cfg.sample_rate.0;
+        let target_channels = stream_cfg.channels.max(1) as usize;
+        let source_channels = source_channels.max(1) as usize;
 
-        if let Ok(ranges) = dev.supported_output_configs() {
-            for range in ranges {
-                if range.min_sample_rate().0 <= target_rate
-                    && range.max_sample_rate().0 >= target_rate
-                {
-                    let ch = range.channels();
-                    return Ok((
-                        cpal::StreamConfig {
-                            channels: ch,
-                            sample_rate: cpal::SampleRate(target_rate),
-                            buffer_size: cpal::BufferSize::Default,
-                        },
-                        ch,
-                    ));
-                }
-            }
-        }
+        let mut resampler = LinearResampler::new(source_rate, target_rate);
+        let mut source_mono = Vec::<f32>::new();
+        let mut resampled = Vec::<f32>::new();
 
-        let default = dev
-            .default_output_config()
-            .context("no supported output configuration")?;
-        let ch = default.channels();
-        Ok((default.config(), ch))
+        dev.build_output_stream(
+            stream_cfg,
+            move |out: &mut [T], _| {
+                source_mono.clear();
+                let needed_mono = out.len().div_ceil(target_channels);
+
+                if let Ok(mut c) = cons.lock() {
+                    for _ in 0..needed_mono {
+                        let mut sum = 0.0f32;
+                        let mut count = 0usize;
+                        for _ in 0..source_channels {
+                            match c.try_pop() {
+                                Some(sample) => {
+                                    sum += sample as f32 / i16::MAX as f32;
+                                    count += 1;
+                                }
+                                None => break,
+                            }
+                        }
+                        source_mono.push(if count == 0 { 0.0 } else { sum / count as f32 });
+                    }
+                } else {
+                    source_mono.resize(needed_mono, 0.0);
+                }
+
+                resampled.clear();
+                resampler.process(&source_mono, &mut resampled);
+
+                let mut idx = 0usize;
+                for frame in out.chunks_mut(target_channels) {
+                    let sample = resampled.get(idx).copied().unwrap_or(0.0);
+                    idx += 1;
+                    let converted = T::from_sample(sample.clamp(-1.0, 1.0));
+                    for o in frame.iter_mut() {
+                        *o = converted;
+                    }
+                }
+            },
+            move |err| {
+                unhealthy.store(true, Ordering::Relaxed);
+                eprintln!("playout err: {err}")
+            },
+            None,
+        )
+        .context("build output stream")
     }
 }
