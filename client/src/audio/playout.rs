@@ -3,10 +3,7 @@ use ringbuf::{
     traits::{Producer, Split},
     HeapProd, HeapRb,
 };
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
-};
+use std::sync::{Arc, Mutex};
 
 pub struct Playout {
     backend: PlayoutBackend,
@@ -213,9 +210,15 @@ mod linux {
 #[cfg(not(target_os = "linux"))]
 mod non_linux {
     use anyhow::{anyhow, Context, Result};
-    use cpal::{traits::DeviceTrait, traits::HostTrait, traits::StreamTrait, Sample, SizedSample};
+    use cpal::{
+        traits::DeviceTrait, traits::HostTrait, traits::StreamTrait, FromSample, Sample,
+        SizedSample,
+    };
     use ringbuf::{traits::Consumer, HeapCons};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    };
 
     struct LinearResampler {
         step: f64,

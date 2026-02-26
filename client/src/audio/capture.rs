@@ -3,10 +3,7 @@ use ringbuf::{
     traits::{Consumer, Split},
     HeapCons, HeapRb,
 };
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
-};
+use std::sync::{Arc, Mutex};
 
 pub struct Capture {
     backend: CaptureBackend,
@@ -231,7 +228,10 @@ mod non_linux {
     use anyhow::{anyhow, Context, Result};
     use cpal::{traits::DeviceTrait, traits::HostTrait, traits::StreamTrait, SizedSample};
     use ringbuf::{traits::Producer, HeapProd};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    };
 
     struct LinearResampler {
         step: f64,
