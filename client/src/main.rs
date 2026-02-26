@@ -338,6 +338,9 @@ async fn app_task(
             loopback_active.clone(),
             session_voice_active.clone(),
             audio_runtime.clone(),
+            sample_rate,
+            channels,
+            frame_ms,
             &mut shutdown_rx,
         )
         .await
@@ -729,6 +732,9 @@ async fn connect_and_run_session(
     loopback_active: Arc<AtomicBool>,
     session_voice_active: Arc<AtomicBool>,
     audio_runtime: AudioRuntimeSettings,
+    sample_rate: u32,
+    channels: u16,
+    frame_ms: u32,
     shutdown_rx: &mut watch::Receiver<bool>,
 ) -> Result<()> {
     let _ = tx_event.send(UiEvent::SetConnected(false));
