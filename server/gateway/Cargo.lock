@@ -2791,6 +2791,7 @@ dependencies = [
  "ring",
  "rustls",
  "rustls-pemfile",
+ "scopeguard",
  "serde",
  "serde_json",
  "sqlx",

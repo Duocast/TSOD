@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use ring::rand::SecureRandom;
+use scopeguard::defer;
 use std::sync::Arc;
 use tokio::{
     sync::mpsc,
@@ -161,6 +162,12 @@ impl Gateway {
         self.sessions
             .register(user_id, Arc::new(QuinnDatagramTx::new(conn.clone())));
 
+        let mut current_channel: Option<ChannelId> = None;
+        defer! {
+            self.push.unregister(user_id, &session_id);
+            self.sessions.unregister(user_id);
+        }
+
         // Datagram recv loop (voice)
         let voice = self.voice.clone();
         let user_for_voice = user_id;
@@ -175,9 +182,16 @@ impl Gateway {
             }
         });
 
+        let ctx = RequestContext {
+            server_id,
+            user_id,
+            is_admin: identity.is_admin,
+        };
+
         // Request + push loop
-        loop {
-            let msg: pb::ClientToServer = tokio::select! {
+        let res: Result<()> = async {
+            loop {
+                let msg: pb::ClientToServer = tokio::select! {
                 push = push_rx.recv() => {
                     match push {
                         Some(push_msg) => {
@@ -216,12 +230,7 @@ impl Gateway {
                 continue;
             }
 
-            let ctx = RequestContext {
-                server_id,
-                user_id,
-                is_admin: identity.is_admin,
-            };
-            let req_id = msg.request_id.clone();
+                let req_id = msg.request_id.clone();
 
             match msg.payload {
                 Some(pb::client_to_server::Payload::JoinChannelRequest(r)) => {
@@ -256,6 +265,7 @@ impl Gateway {
                     for m in &members {
                         self.membership.set_user(m.user_id, ch, m.muted);
                     }
+                    current_channel = Some(ch);
 
                     debug!(
                         session_id = %session_id,
@@ -317,6 +327,9 @@ impl Gateway {
                     self.control.leave_channel(&ctx, ch).await?;
 
                     self.membership.remove_user(user_id);
+                    if current_channel == Some(ch) {
+                        current_channel = None;
+                    }
                     // best effort update channel member list
                     if let Some(mut cur) = self.membership.members_of(ch) {
                         cur.retain(|u| *u != user_id);
@@ -611,12 +624,31 @@ impl Gateway {
                     // Ignore other messages for now.
                 }
             }
+            }
+
+            Ok(())
+        }
+        .await;
+
+        if let Some(ch) = current_channel {
+            if let Err(e) = self.control.leave_channel(&ctx, ch).await {
+                warn!(
+                    user_id = %user_id.0,
+                    channel_id = %ch.0,
+                    error = %e,
+                    "disconnect cleanup leave_channel failed"
+                );
+            } else {
+                self.membership.remove_user(user_id);
+                if let Some(mut cur) = self.membership.members_of(ch) {
+                    cur.retain(|u| *u != user_id);
+                    let max = self.membership.max_talkers_of(ch).unwrap_or(4);
+                    self.membership.set_channel_state(ch, max, cur);
+                }
+            }
         }
 
-        self.push.unregister(user_id, &session_id);
-        self.sessions.unregister(user_id);
-
-        Ok(())
+        res
     }
 
     async fn do_hello(
