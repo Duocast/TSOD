@@ -23,7 +23,9 @@ use config::Config;
 use crossbeam_channel::{bounded, Receiver, Sender};
 use identity::DeviceIdentity;
 use net::dispatcher::{ControlDispatcher, PushEvent};
-use net::voice_datagram::{make_voice_datagram, VOICE_HDR_LEN, VOICE_VERSION};
+use net::voice_datagram::{
+    make_voice_datagram, VOICE_FORWARDED_HDR_LEN, VOICE_HDR_LEN, VOICE_VERSION,
+};
 use proto::voiceplatform::v1 as pb;
 #[cfg(debug_assertions)]
 use std::collections::HashSet;
@@ -1677,12 +1679,16 @@ async fn voice_recv_loop(
             continue;
         }
 
-        let (seq, payload) = match parse_voice_payload(&d) {
+        let packet = match parse_voice_payload(&d) {
             Some(v) => v,
             None => continue,
         };
 
-        jitter.lock().await.push(seq, payload.to_vec());
+        let _ = (packet.sender_user_id, packet.channel_id);
+        jitter
+            .lock()
+            .await
+            .push(packet.seq, packet.payload.to_vec());
 
         while let Some(frame) = jitter.lock().await.pop_ready() {
             let n = match codec.lock().await.decode(&frame, &mut pcm_out) {
@@ -1710,7 +1716,14 @@ async fn voice_recv_loop(
     }
 }
 
-fn parse_voice_payload(d: &Bytes) -> Option<(u32, &[u8])> {
+struct InboundVoice<'a> {
+    sender_user_id: Option<uuid::Uuid>,
+    channel_id: Option<uuid::Uuid>,
+    seq: u32,
+    payload: &'a [u8],
+}
+
+fn parse_voice_payload(d: &Bytes) -> Option<InboundVoice<'_>> {
     if d.len() < VOICE_HDR_LEN {
         return None;
     }
@@ -1718,11 +1731,30 @@ fn parse_voice_payload(d: &Bytes) -> Option<(u32, &[u8])> {
         return None;
     }
     let hdr_len = u16::from_be_bytes([d[2], d[3]]) as usize;
-    if hdr_len != VOICE_HDR_LEN || d.len() <= hdr_len {
+    if d.len() <= hdr_len {
         return None;
     }
     let seq = u32::from_be_bytes([d[12], d[13], d[14], d[15]]);
-    Some((seq, &d[hdr_len..]))
+
+    match hdr_len {
+        VOICE_HDR_LEN => Some(InboundVoice {
+            sender_user_id: None,
+            channel_id: None,
+            seq,
+            payload: &d[hdr_len..],
+        }),
+        VOICE_FORWARDED_HDR_LEN => {
+            let sender_user_id = uuid::Uuid::from_slice(&d[20..36]).ok();
+            let channel_id = uuid::Uuid::from_slice(&d[36..52]).ok();
+            Some(InboundVoice {
+                sender_user_id,
+                channel_id,
+                seq,
+                payload: &d[hdr_len..],
+            })
+        }
+        _ => None,
+    }
 }
 
 fn build_mic_test_waveform(pcm: &[i16], points: usize) -> Vec<f32> {

@@ -18,11 +18,14 @@
 //!   8:  u32 ssrc               (sender stream id)
 //!   12: u32 seq                (monotonic per sender ssrc)
 //!   16: u32 ts_ms              (sender timestamp milliseconds mod 2^32)
-//!   20: ... payload bytes      (Opus frame)
+//!   20: [server forwarded only] 16-byte sender_user_id UUID
+//!   36: [server forwarded only] 16-byte channel_id UUID
+//!   52: ... payload bytes      (Opus frame)
 //!
 //! Notes:
 //! - We use a 32-bit hash for routing speed; we still validate membership against authoritative IDs.
-//! - Channel ID itself is not embedded to keep header small; you can embed full UUID if desired.
+//! - Client->server packets use the minimal 20-byte header.
+//! - Server->client packets are stamped with sender/channel UUID metadata for attribution.
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -31,7 +34,7 @@ use std::{
 };
 
 use anyhow::{anyhow, Result};
-use bytes::Bytes;
+use bytes::{BufMut, Bytes, BytesMut};
 use tokio::sync::{mpsc, RwLock};
 use tracing::debug;
 
@@ -173,7 +176,9 @@ impl VoiceForwarder {
         self.metrics.inc_rx_bytes(datagram.len());
 
         // Basic length check
-        if datagram.len() < self.cfg.min_datagram_bytes || datagram.len() > self.cfg.max_datagram_bytes {
+        if datagram.len() < self.cfg.min_datagram_bytes
+            || datagram.len() > self.cfg.max_datagram_bytes
+        {
             self.metrics.inc_drop_invalid();
             return;
         }
@@ -199,7 +204,11 @@ impl VoiceForwarder {
         }
 
         // Resolve authoritative channel based on route key + membership
-        let channel = match self.membership.resolve_channel_for_sender(sender, parsed.channel_route).await {
+        let channel = match self
+            .membership
+            .resolve_channel_for_sender(sender, parsed.channel_route)
+            .await
+        {
             Some(c) => c,
             None => {
                 self.metrics.inc_drop_not_member();
@@ -231,7 +240,8 @@ impl VoiceForwarder {
                 continue;
             }
 
-            if self.enqueue_to_receiver(uid, datagram.clone()).await {
+            let outbound = stamp_sender_metadata(&parsed, sender, channel, &datagram);
+            if self.enqueue_to_receiver(uid, outbound).await {
                 forwarded += 1;
             } else {
                 self.metrics.inc_drop_send_queue_full();
@@ -291,7 +301,9 @@ impl VoiceForwarder {
         let max = self.membership.max_talkers(channel).await.max(1);
 
         let mut map = self.talkers.write().await;
-        let set = map.entry(channel).or_insert_with(|| TalkerSet::new(self.cfg.talker_activity_window));
+        let set = map
+            .entry(channel)
+            .or_insert_with(|| TalkerSet::new(self.cfg.talker_activity_window));
 
         set.prune();
 
@@ -309,12 +321,39 @@ impl VoiceForwarder {
     }
 }
 
+const CLIENT_HEADER_LEN: usize = 20;
+const FORWARDED_HEADER_LEN: usize = 52;
+
+fn stamp_sender_metadata(
+    parsed: &VoicePacket,
+    sender: UserId,
+    channel: ChannelId,
+    datagram: &Bytes,
+) -> Bytes {
+    let payload = &datagram[CLIENT_HEADER_LEN..];
+    let mut out = BytesMut::with_capacity(FORWARDED_HEADER_LEN + payload.len());
+
+    out.put_u8(1); // version
+    out.put_u8(parsed.flags);
+    out.put_u16(FORWARDED_HEADER_LEN as u16);
+    out.put_u32(parsed.channel_route);
+    out.put_u32(parsed.ssrc);
+    out.put_u32(parsed.seq);
+    out.put_u32(parsed.ts_ms);
+    out.extend_from_slice(sender.0.as_bytes());
+    out.extend_from_slice(channel.0.as_bytes());
+    out.extend_from_slice(payload);
+
+    out.freeze()
+}
+
 /// Parsed voice packet header view.
 #[derive(Clone, Copy, Debug)]
 struct VoicePacket {
+    flags: u8,
     channel_route: u32,
-    _ssrc: u32,
-    _seq: u32,
+    ssrc: u32,
+    seq: u32,
     ts_ms: u32,
     vad: bool,
 }
@@ -341,9 +380,10 @@ impl VoicePacket {
 
         let vad = (flags & 0x01) != 0;
         Ok(Self {
+            flags,
             channel_route,
-            _ssrc: ssrc,
-            _seq: seq,
+            ssrc,
+            seq,
             ts_ms,
             vad,
         })
@@ -421,7 +461,11 @@ struct TalkerSet {
 
 impl TalkerSet {
     fn new(window: Duration) -> Self {
-        Self { window, last_seen: HashMap::new(), order: VecDeque::new() }
+        Self {
+            window,
+            last_seen: HashMap::new(),
+            order: VecDeque::new(),
+        }
     }
 
     fn touch(&mut self, user: UserId) {
@@ -431,11 +475,17 @@ impl TalkerSet {
     }
 
     fn is_active(&self, user: UserId) -> bool {
-        self.last_seen.get(&user).map(|t| t.elapsed() <= self.window).unwrap_or(false)
+        self.last_seen
+            .get(&user)
+            .map(|t| t.elapsed() <= self.window)
+            .unwrap_or(false)
     }
 
     fn active_count(&self) -> usize {
-        self.last_seen.values().filter(|t| t.elapsed() <= self.window).count()
+        self.last_seen
+            .values()
+            .filter(|t| t.elapsed() <= self.window)
+            .count()
     }
 
     fn prune(&mut self) {
