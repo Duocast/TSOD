@@ -175,9 +175,10 @@ impl Gateway {
         // Datagram recv loop (voice)
         let voice = self.voice.clone();
         let user_for_voice = user_id;
+        let conn_voice = conn.clone();
         tokio::spawn(async move {
             loop {
-                match conn.read_datagram().await {
+                match conn_voice.read_datagram().await {
                     Ok(d) => {
                         voice.handle_incoming(user_for_voice, d).await;
                     }
