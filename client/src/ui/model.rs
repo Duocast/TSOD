@@ -59,7 +59,11 @@ pub enum UiEvent {
         user_id: String,
         muted: bool,
         deafened: bool,
+        self_muted: bool,
+        self_deafened: bool,
+        streaming: bool,
     },
+    SetActiveVoiceRoute(u32),
     TypingIndicator {
         channel_id: String,
         user_name: String,
@@ -756,6 +760,7 @@ pub struct UiModel {
     pub self_muted: bool,
     pub self_deafened: bool,
     pub vad_level: Option<f32>,
+    pub active_voice_channel_route: u32,
 
     // Log
     pub log: VecDeque<String>,
@@ -921,6 +926,7 @@ impl Default for UiModel {
             self_muted: false,
             self_deafened: false,
             vad_level: None,
+            active_voice_channel_route: 0,
             log: VecDeque::new(),
             telemetry: TelemetryData::default(),
             show_settings: false,
@@ -1201,14 +1207,21 @@ impl UiModel {
                 user_id,
                 muted,
                 deafened,
+                self_muted,
+                self_deafened,
+                streaming,
             } => {
                 if let Some(members) = self.members.get_mut(&channel_id) {
                     if let Some(member) = members.iter_mut().find(|m| m.user_id == user_id) {
                         member.muted = muted;
                         member.deafened = deafened;
+                        member.self_muted = self_muted;
+                        member.self_deafened = self_deafened;
+                        member.streaming = streaming;
                     }
                 }
             }
+            UiEvent::SetActiveVoiceRoute(route) => self.active_voice_channel_route = route,
             UiEvent::VadLevel(v) => self.vad_level = Some(v),
             UiEvent::MicTestWaveform(samples) => self.mic_test_waveform = samples,
             UiEvent::VoiceActivity { user_id, speaking } => {

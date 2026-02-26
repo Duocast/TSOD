@@ -1082,6 +1082,8 @@ async fn connect_and_run_session(
                                                 .unwrap_or(0);
                                             active_voice_channel_route
                                                 .store(route, Ordering::Relaxed);
+                                            let _ =
+                                                tx_event.send(UiEvent::SetActiveVoiceRoute(route));
                                         }
                                         let _ = tx_event.send(UiEvent::MemberJoined {
                                             channel_id: channel_id.value,
@@ -1108,6 +1110,7 @@ async fn connect_and_run_session(
                                     debug!(channel_id=%ml.channel_id.as_ref().map(|c| c.value.clone()).unwrap_or_default(), user_id=%left_user, "received member-left push event");
                                     if left_user == local_user_id {
                                         active_voice_channel_route.store(0, Ordering::Relaxed);
+                                        let _ = tx_event.send(UiEvent::SetActiveVoiceRoute(0));
                                         let _ = tx_event.send(UiEvent::AppendLog(
                                             "[moderation] you were removed from this channel"
                                                 .into(),
@@ -1130,6 +1133,9 @@ async fn connect_and_run_session(
                                         user_id: vs.user_id.map(|u| u.value).unwrap_or_default(),
                                         muted: vs.muted,
                                         deafened: vs.deafened,
+                                        self_muted: vs.self_muted,
+                                        self_deafened: vs.self_deafened,
+                                        streaming: vs.streaming,
                                     });
                                 }
                                 other => {
@@ -1403,24 +1409,34 @@ async fn connect_and_run_session(
                             return Err(anyhow!("reconnect requested"));
                         }
                         UiIntent::TogglePtt => {
-                            let new = !ptt_active.load(Ordering::Relaxed);
-                            ptt_active.store(new, Ordering::Relaxed);
+                            if active_voice_channel_route.load(Ordering::Relaxed) != 0 {
+                                let new = !ptt_active.load(Ordering::Relaxed);
+                                ptt_active.store(new, Ordering::Relaxed);
+                            }
                         }
                         UiIntent::PttDown => {
-                            ptt_active.store(true, Ordering::Relaxed);
+                            if active_voice_channel_route.load(Ordering::Relaxed) != 0 {
+                                ptt_active.store(true, Ordering::Relaxed);
+                            }
                         }
                         UiIntent::PttUp => {
-                            ptt_active.store(false, Ordering::Relaxed);
+                            if active_voice_channel_route.load(Ordering::Relaxed) != 0 {
+                                ptt_active.store(false, Ordering::Relaxed);
+                            }
                         }
                         UiIntent::ToggleSelfMute => {
-                            let new = !self_muted.load(Ordering::Relaxed);
-                            self_muted.store(new, Ordering::Relaxed);
-                            let _ = tx_event.send(UiEvent::SetSelfMuted(new));
+                            if active_voice_channel_route.load(Ordering::Relaxed) != 0 {
+                                let new = !self_muted.load(Ordering::Relaxed);
+                                self_muted.store(new, Ordering::Relaxed);
+                                let _ = tx_event.send(UiEvent::SetSelfMuted(new));
+                            }
                         }
                         UiIntent::ToggleSelfDeafen => {
-                            let new = !self_deafened.load(Ordering::Relaxed);
-                            self_deafened.store(new, Ordering::Relaxed);
-                            let _ = tx_event.send(UiEvent::SetSelfDeafened(new));
+                            if active_voice_channel_route.load(Ordering::Relaxed) != 0 {
+                                let new = !self_deafened.load(Ordering::Relaxed);
+                                self_deafened.store(new, Ordering::Relaxed);
+                                let _ = tx_event.send(UiEvent::SetSelfDeafened(new));
+                            }
                         }
                         UiIntent::SendChat { text, attachments } => {
                             if let Some(ref ch) = active_channel {
@@ -1521,6 +1537,7 @@ async fn connect_and_run_session(
                                         .map(vp_route_hash::channel_route_hash)
                                         .unwrap_or(0);
                                     active_voice_channel_route.store(route, Ordering::Relaxed);
+                                    let _ = tx_event.send(UiEvent::SetActiveVoiceRoute(route));
                                     let _ = tx_event.send(UiEvent::SetChannelName(channel_id.clone()));
                                     let _ = tx_event.send(UiEvent::UpdateChannelMembers {
                                         channel_id: channel_id.clone(),
@@ -1561,6 +1578,7 @@ async fn connect_and_run_session(
                             }
                             active_channel = None;
                             active_voice_channel_route.store(0, Ordering::Relaxed);
+                            let _ = tx_event.send(UiEvent::SetActiveVoiceRoute(0));
                         }
                         UiIntent::CreateChannel { name, description, channel_type, codec: _, quality, user_limit, parent_channel_id } => {
                             match dispatcher.create_channel(&name, &description, channel_type, quality * 1000, user_limit, parent_channel_id.as_deref()).await {
@@ -2114,7 +2132,8 @@ async fn voice_send_loop(
             let _ = tx_event.send(UiEvent::MicTestWaveform(waveform));
         }
 
-        let can_send = !self_muted.load(Ordering::Relaxed)
+        let can_send = active_voice_channel_route.load(Ordering::Relaxed) != 0
+            && !self_muted.load(Ordering::Relaxed)
             && (!push_to_talk || ptt_active.load(Ordering::Relaxed));
         if !can_send {
             continue;
