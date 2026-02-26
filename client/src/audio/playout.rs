@@ -64,12 +64,25 @@ pub fn enumerate_output_devices() -> Vec<String> {
 #[cfg(target_os = "linux")]
 mod linux {
     use anyhow::{anyhow, Context, Result};
+    use cpal::{
+        traits::DeviceTrait, traits::HostTrait, traits::StreamTrait, FromSample, SizedSample,
+    };
     use pipewire as pw;
     use pw::properties::properties;
     use ringbuf::{traits::Consumer, HeapCons};
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+
+    enum LinuxPlayoutBackend {
+        PipeWire,
+        Pulse(CpalPlayout),
+    }
 
     pub struct LinuxPlayout {
-        _thread: std::thread::JoinHandle<()>,
+        _thread: Option<std::thread::JoinHandle<()>>,
+        backend: LinuxPlayoutBackend,
     }
 
     impl LinuxPlayout {
@@ -77,27 +90,56 @@ mod linux {
             sample_rate: u32,
             channels: u16,
             cons: HeapCons<i16>,
-            _preferred_device: Option<&str>,
+            preferred_device: Option<&str>,
         ) -> Result<Self> {
-            let thread = std::thread::Builder::new()
-                .name("tsod-pipewire-playout".to_string())
-                .spawn(move || {
-                    if let Err(e) = run_pipewire_playout(sample_rate, channels, cons) {
-                        eprintln!("pipewire playout thread failed: {e:#}");
-                    }
-                })
-                .context("spawn PipeWire playout thread")?;
+            if pipewire_is_available() {
+                let thread = std::thread::Builder::new()
+                    .name("tsod-pipewire-playout".to_string())
+                    .spawn(move || {
+                        if let Err(e) = run_pipewire_playout(sample_rate, channels, cons) {
+                            eprintln!("pipewire playout thread failed: {e:#}");
+                        }
+                    })
+                    .context("spawn PipeWire playout thread")?;
 
-            Ok(Self { _thread: thread })
+                return Ok(Self {
+                    _thread: Some(thread),
+                    backend: LinuxPlayoutBackend::PipeWire,
+                });
+            }
+
+            eprintln!("PipeWire unavailable, falling back to PulseAudio playback via CPAL");
+            let pulse = CpalPlayout::start(sample_rate, channels, cons, preferred_device)?;
+            Ok(Self {
+                _thread: None,
+                backend: LinuxPlayoutBackend::Pulse(pulse),
+            })
         }
 
         pub fn enumerate_output_devices() -> Vec<String> {
-            vec!["PipeWire default output".to_string()]
+            if pipewire_is_available() {
+                return vec!["PipeWire default output".to_string()];
+            }
+            CpalPlayout::enumerate_output_devices()
         }
 
         pub fn is_healthy(&self) -> bool {
-            true
+            match &self.backend {
+                LinuxPlayoutBackend::PipeWire => true,
+                LinuxPlayoutBackend::Pulse(cpal) => cpal.is_healthy(),
+            }
         }
+    }
+
+    fn pipewire_is_available() -> bool {
+        pw::init();
+        let Ok(mainloop) = pw::main_loop::MainLoopBox::new(None) else {
+            return false;
+        };
+        let Ok(context) = pw::context::ContextBox::new(mainloop.loop_(), None) else {
+            return false;
+        };
+        context.connect(None).is_ok()
     }
 
     fn run_pipewire_playout(
@@ -195,13 +237,291 @@ mod linux {
             )
             .context("connect PipeWire playout stream")?;
 
-        // All PipeWire objects (stream, listener, core, context) stay alive
-        // as local variables until mainloop.run() returns, then drop in
-        // reverse declaration order.
         let _listener = listener;
         mainloop.run();
         Ok(())
     }
+
+    struct LinearResampler {
+        step: f64,
+        phase: f64,
+        history: Vec<f32>,
+    }
+
+    impl LinearResampler {
+        fn new(input_rate: u32, output_rate: u32) -> Self {
+            Self {
+                step: input_rate as f64 / output_rate as f64,
+                phase: 0.0,
+                history: Vec::new(),
+            }
+        }
+
+        fn process(&mut self, input: &[f32], out: &mut Vec<f32>) {
+            if input.is_empty() {
+                return;
+            }
+
+            self.history.extend_from_slice(input);
+            while self.phase + 1.0 < self.history.len() as f64 {
+                let i0 = self.phase.floor() as usize;
+                let i1 = i0 + 1;
+                let frac = (self.phase - i0 as f64) as f32;
+                let s0 = self.history[i0];
+                let s1 = self.history[i1];
+                out.push(s0 + (s1 - s0) * frac);
+                self.phase += self.step;
+            }
+
+            let consumed = self.phase.floor() as usize;
+            if consumed > 0 {
+                self.history.drain(..consumed);
+                self.phase -= consumed as f64;
+            }
+        }
+    }
+
+    struct CpalPlayout {
+        _stream: cpal::Stream,
+        unhealthy: Arc<AtomicBool>,
+    }
+
+    impl CpalPlayout {
+        fn start(
+            sample_rate: u32,
+            channels: u16,
+            cons: HeapCons<i16>,
+            preferred_device: Option<&str>,
+        ) -> Result<Self> {
+            let host = cpal::default_host();
+            let dev = if let Some(name) = preferred_device {
+                find_output_device_by_name(&host, name)
+                    .with_context(|| format!("output device '{name}' not found"))?
+            } else {
+                host.default_output_device()
+                    .ok_or(anyhow!("no output device"))?
+            };
+            let stream_cfg = native_output_config(&dev)?;
+            let unhealthy = Arc::new(AtomicBool::new(false));
+            let unhealthy_cb = unhealthy.clone();
+            let stream = match stream_cfg.sample_format() {
+                cpal::SampleFormat::I8 => build_output_stream::<i8>(
+                    &dev,
+                    &stream_cfg.config(),
+                    sample_rate,
+                    channels,
+                    cons,
+                    unhealthy_cb,
+                )?,
+                cpal::SampleFormat::I16 => build_output_stream::<i16>(
+                    &dev,
+                    &stream_cfg.config(),
+                    sample_rate,
+                    channels,
+                    cons,
+                    unhealthy_cb,
+                )?,
+                cpal::SampleFormat::I32 => build_output_stream::<i32>(
+                    &dev,
+                    &stream_cfg.config(),
+                    sample_rate,
+                    channels,
+                    cons,
+                    unhealthy_cb,
+                )?,
+                cpal::SampleFormat::I64 => build_output_stream::<i64>(
+                    &dev,
+                    &stream_cfg.config(),
+                    sample_rate,
+                    channels,
+                    cons,
+                    unhealthy_cb,
+                )?,
+                cpal::SampleFormat::U8 => build_output_stream::<u8>(
+                    &dev,
+                    &stream_cfg.config(),
+                    sample_rate,
+                    channels,
+                    cons,
+                    unhealthy_cb,
+                )?,
+                cpal::SampleFormat::U16 => build_output_stream::<u16>(
+                    &dev,
+                    &stream_cfg.config(),
+                    sample_rate,
+                    channels,
+                    cons,
+                    unhealthy_cb,
+                )?,
+                cpal::SampleFormat::U32 => build_output_stream::<u32>(
+                    &dev,
+                    &stream_cfg.config(),
+                    sample_rate,
+                    channels,
+                    cons,
+                    unhealthy_cb,
+                )?,
+                cpal::SampleFormat::U64 => build_output_stream::<u64>(
+                    &dev,
+                    &stream_cfg.config(),
+                    sample_rate,
+                    channels,
+                    cons,
+                    unhealthy_cb,
+                )?,
+                cpal::SampleFormat::F32 => build_output_stream::<f32>(
+                    &dev,
+                    &stream_cfg.config(),
+                    sample_rate,
+                    channels,
+                    cons,
+                    unhealthy_cb,
+                )?,
+                cpal::SampleFormat::F64 => build_output_stream::<f64>(
+                    &dev,
+                    &stream_cfg.config(),
+                    sample_rate,
+                    channels,
+                    cons,
+                    unhealthy_cb,
+                )?,
+                other => return Err(anyhow!("unsupported output sample format: {other:?}")),
+            };
+            stream.play()?;
+            Ok(Self {
+                _stream: stream,
+                unhealthy,
+            })
+        }
+
+        fn enumerate_output_devices() -> Vec<String> {
+            let host = cpal::default_host();
+            host.output_devices()
+                .map(|devs| devs.filter_map(|d| d.name().ok()).collect())
+                .unwrap_or_default()
+        }
+
+        fn is_healthy(&self) -> bool {
+            !self.unhealthy.load(Ordering::Relaxed)
+        }
+    }
+
+    fn find_output_device_by_name(host: &cpal::Host, name: &str) -> Result<cpal::Device> {
+        let mut devices = host.output_devices().context("enumerate output devices")?;
+        devices
+            .find(|dev| dev.name().ok().as_deref() == Some(name))
+            .ok_or_else(|| anyhow!("no matching output device"))
+    }
+
+    fn native_output_config(dev: &cpal::Device) -> Result<cpal::SupportedStreamConfig> {
+        dev.default_output_config()
+            .context("no supported output configuration")
+    }
+
+    fn build_output_stream<T>(
+        dev: &cpal::Device,
+        stream_cfg: &cpal::StreamConfig,
+        source_rate: u32,
+        source_channels: u16,
+        mut cons: HeapCons<i16>,
+        unhealthy: Arc<AtomicBool>,
+    ) -> Result<cpal::Stream>
+    where
+        T: SizedSample + FromSample<f32>,
+    {
+        let target_rate = stream_cfg.sample_rate.0;
+        let target_channels = stream_cfg.channels.max(1) as usize;
+        let source_channels = source_channels.max(1) as usize;
+        let mut resampler = LinearResampler::new(source_rate, target_rate);
+        let mut source_mono = Vec::<f32>::new();
+        let mut source_resampled = Vec::<f32>::new();
+
+        dev.build_output_stream(
+            stream_cfg,
+            move |data: &mut [T], _| {
+                let frames_needed = data.len() / target_channels;
+                if source_mono.len() < frames_needed {
+                    source_mono.resize(frames_needed, 0.0);
+                }
+                for sample in source_mono.iter_mut().take(frames_needed) {
+                    *sample = cons
+                        .try_pop()
+                        .map(|s| s as f32 / i16::MAX as f32)
+                        .unwrap_or(0.0);
+                    for _ in 1..source_channels {
+                        let _ = cons.try_pop();
+                    }
+                }
+
+                source_resampled.clear();
+                resampler.process(&source_mono[..frames_needed], &mut source_resampled);
+
+                let mut idx = 0usize;
+                for frame in data.chunks_mut(target_channels) {
+                    let s = source_resampled.get(idx).copied().unwrap_or(0.0);
+                    let out = T::from_sample(s.clamp(-1.0, 1.0));
+                    for ch in frame {
+                        *ch = out;
+                    }
+                    idx += 1;
+                }
+            },
+            move |err| {
+                unhealthy.store(true, Ordering::Relaxed);
+                eprintln!("playout err: {err}")
+            },
+            None,
+        )
+        .context("build output stream")
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+type PlayoutBackend = non_linux::CpalPlayout;
+
+unsafe impl Send for Playout {}
+unsafe impl Sync for Playout {}
+
+impl Playout {
+    pub fn start(sample_rate: u32, channels: u16) -> Result<Self> {
+        Self::start_with_device(sample_rate, channels, None)
+    }
+
+    pub fn start_with_device(
+        sample_rate: u32,
+        channels: u16,
+        preferred_device: Option<&str>,
+    ) -> Result<Self> {
+        let rb = HeapRb::<i16>::new(sample_rate as usize * channels as usize);
+        let (prod, cons) = rb.split();
+
+        #[cfg(target_os = "linux")]
+        let backend = PlayoutBackend::start(sample_rate, channels, cons, preferred_device)?;
+
+        #[cfg(not(target_os = "linux"))]
+        let backend = PlayoutBackend::start(sample_rate, channels, cons, preferred_device)?;
+
+        Ok(Self {
+            backend,
+            prod: UnsafeCell::new(prod),
+        })
+    }
+
+    pub fn push_pcm(&self, pcm: &[i16]) {
+        let _ = &self.backend;
+        let prod = unsafe { &mut *self.prod.get() };
+        for &s in pcm {
+            let _ = prod.try_push(s);
+        }
+    }
+
+    pub fn is_healthy(&self) -> bool {
+        self.backend.is_healthy()
+    }
+}
+
+pub fn enumerate_output_devices() -> Vec<String> {
+    PlayoutBackend::enumerate_output_devices()
 }
 
 #[cfg(not(target_os = "linux"))]
