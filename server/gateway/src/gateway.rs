@@ -286,7 +286,8 @@ impl Gateway {
                         member_ids.clone(),
                     );
                     for m in &members {
-                        self.membership.set_user(m.user_id, ch, m.muted);
+                        self.membership
+                            .set_user(m.user_id, ch, m.muted, m.deafened);
                     }
                     current_channel = Some(ch);
 
@@ -558,6 +559,7 @@ impl Gateway {
                                     .control
                                     .set_voice_deafen(&ctx, ch, target, m.deafened, None)
                                     .await?;
+                                self.membership.update_deafen(target, ch, m.deafened);
                             }
                             pb::moderation_action_request::Action::Kick(k) => {
                                 tracing::info!(actor=%ctx.user_id.0,target=%target.0,channel=%ch.0,"moderation kick action");

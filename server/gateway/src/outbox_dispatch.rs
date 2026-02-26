@@ -455,7 +455,7 @@ fn apply_cache_side_effects(membership: &MembershipCache, rec: &OutboxEventRow) 
         "presence.member_joined" => {
             let channel_id = parse_channel_id_field(&rec.payload_json, "channel_id")?;
             let user_id = parse_user_id_field(&rec.payload_json, "user_id")?;
-            membership.set_user(user_id, channel_id, false);
+            membership.set_user(user_id, channel_id, false, false);
             membership.add_channel_member(channel_id, user_id);
         }
         "presence.member_left" => {
@@ -472,7 +472,12 @@ fn apply_cache_side_effects(membership: &MembershipCache, rec: &OutboxEventRow) 
                 .get("muted")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            membership.update_mute(user_id, channel_id, muted);
+            let deafened = rec
+                .payload_json
+                .get("deafened")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            membership.update_voice_state(user_id, channel_id, muted, deafened);
         }
         "moderation.user_muted" => {
             let channel_id = parse_channel_id_field(&rec.payload_json, "channel_id")?;
@@ -482,7 +487,22 @@ fn apply_cache_side_effects(membership: &MembershipCache, rec: &OutboxEventRow) 
                 .get("muted")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            membership.update_mute(user_id, channel_id, muted);
+            let deafened = rec
+                .payload_json
+                .get("deafened")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            membership.update_voice_state(user_id, channel_id, muted, deafened);
+        }
+        "moderation.user_deafened" => {
+            let channel_id = parse_channel_id_field(&rec.payload_json, "channel_id")?;
+            let user_id = parse_user_id_field(&rec.payload_json, "target_user_id")?;
+            let deafened = rec
+                .payload_json
+                .get("deafened")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            membership.update_deafen(user_id, channel_id, deafened);
         }
         "channel.created" | "channels.created" | "channel.renamed" | "channel.deleted" => {
             // no membership side-effects; event is still consumed/acked.
@@ -586,6 +606,7 @@ mod tests {
     use serde_json::json;
     use vp_control::ids::{OutboxId, ServerId};
     use vp_control::model::OutboxEventRow;
+    use vp_media::voice_forwarder::MembershipProvider;
 
     #[test]
     fn translate_channel_created_topic_is_supported() {
@@ -666,5 +687,45 @@ mod tests {
             .members_of(vp_control::ids::ChannelId(channel_id))
             .expect("channel should exist in cache");
         assert!(members.is_empty());
+    }
+    #[tokio::test]
+    async fn voice_state_and_deafen_side_effects_update_membership_state() {
+        let membership = MembershipCache::new();
+        let channel = vp_control::ids::ChannelId(uuid::Uuid::new_v4());
+        let user = vp_control::ids::UserId(uuid::Uuid::new_v4());
+
+        membership.set_channel(channel, 4, vec![user]);
+        membership.set_user(user, channel, false, false);
+
+        let voice_state = OutboxEventRow {
+            id: OutboxId(uuid::Uuid::new_v4()),
+            server_id: ServerId(uuid::Uuid::new_v4()),
+            topic: "presence.voice_state_changed".to_string(),
+            payload_json: json!({
+                "channel_id": channel.0,
+                "user_id": user.0,
+                "muted": true,
+                "deafened": true
+            }),
+        };
+        apply_cache_side_effects(&membership, &voice_state).expect("voice state side effects");
+
+        assert!(membership.is_muted(channel, user).await);
+        assert!(membership.is_deafened(channel, user).await);
+
+        let moderation = OutboxEventRow {
+            id: OutboxId(uuid::Uuid::new_v4()),
+            server_id: ServerId(uuid::Uuid::new_v4()),
+            topic: "moderation.user_deafened".to_string(),
+            payload_json: json!({
+                "channel_id": channel.0,
+                "target_user_id": user.0,
+                "deafened": false
+            }),
+        };
+        apply_cache_side_effects(&membership, &moderation).expect("moderation deafen side effects");
+
+        assert!(membership.is_muted(channel, user).await);
+        assert!(!membership.is_deafened(channel, user).await);
     }
 }

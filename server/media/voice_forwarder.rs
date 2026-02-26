@@ -67,6 +67,9 @@ pub trait MembershipProvider: Send + Sync {
     /// True if sender is muted (server-side) in this channel.
     async fn is_muted(&self, channel: ChannelId, sender: UserId) -> bool;
 
+    /// True if user is deafened (server-side) in this channel.
+    async fn is_deafened(&self, channel: ChannelId, user: UserId) -> bool;
+
     /// Channel policy: max concurrent talkers.
     async fn max_talkers(&self, channel: ChannelId) -> usize;
 }
@@ -189,7 +192,10 @@ impl VoiceForwarder {
         };
 
         // Per-sender rate limiting
-        if !self.allow_rate(sender, datagram.len() as u32, parsed.ts_ms).await {
+        if !self
+            .allow_rate(sender, datagram.len() as u32, parsed.ts_ms)
+            .await
+        {
             self.metrics.inc_drop_rate_limited();
             return;
         }
@@ -208,7 +214,9 @@ impl VoiceForwarder {
         };
 
         // Moderation gate
-        if self.membership.is_muted(channel, sender).await {
+        if self.membership.is_muted(channel, sender).await
+            || self.membership.is_deafened(channel, sender).await
+        {
             self.metrics.inc_drop_muted();
             return;
         }
@@ -227,7 +235,7 @@ impl VoiceForwarder {
         let mut forwarded = 0usize;
 
         for uid in members {
-            if uid == sender {
+            if uid == sender || self.membership.is_deafened(channel, uid).await {
                 continue;
             }
 
@@ -394,7 +402,6 @@ impl VoicePacket {
             vad,
         })
     }
-
 }
 
 /// Per-sender limiter state.
