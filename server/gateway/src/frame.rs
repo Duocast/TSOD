@@ -20,10 +20,7 @@ pub async fn read_delimited<M: Message + Default>(
     Ok(M::decode(&buf[..])?)
 }
 
-pub async fn write_delimited<M: Message>(
-    send: &mut quinn::SendStream,
-    msg: &M,
-) -> Result<()> {
+pub async fn write_delimited<M: Message>(send: &mut quinn::SendStream, msg: &M) -> Result<()> {
     let mut body = BytesMut::with_capacity(msg.encoded_len());
     msg.encode(&mut body)?;
 

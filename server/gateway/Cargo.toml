@@ -18,6 +18,7 @@ http-body-util = "0.1"
 hyper-util = { version = "0.1", features = ["tokio"] }
 hyper = { version = "1.5", features = ["server", "http1"] }
 serde = { version = "1", features = ["derive"] }
+scopeguard = "1.2"
 tokio = { version = "1.37", features = ["rt-multi-thread", "macros", "time", "signal", "sync"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
