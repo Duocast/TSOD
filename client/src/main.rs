@@ -1319,6 +1319,7 @@ async fn connect_and_run_session(
         loopback_active.clone(),
         audio_runtime.clone(),
         voice_counters.clone(),
+        local_user_id.clone(),
         cfg.push_to_talk,
         voice_die_tx.clone(),
     ));
@@ -2088,6 +2089,7 @@ async fn voice_send_loop(
     loopback_active: Arc<AtomicBool>,
     audio_runtime: AudioRuntimeSettings,
     voice_counters: Arc<VoiceTelemetryCounters>,
+    local_user_id: String,
     push_to_talk: bool,
     voice_die_tx: watch::Sender<bool>,
 ) {
@@ -2106,6 +2108,7 @@ async fn voice_send_loop(
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut vad_report_counter = 0u32;
     let mut stream_ts_ms = 0u32;
+    let mut last_local_speaking = false;
 
     loop {
         tick.tick().await;
@@ -2138,6 +2141,17 @@ async fn voice_send_loop(
             && !self_muted.load(Ordering::Relaxed)
             && (!push_to_talk || ptt_active.load(Ordering::Relaxed));
         if !can_send {
+            if last_local_speaking {
+                last_local_speaking = false;
+                let _ = tx_event.send(UiEvent::VoiceActivity {
+                    user_id: local_user_id.clone(),
+                    speaking: false,
+                });
+            }
+            let _ = tx_event.send(UiEvent::VoiceMeter {
+                user_id: local_user_id.clone(),
+                level: 0.0,
+            });
             continue;
         }
 
@@ -2170,7 +2184,28 @@ async fn voice_send_loop(
         }
 
         // Skip sending if VAD says no voice (and not PTT mode)
-        if !push_to_talk && !is_voice {
+        let speaking_now = push_to_talk || is_voice;
+        if speaking_now != last_local_speaking {
+            last_local_speaking = speaking_now;
+            let _ = tx_event.send(UiEvent::VoiceActivity {
+                user_id: local_user_id.clone(),
+                speaking: speaking_now,
+            });
+        }
+
+        let local_level = if speaking_now {
+            pcm.iter()
+                .map(|s| (*s as i32).unsigned_abs() as f32 / 32768.0)
+                .fold(0.0_f32, f32::max)
+        } else {
+            0.0
+        };
+        let _ = tx_event.send(UiEvent::VoiceMeter {
+            user_id: local_user_id.clone(),
+            level: local_level,
+        });
+
+        if !speaking_now {
             continue;
         }
 
