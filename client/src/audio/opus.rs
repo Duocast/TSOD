@@ -22,6 +22,16 @@ impl OpusEncoder {
     pub fn encode(&mut self, pcm: &[i16], out: &mut [u8]) -> Result<usize> {
         Ok(self.enc.encode(pcm, out)?)
     }
+
+    pub fn set_inband_fec(&mut self, enabled: bool) -> Result<()> {
+        self.enc.set_inband_fec(enabled)?;
+        Ok(())
+    }
+
+    pub fn set_packet_loss_perc(&mut self, loss_perc: i32) -> Result<()> {
+        self.enc.set_packet_loss_perc(loss_perc.clamp(0, 100))?;
+        Ok(())
+    }
 }
 
 impl OpusDecoder {

@@ -40,6 +40,7 @@ use tokio::sync::{watch, Mutex, RwLock};
 use tokio::time::{sleep, Duration, Instant};
 use tracing::{debug, warn, Level};
 use tracing_subscriber::EnvFilter;
+use ui::model::FecMode;
 use ui::{UiEvent, UiIntent, VpApp};
 
 #[cfg(debug_assertions)]
@@ -54,6 +55,8 @@ struct AudioRuntimeSettings {
     ducking_attenuation_db: Arc<AtomicU32>,
     typing_attenuation: Arc<AtomicBool>,
     denoise_attenuation_db: Arc<AtomicU32>,
+    fec_mode: Arc<AtomicU32>,
+    fec_strength: Arc<AtomicU32>,
 }
 
 impl AudioRuntimeSettings {
@@ -70,6 +73,8 @@ impl AudioRuntimeSettings {
             denoise_attenuation_db: Arc::new(AtomicU32::new(f32_to_u32(
                 settings.denoise_attenuation_db as f32,
             ))),
+            fec_mode: Arc::new(AtomicU32::new(settings.fec_mode as u32)),
+            fec_strength: Arc::new(AtomicU32::new(settings.fec_strength as u32)),
         }
     }
 
@@ -92,7 +97,32 @@ impl AudioRuntimeSettings {
             f32_to_u32(settings.denoise_attenuation_db as f32),
             Ordering::Relaxed,
         );
+        self.fec_mode
+            .store(settings.fec_mode as u32, Ordering::Relaxed);
+        self.fec_strength
+            .store(settings.fec_strength as u32, Ordering::Relaxed);
     }
+}
+
+fn apply_fec_encoder_settings(
+    encoder: &mut audio::opus::OpusEncoder,
+    audio_runtime: &AudioRuntimeSettings,
+) -> Result<()> {
+    let fec_mode = match audio_runtime.fec_mode.load(Ordering::Relaxed) {
+        0 => FecMode::Off,
+        2 => FecMode::On,
+        _ => FecMode::Auto,
+    };
+    let fec_strength = audio_runtime.fec_strength.load(Ordering::Relaxed).min(100) as i32;
+    let enable_fec = fec_mode != FecMode::Off;
+    let packet_loss = match fec_mode {
+        FecMode::Off => 0,
+        FecMode::Auto => fec_strength.clamp(10, 40),
+        FecMode::On => fec_strength,
+    };
+    encoder.set_inband_fec(enable_fec)?;
+    encoder.set_packet_loss_perc(packet_loss)?;
+    Ok(())
 }
 
 fn main() -> Result<()> {
@@ -262,6 +292,10 @@ async fn app_task(
         sample_rate,
         channels as u8,
     )?));
+    {
+        let mut enc = encoder.lock().await;
+        let _ = apply_fec_encoder_settings(&mut enc, &audio_runtime);
+    }
 
     let initial_selection = selected_audio.lock().await.clone();
     let capture = Arc::new(RwLock::new(Arc::new(start_capture_with_fallback(
@@ -1660,6 +1694,14 @@ async fn connect_and_run_session(
                             input_gain.store(f32_to_u32(settings.input_gain), Ordering::Relaxed);
                             output_gain.store(f32_to_u32(settings.output_gain), Ordering::Relaxed);
                             audio_runtime.apply(settings);
+                            {
+                                let mut enc = encoder.lock().await;
+                                if let Err(e) = apply_fec_encoder_settings(&mut enc, &audio_runtime) {
+                                    let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                        "[audio] failed to apply FEC settings: {e:#}"
+                                    )));
+                                }
+                            }
 
                             // Update PTT mode
                             let is_ptt = settings.capture_mode == ui::model::CaptureMode::PushToTalk;
@@ -1997,7 +2039,12 @@ async fn voice_recv_loop(
     const STREAM_IDLE_DROP_MS: u64 = 10_000;
     const PLC_MAX_FRAMES: usize = 5;
     const JITTER_MISSING_WAIT_MS: u64 = 40;
-    const OPUS_USE_INBAND_FEC: bool = false;
+    let fec_mode = match audio_runtime.fec_mode.load(Ordering::Relaxed) {
+        0 => FecMode::Off,
+        2 => FecMode::On,
+        _ => FecMode::Auto,
+    };
+    let opus_use_inband_fec = fec_mode != FecMode::Off;
 
     let sample_rate = 48_000u32;
     let channels = 1usize;
@@ -2081,7 +2128,7 @@ async fn voice_recv_loop(
                         audio::jitter::PopResult::Missing
                             if stream.last_packet_wall_ms != 0 && stream.plc_frames < PLC_MAX_FRAMES =>
                         {
-                            let n = if OPUS_USE_INBAND_FEC {
+                            let n = if opus_use_inband_fec {
                                 match stream.jitter.peek_expected() {
                                     Some(next_frame) => stream
                                         .decoder

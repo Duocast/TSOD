@@ -4,7 +4,7 @@
 //!             Notifications, Whisper, Screen Share, Video Call, Security
 
 use crate::settings_io;
-use crate::ui::model::{AppSettings, CaptureMode, SettingsPage, UiIntent, UiModel};
+use crate::ui::model::{AppSettings, CaptureMode, FecMode, SettingsPage, UiIntent, UiModel};
 use crate::ui::theme;
 use crossbeam_channel::Sender;
 use eframe::egui;
@@ -516,6 +516,38 @@ fn page_capture(
         dirty = true;
     }
     hint(ui, "Reduces keyboard click noise while you type.");
+
+    ui.horizontal(|ui: &mut egui::Ui| {
+        ui.label("Forward Error Correction:");
+        let prev = s.fec_mode;
+        egui::ComboBox::from_id_salt("cap_fec_mode")
+            .selected_text(s.fec_mode.label())
+            .width(220.0)
+            .show_ui(ui, |ui: &mut egui::Ui| {
+                for mode in FecMode::ALL {
+                    ui.selectable_value(&mut s.fec_mode, mode, mode.label());
+                }
+            });
+        if s.fec_mode != prev {
+            dirty = true;
+        }
+    });
+
+    if s.fec_mode != FecMode::Off {
+        ui.horizontal(|ui: &mut egui::Ui| {
+            let pct = s.fec_strength.clamp(0, 100);
+            ui.label(format!("FEC Strength: {pct}%"));
+        });
+        let prev = s.fec_strength;
+        ui.add(
+            egui::Slider::new(&mut s.fec_strength, 0..=100)
+                .show_value(false)
+                .suffix("%"),
+        );
+        if s.fec_strength != prev {
+            dirty = true;
+        }
+    }
 
     section(ui, "Mic Test");
 

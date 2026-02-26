@@ -272,6 +272,8 @@ pub struct AppSettings {
     pub echo_cancellation: bool,
     pub denoise_attenuation_db: i32,
     pub typing_attenuation: bool,
+    pub fec_mode: FecMode,
+    pub fec_strength: u8,
 
     // ─── Playback ───
     pub playback_device: String,
@@ -358,6 +360,8 @@ impl Default for AppSettings {
             echo_cancellation: false,
             denoise_attenuation_db: -30,
             typing_attenuation: true,
+            fec_mode: FecMode::Auto,
+            fec_strength: 50,
 
             // Playback
             playback_device: "(system default)".into(),
@@ -426,6 +430,25 @@ impl Default for AppSettings {
             max_download_size_mb: 100,
             auto_download_images: true,
             auto_download_files: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum FecMode {
+    Off,
+    Auto,
+    On,
+}
+
+impl FecMode {
+    pub const ALL: [FecMode; 3] = [FecMode::Off, FecMode::Auto, FecMode::On];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            FecMode::Off => "Off",
+            FecMode::Auto => "Auto (recommended)",
+            FecMode::On => "On",
         }
     }
 }
