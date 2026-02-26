@@ -72,7 +72,7 @@ impl JitterBuffer {
                 }
             };
 
-            if timed_out || Self::seq_before(self.expected_seq, min_seq) {
+            if timed_out {
                 self.expected_seq = self.expected_seq.wrapping_add(1);
                 self.expected_wait_started_ms = Some(now_ms);
                 return PopResult::Missing;
