@@ -319,6 +319,12 @@ async fn app_task(
                             UiIntent::SetInputGain(gain) => {
                                 input_gain.store(f32_to_u32(gain), Ordering::Relaxed);
                             }
+                            UiIntent::SetEchoCancellation(enabled) => {
+                                if let Some(ref dsp) = capture_dsp {
+                                    let mut d = dsp.lock().await;
+                                    d.set_echo_cancellation(enabled);
+                                }
+                            }
                             UiIntent::SetInputDevice(dev) => {
                                 let selected = normalize_device_name(&dev);
                                 {
@@ -1469,6 +1475,15 @@ async fn connect_and_run_session(
                             }
                             let _ = tx_event.send(UiEvent::AppendLog(
                                 format!("[dsp] AGC: {enabled}"),
+                            ));
+                        }
+                        UiIntent::SetEchoCancellation(enabled) => {
+                            if let Some(ref dsp) = capture_dsp {
+                                let mut d = dsp.lock().await;
+                                d.set_echo_cancellation(enabled);
+                            }
+                            let _ = tx_event.send(UiEvent::AppendLog(
+                                format!("[dsp] echo cancellation: {enabled}"),
                             ));
                         }
                         UiIntent::SetVadThreshold(threshold) => {
