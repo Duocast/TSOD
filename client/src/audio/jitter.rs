@@ -64,6 +64,10 @@ impl JitterBuffer {
         PopResult::Waiting
     }
 
+    pub fn peek_expected(&self) -> Option<&[u8]> {
+        self.buf.get(&self.expected_seq).map(Vec::as_slice)
+    }
+
     pub fn set_expected(&mut self, seq: u32) {
         self.expected_seq = seq;
         self.expected_wait_started_ms = None;
