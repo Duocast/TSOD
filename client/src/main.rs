@@ -145,7 +145,11 @@ async fn app_task(
         "[sys] starting, server={}, sni={}, ca_cert={}",
         cfg.server,
         cfg.server_name,
-        if cfg.ca_cert_pem.is_empty() { "(insecure dev mode)" } else { &cfg.ca_cert_pem }
+        if cfg.ca_cert_pem.is_empty() {
+            "(insecure dev mode)"
+        } else {
+            &cfg.ca_cert_pem
+        }
     )));
     let _ = tx_event.send(UiEvent::SetNick(cfg.display_name.clone()));
     let (initial_host, initial_port) = split_server_host_port(&cfg.server);
@@ -227,7 +231,9 @@ async fn app_task(
 
     let channel_id_str = cfg.channel_id.clone().unwrap_or_default();
     let channel_route_hash = if !channel_id_str.is_empty() {
-        stable_route_hash_u32(channel_id_str.as_bytes())
+        uuid::Uuid::parse_str(&channel_id_str)
+            .map(vp_route_hash::channel_route_hash)
+            .unwrap_or(0)
     } else {
         0
     };
@@ -1702,18 +1708,6 @@ fn parse_voice_payload(d: &Bytes) -> Option<(u32, &[u8])> {
     }
     let seq = u32::from_be_bytes([d[12], d[13], d[14], d[15]]);
     Some((seq, &d[hdr_len..]))
-}
-
-fn stable_route_hash_u32(bytes: &[u8]) -> u32 {
-    const FNV_OFFSET: u32 = 0x811C9DC5;
-    const FNV_PRIME: u32 = 0x01000193;
-
-    let mut h = FNV_OFFSET;
-    for &b in bytes {
-        h ^= b as u32;
-        h = h.wrapping_mul(FNV_PRIME);
-    }
-    h
 }
 
 fn build_mic_test_waveform(pcm: &[i16], points: usize) -> Vec<f32> {
