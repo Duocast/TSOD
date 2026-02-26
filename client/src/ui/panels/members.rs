@@ -140,6 +140,9 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
             if member.streaming {
                 status_parts.push("📺 streaming");
             }
+            if !member.away_message.trim().is_empty() {
+                status_parts.push(format!("🌙 Away: {}", member.away_message.trim()));
+            }
             if !status_parts.is_empty() {
                 ui.painter().text(
                     egui::pos2(text_x, row_rect.bottom() - 8.0),
