@@ -144,6 +144,50 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
             }
 
             response.context_menu(|ui| {
+                let current_gain = model.user_output_gain(&member.user_id);
+                let mut draft_gain = current_gain;
+                let mut local_muted = model.user_locally_muted(&member.user_id);
+                ui.label("Local audio");
+                if ui.checkbox(&mut local_muted, "Mute for me").changed() {
+                    model
+                        .settings
+                        .per_user_audio
+                        .entry(member.user_id.clone())
+                        .or_default()
+                        .muted = local_muted;
+                    model.settings_draft = model.settings.clone();
+                    model.settings_dirty = false;
+                    let _ = tx_intent.send(UiIntent::SetUserLocalMute {
+                        user_id: member.user_id.clone(),
+                        muted: local_muted,
+                    });
+                    let _ =
+                        tx_intent.send(UiIntent::SaveSettings(Box::new(model.settings.clone())));
+                }
+                if ui
+                    .add(
+                        egui::Slider::new(&mut draft_gain, 0.0..=2.0)
+                            .text("Volume")
+                            .show_value(true),
+                    )
+                    .changed()
+                {
+                    model
+                        .settings
+                        .per_user_audio
+                        .entry(member.user_id.clone())
+                        .or_default()
+                        .gain = draft_gain;
+                    model.settings_draft = model.settings.clone();
+                    model.settings_dirty = false;
+                    let _ = tx_intent.send(UiIntent::SetUserOutputGain {
+                        user_id: member.user_id.clone(),
+                        gain: draft_gain,
+                    });
+                    let _ =
+                        tx_intent.send(UiIntent::SaveSettings(Box::new(model.settings.clone())));
+                }
+                ui.separator();
                 if ui.button("Poke").clicked() {
                     model.show_poke_dialog = true;
                     model.poke_target_user_id = member.user_id.clone();

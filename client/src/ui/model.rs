@@ -244,6 +244,14 @@ pub enum UiIntent {
     SetOutputDevice(String),
     SetInputGain(f32),
     SetOutputGain(f32),
+    SetUserOutputGain {
+        user_id: String,
+        gain: f32,
+    },
+    SetUserLocalMute {
+        user_id: String,
+        muted: bool,
+    },
     ToggleLoopback,
 
     // Settings: Apply all (sent after settings are saved)
@@ -278,6 +286,7 @@ pub struct AppSettings {
     // ─── Playback ───
     pub playback_device: String,
     pub output_gain: f32,
+    pub per_user_audio: HashMap<String, PerUserAudioSettings>,
     pub output_auto_level: bool,
     pub mono_expansion: bool,
     pub comfort_noise: bool,
@@ -366,6 +375,7 @@ impl Default for AppSettings {
             // Playback
             playback_device: "(system default)".into(),
             output_gain: 1.0,
+            per_user_audio: HashMap::new(),
             output_auto_level: false,
             mono_expansion: false,
             comfort_noise: false,
@@ -481,6 +491,22 @@ pub struct HotkeyBinding {
     pub action: HotkeyAction,
     pub key: String,
     pub enabled: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct PerUserAudioSettings {
+    pub gain: f32,
+    pub muted: bool,
+}
+
+impl Default for PerUserAudioSettings {
+    fn default() -> Self {
+        Self {
+            gain: 1.0,
+            muted: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1391,6 +1417,22 @@ impl UiModel {
         }
 
         self.connection_port_draft = self.settings.last_server_port.to_string();
+    }
+
+    pub fn user_output_gain(&self, user_id: &str) -> f32 {
+        self.settings
+            .per_user_audio
+            .get(user_id)
+            .map(|s| s.gain.clamp(0.0, 2.0))
+            .unwrap_or(1.0)
+    }
+
+    pub fn user_locally_muted(&self, user_id: &str) -> bool {
+        self.settings
+            .per_user_audio
+            .get(user_id)
+            .map(|s| s.muted)
+            .unwrap_or(false)
     }
 
     /// Get messages for the currently selected channel.
