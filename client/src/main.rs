@@ -2367,13 +2367,14 @@ async fn voice_recv_loop(
                     }
 
                     if frame_present {
-                        stream.last_frame_wall_ms = now_ms;
-                        stream.speaking = true;
+                        stream.last_voice_frame_wall_ms = now_ms;
                     }
 
-                    let speaking_now = now_ms.saturating_sub(stream.last_frame_wall_ms) <= SPEAKING_HANGOVER_MS;
-                    if speaking_now != stream.speaking {
-                        stream.speaking = speaking_now;
+                    let speaking_now =
+                        now_ms.saturating_sub(stream.last_voice_frame_wall_ms) <= SPEAKING_HANGOVER_MS;
+                    stream.speaking = speaking_now;
+                    if speaking_now != stream.last_emitted_speaking {
+                        stream.last_emitted_speaking = speaking_now;
                         if let Some(user_id) = stream.user_id.as_ref() {
                             let _ = tx_event.send(UiEvent::VoiceActivity {
                                 user_id: user_id.clone(),
@@ -2395,7 +2396,7 @@ async fn voice_recv_loop(
                 streams.retain(|_, stream| {
                     let idle = now_ms.saturating_sub(stream.last_packet_wall_ms);
                     if idle >= STREAM_IDLE_DROP_MS {
-                        if stream.speaking {
+                        if stream.last_emitted_speaking {
                             if let Some(user_id) = stream.user_id.as_ref() {
                                 let _ = tx_event.send(UiEvent::VoiceActivity { user_id: user_id.clone(), speaking: false });
                             }
@@ -2481,9 +2482,10 @@ struct InboundStreamState {
     level: f32,
     last_packet_ts_ms: u32,
     last_packet_wall_ms: u64,
-    last_frame_wall_ms: u64,
+    last_voice_frame_wall_ms: u64,
     plc_frames: usize,
     speaking: bool,
+    last_emitted_speaking: bool,
 }
 
 impl InboundStreamState {
@@ -2499,9 +2501,10 @@ impl InboundStreamState {
             level: 0.0,
             last_packet_ts_ms: 0,
             last_packet_wall_ms: 0,
-            last_frame_wall_ms: 0,
+            last_voice_frame_wall_ms: 0,
             plc_frames: 0,
             speaking: false,
+            last_emitted_speaking: false,
         }
     }
 }
