@@ -78,12 +78,23 @@ pub fn enumerate_input_devices() -> Vec<String> {
 #[cfg(target_os = "linux")]
 mod linux {
     use anyhow::{anyhow, Context, Result};
+    use cpal::{traits::DeviceTrait, traits::HostTrait, traits::StreamTrait, SizedSample};
     use pipewire as pw;
     use pw::properties::properties;
     use ringbuf::{traits::Producer, HeapProd};
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+
+    enum LinuxCaptureBackend {
+        PipeWire,
+        Pulse(CpalCapture),
+    }
 
     pub struct LinuxCapture {
-        _thread: std::thread::JoinHandle<()>,
+        _thread: Option<std::thread::JoinHandle<()>>,
+        backend: LinuxCaptureBackend,
     }
 
     impl LinuxCapture {
@@ -91,27 +102,56 @@ mod linux {
             sample_rate: u32,
             channels: u16,
             prod: HeapProd<i16>,
-            _preferred_device: Option<&str>,
+            preferred_device: Option<&str>,
         ) -> Result<Self> {
-            let thread = std::thread::Builder::new()
-                .name("tsod-pipewire-capture".to_string())
-                .spawn(move || {
-                    if let Err(e) = run_pipewire_capture(sample_rate, channels, prod) {
-                        eprintln!("pipewire capture thread failed: {e:#}");
-                    }
-                })
-                .context("spawn PipeWire capture thread")?;
+            if pipewire_is_available() {
+                let thread = std::thread::Builder::new()
+                    .name("tsod-pipewire-capture".to_string())
+                    .spawn(move || {
+                        if let Err(e) = run_pipewire_capture(sample_rate, channels, prod) {
+                            eprintln!("pipewire capture thread failed: {e:#}");
+                        }
+                    })
+                    .context("spawn PipeWire capture thread")?;
 
-            Ok(Self { _thread: thread })
+                return Ok(Self {
+                    _thread: Some(thread),
+                    backend: LinuxCaptureBackend::PipeWire,
+                });
+            }
+
+            eprintln!("PipeWire unavailable, falling back to PulseAudio capture via CPAL");
+            let pulse = CpalCapture::start(sample_rate, channels, prod, preferred_device)?;
+            Ok(Self {
+                _thread: None,
+                backend: LinuxCaptureBackend::Pulse(pulse),
+            })
         }
 
         pub fn enumerate_input_devices() -> Vec<String> {
-            vec!["PipeWire default input".to_string()]
+            if pipewire_is_available() {
+                return vec!["PipeWire default input".to_string()];
+            }
+            CpalCapture::enumerate_input_devices()
         }
 
         pub fn is_healthy(&self) -> bool {
-            true
+            match &self.backend {
+                LinuxCaptureBackend::PipeWire => true,
+                LinuxCaptureBackend::Pulse(cpal) => cpal.is_healthy(),
+            }
         }
+    }
+
+    fn pipewire_is_available() -> bool {
+        pw::init();
+        let Ok(mainloop) = pw::main_loop::MainLoopBox::new(None) else {
+            return false;
+        };
+        let Ok(context) = pw::context::ContextBox::new(mainloop.loop_(), None) else {
+            return false;
+        };
+        context.connect(None).is_ok()
     }
 
     fn run_pipewire_capture(
@@ -208,13 +248,301 @@ mod linux {
             )
             .context("connect PipeWire capture stream")?;
 
-        // All PipeWire objects (stream, listener, core, context) stay alive
-        // as local variables until mainloop.run() returns, then drop in
-        // reverse declaration order.
         let _listener = listener;
         mainloop.run();
         Ok(())
     }
+
+    struct LinearResampler {
+        step: f64,
+        phase: f64,
+        history: Vec<f32>,
+    }
+
+    impl LinearResampler {
+        fn new(input_rate: u32, output_rate: u32) -> Self {
+            Self {
+                step: input_rate as f64 / output_rate as f64,
+                phase: 0.0,
+                history: Vec::new(),
+            }
+        }
+
+        fn process(&mut self, input: &[f32], out: &mut Vec<f32>) {
+            if input.is_empty() {
+                return;
+            }
+
+            self.history.extend_from_slice(input);
+            while self.phase + 1.0 < self.history.len() as f64 {
+                let i0 = self.phase.floor() as usize;
+                let i1 = i0 + 1;
+                let frac = (self.phase - i0 as f64) as f32;
+                let s0 = self.history[i0];
+                let s1 = self.history[i1];
+                out.push(s0 + (s1 - s0) * frac);
+                self.phase += self.step;
+            }
+
+            let consumed = self.phase.floor() as usize;
+            if consumed > 0 {
+                self.history.drain(..consumed);
+                self.phase -= consumed as f64;
+            }
+        }
+    }
+
+    struct CpalCapture {
+        _stream: cpal::Stream,
+        unhealthy: Arc<AtomicBool>,
+    }
+
+    impl CpalCapture {
+        fn start(
+            sample_rate: u32,
+            channels: u16,
+            prod: HeapProd<i16>,
+            preferred_device: Option<&str>,
+        ) -> Result<Self> {
+            let host = cpal::default_host();
+            let dev = if let Some(name) = preferred_device {
+                find_input_device_by_name(&host, name)
+                    .with_context(|| format!("input device '{name}' not found"))?
+            } else {
+                host.default_input_device()
+                    .ok_or(anyhow!("no input device"))?
+            };
+            let stream_cfg = native_input_config(&dev)?;
+            let unhealthy = Arc::new(AtomicBool::new(false));
+            let unhealthy_cb = unhealthy.clone();
+            let stream = match stream_cfg.sample_format() {
+                cpal::SampleFormat::I8 => build_input_stream::<i8>(
+                    &dev,
+                    &stream_cfg.config(),
+                    sample_rate,
+                    channels,
+                    prod,
+                    unhealthy_cb,
+                )?,
+                cpal::SampleFormat::I16 => build_input_stream::<i16>(
+                    &dev,
+                    &stream_cfg.config(),
+                    sample_rate,
+                    channels,
+                    prod,
+                    unhealthy_cb,
+                )?,
+                cpal::SampleFormat::I32 => build_input_stream::<i32>(
+                    &dev,
+                    &stream_cfg.config(),
+                    sample_rate,
+                    channels,
+                    prod,
+                    unhealthy_cb,
+                )?,
+                cpal::SampleFormat::I64 => build_input_stream::<i64>(
+                    &dev,
+                    &stream_cfg.config(),
+                    sample_rate,
+                    channels,
+                    prod,
+                    unhealthy_cb,
+                )?,
+                cpal::SampleFormat::U8 => build_input_stream::<u8>(
+                    &dev,
+                    &stream_cfg.config(),
+                    sample_rate,
+                    channels,
+                    prod,
+                    unhealthy_cb,
+                )?,
+                cpal::SampleFormat::U16 => build_input_stream::<u16>(
+                    &dev,
+                    &stream_cfg.config(),
+                    sample_rate,
+                    channels,
+                    prod,
+                    unhealthy_cb,
+                )?,
+                cpal::SampleFormat::U32 => build_input_stream::<u32>(
+                    &dev,
+                    &stream_cfg.config(),
+                    sample_rate,
+                    channels,
+                    prod,
+                    unhealthy_cb,
+                )?,
+                cpal::SampleFormat::U64 => build_input_stream::<u64>(
+                    &dev,
+                    &stream_cfg.config(),
+                    sample_rate,
+                    channels,
+                    prod,
+                    unhealthy_cb,
+                )?,
+                cpal::SampleFormat::F32 => build_input_stream::<f32>(
+                    &dev,
+                    &stream_cfg.config(),
+                    sample_rate,
+                    channels,
+                    prod,
+                    unhealthy_cb,
+                )?,
+                cpal::SampleFormat::F64 => build_input_stream::<f64>(
+                    &dev,
+                    &stream_cfg.config(),
+                    sample_rate,
+                    channels,
+                    prod,
+                    unhealthy_cb,
+                )?,
+                other => return Err(anyhow!("unsupported input sample format: {other:?}")),
+            };
+            stream.play()?;
+            Ok(Self {
+                _stream: stream,
+                unhealthy,
+            })
+        }
+
+        fn enumerate_input_devices() -> Vec<String> {
+            let host = cpal::default_host();
+            host.input_devices()
+                .map(|devs| devs.filter_map(|d| d.name().ok()).collect())
+                .unwrap_or_default()
+        }
+
+        fn is_healthy(&self) -> bool {
+            !self.unhealthy.load(Ordering::Relaxed)
+        }
+    }
+
+    fn find_input_device_by_name(host: &cpal::Host, name: &str) -> Result<cpal::Device> {
+        let mut devices = host.input_devices().context("enumerate input devices")?;
+        devices
+            .find(|dev| dev.name().ok().as_deref() == Some(name))
+            .ok_or_else(|| anyhow!("no matching input device"))
+    }
+
+    fn native_input_config(dev: &cpal::Device) -> Result<cpal::SupportedStreamConfig> {
+        dev.default_input_config()
+            .context("no supported input configuration")
+    }
+
+    fn build_input_stream<T>(
+        dev: &cpal::Device,
+        stream_cfg: &cpal::StreamConfig,
+        target_rate: u32,
+        target_channels: u16,
+        mut prod: HeapProd<i16>,
+        unhealthy: Arc<AtomicBool>,
+    ) -> Result<cpal::Stream>
+    where
+        T: SizedSample,
+        f32: cpal::FromSample<T>,
+    {
+        let source_rate = stream_cfg.sample_rate.0;
+        let source_channels = stream_cfg.channels.max(1) as usize;
+        let target_channels = target_channels.max(1) as usize;
+        let mut resampler = LinearResampler::new(source_rate, target_rate);
+        let mut mono = Vec::<f32>::new();
+        let mut resampled = Vec::<f32>::new();
+
+        dev.build_input_stream(
+            stream_cfg,
+            move |data: &[T], _| {
+                mono.clear();
+                mono.reserve(data.len() / source_channels + 1);
+                for frame in data.chunks(source_channels) {
+                    if frame.is_empty() {
+                        continue;
+                    }
+                    let mut sum = 0.0f32;
+                    for &sample in frame {
+                        sum += sample.to_sample::<f32>();
+                    }
+                    mono.push(sum / frame.len() as f32);
+                }
+
+                resampled.clear();
+                resampler.process(&mono, &mut resampled);
+
+                for &s in &resampled {
+                    let v = (s.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16;
+                    for _ in 0..target_channels {
+                        let _ = prod.try_push(v);
+                    }
+                }
+            },
+            move |err| {
+                unhealthy.store(true, Ordering::Relaxed);
+                eprintln!("capture err: {err}")
+            },
+            None,
+        )
+        .context("build input stream")
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+type CaptureBackend = non_linux::CpalCapture;
+
+unsafe impl Send for Capture {}
+unsafe impl Sync for Capture {}
+
+impl Capture {
+    pub fn start(sample_rate: u32, channels: u16, frame_ms: u32) -> Result<Self> {
+        Self::start_with_device(sample_rate, channels, frame_ms, None)
+    }
+
+    pub fn start_with_device(
+        sample_rate: u32,
+        channels: u16,
+        frame_ms: u32,
+        preferred_device: Option<&str>,
+    ) -> Result<Self> {
+        let frame_samples = (sample_rate as usize * frame_ms as usize / 1000) * channels as usize;
+        let rb = HeapRb::<i16>::new(frame_samples * 50);
+        let (prod, cons) = rb.split();
+
+        #[cfg(target_os = "linux")]
+        let backend = CaptureBackend::start(sample_rate, channels, prod, preferred_device)?;
+
+        #[cfg(not(target_os = "linux"))]
+        let backend = CaptureBackend::start(sample_rate, channels, prod, preferred_device)?;
+
+        Ok(Self {
+            backend,
+            cons: UnsafeCell::new(cons),
+            frame_samples,
+        })
+    }
+
+    pub fn read_frame(&self, out: &mut [i16]) -> bool {
+        let _ = &self.backend;
+        if out.len() != self.frame_samples {
+            return false;
+        }
+        let mut got = 0usize;
+        let cons = unsafe { &mut *self.cons.get() };
+        while got < out.len() {
+            if let Some(v) = cons.try_pop() {
+                out[got] = v;
+                got += 1;
+            } else {
+                break;
+            }
+        }
+        got == out.len()
+    }
+
+    pub fn is_healthy(&self) -> bool {
+        self.backend.is_healthy()
+    }
+}
+
+pub fn enumerate_input_devices() -> Vec<String> {
+    CaptureBackend::enumerate_input_devices()
 }
 
 #[cfg(not(target_os = "linux"))]
