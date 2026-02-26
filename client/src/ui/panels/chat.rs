@@ -1,4 +1,4 @@
-//! Chat panel: message display, input bar, typing indicators.
+//! Chat panel: message display, input bar, typing indicators, Discord-like drag overlay.
 
 use crate::ui::model::{AttachmentData, ChatMessage, PendingAttachment, UiIntent, UiModel};
 use crate::ui::theme;
@@ -6,6 +6,7 @@ use chrono::{Days, Local, NaiveDate, TimeZone};
 use crossbeam_channel::Sender;
 use eframe::egui;
 use std::path::Path;
+use std::time::{Duration, Instant};
 use tracing::debug;
 
 const MESSAGE_GROUP_WINDOW_MS: i64 = 5 * 60 * 1000;
@@ -20,8 +21,20 @@ const ALLOWED_ATTACHMENT_MIME: &[&str] = &[
     "video/webm",
 ];
 
+/// Duration the overlay stays fully visible after a drop.
+const OVERLAY_HOLD_MS: u64 = 600;
+/// Duration of the fade-out after the hold period.
+const OVERLAY_FADE_MS: u64 = 400;
+
+/// Height of a single attachment preview card in the composer strip.
+const PREVIEW_CARD_HEIGHT: f32 = 86.0;
+
 pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>) {
-    collect_dropped_files(ui.ctx(), model);
+    let chat_rect = ui.max_rect();
+    let shift_held = ui.ctx().input(|i| i.modifiers.shift);
+
+    // Handle drag-and-drop (overlay state + file collection + shift-drop)
+    handle_drag_and_drop(ui.ctx(), model, tx_intent, chat_rect, shift_held);
 
     // Channel header
     ui.horizontal(|ui| {
@@ -34,8 +47,15 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
     });
     ui.separator();
 
-    // Messages area (takes remaining space minus input)
-    let available = ui.available_height() - 64.0; // reserve space for typing + compact input
+    // Reserve space for bottom area: typing + separator + preview strip + input
+    let preview_height = if model.pending_attachments.is_empty() {
+        0.0
+    } else {
+        PREVIEW_CARD_HEIGHT + 12.0
+    };
+    let available = ui.available_height() - 64.0 - preview_height;
+
+    // Messages area
     egui::ScrollArea::vertical()
         .max_height(available.max(100.0))
         .stick_to_bottom(true)
@@ -87,17 +107,23 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
         );
     }
 
-    let lower_input_spacer = (ui.available_height() - 34.0).max(2.0);
+    let lower_input_spacer = (ui.available_height() - 34.0 - preview_height).max(2.0);
     ui.add_space(lower_input_spacer);
     ui.separator();
 
-    show_pending_attachments(ui, model);
+    // Discord-like attachment preview strip (above the input bar)
+    show_attachment_preview_strip(ui, model);
 
     // Input bar
     ui.horizontal(|ui| {
+        let hint = if !model.pending_attachments.is_empty() {
+            "Add a comment..."
+        } else {
+            "Type a message..."
+        };
         let response = ui.add(
             egui::TextEdit::singleline(&mut model.chat_input)
-                .hint_text("Type a message...")
+                .hint_text(hint)
                 .desired_width(ui.available_width() - 70.0)
                 .frame(true),
         );
@@ -114,9 +140,482 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
         }
     });
 
-    // Notifications overlay
+    // === Overlays (painted on top of everything) ===
+    show_drag_overlay(ui, model, chat_rect);
     show_notifications(ui, model);
 }
+
+// ── Drag-and-drop handling ──────────────────────────────────────────────
+
+fn handle_drag_and_drop(
+    ctx: &egui::Context,
+    model: &mut UiModel,
+    tx_intent: &Sender<UiIntent>,
+    chat_rect: egui::Rect,
+    shift_held: bool,
+) {
+    let (hovered_files, dropped_files, pointer_pos) = ctx.input(|i| {
+        (
+            i.raw.hovered_files.clone(),
+            i.raw.dropped_files.clone(),
+            i.pointer.hover_pos(),
+        )
+    });
+
+    // Check if pointer is inside the chat panel area
+    let pointer_in_chat = pointer_pos.is_some_and(|pos| chat_rect.contains(pos));
+
+    // Update hover state: files hovering AND pointer over chat panel
+    model.drag_hovering = !hovered_files.is_empty() && pointer_in_chat;
+
+    // Process dropped files
+    if !dropped_files.is_empty() && pointer_in_chat {
+        // Set overlay hold timer (visible briefly after drop)
+        model.drag_overlay_until =
+            Some(Instant::now() + Duration::from_millis(OVERLAY_HOLD_MS + OVERLAY_FADE_MS));
+
+        let mut added_any = false;
+        for dropped in &dropped_files {
+            let Some(ref path) = dropped.path else {
+                continue;
+            };
+            let filename = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("attachment")
+                .to_string();
+            let mime_type = detect_mime_type(path, &dropped.mime);
+            let size_bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+
+            let mut error = None;
+            if !ALLOWED_ATTACHMENT_MIME.contains(&mime_type.as_str()) {
+                error = Some("Unsupported file type".to_string());
+            } else if size_bytes > MAX_ATTACHMENT_BYTES {
+                error = Some("File exceeds 25MB limit".to_string());
+            }
+
+            model.pending_attachments.push(PendingAttachment {
+                path: path.to_string_lossy().to_string(),
+                filename,
+                mime_type,
+                size_bytes,
+                error,
+            });
+            added_any = true;
+        }
+
+        // Shift-drop: immediately send (if no validation errors)
+        if shift_held && added_any {
+            send_chat_from_input(model, tx_intent);
+        }
+
+        // Request repaint for overlay animation
+        ctx.request_repaint();
+    }
+
+    // Keep repainting while overlay is visible (for fade animation)
+    if model.drag_hovering || model.drag_overlay_until.is_some_and(|t| Instant::now() < t) {
+        ctx.request_repaint_after(Duration::from_millis(16));
+    }
+}
+
+// ── Discord-like drag overlay ───────────────────────────────────────────
+
+fn show_drag_overlay(ui: &mut egui::Ui, model: &mut UiModel, chat_rect: egui::Rect) {
+    let now = Instant::now();
+
+    // Compute overlay alpha
+    let alpha = if model.drag_hovering {
+        1.0_f32
+    } else if let Some(until) = model.drag_overlay_until {
+        if now >= until {
+            model.drag_overlay_until = None;
+            return;
+        }
+        let remaining = until.duration_since(now).as_millis() as f32;
+        let fade_ms = OVERLAY_FADE_MS as f32;
+        if remaining > fade_ms {
+            1.0 // Still in the hold period
+        } else {
+            remaining / fade_ms // Fading out
+        }
+    } else {
+        return; // No overlay to show
+    };
+
+    let painter = ui.painter();
+
+    // Dim the entire chat panel with semi-transparent dark overlay
+    let dim_color = egui::Color32::from_black_alpha((180.0 * alpha) as u8);
+    painter.rect_filled(chat_rect, 0.0, dim_color);
+
+    // Center card dimensions
+    let card_width = 360.0_f32.min(chat_rect.width() - 40.0);
+    let card_height = 200.0;
+    let card_rect = egui::Rect::from_center_size(
+        chat_rect.center(),
+        egui::vec2(card_width, card_height),
+    );
+
+    // Card background
+    let card_bg = egui::Color32::from_rgba_premultiplied(
+        (43.0 * alpha) as u8,
+        (45.0 * alpha) as u8,
+        (49.0 * alpha) as u8,
+        (240.0 * alpha) as u8,
+    );
+    let card_rounding = egui::Rounding::same(12.0);
+    painter.rect_filled(card_rect, card_rounding, card_bg);
+
+    // Dashed border
+    let dash_color = egui::Color32::from_rgba_premultiplied(
+        (88.0 * alpha) as u8,
+        (101.0 * alpha) as u8,
+        (242.0 * alpha) as u8,
+        (200.0 * alpha) as u8,
+    );
+    let inset = card_rect.shrink(6.0);
+    draw_dashed_rect(painter, inset, 8.0, dash_color, 10.0, 6.0, 2.0);
+
+    // Channel name
+    let channel_name = if model.selected_channel_name.is_empty() {
+        "channel".to_string()
+    } else {
+        model.selected_channel_name.clone()
+    };
+
+    // Upload icon (large centered arrow)
+    let icon_y = card_rect.center().y - 40.0;
+    painter.text(
+        egui::pos2(card_rect.center().x, icon_y),
+        egui::Align2::CENTER_CENTER,
+        "\u{2B06}", // upward arrow
+        egui::FontId::proportional(36.0),
+        egui::Color32::from_rgba_premultiplied(
+            (88.0 * alpha) as u8,
+            (101.0 * alpha) as u8,
+            (242.0 * alpha) as u8,
+            (255.0 * alpha) as u8,
+        ),
+    );
+
+    // Headline: "Upload to #channel-name"
+    let headline_y = card_rect.center().y + 10.0;
+    painter.text(
+        egui::pos2(card_rect.center().x, headline_y),
+        egui::Align2::CENTER_CENTER,
+        format!("Upload to #{channel_name}"),
+        egui::FontId::proportional(18.0),
+        egui::Color32::from_rgba_premultiplied(
+            (219.0 * alpha) as u8,
+            (222.0 * alpha) as u8,
+            (225.0 * alpha) as u8,
+            (255.0 * alpha) as u8,
+        ),
+    );
+
+    // Subtext
+    let sub_y = headline_y + 24.0;
+    painter.text(
+        egui::pos2(card_rect.center().x, sub_y),
+        egui::Align2::CENTER_CENTER,
+        "You can add comments before uploading.",
+        egui::FontId::proportional(13.0),
+        egui::Color32::from_rgba_premultiplied(
+            (148.0 * alpha) as u8,
+            (155.0 * alpha) as u8,
+            (164.0 * alpha) as u8,
+            (255.0 * alpha) as u8,
+        ),
+    );
+
+    // Hint
+    let hint_y = sub_y + 20.0;
+    painter.text(
+        egui::pos2(card_rect.center().x, hint_y),
+        egui::Align2::CENTER_CENTER,
+        "Hold Shift to upload directly.",
+        egui::FontId::proportional(11.0),
+        egui::Color32::from_rgba_premultiplied(
+            (96.0 * alpha) as u8,
+            (100.0 * alpha) as u8,
+            (108.0 * alpha) as u8,
+            (220.0 * alpha) as u8,
+        ),
+    );
+}
+
+/// Draw a dashed rectangle outline (straight sides, no corner arcs).
+fn draw_dashed_rect(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    rounding: f32,
+    color: egui::Color32,
+    dash_len: f32,
+    gap_len: f32,
+    width: f32,
+) {
+    let stroke = egui::Stroke::new(width, color);
+    let r = rounding;
+
+    // Top side
+    draw_dashed_line(
+        painter,
+        egui::pos2(rect.left() + r, rect.top()),
+        egui::pos2(rect.right() - r, rect.top()),
+        dash_len,
+        gap_len,
+        stroke,
+    );
+    // Bottom side
+    draw_dashed_line(
+        painter,
+        egui::pos2(rect.left() + r, rect.bottom()),
+        egui::pos2(rect.right() - r, rect.bottom()),
+        dash_len,
+        gap_len,
+        stroke,
+    );
+    // Left side
+    draw_dashed_line(
+        painter,
+        egui::pos2(rect.left(), rect.top() + r),
+        egui::pos2(rect.left(), rect.bottom() - r),
+        dash_len,
+        gap_len,
+        stroke,
+    );
+    // Right side
+    draw_dashed_line(
+        painter,
+        egui::pos2(rect.right(), rect.top() + r),
+        egui::pos2(rect.right(), rect.bottom() - r),
+        dash_len,
+        gap_len,
+        stroke,
+    );
+
+    // Rounded corners using small arc segments
+    let segments = 6;
+    for corner in 0..4 {
+        let (cx, cy, angle_start) = match corner {
+            0 => (rect.left() + r, rect.top() + r, std::f32::consts::PI),
+            1 => (
+                rect.right() - r,
+                rect.top() + r,
+                std::f32::consts::FRAC_PI_2 * 3.0,
+            ),
+            2 => (rect.right() - r, rect.bottom() - r, 0.0),
+            _ => (rect.left() + r, rect.bottom() - r, std::f32::consts::FRAC_PI_2),
+        };
+        let angle_step = std::f32::consts::FRAC_PI_2 / segments as f32;
+        for s in (0..segments).step_by(2) {
+            let a0 = angle_start + s as f32 * angle_step;
+            let a1 = angle_start + (s + 1).min(segments) as f32 * angle_step;
+            let p0 = egui::pos2(cx + r * a0.cos(), cy - r * a0.sin());
+            let p1 = egui::pos2(cx + r * a1.cos(), cy - r * a1.sin());
+            painter.line_segment([p0, p1], stroke);
+        }
+    }
+}
+
+fn draw_dashed_line(
+    painter: &egui::Painter,
+    start: egui::Pos2,
+    end: egui::Pos2,
+    dash_len: f32,
+    gap_len: f32,
+    stroke: egui::Stroke,
+) {
+    let delta = end - start;
+    let total = delta.length();
+    if total < 0.1 {
+        return;
+    }
+    let dir = delta / total;
+    let step = dash_len + gap_len;
+    let mut t = 0.0;
+    while t < total {
+        let a = start + dir * t;
+        let b = start + dir * (t + dash_len).min(total);
+        painter.line_segment([a, b], stroke);
+        t += step;
+    }
+}
+
+// ── Attachment preview strip (Discord-like, above input) ────────────────
+
+fn show_attachment_preview_strip(ui: &mut egui::Ui, model: &mut UiModel) {
+    if model.pending_attachments.is_empty() {
+        return;
+    }
+
+    let mut remove_idx: Option<usize> = None;
+
+    egui::Frame::default()
+        .fill(theme::bg_medium())
+        .inner_margin(egui::Margin::symmetric(8.0, 6.0))
+        .outer_margin(egui::Margin {
+            left: 0.0,
+            right: 0.0,
+            top: 0.0,
+            bottom: 4.0,
+        })
+        .rounding(egui::Rounding {
+            nw: 8.0,
+            ne: 8.0,
+            sw: 0.0,
+            se: 0.0,
+        })
+        .show(ui, |ui: &mut egui::Ui| {
+            ui.horizontal(|ui: &mut egui::Ui| {
+                for (idx, file) in model.pending_attachments.iter().enumerate() {
+                    let is_image = file.mime_type.starts_with("image/");
+                    let has_error = file.error.is_some();
+
+                    // Card frame for each attachment
+                    let card_fill = if has_error {
+                        theme::COLOR_DANGER.linear_multiply(0.15)
+                    } else {
+                        theme::bg_light()
+                    };
+                    let card_stroke = if has_error {
+                        egui::Stroke::new(1.0, theme::COLOR_DANGER.linear_multiply(0.5))
+                    } else {
+                        egui::Stroke::NONE
+                    };
+
+                    egui::Frame::default()
+                        .fill(card_fill)
+                        .stroke(card_stroke)
+                        .inner_margin(egui::Margin::same(4.0))
+                        .rounding(egui::Rounding::same(6.0))
+                        .show(ui, |ui: &mut egui::Ui| {
+                            ui.set_max_height(PREVIEW_CARD_HEIGHT - 12.0);
+
+                            if is_image && !has_error {
+                                // Image thumbnail preview
+                                ui.vertical(|ui: &mut egui::Ui| {
+                                    let uri = format!("file://{}", file.path);
+                                    let image = egui::Image::from_uri(uri)
+                                        .max_width(80.0)
+                                        .max_height(52.0)
+                                        .maintain_aspect_ratio(true)
+                                        .rounding(egui::Rounding::same(4.0));
+                                    ui.add(image);
+
+                                    // Filename + remove button row
+                                    ui.horizontal(|ui: &mut egui::Ui| {
+                                        ui.label(
+                                            egui::RichText::new(truncate_filename(
+                                                &file.filename,
+                                                14,
+                                            ))
+                                            .small()
+                                            .color(theme::text_dim()),
+                                        );
+                                        if ui
+                                            .add(
+                                                egui::Button::new(
+                                                    egui::RichText::new("\u{2715}")
+                                                        .small()
+                                                        .color(theme::text_muted()),
+                                                )
+                                                .small()
+                                                .frame(false),
+                                            )
+                                            .clicked()
+                                        {
+                                            remove_idx = Some(idx);
+                                        }
+                                    });
+                                });
+                            } else {
+                                // File/video card or errored attachment
+                                ui.vertical(|ui: &mut egui::Ui| {
+                                    let icon = if file.mime_type.starts_with("video/") {
+                                        "\u{1F3AC}" // movie clapper
+                                    } else {
+                                        "\u{1F4CE}" // paperclip
+                                    };
+                                    ui.label(
+                                        egui::RichText::new(icon)
+                                            .size(22.0)
+                                            .color(theme::text_dim()),
+                                    );
+
+                                    ui.label(
+                                        egui::RichText::new(truncate_filename(
+                                            &file.filename,
+                                            16,
+                                        ))
+                                        .small()
+                                        .color(if has_error {
+                                            theme::COLOR_DANGER
+                                        } else {
+                                            theme::text_color()
+                                        }),
+                                    );
+
+                                    let detail = file
+                                        .error
+                                        .clone()
+                                        .unwrap_or_else(|| format_size(file.size_bytes));
+                                    ui.label(
+                                        egui::RichText::new(detail).small().color(if has_error {
+                                            theme::COLOR_DANGER
+                                        } else {
+                                            theme::text_muted()
+                                        }),
+                                    );
+
+                                    ui.horizontal(|ui: &mut egui::Ui| {
+                                        if ui
+                                            .add(
+                                                egui::Button::new(
+                                                    egui::RichText::new("\u{2715} Remove")
+                                                        .small()
+                                                        .color(theme::text_muted()),
+                                                )
+                                                .small()
+                                                .frame(false),
+                                            )
+                                            .clicked()
+                                        {
+                                            remove_idx = Some(idx);
+                                        }
+                                    });
+                                });
+                            }
+                        });
+
+                    // Small spacing between cards
+                    ui.add_space(4.0);
+                }
+            });
+        });
+
+    if let Some(idx) = remove_idx {
+        model.pending_attachments.remove(idx);
+    }
+}
+
+fn truncate_filename(name: &str, max_len: usize) -> String {
+    if name.len() <= max_len {
+        return name.to_string();
+    }
+    // Keep extension visible
+    if let Some(dot) = name.rfind('.') {
+        let ext = &name[dot..];
+        let prefix_len = max_len.saturating_sub(ext.len() + 2);
+        if prefix_len > 0 {
+            return format!("{}..{ext}", &name[..prefix_len]);
+        }
+    }
+    format!("{}..", &name[..max_len.saturating_sub(2)])
+}
+
+// ── Send logic ──────────────────────────────────────────────────────────
 
 fn send_chat_from_input(model: &mut UiModel, tx_intent: &Sender<UiIntent>) {
     let text = model.chat_input.trim().to_string();
@@ -143,71 +642,11 @@ fn send_chat_from_input(model: &mut UiModel, tx_intent: &Sender<UiIntent>) {
 
     let _ = tx_intent.send(UiIntent::SendChat { text, attachments });
     model.chat_input.clear();
+    model.pending_attachments.clear();
+    model.clear_current_draft();
 }
 
-fn show_pending_attachments(ui: &mut egui::Ui, model: &mut UiModel) {
-    if model.pending_attachments.is_empty() {
-        return;
-    }
-
-    ui.group(|ui| {
-        ui.label(egui::RichText::new("Pending attachments").small().strong());
-        let mut remove_idx = None;
-        for (idx, file) in model.pending_attachments.iter().enumerate() {
-            ui.horizontal(|ui| {
-                let status = file
-                    .error
-                    .clone()
-                    .unwrap_or_else(|| format_size(file.size_bytes));
-                let text = if file.error.is_some() {
-                    egui::RichText::new(format!("{} ({status})", file.filename))
-                        .color(theme::COLOR_DANGER)
-                } else {
-                    egui::RichText::new(format!("{} ({status})", file.filename))
-                };
-                ui.label(text);
-                if ui.small_button("Remove").clicked() {
-                    remove_idx = Some(idx);
-                }
-            });
-        }
-        if let Some(idx) = remove_idx {
-            model.pending_attachments.remove(idx);
-        }
-    });
-    ui.add_space(4.0);
-}
-
-fn collect_dropped_files(ctx: &egui::Context, model: &mut UiModel) {
-    let dropped_files = ctx.input(|i| i.raw.dropped_files.clone());
-    for dropped in dropped_files {
-        let Some(path) = dropped.path else {
-            continue;
-        };
-        let filename = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("attachment")
-            .to_string();
-        let mime_type = detect_mime_type(&path, &dropped.mime);
-        let size_bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-
-        let mut error = None;
-        if !ALLOWED_ATTACHMENT_MIME.contains(&mime_type.as_str()) {
-            error = Some("Unsupported file type".to_string());
-        } else if size_bytes > MAX_ATTACHMENT_BYTES {
-            error = Some("File exceeds 25MB limit".to_string());
-        }
-
-        model.pending_attachments.push(PendingAttachment {
-            path: path.to_string_lossy().to_string(),
-            filename,
-            mime_type,
-            size_bytes,
-            error,
-        });
-    }
-}
+// ── Message rendering (unchanged) ───────────────────────────────────────
 
 fn detect_mime_type(path: &Path, raw_mime: &str) -> String {
     if !raw_mime.is_empty() {
@@ -232,7 +671,12 @@ fn detect_mime_type(path: &Path, raw_mime: &str) -> String {
     .to_string()
 }
 
-fn show_message(ui: &mut egui::Ui, msg: &ChatMessage, grouped: bool, tx_intent: &Sender<UiIntent>) {
+fn show_message(
+    ui: &mut egui::Ui,
+    msg: &ChatMessage,
+    grouped: bool,
+    tx_intent: &Sender<UiIntent>,
+) {
     ui.horizontal(|ui| {
         if !grouped {
             // Full message with author + timestamp
@@ -253,7 +697,7 @@ fn show_message(ui: &mut egui::Ui, msg: &ChatMessage, grouped: bool, tx_intent: 
                         );
                     }
                     if msg.pinned {
-                        ui.label(egui::RichText::new("📌").small());
+                        ui.label(egui::RichText::new("\u{1F4CC}").small());
                     }
                 });
                 show_message_content(ui, msg, tx_intent);
@@ -367,7 +811,7 @@ fn show_message_content(ui: &mut egui::Ui, msg: &ChatMessage, tx_intent: &Sender
         if att.mime_type.starts_with("image/") {
             show_image_attachment(ui, att);
         } else {
-            show_file_attachment(ui, att, "🎞");
+            show_file_attachment(ui, att, "\u{1F39E}");
         }
     }
 
@@ -410,7 +854,7 @@ fn show_image_attachment(ui: &mut egui::Ui, att: &AttachmentData) {
         format!("file://{}", att.asset_id)
     };
     ui.horizontal(|ui| {
-        ui.label("🖼");
+        ui.label("\u{1F5BC}");
         let response = ui.add(
             egui::Label::new(
                 egui::RichText::new(format!(
@@ -564,8 +1008,10 @@ fn show_notifications(ui: &mut egui::Ui, model: &UiModel) {
             crate::ui::model::NotificationKind::Info => theme::COLOR_ACCENT,
         };
 
-        let notif_rect =
-            egui::Rect::from_min_size(egui::pos2(rect.right() - 300.0, y), egui::vec2(280.0, 30.0));
+        let notif_rect = egui::Rect::from_min_size(
+            egui::pos2(rect.right() - 300.0, y),
+            egui::vec2(280.0, 30.0),
+        );
         ui.painter()
             .rect_filled(notif_rect, 6.0, color.linear_multiply(0.9));
         ui.painter().text(
@@ -600,10 +1046,10 @@ fn format_size(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        format_day_label, format_timestamp, linkify_message, should_group_messages, ChatMessage,
-        MessageSegment, MESSAGE_GROUP_WINDOW_MS,
+        format_day_label, format_timestamp, linkify_message, should_group_messages,
+        truncate_filename, ChatMessage, MessageSegment, MESSAGE_GROUP_WINDOW_MS,
     };
-    use chrono::{DateTime, Days, Local};
+    use chrono::{Days, Local, TimeZone};
 
     fn msg(author_id: &str, timestamp: i64) -> ChatMessage {
         ChatMessage {
@@ -624,7 +1070,9 @@ mod tests {
     #[test]
     fn formats_timestamp_using_local_time() {
         let unix_millis = 1_710_000_000_000_i64;
-        let expected = DateTime::<Local>::from_timestamp_millis(unix_millis)
+        let expected = Local
+            .timestamp_millis_opt(unix_millis)
+            .single()
             .unwrap()
             .format("%H:%M")
             .to_string();
@@ -707,5 +1155,15 @@ mod tests {
                 MessageSegment::Text("). done".into()),
             ]
         );
+    }
+
+    #[test]
+    fn truncate_preserves_extension() {
+        assert_eq!(truncate_filename("screenshot.png", 14), "screenshot.png");
+        assert_eq!(
+            truncate_filename("very_long_screenshot_name.png", 14),
+            "very_lon...png"
+        );
+        assert_eq!(truncate_filename("short.jpg", 20), "short.jpg");
     }
 }
