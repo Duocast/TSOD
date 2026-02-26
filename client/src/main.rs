@@ -1175,12 +1175,6 @@ async fn connect_and_run_session(
                                         away_message: status.custom_status_text,
                                     });
                                 }
-                                other => {
-                                    let _ = tx_event.send(UiEvent::AppendLog(format!(
-                                        "[presence] {:?}",
-                                        other
-                                    )));
-                                }
                             }
                         }
                     }
