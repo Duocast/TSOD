@@ -175,6 +175,18 @@ async fn app_task(
         cfg.display_name = saved_settings.identity_nickname.trim().to_string();
         let _ = tx_event.send(UiEvent::SetNick(cfg.display_name.clone()));
     }
+    if !saved_settings.last_server_host.trim().is_empty() {
+        cfg.server = format!(
+            "{}:{}",
+            saved_settings.last_server_host.trim(),
+            saved_settings.last_server_port
+        );
+        cfg.server_name = saved_settings.last_server_host.trim().to_string();
+        let _ = tx_event.send(UiEvent::SetServerAddress {
+            host: saved_settings.last_server_host.trim().to_string(),
+            port: saved_settings.last_server_port,
+        });
+    }
     let _ = tx_event.send(UiEvent::SettingsLoaded(Box::new(saved_settings.clone())));
 
     // Audio constants

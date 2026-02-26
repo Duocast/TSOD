@@ -97,8 +97,10 @@ impl VpApp {
         self.model.connection_error.clear();
         self.model.settings.identity_nickname = nickname.clone();
         self.model.settings.last_server_host = host.clone();
+        self.model.settings.last_server_port = port;
         self.model.settings_draft.identity_nickname = nickname.clone();
         self.model.settings_draft.last_server_host = host.clone();
+        self.model.settings_draft.last_server_port = port;
         let _ = crate::settings_io::save_settings(&self.model.settings);
         let _ = self.tx_intent.send(UiIntent::SaveSettings(Box::new(
             self.model.settings.clone(),
