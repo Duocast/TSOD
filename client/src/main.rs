@@ -1326,6 +1326,7 @@ async fn connect_and_run_session(
 
     let (voice_die_tx, mut voice_die_rx) = watch::channel::<bool>(false);
     let _session_voice_flag = SessionVoiceFlag::new(session_voice_active.clone());
+    let _ = tx_event.send(UiEvent::VoiceSessionHealth(true));
 
     let _voice_send = tokio::spawn(voice_send_loop(
         conn.clone(),
@@ -1903,16 +1904,21 @@ async fn connect_and_run_session(
             }
 
             _ = shutdown_rx.changed() => {
-                if *shutdown_rx.borrow() { return Ok(()); }
+                if *shutdown_rx.borrow() {
+                    let _ = tx_event.send(UiEvent::VoiceSessionHealth(false));
+                    return Ok(());
+                }
             }
 
             _ = voice_die_rx.changed() => {
                 if *voice_die_rx.borrow() {
+                    let _ = tx_event.send(UiEvent::VoiceSessionHealth(false));
                     return Err(anyhow!("voice loop terminated"));
                 }
             }
 
             r = &mut ctl_keepalive => {
+                let _ = tx_event.send(UiEvent::VoiceSessionHealth(false));
                 return Err(anyhow!("control keepalive ended: {:?}", r));
             }
         }

@@ -64,6 +64,7 @@ pub enum UiEvent {
         streaming: bool,
     },
     SetActiveVoiceRoute(u32),
+    VoiceSessionHealth(bool),
     TypingIndicator {
         channel_id: String,
         user_name: String,
@@ -761,6 +762,7 @@ pub struct UiModel {
     pub self_deafened: bool,
     pub vad_level: Option<f32>,
     pub active_voice_channel_route: u32,
+    pub voice_session_healthy: bool,
 
     // Log
     pub log: VecDeque<String>,
@@ -927,6 +929,7 @@ impl Default for UiModel {
             self_deafened: false,
             vad_level: None,
             active_voice_channel_route: 0,
+            voice_session_healthy: false,
             log: VecDeque::new(),
             telemetry: TelemetryData::default(),
             show_settings: false,
@@ -1222,6 +1225,7 @@ impl UiModel {
                 }
             }
             UiEvent::SetActiveVoiceRoute(route) => self.active_voice_channel_route = route,
+            UiEvent::VoiceSessionHealth(healthy) => self.voice_session_healthy = healthy,
             UiEvent::VadLevel(v) => self.vad_level = Some(v),
             UiEvent::MicTestWaveform(samples) => self.mic_test_waveform = samples,
             UiEvent::VoiceActivity { user_id, speaking } => {
