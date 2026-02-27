@@ -376,7 +376,7 @@ mod linux {
         fn enumerate_input_devices() -> Vec<String> {
             let host = cpal::default_host();
             host.input_devices()
-                .map(|devs| devs.filter_map(|d| d.description().ok().map(|desc| desc.name().to_string())).collect())
+                .map(|devs| devs.filter_map(|d| device_name(&d)).collect())
                 .unwrap_or_default()
         }
 
@@ -385,10 +385,49 @@ mod linux {
         }
     }
 
+    fn device_name(device: &cpal::Device) -> Option<String> {
+        let description = device.description().ok();
+        if let Some(desc) = description {
+            let base = desc.name().trim();
+            if base.is_empty() {
+                return None;
+            }
+
+            let extended = desc
+                .extended()
+                .iter()
+                .map(|line| line.trim())
+                .find(|line| !line.is_empty() && *line != base);
+            if let Some(name) = extended {
+                return Some(name.to_string());
+            }
+
+            if let Some(driver) = desc.driver().map(str::trim) {
+                if !driver.is_empty() && driver != base {
+                    return Some(driver.to_string());
+                }
+            }
+
+            if let Some(manufacturer) = desc.manufacturer().map(str::trim) {
+                if !manufacturer.is_empty()
+                    && !base
+                        .to_ascii_lowercase()
+                        .contains(&manufacturer.to_ascii_lowercase())
+                {
+                    return Some(format!("{base} ({manufacturer})"));
+                }
+            }
+
+            return Some(base.to_string());
+        }
+
+        device.name().ok().filter(|name| !name.trim().is_empty())
+    }
+
     fn find_input_device_by_name(host: &cpal::Host, name: &str) -> Result<cpal::Device> {
         let mut devices = host.input_devices().context("enumerate input devices")?;
         devices
-            .find(|dev| dev.description().ok().map(|d| d.name().to_string()).as_deref() == Some(name))
+            .find(|dev| device_name(dev).as_deref() == Some(name))
             .ok_or_else(|| anyhow!("no matching input device"))
     }
 
@@ -580,7 +619,7 @@ mod non_linux {
         pub fn enumerate_input_devices() -> Vec<String> {
             let host = cpal::default_host();
             host.input_devices()
-                .map(|devs| devs.filter_map(|d| d.description().ok().map(|desc| desc.name().to_string())).collect())
+                .map(|devs| devs.filter_map(|d| device_name(&d)).collect())
                 .unwrap_or_default()
         }
 
@@ -589,10 +628,49 @@ mod non_linux {
         }
     }
 
+    fn device_name(device: &cpal::Device) -> Option<String> {
+        let description = device.description().ok();
+        if let Some(desc) = description {
+            let base = desc.name().trim();
+            if base.is_empty() {
+                return None;
+            }
+
+            let extended = desc
+                .extended()
+                .iter()
+                .map(|line| line.trim())
+                .find(|line| !line.is_empty() && *line != base);
+            if let Some(name) = extended {
+                return Some(name.to_string());
+            }
+
+            if let Some(driver) = desc.driver().map(str::trim) {
+                if !driver.is_empty() && driver != base {
+                    return Some(driver.to_string());
+                }
+            }
+
+            if let Some(manufacturer) = desc.manufacturer().map(str::trim) {
+                if !manufacturer.is_empty()
+                    && !base
+                        .to_ascii_lowercase()
+                        .contains(&manufacturer.to_ascii_lowercase())
+                {
+                    return Some(format!("{base} ({manufacturer})"));
+                }
+            }
+
+            return Some(base.to_string());
+        }
+
+        device.name().ok().filter(|name| !name.trim().is_empty())
+    }
+
     fn find_input_device_by_name(host: &cpal::Host, name: &str) -> Result<cpal::Device> {
         let mut devices = host.input_devices().context("enumerate input devices")?;
         devices
-            .find(|dev| dev.description().ok().map(|d| d.name().to_string()).as_deref() == Some(name))
+            .find(|dev| device_name(dev).as_deref() == Some(name))
             .ok_or_else(|| anyhow!("no matching input device"))
     }
 
