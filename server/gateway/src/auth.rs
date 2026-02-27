@@ -75,12 +75,13 @@ impl AuthProvider for DeviceAuthProvider {
 
                 let user_id = lookup_or_create_user_for_device(
                     &self.pool,
+                    self.default_server_id,
                     parsed_device_id,
                     &device.device_pubkey,
                 )
                 .await?;
 
-                let is_admin = is_user_admin(&self.pool, user_id).await?;
+                let is_admin = is_user_admin(&self.pool, self.default_server_id, user_id).await?;
 
                 Ok(AuthedIdentity {
                     user_id: user_id.to_string(),
@@ -96,10 +97,13 @@ impl AuthProvider for DeviceAuthProvider {
 
 async fn lookup_or_create_user_for_device(
     pool: &Pool<Postgres>,
+    server_id: uuid::Uuid,
     device_id: uuid::Uuid,
     pubkey: &[u8],
 ) -> Result<uuid::Uuid> {
     let mut tx = pool.begin().await.context("begin device auth tx")?;
+
+    ensure_server_rbac_defaults(&mut tx, server_id).await?;
 
     let existing = sqlx::query(
         r#"
@@ -136,6 +140,8 @@ async fn lookup_or_create_user_for_device(
         .await
         .context("update device last_seen")?;
 
+        assign_default_member_role(&mut tx, server_id, existing_user_id).await?;
+
         tx.commit().await.context("commit existing device auth")?;
         return Ok(existing_user_id);
     }
@@ -151,6 +157,8 @@ async fn lookup_or_create_user_for_device(
     .execute(&mut *tx)
     .await
     .context("insert auth user")?;
+
+    assign_default_member_role(&mut tx, server_id, user_id).await?;
 
     let insert_res = sqlx::query(
         r#"
@@ -205,6 +213,7 @@ async fn lookup_or_create_user_for_device(
                 .execute(&mut *tx)
                 .await
                 .context("update device last_seen after conflict")?;
+                assign_default_member_role(&mut tx, server_id, existing_user_id).await?;
                 tx.commit().await.context("commit conflict device auth")?;
                 return Ok(existing_user_id);
             }
@@ -216,20 +225,96 @@ async fn lookup_or_create_user_for_device(
     Ok(user_id)
 }
 
-async fn is_user_admin(pool: &Pool<Postgres>, user_id: uuid::Uuid) -> Result<bool> {
+async fn is_user_admin(
+    pool: &Pool<Postgres>,
+    server_id: uuid::Uuid,
+    user_id: uuid::Uuid,
+) -> Result<bool> {
     let row = sqlx::query(
         r#"
         SELECT EXISTS(
             SELECT 1
             FROM user_roles
-            WHERE user_id = $1
+            WHERE server_id = $1
+              AND user_id = $2
               AND role_id = 'admin'
         ) AS is_admin
         "#,
     )
+    .bind(server_id)
     .bind(user_id)
     .fetch_one(pool)
     .await
     .context("lookup admin role")?;
     Ok(row.try_get::<bool, _>("is_admin")?)
+}
+
+async fn ensure_server_rbac_defaults(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    server_id: uuid::Uuid,
+) -> Result<()> {
+    for (role_id, role_name) in [
+        ("owner", "Owner"),
+        ("admin", "Admin"),
+        ("mod", "Moderator"),
+        ("member", "@everyone"),
+        ("muted", "Muted"),
+    ] {
+        sqlx::query(
+            r#"
+            INSERT INTO roles (id, server_id, name)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (id) DO NOTHING
+            "#,
+        )
+        .bind(role_id)
+        .bind(server_id)
+        .bind(role_name)
+        .execute(&mut **tx)
+        .await
+        .with_context(|| format!("seed role {}", role_id))?;
+    }
+
+    for (role_id, cap, effect) in [
+        ("member", "join_channel", "grant"),
+        ("member", "speak", "grant"),
+        ("member", "send_message", "grant"),
+    ] {
+        sqlx::query(
+            r#"
+            INSERT INTO role_caps (role_id, cap, effect)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (role_id, cap, effect) DO NOTHING
+            "#,
+        )
+        .bind(role_id)
+        .bind(cap)
+        .bind(effect)
+        .execute(&mut **tx)
+        .await
+        .with_context(|| format!("seed role cap {} {} {}", role_id, cap, effect))?;
+    }
+
+    Ok(())
+}
+
+async fn assign_default_member_role(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    server_id: uuid::Uuid,
+    user_id: uuid::Uuid,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO user_roles (server_id, user_id, role_id)
+        VALUES ($1, $2, 'member')
+        ON CONFLICT (server_id, user_id, role_id) DO NOTHING
+        "#,
+    )
+    .bind(server_id)
+    .bind(user_id)
+    .execute(&mut **tx)
+    .await
+    .context("assign default member role")?;
+
+    Ok(())
 }
