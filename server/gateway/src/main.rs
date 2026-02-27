@@ -20,6 +20,7 @@ use sqlx::postgres::PgPoolOptions;
 use std::{net::SocketAddr, sync::Arc};
 use tracing::{info, Level};
 use tracing_subscriber::EnvFilter;
+use vp_media::voice_forwarder::QUIC_MAX_DATAGRAM_BYTES;
 use vp_metrics::{MetricsConfig, MetricsServer};
 
 use crate::auth::DeviceAuthProvider;
@@ -126,7 +127,7 @@ async fn main() -> Result<()> {
     transport.max_concurrent_bidi_streams(64u32.into());
     transport.max_concurrent_uni_streams(64u32.into());
     // In quinn 0.11, max_datagram_frame_size is advertised from datagram_receive_buffer_size.
-    transport.datagram_receive_buffer_size(Some(1200));
+    transport.datagram_receive_buffer_size(Some(QUIC_MAX_DATAGRAM_BYTES));
     transport.datagram_send_buffer_size(1024 * 1024);
     transport.keep_alive_interval(Some(std::time::Duration::from_secs(10)));
     server_config.transport_config(Arc::new(transport));
