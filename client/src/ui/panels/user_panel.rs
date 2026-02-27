@@ -11,11 +11,11 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
     let panel_width = ui.available_width();
 
     // Background frame for the entire user panel
-    egui::Frame::none()
+    egui::Frame::new()
         .fill(theme::bg_dark())
         .inner_margin(8.0)
         .outer_margin(egui::Margin::ZERO)
-        .rounding(0.0)
+        .corner_radius(0.0)
         .show(ui, |ui: &mut egui::Ui| {
             ui.set_min_width(panel_width - 16.0);
 
@@ -122,7 +122,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                             .strong(),
                     )
                     .fill(theme::bg_light())
-                    .rounding(4.0),
+                    .corner_radius(4.0),
                 );
                 if away_btn.clicked() {
                     model.show_away_message_dialog = true;
@@ -156,7 +156,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                                 .strong(),
                         )
                         .fill(mute_fill)
-                        .rounding(4.0),
+                        .corner_radius(4.0),
                     )
                 });
                 let mute_btn = mute_btn.inner;
@@ -200,7 +200,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                                 .strong(),
                         )
                         .fill(deafen_fill)
-                        .rounding(4.0),
+                        .corner_radius(4.0),
                     )
                 });
                 let deafen_btn = deafen_btn.inner;

@@ -418,7 +418,7 @@ mod linux {
         fn enumerate_output_devices() -> Vec<String> {
             let host = cpal::default_host();
             host.output_devices()
-                .map(|devs| devs.filter_map(|d| d.name().ok()).collect())
+                .map(|devs| devs.filter_map(|d| d.description().ok().map(|desc| desc.name().to_string())).collect())
                 .unwrap_or_default()
         }
 
@@ -430,7 +430,7 @@ mod linux {
     fn find_output_device_by_name(host: &cpal::Host, name: &str) -> Result<cpal::Device> {
         let mut devices = host.output_devices().context("enumerate output devices")?;
         devices
-            .find(|dev| dev.name().ok().as_deref() == Some(name))
+            .find(|dev| dev.description().ok().map(|d| d.name().to_string()).as_deref() == Some(name))
             .ok_or_else(|| anyhow!("no matching output device"))
     }
 
@@ -629,7 +629,7 @@ mod non_linux {
         pub fn enumerate_output_devices() -> Vec<String> {
             let host = cpal::default_host();
             host.output_devices()
-                .map(|devs| devs.filter_map(|d| d.name().ok()).collect())
+                .map(|devs| devs.filter_map(|d| d.description().ok().map(|desc| desc.name().to_string())).collect())
                 .unwrap_or_default()
         }
 
@@ -648,7 +648,7 @@ mod non_linux {
     fn find_output_device_by_name(host: &cpal::Host, name: &str) -> Result<cpal::Device> {
         let mut devices = host.output_devices().context("enumerate output devices")?;
         devices
-            .find(|dev| dev.name().ok().as_deref() == Some(name))
+            .find(|dev| dev.description().ok().map(|d| d.name().to_string()).as_deref() == Some(name))
             .ok_or_else(|| anyhow!("no matching output device"))
     }
 
