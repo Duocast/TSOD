@@ -4,10 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-anyhow = "1.0"
-async-trait = "0.1"
-bytes = "1.6"
-tokio = { version = "1.37", features = ["rt-multi-thread", "macros", "time", "sync"] }
-tracing = "0.1"
+anyhow = "1.0.102"
+async-trait = "0.1.89"
+bytes = "1.11.1"
+tokio = { version = "1.49", features = ["rt-multi-thread", "macros", "time", "sync"] }
+tracing = "0.1.44"
 
 vp-control = { path = "../control" }
