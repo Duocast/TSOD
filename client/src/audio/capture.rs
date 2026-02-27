@@ -118,6 +118,8 @@ mod linux {
         Arc,
     };
 
+    use tracing::info;
+
     use crate::ui::model::{AudioDeviceId, AudioDeviceInfo, AudioDirection};
 
     enum LinuxCaptureBackend {
@@ -358,6 +360,8 @@ mod linux {
     }
 
     use crate::audio::resample::LinearResampler;
+    #[cfg(target_os = "windows")]
+    use crate::audio::windows::mmdevice;
 
     struct CpalCapture {
         _stream: cpal::Stream,
@@ -379,6 +383,13 @@ mod linux {
                 host.default_input_device()
                     .ok_or(anyhow!("no input device"))?
             };
+            let selected_id = dev
+                .id()
+                .ok()
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "<unknown-id>".to_string());
+            let selected_name = device_label(&dev).unwrap_or_else(|| "Unknown device".to_string());
+            info!(endpoint_id = %selected_id, friendly_name = %selected_name, "starting input stream");
             let stream_cfg = native_input_config(&dev)?;
             let unhealthy = Arc::new(AtomicBool::new(false));
             let unhealthy_cb = unhealthy.clone();
@@ -513,7 +524,63 @@ mod linux {
                 return Ok(device);
             }
         }
+
+        for device in host
+            .input_devices()
+            .context("list input devices for id fallback")?
+        {
+            let Ok(current_id) = device.id() else {
+                continue;
+            };
+            if current_id.to_string() == id {
+                return Ok(device);
+            }
+        }
+
         Err(anyhow!("no matching input device id: {id}"))
+    }
+
+    #[cfg(target_os = "windows")]
+    fn enumerate_mmdevice_input_devices() -> Vec<AudioDeviceInfo> {
+        let host = cpal::default_host();
+        let default_id = mmdevice::default_input_endpoint_id().ok().flatten();
+        let mut devices = Vec::new();
+
+        let endpoints = match mmdevice::enumerate_input_endpoints() {
+            Ok(values) => values,
+            Err(error) => {
+                warn!("failed MMDevice input enumeration: {error:#}");
+                return host
+                    .input_devices()
+                    .map(|devs| devs.filter_map(|d| device_info(&d)).collect())
+                    .unwrap_or_default();
+            }
+        };
+
+        for (endpoint_id, friendly_name) in endpoints {
+            let openable = endpoint_id
+                .parse::<cpal::DeviceId>()
+                .ok()
+                .and_then(|parsed| host.device_by_id(&parsed))
+                .is_some();
+            debug!(endpoint_id = %endpoint_id, friendly_name = %friendly_name, openable_via_cpal = openable, "enumerated input endpoint");
+            if !openable {
+                warn!(endpoint_id = %endpoint_id, friendly_name = %friendly_name, "skipping input endpoint because CPAL cannot open it");
+                continue;
+            }
+            devices.push(AudioDeviceInfo {
+                key: AudioDeviceId {
+                    backend: super::cpal_backend(),
+                    direction: AudioDirection::Input,
+                    id: endpoint_id.clone(),
+                },
+                label: friendly_name.clone(),
+                display_label: friendly_name,
+                is_default: default_id.as_deref() == Some(endpoint_id.as_str()),
+            });
+        }
+
+        devices
     }
 
     fn native_input_config(dev: &cpal::Device) -> Result<cpal::SupportedStreamConfig> {
@@ -585,8 +652,11 @@ mod non_linux {
         atomic::{AtomicBool, Ordering},
         Arc,
     };
+    use tracing::{debug, info, warn};
 
     use crate::audio::resample::LinearResampler;
+    #[cfg(target_os = "windows")]
+    use crate::audio::windows::mmdevice;
     use crate::ui::model::{AudioDeviceId, AudioDeviceInfo, AudioDirection};
 
     pub struct CpalCapture {
@@ -609,6 +679,13 @@ mod non_linux {
                 host.default_input_device()
                     .ok_or(anyhow!("no input device"))?
             };
+            let selected_id = dev
+                .id()
+                .ok()
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "<unknown-id>".to_string());
+            let selected_name = device_label(&dev).unwrap_or_else(|| "Unknown device".to_string());
+            info!(endpoint_id = %selected_id, friendly_name = %selected_name, "starting input stream");
             let stream_cfg = native_input_config(&dev)?;
             let unhealthy = Arc::new(AtomicBool::new(false));
             let unhealthy_cb = unhealthy.clone();
@@ -703,10 +780,19 @@ mod non_linux {
         }
 
         pub fn enumerate_input_devices() -> Vec<AudioDeviceInfo> {
-            let host = cpal::default_host();
-            host.input_devices()
-                .map(|devs| devs.filter_map(|d| device_info(&d)).collect())
-                .unwrap_or_default()
+            #[cfg(target_os = "windows")]
+            {
+                return enumerate_mmdevice_input_devices();
+            }
+
+            #[cfg(not(target_os = "windows"))]
+            {
+                let host = cpal::default_host();
+                return host
+                    .input_devices()
+                    .map(|devs| devs.filter_map(|d| device_info(&d)).collect())
+                    .unwrap_or_default();
+            }
         }
 
         pub fn is_healthy(&self) -> bool {
@@ -743,7 +829,63 @@ mod non_linux {
                 return Ok(device);
             }
         }
+
+        for device in host
+            .input_devices()
+            .context("list input devices for id fallback")?
+        {
+            let Ok(current_id) = device.id() else {
+                continue;
+            };
+            if current_id.to_string() == id {
+                return Ok(device);
+            }
+        }
+
         Err(anyhow!("no matching input device id: {id}"))
+    }
+
+    #[cfg(target_os = "windows")]
+    fn enumerate_mmdevice_input_devices() -> Vec<AudioDeviceInfo> {
+        let host = cpal::default_host();
+        let default_id = mmdevice::default_input_endpoint_id().ok().flatten();
+        let mut devices = Vec::new();
+
+        let endpoints = match mmdevice::enumerate_input_endpoints() {
+            Ok(values) => values,
+            Err(error) => {
+                warn!("failed MMDevice input enumeration: {error:#}");
+                return host
+                    .input_devices()
+                    .map(|devs| devs.filter_map(|d| device_info(&d)).collect())
+                    .unwrap_or_default();
+            }
+        };
+
+        for (endpoint_id, friendly_name) in endpoints {
+            let openable = endpoint_id
+                .parse::<cpal::DeviceId>()
+                .ok()
+                .and_then(|parsed| host.device_by_id(&parsed))
+                .is_some();
+            debug!(endpoint_id = %endpoint_id, friendly_name = %friendly_name, openable_via_cpal = openable, "enumerated input endpoint");
+            if !openable {
+                warn!(endpoint_id = %endpoint_id, friendly_name = %friendly_name, "skipping input endpoint because CPAL cannot open it");
+                continue;
+            }
+            devices.push(AudioDeviceInfo {
+                key: AudioDeviceId {
+                    backend: super::cpal_backend(),
+                    direction: AudioDirection::Input,
+                    id: endpoint_id.clone(),
+                },
+                label: friendly_name.clone(),
+                display_label: friendly_name,
+                is_default: default_id.as_deref() == Some(endpoint_id.as_str()),
+            });
+        }
+
+        devices
     }
 
     fn native_input_config(dev: &cpal::Device) -> Result<cpal::SupportedStreamConfig> {
