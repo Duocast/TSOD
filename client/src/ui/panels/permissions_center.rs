@@ -3,6 +3,7 @@ use crate::ui::model::{
     PermissionsTab, UiModel,
 };
 use crate::ui::theme;
+use chrono::{Local, TimeZone};
 use eframe::egui;
 
 const PERMISSION_GROUPS: &[(&str, &[&str])] = &[
@@ -69,7 +70,7 @@ pub fn show_permissions_center(ctx: &egui::Context, model: &mut UiModel) {
                 PermissionsTab::Roles => show_roles_tab(ui, model),
                 PermissionsTab::Channels => show_channels_tab(ui, model),
                 PermissionsTab::Members => show_members_tab(ui, model),
-                PermissionsTab::AuditLog => show_audit_tab(ui),
+                PermissionsTab::AuditLog => show_audit_tab(ui, model),
                 PermissionsTab::Advanced => show_advanced_tab(ui, model),
             }
         });
@@ -582,11 +583,27 @@ fn show_members_tab(ui: &mut egui::Ui, model: &mut UiModel) {
     });
 }
 
-fn show_audit_tab(ui: &mut egui::Ui) {
-    ui.label("Audit log events will appear here.");
-    ui.label("Recent:");
-    ui.monospace("[12:01] role.update  moderator -> mentionable=true");
-    ui.monospace("[11:42] channel.override  #general deny SEND_MESSAGES @everyone");
+fn show_audit_tab(ui: &mut egui::Ui, model: &UiModel) {
+    ui.label("Recent permission audit events:");
+
+    if model.permissions_audit_rows.is_empty() {
+        ui.colored_label(theme::text_muted(), "No audit entries found.");
+        return;
+    }
+
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        for row in &model.permissions_audit_rows {
+            let timestamp = Local
+                .timestamp_millis_opt(row.created_at_unix_millis)
+                .single()
+                .map(|ts| ts.format("%H:%M:%S").to_string())
+                .unwrap_or_else(|| "unknown-time".to_string());
+            ui.monospace(format!(
+                "[{timestamp}] {}  {}:{}",
+                row.action, row.target_type, row.target_id
+            ));
+        }
+    });
 }
 
 fn show_advanced_tab(ui: &mut egui::Ui, model: &mut UiModel) {

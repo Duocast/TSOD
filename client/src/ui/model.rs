@@ -138,6 +138,9 @@ pub enum UiEvent {
         current_user_max_role: usize,
         can_moderate_members: bool,
     },
+    PermissionsAuditLoaded {
+        rows: Vec<PermissionAuditRow>,
+    },
 }
 
 // ── Intents from UI to backend ─────────────────────────────────────────
@@ -872,6 +875,7 @@ pub struct UiModel {
     pub permissions_view_as_name: String,
     pub permissions_member_search: String,
     pub permissions_members: Vec<MemberPermissionDraft>,
+    pub permissions_audit_rows: Vec<PermissionAuditRow>,
     pub permissions_selected_member: usize,
     pub permissions_advanced_enabled: bool,
     pub permissions_actor_power: PermissionPowerDraft,
@@ -1042,6 +1046,14 @@ pub struct MemberPermissionDraft {
     pub can_kick_members: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct PermissionAuditRow {
+    pub action: String,
+    pub target_type: String,
+    pub target_id: String,
+    pub created_at_unix_millis: i64,
+}
+
 impl Default for UiModel {
     fn default() -> Self {
         let settings = AppSettings::default();
@@ -1205,6 +1217,7 @@ impl Default for UiModel {
             permissions_view_as_name: "@everyone".into(),
             permissions_member_search: String::new(),
             permissions_members: vec![],
+            permissions_audit_rows: vec![],
             permissions_selected_member: 0,
             permissions_advanced_enabled: false,
             permissions_actor_power: PermissionPowerDraft {
@@ -1616,6 +1629,9 @@ impl UiModel {
                 self.permissions_current_user_max_role = current_user_max_role;
                 self.permissions_can_moderate_members = can_moderate_members;
                 self.permissions_selected_member = 0;
+            }
+            UiEvent::PermissionsAuditLoaded { rows } => {
+                self.permissions_audit_rows = rows;
             }
         }
 

@@ -2059,6 +2059,51 @@ async fn connect_and_run_session(
                                     )));
                                 }
                             }
+
+                            let req = pb::PermAuditQueryRequest {
+                                server_id: None,
+                                limit: 100,
+                                offset: 0,
+                            };
+                            match dispatcher
+                                .send_request(
+                                    pb::client_to_server::Payload::PermAuditQuery(req),
+                                    Duration::from_secs(5),
+                                )
+                                .await
+                            {
+                                Ok(Ok(resp)) => {
+                                    if let Some(pb::server_to_client::Payload::PermAuditQuery(
+                                        payload,
+                                    )) = resp.payload
+                                    {
+                                        let rows = payload
+                                            .rows
+                                            .into_iter()
+                                            .map(|row| ui::model::PermissionAuditRow {
+                                                action: row.action,
+                                                target_type: row.target_type,
+                                                target_id: row.target_id,
+                                                created_at_unix_millis: row
+                                                    .created_at
+                                                    .map_or(0, |ts| ts.unix_millis),
+                                            })
+                                            .collect();
+                                        let _ = tx_event.send(UiEvent::PermissionsAuditLoaded {
+                                            rows,
+                                        });
+                                    } else {
+                                        let _ = tx_event.send(UiEvent::AppendLog(
+                                            "[perm] unexpected response to perm_audit_query".into(),
+                                        ));
+                                    }
+                                }
+                                Ok(Err(e)) | Err(e) => {
+                                    let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                        "[perm] audit query failed: {e:#}"
+                                    )));
+                                }
+                            }
                         }
                         UiIntent::PokeUser { user_id, message } => {
                             if let Err(e) = dispatcher.poke_user(&user_id, &message).await {
