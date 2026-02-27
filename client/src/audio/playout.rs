@@ -418,7 +418,7 @@ mod linux {
         fn enumerate_output_devices() -> Vec<String> {
             let host = cpal::default_host();
             host.output_devices()
-                .map(|devs| devs.filter_map(|d| d.description().ok().map(|desc| desc.name().to_string())).collect())
+                .map(|devs| devs.filter_map(|d| device_name(&d)).collect())
                 .unwrap_or_default()
         }
 
@@ -427,10 +427,50 @@ mod linux {
         }
     }
 
+    fn device_name(device: &cpal::Device) -> Option<String> {
+        fn push_unique(parts: &mut Vec<String>, value: Option<&str>) {
+            let Some(value) = value.map(str::trim).filter(|v| !v.is_empty()) else {
+                return;
+            };
+            let already_present = parts.iter().any(|part| part.eq_ignore_ascii_case(value));
+            if !already_present {
+                parts.push(value.to_string());
+            }
+        }
+
+        if let Ok(desc) = device.description() {
+            let base = desc.name().trim();
+            if base.is_empty() {
+                return None;
+            }
+
+            let mut parts = Vec::with_capacity(4);
+            // Extended lines typically carry the most user-friendly endpoint labels.
+            for line in desc.extended() {
+                push_unique(&mut parts, Some(line));
+            }
+            push_unique(&mut parts, Some(base));
+            push_unique(&mut parts, desc.driver());
+            push_unique(&mut parts, desc.manufacturer());
+
+            if parts.is_empty() {
+                return None;
+            }
+
+            let primary = parts.remove(0);
+            if parts.is_empty() {
+                return Some(primary);
+            }
+            return Some(format!("{primary} — {}", parts.join(" • ")));
+        }
+
+        device.name().ok().filter(|name| !name.trim().is_empty())
+    }
+
     fn find_output_device_by_name(host: &cpal::Host, name: &str) -> Result<cpal::Device> {
         let mut devices = host.output_devices().context("enumerate output devices")?;
         devices
-            .find(|dev| dev.description().ok().map(|d| d.name().to_string()).as_deref() == Some(name))
+            .find(|dev| device_name(dev).as_deref() == Some(name))
             .ok_or_else(|| anyhow!("no matching output device"))
     }
 
@@ -629,7 +669,7 @@ mod non_linux {
         pub fn enumerate_output_devices() -> Vec<String> {
             let host = cpal::default_host();
             host.output_devices()
-                .map(|devs| devs.filter_map(|d| d.description().ok().map(|desc| desc.name().to_string())).collect())
+                .map(|devs| devs.filter_map(|d| device_name(&d)).collect())
                 .unwrap_or_default()
         }
 
@@ -645,10 +685,50 @@ mod non_linux {
         }
     }
 
+    fn device_name(device: &cpal::Device) -> Option<String> {
+        fn push_unique(parts: &mut Vec<String>, value: Option<&str>) {
+            let Some(value) = value.map(str::trim).filter(|v| !v.is_empty()) else {
+                return;
+            };
+            let already_present = parts.iter().any(|part| part.eq_ignore_ascii_case(value));
+            if !already_present {
+                parts.push(value.to_string());
+            }
+        }
+
+        if let Ok(desc) = device.description() {
+            let base = desc.name().trim();
+            if base.is_empty() {
+                return None;
+            }
+
+            let mut parts = Vec::with_capacity(4);
+            // Extended lines typically carry the most user-friendly endpoint labels.
+            for line in desc.extended() {
+                push_unique(&mut parts, Some(line));
+            }
+            push_unique(&mut parts, Some(base));
+            push_unique(&mut parts, desc.driver());
+            push_unique(&mut parts, desc.manufacturer());
+
+            if parts.is_empty() {
+                return None;
+            }
+
+            let primary = parts.remove(0);
+            if parts.is_empty() {
+                return Some(primary);
+            }
+            return Some(format!("{primary} — {}", parts.join(" • ")));
+        }
+
+        device.name().ok().filter(|name| !name.trim().is_empty())
+    }
+
     fn find_output_device_by_name(host: &cpal::Host, name: &str) -> Result<cpal::Device> {
         let mut devices = host.output_devices().context("enumerate output devices")?;
         devices
-            .find(|dev| dev.description().ok().map(|d| d.name().to_string()).as_deref() == Some(name))
+            .find(|dev| device_name(dev).as_deref() == Some(name))
             .ok_or_else(|| anyhow!("no matching output device"))
     }
 
