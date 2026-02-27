@@ -340,12 +340,12 @@ async fn app_task(
         sample_rate,
         channels,
         frame_ms,
-        initial_selection.input_device.as_deref(),
+        preferred_device_id(&initial_selection.input_device),
     )?)));
     let playout = Arc::new(RwLock::new(Arc::new(start_playout_with_fallback(
         sample_rate,
         channels,
-        initial_selection.output_device.as_deref(),
+        preferred_device_id(&initial_selection.output_device),
         initial_selection.playback_mode.as_deref(),
     )?)));
 
@@ -828,14 +828,8 @@ async fn restart_audio_streams(
 
     let _ = tx_event.send(UiEvent::AppendLog(format!(
         "[audio] streams restarted (input={}, output={}, mode={})",
-        selected
-            .input_device
-            .as_deref()
-            .unwrap_or("(system default)"),
-        selected
-            .output_device
-            .as_deref()
-            .unwrap_or("(system default)"),
+        preferred_device_id(&selected.input_device).unwrap_or("(system default)"),
+        preferred_device_id(&selected.output_device).unwrap_or("(system default)"),
         selected
             .playback_mode
             .as_deref()
