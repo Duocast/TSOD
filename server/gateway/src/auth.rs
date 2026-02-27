@@ -25,13 +25,19 @@ pub trait AuthProvider: Send + Sync + 'static {
 pub struct DeviceAuthProvider {
     pool: Pool<Postgres>,
     default_server_id: uuid::Uuid,
+    bootstrap_owner_user_id: Option<uuid::Uuid>,
 }
 
 impl DeviceAuthProvider {
-    pub fn new(pool: Pool<Postgres>, default_server_id: uuid::Uuid) -> Self {
+    pub fn new(
+        pool: Pool<Postgres>,
+        default_server_id: uuid::Uuid,
+        bootstrap_owner_user_id: Option<uuid::Uuid>,
+    ) -> Self {
         Self {
             pool,
             default_server_id,
+            bootstrap_owner_user_id,
         }
     }
 }
@@ -76,6 +82,7 @@ impl AuthProvider for DeviceAuthProvider {
                 let user_id = lookup_or_create_user_for_device(
                     &self.pool,
                     self.default_server_id,
+                    self.bootstrap_owner_user_id,
                     parsed_device_id,
                     &device.device_pubkey,
                 )
@@ -98,6 +105,7 @@ impl AuthProvider for DeviceAuthProvider {
 async fn lookup_or_create_user_for_device(
     pool: &Pool<Postgres>,
     server_id: uuid::Uuid,
+    bootstrap_owner_user_id: Option<uuid::Uuid>,
     device_id: uuid::Uuid,
     pubkey: &[u8],
 ) -> Result<uuid::Uuid> {
@@ -141,6 +149,7 @@ async fn lookup_or_create_user_for_device(
         .context("update device last_seen")?;
 
         assign_default_member_role(&mut tx, server_id, existing_user_id).await?;
+        ensure_bootstrap_owner_role(&mut tx, server_id, bootstrap_owner_user_id).await?;
 
         tx.commit().await.context("commit existing device auth")?;
         return Ok(existing_user_id);
@@ -214,6 +223,7 @@ async fn lookup_or_create_user_for_device(
                 .await
                 .context("update device last_seen after conflict")?;
                 assign_default_member_role(&mut tx, server_id, existing_user_id).await?;
+                ensure_bootstrap_owner_role(&mut tx, server_id, bootstrap_owner_user_id).await?;
                 tx.commit().await.context("commit conflict device auth")?;
                 return Ok(existing_user_id);
             }
@@ -222,9 +232,33 @@ async fn lookup_or_create_user_for_device(
     }
 
     assign_owner_role_if_missing(&mut tx, server_id, user_id).await?;
+    ensure_bootstrap_owner_role(&mut tx, server_id, bootstrap_owner_user_id).await?;
 
     tx.commit().await.context("commit new device auth")?;
     Ok(user_id)
+}
+
+async fn ensure_bootstrap_owner_role(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    server_id: uuid::Uuid,
+    bootstrap_owner_user_id: Option<uuid::Uuid>,
+) -> Result<()> {
+    if let Some(bootstrap_owner_user_id) = bootstrap_owner_user_id {
+        sqlx::query(
+            r#"
+            INSERT INTO user_roles (server_id, user_id, role_id)
+            VALUES ($1, $2, 'owner')
+            ON CONFLICT (server_id, user_id, role_id) DO NOTHING
+            "#,
+        )
+        .bind(server_id)
+        .bind(bootstrap_owner_user_id)
+        .execute(&mut **tx)
+        .await
+        .context("assign bootstrap owner role")?;
+    }
+
+    Ok(())
 }
 
 async fn assign_owner_role_if_missing(

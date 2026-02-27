@@ -135,10 +135,24 @@ async fn main() -> Result<()> {
     let endpoint = Endpoint::server(server_config, addr)?;
     info!("listening on {}", endpoint.local_addr()?);
 
+    let bootstrap_owner_user_id = cfg
+        .bootstrap_owner_user_id
+        .as_deref()
+        .map(uuid::Uuid::parse_str)
+        .transpose()?;
+
     let auth_provider: Arc<dyn auth::AuthProvider> = if cfg.dev_mode {
-        Arc::new(DeviceAuthProvider::new(pool.clone(), server_id.0))
+        Arc::new(DeviceAuthProvider::new(
+            pool.clone(),
+            server_id.0,
+            bootstrap_owner_user_id,
+        ))
     } else {
-        Arc::new(DeviceAuthProvider::new(pool.clone(), server_id.0))
+        Arc::new(DeviceAuthProvider::new(
+            pool.clone(),
+            server_id.0,
+            bootstrap_owner_user_id,
+        ))
     };
 
     let gw = Gateway::new(
