@@ -253,23 +253,27 @@ async fn ensure_server_rbac_defaults(
     tx: &mut sqlx::Transaction<'_, Postgres>,
     server_id: uuid::Uuid,
 ) -> Result<()> {
-    for (role_id, role_name) in [
+    for (idx, (role_id, role_name)) in [
         ("owner", "Owner"),
         ("admin", "Admin"),
         ("mod", "Moderator"),
         ("member", "@everyone"),
         ("muted", "Muted"),
-    ] {
+    ]
+    .iter()
+    .enumerate()
+    {
         sqlx::query(
             r#"
-            INSERT INTO roles (id, server_id, name)
-            VALUES ($1, $2, $3)
+            INSERT INTO roles (id, server_id, name, color, position, is_system)
+            VALUES ($1, $2, $3, 0, $4, FALSE)
             ON CONFLICT (id) DO NOTHING
             "#,
         )
         .bind(role_id)
         .bind(server_id)
         .bind(role_name)
+        .bind(idx as i32)
         .execute(&mut **tx)
         .await
         .with_context(|| format!("seed role {}", role_id))?;
@@ -282,14 +286,16 @@ async fn ensure_server_rbac_defaults(
     ] {
         sqlx::query(
             r#"
-            INSERT INTO role_caps (role_id, cap, effect)
-            VALUES ($1, $2, $3)
+            INSERT INTO role_caps (role_id, cap, effect, server_id, allowed)
+            VALUES ($1, $2, $3, $4, $5)
             ON CONFLICT (role_id, cap, effect) DO NOTHING
             "#,
         )
         .bind(role_id)
         .bind(cap)
         .bind(effect)
+        .bind(server_id)
+        .bind(effect == "grant")
         .execute(&mut **tx)
         .await
         .with_context(|| format!("seed role cap {} {} {}", role_id, cap, effect))?;
