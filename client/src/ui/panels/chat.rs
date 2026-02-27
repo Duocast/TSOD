@@ -265,7 +265,7 @@ fn show_drag_overlay(ui: &mut egui::Ui, model: &mut UiModel, chat_rect: egui::Re
         (49.0 * alpha) as u8,
         (240.0 * alpha) as u8,
     );
-    let card_rounding = egui::Rounding::same(12.0);
+    let card_rounding = egui::CornerRadius::same(12);
     painter.rect_filled(card_rect, card_rounding, card_bg);
 
     // Dashed border
@@ -459,18 +459,18 @@ fn show_attachment_preview_strip(ui: &mut egui::Ui, model: &mut UiModel) {
 
     egui::Frame::default()
         .fill(theme::bg_medium())
-        .inner_margin(egui::Margin::symmetric(8.0, 6.0))
+        .inner_margin(egui::Margin::symmetric(8, 6))
         .outer_margin(egui::Margin {
-            left: 0.0,
-            right: 0.0,
-            top: 0.0,
-            bottom: 4.0,
+            left: 0,
+            right: 0,
+            top: 0,
+            bottom: 4,
         })
-        .rounding(egui::Rounding {
-            nw: 8.0,
-            ne: 8.0,
-            sw: 0.0,
-            se: 0.0,
+        .corner_radius(egui::CornerRadius {
+            nw: 8,
+            ne: 8,
+            sw: 0,
+            se: 0,
         })
         .show(ui, |ui: &mut egui::Ui| {
             ui.horizontal(|ui: &mut egui::Ui| {
@@ -493,8 +493,8 @@ fn show_attachment_preview_strip(ui: &mut egui::Ui, model: &mut UiModel) {
                     egui::Frame::default()
                         .fill(card_fill)
                         .stroke(card_stroke)
-                        .inner_margin(egui::Margin::same(4.0))
-                        .rounding(egui::Rounding::same(6.0))
+                        .inner_margin(egui::Margin::same(4))
+                        .corner_radius(egui::CornerRadius::same(6))
                         .show(ui, |ui: &mut egui::Ui| {
                             ui.set_max_height(PREVIEW_CARD_HEIGHT - 12.0);
 
@@ -506,7 +506,7 @@ fn show_attachment_preview_strip(ui: &mut egui::Ui, model: &mut UiModel) {
                                         .max_width(80.0)
                                         .max_height(52.0)
                                         .maintain_aspect_ratio(true)
-                                        .rounding(egui::Rounding::same(4.0));
+                                        .corner_radius(egui::CornerRadius::same(4));
                                     ui.add(image);
 
                                     // Filename + remove button row

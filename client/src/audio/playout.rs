@@ -155,12 +155,7 @@ mod linux {
             }
 
             eprintln!("PipeWire unavailable, falling back to PulseAudio playback via CPAL");
-            let pulse = CpalPlayout::start(
-                sample_rate,
-                channels,
-                cons,
-                preferred_device,
-            )?;
+            let pulse = CpalPlayout::start(sample_rate, channels, cons, preferred_device)?;
             Ok(Self {
                 _thread: None,
                 backend: LinuxPlayoutBackend::Pulse(pulse),
@@ -455,7 +450,7 @@ mod linux {
     where
         T: SizedSample + FromSample<f32>,
     {
-        let target_rate = stream_cfg.sample_rate.0;
+        let target_rate = stream_cfg.sample_rate;
         let target_channels = stream_cfg.channels.max(1) as usize;
         let source_channels = source_channels.max(1) as usize;
         let mut resampler = LinearResampler::new(source_rate, target_rate);
@@ -673,7 +668,7 @@ mod non_linux {
     where
         T: SizedSample + FromSample<f32>,
     {
-        let target_rate = stream_cfg.sample_rate.0;
+        let target_rate = stream_cfg.sample_rate;
         let target_channels = stream_cfg.channels.max(1) as usize;
         let source_channels = source_channels.max(1) as usize;
 
