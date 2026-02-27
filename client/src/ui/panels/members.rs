@@ -49,7 +49,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
             if response.hovered() {
                 ui.painter().rect_filled(
                     row_rect,
-                    egui::Rounding::same(4.0),
+                    egui::CornerRadius::same(4),
                     ui.visuals().widgets.hovered.bg_fill.linear_multiply(0.35),
                 );
             }
@@ -98,7 +98,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                 egui::vec2(meter_width, meter_height),
             );
             ui.painter()
-                .rect_filled(meter_bg, egui::Rounding::same(2.0), theme::bg_light());
+                .rect_filled(meter_bg, egui::CornerRadius::same(2), theme::bg_light());
             if voice_level > 0.0 {
                 let meter_fg = egui::Rect::from_min_max(
                     meter_bg.min,
@@ -109,7 +109,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                 );
                 ui.painter().rect_filled(
                     meter_fg,
-                    egui::Rounding::same(2.0),
+                    egui::CornerRadius::same(2),
                     theme::COLOR_VOICE_ACTIVE,
                 );
             }
@@ -203,7 +203,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                     model.poke_target_user_id = member.user_id.clone();
                     model.poke_target_display_name = member.display_name.clone();
                     model.poke_message_draft = "Poke".into();
-                    ui.close_menu();
+                    ui.close();
                 }
                 ui.separator();
                 let mute_label = if member.muted { "Unmute" } else { "Mute" };
@@ -212,7 +212,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                         user_id: member.user_id.clone(),
                         muted: !member.muted,
                     });
-                    ui.close_menu();
+                    ui.close();
                 }
                 let deafen_label = if member.deafened {
                     "Undeafen"
@@ -224,14 +224,14 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                         user_id: member.user_id.clone(),
                         deafened: !member.deafened,
                     });
-                    ui.close_menu();
+                    ui.close();
                 }
                 ui.separator();
                 if ui.button("Get Connection Info").clicked() {
                     model.show_member_connection_info = true;
                     model.connection_info_target_user_id = member.user_id.clone();
                     model.connection_info_target_display_name = member.display_name.clone();
-                    ui.close_menu();
+                    ui.close();
                 }
                 ui.separator();
                 if ui.button("Kick").clicked() {
@@ -239,7 +239,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                         user_id: member.user_id.clone(),
                         reason: String::new(),
                     });
-                    ui.close_menu();
+                    ui.close();
                 }
                 ui.add_enabled(
                     false,

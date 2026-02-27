@@ -409,7 +409,7 @@ mod linux {
         T: SizedSample,
         f32: cpal::FromSample<T>,
     {
-        let source_rate = stream_cfg.sample_rate.0;
+        let source_rate = stream_cfg.sample_rate;
         let source_channels = stream_cfg.channels.max(1) as usize;
         let target_channels = target_channels.max(1) as usize;
         let mut resampler = LinearResampler::new(source_rate, target_rate);
@@ -613,7 +613,7 @@ mod non_linux {
         T: SizedSample,
         f32: cpal::FromSample<T>,
     {
-        let source_rate = stream_cfg.sample_rate.0;
+        let source_rate = stream_cfg.sample_rate;
         let source_channels = stream_cfg.channels.max(1) as usize;
         let target_channels = target_channels.max(1) as usize;
         let mut resampler = LinearResampler::new(source_rate, target_rate);

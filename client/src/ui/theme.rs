@@ -176,11 +176,10 @@ pub fn apply_theme(ctx: &egui::Context, theme_name: &str) {
         };
     }
 
-    v.window_rounding = egui::Rounding::same(8.0);
     v.window_shadow = egui::epaint::Shadow {
-        offset: egui::vec2(0.0, 4.0),
-        blur: 12.0,
-        spread: 0.0,
+        offset: [0, 4],
+        blur: 12,
+        spread: 0,
         color: egui::Color32::from_black_alpha(80),
     };
 
@@ -189,7 +188,7 @@ pub fn apply_theme(ctx: &egui::Context, theme_name: &str) {
 
     // Spacing
     style.spacing.item_spacing = egui::vec2(8.0, 4.0);
-    style.spacing.window_margin = egui::Margin::same(12.0);
+    style.spacing.window_margin = egui::Margin::same(12);
 
     ctx.set_style(style);
 }

@@ -181,7 +181,7 @@ impl eframe::App for VpApp {
 
         // Top menu bar
         egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
-            egui::menu::bar(ui, |ui| {
+            egui::MenuBar::new().ui(ui, |ui| {
                 ui.label(egui::RichText::new("TSOD").strong().size(16.0));
                 ui.separator();
 

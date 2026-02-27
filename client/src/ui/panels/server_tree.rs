@@ -94,7 +94,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                 model.create_channel_parent_id = None;
                 model.create_channel_name.clear();
                 model.create_channel_description.clear();
-                ui.close_menu();
+                ui.close();
             }
         });
     });
@@ -272,7 +272,7 @@ fn show_channel(
     let (row_rect, row_response) =
         ui.allocate_exact_size(egui::vec2(row_width, row_height), egui::Sense::click());
 
-    let rounding = egui::Rounding::same(4.0);
+    let rounding = egui::CornerRadius::same(4);
     let visuals = ui.visuals();
     if is_selected {
         ui.painter().rect_filled(
@@ -348,25 +348,25 @@ fn show_channel(
             let _ = tx_intent.send(UiIntent::JoinChannel {
                 channel_id: ch.id.clone(),
             });
-            ui.close_menu();
+            ui.close();
         }
         if ui.button("Edit channel").clicked() {
             model.rename_channel_target_id = Some(ch.id.clone());
             model.rename_channel_name = ch.name.clone();
             model.show_rename_channel = true;
-            ui.close_menu();
+            ui.close();
         }
         if ui.button("Delete channel").clicked() {
             model.delete_channel_target_id = Some(ch.id.clone());
             model.show_delete_channel_confirm = true;
-            ui.close_menu();
+            ui.close();
         }
         if ui.button("Create sub-channel").clicked() {
             model.show_create_channel = true;
             model.create_channel_parent_id = Some(ch.id.clone());
             model.create_channel_name.clear();
             model.create_channel_description.clear();
-            ui.close_menu();
+            ui.close();
         }
     });
 
