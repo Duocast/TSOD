@@ -1,5 +1,7 @@
 use clap::Parser;
 
+use crate::bootstrap::OwnerBootstrapPolicy;
+
 #[derive(Parser, Debug, Clone)]
 #[command(name = "vp-gateway", about = "Voice platform QUIC gateway")]
 pub struct Config {
@@ -37,6 +39,14 @@ pub struct Config {
     #[arg(long)]
     pub bootstrap_owner_user_id: Option<String>,
 
+    /// Owner bootstrap policy.
+    #[arg(long, value_enum, default_value_t = default_owner_bootstrap_policy())]
+    pub owner_bootstrap_policy: OwnerBootstrapPolicy,
+
+    /// In dev only: delete orphaned user_roles rows that reference missing roles.
+    #[arg(long, default_value_t = false)]
+    pub dev_repair_orphan_user_roles: bool,
+
     /// Metrics scrape listen address
     #[arg(long, default_value = "0.0.0.0:9100")]
     pub metrics_listen: String,
@@ -60,4 +70,12 @@ pub struct Config {
     /// Max concurrent connections (soft limit)
     #[arg(long, default_value_t = 10_000)]
     pub max_connections: usize,
+}
+
+fn default_owner_bootstrap_policy() -> OwnerBootstrapPolicy {
+    if cfg!(debug_assertions) {
+        OwnerBootstrapPolicy::FirstLoginWins
+    } else {
+        OwnerBootstrapPolicy::ConfigOnly
+    }
 }

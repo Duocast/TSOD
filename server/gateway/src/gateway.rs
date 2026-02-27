@@ -779,12 +779,21 @@ impl Gateway {
             };
 
             if let Err(err) = request_result {
-                warn!(
-                    session_id = %session_id,
-                    user_id = %user_id.0,
-                    error = %err,
-                    "request failed"
-                );
+                if matches!(err.downcast_ref::<ControlError>(), Some(ControlError::PermissionDenied(_))) {
+                    debug!(
+                        session_id = %session_id,
+                        user_id = %user_id.0,
+                        error = %err,
+                        "permission denied; keeping connection alive"
+                    );
+                } else {
+                    warn!(
+                        session_id = %session_id,
+                        user_id = %user_id.0,
+                        error = %err,
+                        "request failed"
+                    );
+                }
 
                 let resp = pb::ServerToClient {
                     request_id: req_id,
@@ -1088,7 +1097,16 @@ fn unix_ms_u64() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_preferred_display_name;
+    use super::{error_from_anyhow, normalize_preferred_display_name};
+    use crate::proto::voiceplatform::v1 as pb;
+    use vp_control::ControlError;
+
+    #[test]
+    fn permission_denied_maps_to_permission_denied_error_response() {
+        let err = anyhow::Error::new(ControlError::PermissionDenied("denied"));
+        let mapped = error_from_anyhow(&err);
+        assert_eq!(mapped.code, pb::error::Code::PermissionDenied as i32);
+    }
 
     #[test]
     fn preferred_display_name_is_trimmed_and_limited() {
