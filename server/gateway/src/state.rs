@@ -4,6 +4,7 @@ use anyhow::Result;
 use bytes::Bytes;
 use dashmap::DashMap;
 use tokio::sync::mpsc;
+use tracing::warn;
 
 use crate::proto::voiceplatform::v1 as pb;
 
@@ -82,7 +83,10 @@ impl QuinnDatagramTx {
 #[async_trait::async_trait]
 impl DatagramTx for QuinnDatagramTx {
     async fn send(&self, bytes: Bytes) -> Result<()> {
-        self.conn.send_datagram(bytes)?;
+        if let Err(e) = self.conn.send_datagram(bytes) {
+            warn!(error = ?e, "failed to forward datagram");
+            return Err(e.into());
+        }
         Ok(())
     }
 }
@@ -275,6 +279,7 @@ mod tests {
     use super::{MembershipCache, PushHub};
     use crate::proto::voiceplatform::v1 as pb;
     use tokio::sync::mpsc;
+    use tracing::warn;
     use vp_control::ids::{ChannelId, UserId};
 
     #[tokio::test]
