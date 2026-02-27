@@ -8,7 +8,8 @@ use crate::{
     ids::{ChannelId, MessageId, OutboxId, ServerId, UserId},
     model::{
         AuditEntry, Channel, ChannelCreate, ChatMessage, JoinChannel, Member, OutboxEvent,
-        OutboxEventRow, PermissionRequest, SendMessage,
+        OutboxEventRow, PermAuditRow, PermChannelOverrideRecord, PermRoleRecord, PermissionRequest,
+        SendMessage,
     },
     perms::{Capability, Decision},
     repo::ControlRepo,
@@ -773,6 +774,461 @@ impl<R: ControlRepo> ControlService<R> {
 
         tx.commit().await?;
         Ok(rec)
+    }
+
+    // -------------------------------------------------------------------------
+    // Admin permissions RPCs
+    // -------------------------------------------------------------------------
+
+    pub async fn perm_list_roles(
+        &self,
+        ctx: &RequestContext,
+    ) -> ControlResult<Vec<PermRoleRecord>> {
+        let mut tx = <R as ControlRepo>::tx(&self.repo).await?;
+        self.require(&mut tx, ctx, None, None, Capability::ManageRoles)
+            .await?;
+        let roles = <R as ControlRepo>::perm_list_roles(&self.repo, &mut tx, ctx.server_id).await?;
+        tx.commit().await?;
+        Ok(roles)
+    }
+
+    pub async fn perm_upsert_role(
+        &self,
+        ctx: &RequestContext,
+        role_id: Option<&str>,
+        name: &str,
+        color: i32,
+        position: i32,
+    ) -> ControlResult<PermRoleRecord> {
+        if name.trim().is_empty() {
+            return Err(ControlError::InvalidArgument("role name empty"));
+        }
+        if name.trim().eq_ignore_ascii_case("owner") && !ctx.is_admin {
+            return Err(ControlError::PermissionDenied(
+                "owner role editable only by server owner",
+            ));
+        }
+        let mut tx = <R as ControlRepo>::tx(&self.repo).await?;
+        self.require(&mut tx, ctx, None, None, Capability::ManageRoles)
+            .await?;
+        if let Some(existing_role_id) = role_id {
+            let _ = self
+                .require_manageable_role(&mut tx, ctx, existing_role_id)
+                .await?;
+        }
+        let role = <R as ControlRepo>::perm_upsert_role(
+            &self.repo,
+            &mut tx,
+            ctx.server_id,
+            role_id,
+            name.trim(),
+            color,
+            position,
+        )
+        .await?;
+        <R as ControlRepo>::insert_audit(
+            &self.repo,
+            &mut tx,
+            &AuditEntry::new(
+                ctx.server_id,
+                Some(ctx.user_id),
+                "perm.role.upsert",
+                "role",
+                role.role_id.clone(),
+                json!({"name": role.name, "position": role.role_position}),
+            ),
+        )
+        .await?;
+        <R as ControlRepo>::insert_outbox(
+            &self.repo,
+            &mut tx,
+            &OutboxEvent {
+                id: OutboxId(Uuid::new_v4()),
+                server_id: ctx.server_id,
+                topic: "perm.audit.appended".to_string(),
+                payload_json: json!({"action": "perm.role.upsert", "target_type": "role", "target_id": role.role_id}),
+            },
+        )
+        .await?;
+        <R as ControlRepo>::insert_outbox(&self.repo, &mut tx, &OutboxEvent { id: OutboxId(Uuid::new_v4()), server_id: ctx.server_id, topic: "perm.role.upserted".to_string(), payload_json: json!({"role_id": role.role_id, "name": role.name, "position": role.role_position}) }).await?;
+        <R as ControlRepo>::insert_outbox(
+            &self.repo,
+            &mut tx,
+            &OutboxEvent {
+                id: OutboxId(Uuid::new_v4()),
+                server_id: ctx.server_id,
+                topic: "perm.role.order_changed".to_string(),
+                payload_json: json!({"role_ids": [role.role_id.clone()]}),
+            },
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(role)
+    }
+
+    pub async fn perm_delete_role(&self, ctx: &RequestContext, role_id: &str) -> ControlResult<()> {
+        let mut tx = <R as ControlRepo>::tx(&self.repo).await?;
+        self.require(&mut tx, ctx, None, None, Capability::ManageRoles)
+            .await?;
+        let _ = self.require_manageable_role(&mut tx, ctx, role_id).await?;
+        let deleted =
+            <R as ControlRepo>::perm_delete_role(&self.repo, &mut tx, ctx.server_id, role_id)
+                .await?;
+        if !deleted {
+            return Err(ControlError::NotFound("role"));
+        }
+        <R as ControlRepo>::insert_audit(
+            &self.repo,
+            &mut tx,
+            &AuditEntry::new(
+                ctx.server_id,
+                Some(ctx.user_id),
+                "perm.role.delete",
+                "role",
+                role_id.to_string(),
+                json!({}),
+            ),
+        )
+        .await?;
+        <R as ControlRepo>::insert_outbox(
+            &self.repo,
+            &mut tx,
+            &OutboxEvent {
+                id: OutboxId(Uuid::new_v4()),
+                server_id: ctx.server_id,
+                topic: "perm.audit.appended".to_string(),
+                payload_json: json!({"action": "perm.role.delete", "target_type": "role", "target_id": role_id}),
+            },
+        )
+        .await?;
+        <R as ControlRepo>::insert_outbox(
+            &self.repo,
+            &mut tx,
+            &OutboxEvent {
+                id: OutboxId(Uuid::new_v4()),
+                server_id: ctx.server_id,
+                topic: "perm.role.deleted".to_string(),
+                payload_json: json!({"role_id": role_id}),
+            },
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn perm_set_role_caps(
+        &self,
+        ctx: &RequestContext,
+        role_id: &str,
+        caps: &[(String, String)],
+    ) -> ControlResult<()> {
+        let mut tx = <R as ControlRepo>::tx(&self.repo).await?;
+        self.require(&mut tx, ctx, None, None, Capability::ManageRoles)
+            .await?;
+        let _ = self.require_manageable_role(&mut tx, ctx, role_id).await?;
+        <R as ControlRepo>::perm_replace_role_caps(&self.repo, &mut tx, role_id, caps).await?;
+        <R as ControlRepo>::insert_audit(
+            &self.repo,
+            &mut tx,
+            &AuditEntry::new(
+                ctx.server_id,
+                Some(ctx.user_id),
+                "perm.role.caps",
+                "role",
+                role_id.to_string(),
+                json!({"caps": caps}),
+            ),
+        )
+        .await?;
+        <R as ControlRepo>::insert_outbox(
+            &self.repo,
+            &mut tx,
+            &OutboxEvent {
+                id: OutboxId(Uuid::new_v4()),
+                server_id: ctx.server_id,
+                topic: "perm.audit.appended".to_string(),
+                payload_json: json!({"action": "perm.role.caps", "target_type": "role", "target_id": role_id}),
+            },
+        )
+        .await?;
+        <R as ControlRepo>::insert_outbox(
+            &self.repo,
+            &mut tx,
+            &OutboxEvent {
+                id: OutboxId(Uuid::new_v4()),
+                server_id: ctx.server_id,
+                topic: "perm.role.caps_changed".to_string(),
+                payload_json: json!({"role_id": role_id, "caps": caps}),
+            },
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn perm_assign_roles(
+        &self,
+        ctx: &RequestContext,
+        user_id: UserId,
+        role_ids: &[String],
+    ) -> ControlResult<()> {
+        let mut tx = <R as ControlRepo>::tx(&self.repo).await?;
+        self.require(&mut tx, ctx, None, Some(user_id), Capability::ManageRoles)
+            .await?;
+        self.require_manageable_target_user(&mut tx, ctx, user_id)
+            .await?;
+        let actor_max = self.actor_max_role_position(&mut tx, ctx).await?;
+        for rid in role_ids {
+            let role = <R as ControlRepo>::perm_get_role(&self.repo, &mut tx, ctx.server_id, rid)
+                .await?
+                .ok_or(ControlError::NotFound("role"))?;
+            if role.role_position >= actor_max {
+                return Err(ControlError::PermissionDenied(
+                    "cannot assign roles above or equal to your highest role",
+                ));
+            }
+            if role.name.eq_ignore_ascii_case("owner") && !ctx.is_admin {
+                return Err(ControlError::PermissionDenied(
+                    "owner role editable only by server owner",
+                ));
+            }
+        }
+        <R as ControlRepo>::perm_replace_user_roles(
+            &self.repo,
+            &mut tx,
+            ctx.server_id,
+            user_id,
+            role_ids,
+        )
+        .await?;
+        <R as ControlRepo>::insert_audit(
+            &self.repo,
+            &mut tx,
+            &AuditEntry::new(
+                ctx.server_id,
+                Some(ctx.user_id),
+                "perm.user.roles",
+                "user",
+                user_id.0.to_string(),
+                json!({"roles": role_ids}),
+            ),
+        )
+        .await?;
+        <R as ControlRepo>::insert_outbox(
+            &self.repo,
+            &mut tx,
+            &OutboxEvent {
+                id: OutboxId(Uuid::new_v4()),
+                server_id: ctx.server_id,
+                topic: "perm.audit.appended".to_string(),
+                payload_json: json!({"action": "perm.user.roles", "target_type": "user", "target_id": user_id.0}),
+            },
+        )
+        .await?;
+        <R as ControlRepo>::insert_outbox(
+            &self.repo,
+            &mut tx,
+            &OutboxEvent {
+                id: OutboxId(Uuid::new_v4()),
+                server_id: ctx.server_id,
+                topic: "perm.user.roles_changed".to_string(),
+                payload_json: json!({"user_id": user_id.0, "roles": role_ids}),
+            },
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn perm_list_channel_overrides(
+        &self,
+        ctx: &RequestContext,
+        channel_id: ChannelId,
+    ) -> ControlResult<Vec<PermChannelOverrideRecord>> {
+        let mut tx = <R as ControlRepo>::tx(&self.repo).await?;
+        self.require(
+            &mut tx,
+            ctx,
+            Some(channel_id),
+            None,
+            Capability::ManageRoles,
+        )
+        .await?;
+        self.require(
+            &mut tx,
+            ctx,
+            Some(channel_id),
+            None,
+            Capability::ManageChannel,
+        )
+        .await?;
+        let rows = <R as ControlRepo>::perm_list_channel_overrides(&self.repo, &mut tx, channel_id)
+            .await?;
+        tx.commit().await?;
+        Ok(rows)
+    }
+
+    pub async fn perm_set_channel_override(
+        &self,
+        ctx: &RequestContext,
+        rec: &PermChannelOverrideRecord,
+    ) -> ControlResult<()> {
+        let mut tx = <R as ControlRepo>::tx(&self.repo).await?;
+        self.require(
+            &mut tx,
+            ctx,
+            Some(rec.channel_id),
+            rec.user_id,
+            Capability::ManageRoles,
+        )
+        .await?;
+        self.require(
+            &mut tx,
+            ctx,
+            Some(rec.channel_id),
+            rec.user_id,
+            Capability::ManageChannel,
+        )
+        .await?;
+        if let Some(target_user) = rec.user_id {
+            self.require_manageable_target_user(&mut tx, ctx, target_user)
+                .await?;
+        }
+        if let Some(ref role_id) = rec.role_id {
+            let _ = self.require_manageable_role(&mut tx, ctx, role_id).await?;
+        }
+        <R as ControlRepo>::perm_set_channel_override(&self.repo, &mut tx, rec).await?;
+        <R as ControlRepo>::insert_audit(&self.repo, &mut tx, &AuditEntry::new(ctx.server_id, Some(ctx.user_id), "perm.channel.override", "channel", rec.channel_id.0.to_string(), json!({"role_id": rec.role_id, "user_id": rec.user_id.map(|u| u.0), "cap": rec.cap, "effect": rec.effect}))).await?;
+        <R as ControlRepo>::insert_outbox(
+            &self.repo,
+            &mut tx,
+            &OutboxEvent {
+                id: OutboxId(Uuid::new_v4()),
+                server_id: ctx.server_id,
+                topic: "perm.audit.appended".to_string(),
+                payload_json: json!({"action": "perm.channel.override", "target_type": "channel", "target_id": rec.channel_id.0}),
+            },
+        )
+        .await?;
+        <R as ControlRepo>::insert_outbox(&self.repo, &mut tx, &OutboxEvent { id: OutboxId(Uuid::new_v4()), server_id: ctx.server_id, topic: "perm.channel.overrides_changed".to_string(), payload_json: json!({"channel_id": rec.channel_id.0, "role_id": rec.role_id, "user_id": rec.user_id.map(|u| u.0), "cap": rec.cap, "effect": rec.effect}) }).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn perm_audit_query(
+        &self,
+        ctx: &RequestContext,
+        limit: i64,
+    ) -> ControlResult<Vec<PermAuditRow>> {
+        let mut tx = <R as ControlRepo>::tx(&self.repo).await?;
+        self.require(&mut tx, ctx, None, None, Capability::ManageRoles)
+            .await?;
+        let rows = <R as ControlRepo>::perm_query_audit(
+            &self.repo,
+            &mut tx,
+            ctx.server_id,
+            limit.max(1).min(200),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(rows)
+    }
+
+    pub async fn perm_eval_effective(
+        &self,
+        ctx: &RequestContext,
+        user_id: UserId,
+        channel_id: Option<ChannelId>,
+        caps: &[String],
+    ) -> ControlResult<Vec<(String, bool)>> {
+        let mut tx = <R as ControlRepo>::tx(&self.repo).await?;
+        self.require(
+            &mut tx,
+            ctx,
+            channel_id,
+            Some(user_id),
+            Capability::ManageRoles,
+        )
+        .await?;
+        let mut out = Vec::with_capacity(caps.len());
+        for cap in caps {
+            let c = Capability::from_str(cap)
+                .ok_or(ControlError::InvalidArgument("unknown capability"))?;
+            let req = PermissionRequest {
+                server_id: ctx.server_id,
+                user_id,
+                is_admin: false,
+                capability: c,
+                channel_id,
+                target_user_id: None,
+            };
+            let allowed = matches!(
+                <R as ControlRepo>::decide_permission(&self.repo, &mut tx, &req).await?,
+                Decision::Allow
+            );
+            out.push((cap.clone(), allowed));
+        }
+        tx.commit().await?;
+        Ok(out)
+    }
+
+    async fn actor_max_role_position(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        ctx: &RequestContext,
+    ) -> ControlResult<i32> {
+        <R as ControlRepo>::perm_actor_max_role_position(&self.repo, tx, ctx.server_id, ctx.user_id)
+            .await
+    }
+
+    async fn require_manageable_role(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        ctx: &RequestContext,
+        role_id: &str,
+    ) -> ControlResult<PermRoleRecord> {
+        let role = <R as ControlRepo>::perm_get_role(&self.repo, tx, ctx.server_id, role_id)
+            .await?
+            .ok_or(ControlError::NotFound("role"))?;
+        if role.is_everyone {
+            return Err(ControlError::FailedPrecondition(
+                "@everyone role is immutable for this action",
+            ));
+        }
+        if role.name.eq_ignore_ascii_case("owner") && !ctx.is_admin {
+            return Err(ControlError::PermissionDenied(
+                "owner role editable only by server owner",
+            ));
+        }
+        let actor_max = self.actor_max_role_position(tx, ctx).await?;
+        if role.role_position >= actor_max {
+            return Err(ControlError::PermissionDenied(
+                "can only manage roles below your highest role",
+            ));
+        }
+        Ok(role)
+    }
+
+    async fn require_manageable_target_user(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        ctx: &RequestContext,
+        target_user_id: UserId,
+    ) -> ControlResult<()> {
+        let actor_max = self.actor_max_role_position(tx, ctx).await?;
+        let target_max = <R as ControlRepo>::perm_user_max_role_position(
+            &self.repo,
+            tx,
+            ctx.server_id,
+            target_user_id,
+        )
+        .await?;
+        if target_max >= actor_max {
+            return Err(ControlError::PermissionDenied(
+                "target user is not below your highest role",
+            ));
+        }
+        Ok(())
     }
 
     // -------------------------------------------------------------------------

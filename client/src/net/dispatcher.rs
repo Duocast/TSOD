@@ -54,6 +54,10 @@ pub enum PushEvent {
         snapshot: pb::InitialStateSnapshot,
         event_seq: u64,
     },
+    Permissions {
+        event: pb::PushEvent,
+        event_seq: u64,
+    },
     Unknown(pb::ServerToClient),
 }
 
@@ -663,6 +667,12 @@ fn classify_push(msg: pb::ServerToClient) -> PushEvent {
         Some(pb::server_to_client::Payload::InitialStateSnapshot(snapshot)) => {
             PushEvent::Snapshot {
                 snapshot,
+                event_seq: msg.event_seq,
+            }
+        }
+        Some(pb::server_to_client::Payload::PermissionsPushEvent(event)) => {
+            PushEvent::Permissions {
+                event,
                 event_seq: msg.event_seq,
             }
         }

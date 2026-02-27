@@ -1363,6 +1363,50 @@ async fn connect_and_run_session(
                             snapshot.self_user_id.as_ref().map(|u| u.value.clone()).unwrap_or_default(),
                         )));
                     }
+                    PushEvent::Permissions { event, event_seq } => {
+                        maybe_note_event_gap(&tx_event, event_seq);
+                        if !should_apply_event_seq(&tx_event, &mut last_event_seq, event_seq) {
+                            continue;
+                        }
+                        let summary = match event.evt {
+                            Some(pb::push_event::Evt::RoleUpserted(e)) => {
+                                format!(
+                                    "role_upserted role_id={} position={}",
+                                    e.role_id, e.position
+                                )
+                            }
+                            Some(pb::push_event::Evt::RoleDeleted(e)) => {
+                                format!("role_deleted role_id={}", e.role_id)
+                            }
+                            Some(pb::push_event::Evt::RoleOrder(e)) => {
+                                format!("role_order_changed count={}", e.role_ids.len())
+                            }
+                            Some(pb::push_event::Evt::RoleCaps(e)) => {
+                                format!("role_caps_changed role_id={}", e.role_id)
+                            }
+                            Some(pb::push_event::Evt::UserRoles(e)) => {
+                                format!(
+                                    "user_roles_changed user_id={}",
+                                    e.user_id.map(|u| u.value).unwrap_or_default()
+                                )
+                            }
+                            Some(pb::push_event::Evt::ChanOvr(e)) => {
+                                format!(
+                                    "channel_overrides_changed channel_id={}",
+                                    e.channel_id.map(|c| c.value).unwrap_or_default()
+                                )
+                            }
+                            Some(pb::push_event::Evt::AuditAppended(e)) => {
+                                format!(
+                                    "audit_appended action={} target={}:{}",
+                                    e.action, e.target_type, e.target_id
+                                )
+                            }
+                            None => "permissions_push empty".to_string(),
+                        };
+                        let _ =
+                            tx_event.send(UiEvent::AppendLog(format!("[perm-push] {}", summary)));
+                    }
                     PushEvent::Unknown(_) => {}
                 }
             }

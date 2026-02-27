@@ -644,6 +644,92 @@ impl Gateway {
                         break;
                     }
                 }
+                Some(pb::client_to_server::Payload::PermListRoles(_)) => {
+                    let roles = self.control.perm_list_roles(&ctx).await?;
+                    let resp = pb::ServerToClient {
+                        request_id: req_id,
+                        session_id: Some(pb::SessionId { value: session_id.clone() }),
+                        sent_at: Some(now_ts()),
+                        error: None,
+                        event_seq: 0,
+                        payload: Some(pb::server_to_client::Payload::PermListRoles(pb::PermListRolesResponse {
+                            roles: roles.into_iter().map(|r| pb::PermRole { role_id: r.role_id, name: r.name, color: r.color.max(0) as u32, position: r.role_position.max(0) as u32, is_everyone: r.is_everyone, is_system: false }).collect(),
+                            roles_with_caps: vec![],
+                        })),
+                    };
+                    if let Err(e) = write_delimited(&mut send, &resp).await { warn!("control write failed: {:#}", e); break; }
+                }
+                Some(pb::client_to_server::Payload::PermUpsertRole(r)) => {
+                    let role = self.control.perm_upsert_role(&ctx, (!r.role_id.is_empty()).then_some(r.role_id.as_str()), &r.name, r.color as i32, r.position as i32).await?;
+                    let resp = pb::ServerToClient {
+                        request_id: req_id,
+                        session_id: Some(pb::SessionId { value: session_id.clone() }),
+                        sent_at: Some(now_ts()),
+                        error: None,
+                        event_seq: 0,
+                        payload: Some(pb::server_to_client::Payload::PermUpsertRole(pb::PermUpsertRoleResponse { role: Some(pb::PermRole { role_id: role.role_id, name: role.name, color: role.color.max(0) as u32, position: role.role_position.max(0) as u32, is_everyone: role.is_everyone, is_system: false }) })),
+                    };
+                    if let Err(e) = write_delimited(&mut send, &resp).await { warn!("control write failed: {:#}", e); break; }
+                }
+                Some(pb::client_to_server::Payload::PermDeleteRole(r)) => {
+                    self.control.perm_delete_role(&ctx, &r.role_id).await?;
+                    let resp = pb::ServerToClient {
+                        request_id: req_id,
+                        session_id: Some(pb::SessionId { value: session_id.clone() }),
+                        sent_at: Some(now_ts()),
+                        error: None,
+                        event_seq: 0,
+                        payload: Some(pb::server_to_client::Payload::PermDeleteRole(pb::PermDeleteRoleResponse {})),
+                    };
+                    if let Err(e) = write_delimited(&mut send, &resp).await { warn!("control write failed: {:#}", e); break; }
+                }
+                Some(pb::client_to_server::Payload::PermSetRoleCaps(r)) => {
+                    let caps = r.caps.into_iter().map(|c| (c.cap, c.effect)).collect::<Vec<_>>();
+                    self.control.perm_set_role_caps(&ctx, &r.role_id, &caps).await?;
+                    let resp = pb::ServerToClient { request_id: req_id, session_id: Some(pb::SessionId { value: session_id.clone() }), sent_at: Some(now_ts()), error: None, event_seq: 0, payload: Some(pb::server_to_client::Payload::PermSetRoleCaps(pb::PermSetRoleCapsResponse {})) };
+                    if let Err(e) = write_delimited(&mut send, &resp).await { warn!("control write failed: {:#}", e); break; }
+                }
+                Some(pb::client_to_server::Payload::PermAssignRoles(r)) => {
+                    let target = parse_user_id(r.user_id.as_ref())?;
+                    self.control.perm_assign_roles(&ctx, target, &r.role_ids).await?;
+                    let resp = pb::ServerToClient { request_id: req_id, session_id: Some(pb::SessionId { value: session_id.clone() }), sent_at: Some(now_ts()), error: None, event_seq: 0, payload: Some(pb::server_to_client::Payload::PermAssignRoles(pb::PermAssignRolesResponse { role_ids: r.role_ids.clone() })) };
+                    if let Err(e) = write_delimited(&mut send, &resp).await { warn!("control write failed: {:#}", e); break; }
+                }
+                Some(pb::client_to_server::Payload::PermListChanOvr(r)) => {
+                    let channel_id = parse_channel_id(r.channel_id.as_ref())?;
+                    let rows = self.control.perm_list_channel_overrides(&ctx, channel_id).await?;
+                    let overrides = rows.into_iter().map(|row| {
+                        let target = if let Some(role_id) = row.role_id { pb::perm_channel_override::Target::RoleId(role_id) } else { pb::perm_channel_override::Target::UserId(pb::UserId { value: row.user_id.expect("user id").0.to_string() }) };
+                        pb::PermChannelOverride { channel_id: Some(pb::ChannelId { value: row.channel_id.0.to_string() }), target: Some(target), cap: row.cap, effect: row.effect }
+                    }).collect();
+                    let resp = pb::ServerToClient { request_id: req_id, session_id: Some(pb::SessionId { value: session_id.clone() }), sent_at: Some(now_ts()), error: None, event_seq: 0, payload: Some(pb::server_to_client::Payload::PermListChanOvr(pb::PermListChannelOverridesResponse { overrides, role_overrides: vec![], user_overrides: vec![] })) };
+                    if let Err(e) = write_delimited(&mut send, &resp).await { warn!("control write failed: {:#}", e); break; }
+                }
+                Some(pb::client_to_server::Payload::PermSetChanOvr(r)) => {
+                    let o = r.r#override.ok_or(ControlError::InvalidArgument("override missing"))?;
+                    let channel_id = parse_channel_id(o.channel_id.as_ref())?;
+                    let (role_id, user_id) = match o.target {
+                        Some(pb::perm_channel_override::Target::RoleId(role_id)) => (Some(role_id), None),
+                        Some(pb::perm_channel_override::Target::UserId(user_id)) => (None, Some(parse_user_id(Some(&user_id))?)),
+                        None => return Err(ControlError::InvalidArgument("override target missing").into()),
+                    };
+                    let rec = vp_control::PermChannelOverrideRecord { channel_id, role_id, user_id, cap: o.cap, effect: o.effect };
+                    self.control.perm_set_channel_override(&ctx, &rec).await?;
+                    let resp = pb::ServerToClient { request_id: req_id, session_id: Some(pb::SessionId { value: session_id.clone() }), sent_at: Some(now_ts()), error: None, event_seq: 0, payload: Some(pb::server_to_client::Payload::PermSetChanOvr(pb::PermSetChannelOverrideResponse {})) };
+                    if let Err(e) = write_delimited(&mut send, &resp).await { warn!("control write failed: {:#}", e); break; }
+                }
+                Some(pb::client_to_server::Payload::PermAuditQuery(r)) => {
+                    let rows = self.control.perm_audit_query(&ctx, r.limit as i64).await?;
+                    let resp = pb::ServerToClient { request_id: req_id, session_id: Some(pb::SessionId { value: session_id.clone() }), sent_at: Some(now_ts()), error: None, event_seq: 0, payload: Some(pb::server_to_client::Payload::PermAuditQuery(pb::PermAuditQueryResponse { rows: rows.into_iter().map(|row| pb::PermAuditRow { action: row.action, target_type: row.target_type, target_id: row.target_id, created_at: Some(pb::Timestamp { unix_millis: row.created_at.timestamp_millis() }) }).collect() })) };
+                    if let Err(e) = write_delimited(&mut send, &resp).await { warn!("control write failed: {:#}", e); break; }
+                }
+                Some(pb::client_to_server::Payload::PermEvalEffective(r)) => {
+                    let target = parse_user_id(r.user_id.as_ref())?;
+                    let channel_id = if let Some(ch) = r.channel_id.as_ref() { Some(parse_channel_id(Some(ch))?) } else { None };
+                    let entries = self.control.perm_eval_effective(&ctx, target, channel_id, &r.caps).await?;
+                    let resp = pb::ServerToClient { request_id: req_id, session_id: Some(pb::SessionId { value: session_id.clone() }), sent_at: Some(now_ts()), error: None, event_seq: 0, payload: Some(pb::server_to_client::Payload::PermEvalEffective(pb::PermEvaluateEffectiveResponse { entries: entries.into_iter().map(|(cap,allowed)| pb::PermEvaluateEntry { cap, allowed }).collect(), explain: vec![] })) };
+                    if let Err(e) = write_delimited(&mut send, &resp).await { warn!("control write failed: {:#}", e); break; }
+                }
                 _ => {
                     // Ignore other messages for now.
                 }
@@ -901,6 +987,13 @@ fn normalize_preferred_display_name(value: &str) -> Option<String> {
         return None;
     }
     Some(trimmed.chars().take(64).collect())
+}
+
+fn parse_user_id(u: Option<&pb::UserId>) -> Result<UserId> {
+    let u = u.ok_or(ControlError::InvalidArgument("user_id missing"))?;
+    Ok(UserId(uuid::Uuid::parse_str(&u.value).map_err(|_| {
+        ControlError::InvalidArgument("invalid user_id")
+    })?))
 }
 
 fn parse_channel_id(ch: Option<&pb::ChannelId>) -> Result<ChannelId> {
