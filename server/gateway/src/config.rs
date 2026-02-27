@@ -33,6 +33,10 @@ pub struct Config {
     #[arg(long, default_value = "00000000-0000-0000-0000-0000000000aa")]
     pub default_server_id: String,
 
+    /// Optional user id (UUID) to force-assign the owner role on this server.
+    #[arg(long)]
+    pub bootstrap_owner_user_id: Option<String>,
+
     /// Metrics scrape listen address
     #[arg(long, default_value = "0.0.0.0:9100")]
     pub metrics_listen: String,
