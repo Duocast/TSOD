@@ -2363,7 +2363,10 @@ async fn voice_send_loop(
             .tx_bytes
             .fetch_add(d.len() as u64, Ordering::Relaxed);
 
-        if conn.send_datagram(d).is_err() {
+        if let Err(e) = conn.send_datagram(d) {
+            let _ = tx_event.send(UiEvent::AppendLog(format!(
+                "[voice] send_datagram failed: {e:?}"
+            )));
             let _ = voice_die_tx.send(true);
             return;
         }
