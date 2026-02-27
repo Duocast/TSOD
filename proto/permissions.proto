@@ -244,6 +244,26 @@ message PermListRolesResponse {
   repeated PermRoleWithCaps roles_with_caps = 2;
 }
 
+message PermUserSummary {
+  UserId user_id = 1;
+  string display_name = 2;
+  Timestamp joined_at = 3;
+  Timestamp last_seen = 4;
+  int32 highest_role_position = 5;
+  repeated string role_ids = 6;
+  bool is_admin = 7;
+}
+
+message PermListUsersRequest {
+  ServerId server_id = 1;
+}
+
+message PermListUsersResponse {
+  repeated PermUserSummary users = 1;
+  int32 editor_highest_role_position = 2;
+  bool editor_is_admin = 3;
+}
+
 message PermUpsertRoleRequest {
   ServerId server_id = 1;
   string role_id = 2; // empty => create

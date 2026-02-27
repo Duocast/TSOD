@@ -8,8 +8,8 @@ use crate::{
     ids::{ChannelId, MessageId, OutboxId, ServerId, UserId},
     model::{
         AuditEntry, Channel, ChannelCreate, ChatMessage, JoinChannel, Member, OutboxEvent,
-        OutboxEventRow, PermAuditRow, PermChannelOverrideRecord, PermRoleRecord, PermissionRequest,
-        SendMessage,
+        OutboxEventRow, PermAuditRow, PermChannelOverrideRecord, PermRoleRecord,
+        PermUserSummaryRecord, PermissionRequest, SendMessage,
     },
     perms::{Capability, Decision},
     repo::ControlRepo,
@@ -790,6 +790,19 @@ impl<R: ControlRepo> ControlService<R> {
         let roles = <R as ControlRepo>::perm_list_roles(&self.repo, &mut tx, ctx.server_id).await?;
         tx.commit().await?;
         Ok(roles)
+    }
+
+    pub async fn perm_list_users(
+        &self,
+        ctx: &RequestContext,
+    ) -> ControlResult<(Vec<PermUserSummaryRecord>, i32, bool)> {
+        let mut tx = <R as ControlRepo>::tx(&self.repo).await?;
+        self.require(&mut tx, ctx, None, None, Capability::ManageRoles)
+            .await?;
+        let users = <R as ControlRepo>::perm_list_users(&self.repo, &mut tx, ctx.server_id).await?;
+        let editor_highest_role_position = self.actor_max_role_position(&mut tx, ctx).await?;
+        tx.commit().await?;
+        Ok((users, editor_highest_role_position, ctx.is_admin))
     }
 
     pub async fn perm_upsert_role(

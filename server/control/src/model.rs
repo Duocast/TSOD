@@ -156,6 +156,17 @@ pub struct PermAuditRow {
     pub target_id: String,
     pub created_at: DateTime<Utc>,
 }
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PermUserSummaryRecord {
+    pub user_id: UserId,
+    pub display_name: String,
+    pub joined_at: Option<DateTime<Utc>>,
+    pub last_seen: Option<DateTime<Utc>>,
+    pub highest_role_position: i32,
+    pub role_ids: Vec<String>,
+    pub is_admin: bool,
+}
 /// Permission check request (repo decides allow/deny)
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PermissionRequest {
