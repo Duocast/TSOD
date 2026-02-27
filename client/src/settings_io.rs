@@ -1,6 +1,6 @@
 //! Settings persistence: save/load AppSettings to a JSON file.
 
-use crate::ui::model::AppSettings;
+use crate::ui::model::{AppSettings, AudioDeviceId, AudioDeviceInfo};
 use anyhow::Result;
 use std::path::PathBuf;
 
@@ -54,4 +54,52 @@ pub fn save_settings(settings: &AppSettings) -> Result<()> {
     std::fs::write(&path, json)?;
     tracing::info!("settings saved to {}", path.display());
     Ok(())
+}
+
+pub fn migrate_audio_device_ids(
+    settings: &mut AppSettings,
+    input_devices: &[AudioDeviceInfo],
+    output_devices: &[AudioDeviceInfo],
+) {
+    settings.capture_device = migrate_device(
+        &settings.capture_device,
+        input_devices,
+        AudioDeviceId::default_input(),
+    );
+    settings.playback_device = migrate_device(
+        &settings.playback_device,
+        output_devices,
+        AudioDeviceId::default_output(),
+    );
+}
+
+fn migrate_device(
+    current: &AudioDeviceId,
+    devices: &[AudioDeviceInfo],
+    default_id: AudioDeviceId,
+) -> AudioDeviceId {
+    if current.is_default() {
+        return default_id;
+    }
+
+    if devices.iter().any(|d| d.key == *current) {
+        return current.clone();
+    }
+
+    let legacy_name = current.id.trim();
+    if legacy_name.is_empty() || legacy_name == "(system default)" {
+        return default_id;
+    }
+
+    let mut matches: Vec<&AudioDeviceInfo> = devices
+        .iter()
+        .filter(|d| d.label == legacy_name || d.display_label == legacy_name)
+        .collect();
+
+    if matches.is_empty() {
+        return default_id;
+    }
+
+    matches.sort_by_key(|d| (!d.is_default, d.label.clone()));
+    matches[0].key.clone()
 }
