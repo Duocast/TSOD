@@ -327,25 +327,44 @@ fn page_capture(
 
     ui.horizontal(|ui: &mut egui::Ui| {
         ui.label("Input Device:");
-        let selected_label = input_devices
-            .iter()
-            .find(|d| d.key == s.capture_device)
-            .map(|d| d.label.as_str())
-            .unwrap_or("(system default)");
+        let selected_label = if s.capture_device.is_default() {
+            "Default (system)".to_string()
+        } else {
+            input_devices
+                .iter()
+                .find(|d| d.key == s.capture_device)
+                .map(|d| d.display_label.clone())
+                .unwrap_or_else(|| format!("Missing device — {}", s.capture_device.id))
+        };
         egui::ComboBox::from_id_salt("cap_device")
             .selected_text(selected_label)
             .width(300.0)
             .show_ui(ui, |ui: &mut egui::Ui| {
+                if ui
+                    .selectable_value(
+                        &mut s.capture_device,
+                        crate::ui::model::AudioDeviceId::default_input(),
+                        "Default (system)",
+                    )
+                    .changed()
+                {
+                    dirty = true;
+                    let _ = tx_intent.send(UiIntent::SetInputDevice(s.capture_device.clone()));
+                }
                 for dev in input_devices {
+                    if dev.key.is_default() {
+                        continue;
+                    }
                     if ui
                         .selectable_value(
                             &mut s.capture_device,
                             dev.key.clone(),
-                            dev.label.as_str(),
+                            dev.display_label.as_str(),
                         )
                         .changed()
                     {
                         dirty = true;
+                        let _ = tx_intent.send(UiIntent::SetInputDevice(s.capture_device.clone()));
                     }
                 }
             });
@@ -669,25 +688,45 @@ fn page_playback(
 
     ui.horizontal(|ui: &mut egui::Ui| {
         ui.label("Output Device:");
-        let selected_label = output_devices
-            .iter()
-            .find(|d| d.key == s.playback_device)
-            .map(|d| d.label.as_str())
-            .unwrap_or("(system default)");
+        let selected_label = if s.playback_device.is_default() {
+            "Default (system)".to_string()
+        } else {
+            output_devices
+                .iter()
+                .find(|d| d.key == s.playback_device)
+                .map(|d| d.display_label.clone())
+                .unwrap_or_else(|| format!("Missing device — {}", s.playback_device.id))
+        };
         egui::ComboBox::from_id_salt("play_device")
             .selected_text(selected_label)
             .width(300.0)
             .show_ui(ui, |ui: &mut egui::Ui| {
+                if ui
+                    .selectable_value(
+                        &mut s.playback_device,
+                        crate::ui::model::AudioDeviceId::default_output(),
+                        "Default (system)",
+                    )
+                    .changed()
+                {
+                    dirty = true;
+                    let _ = tx_intent.send(UiIntent::SetOutputDevice(s.playback_device.clone()));
+                }
                 for dev in output_devices {
+                    if dev.key.is_default() {
+                        continue;
+                    }
                     if ui
                         .selectable_value(
                             &mut s.playback_device,
                             dev.key.clone(),
-                            dev.label.as_str(),
+                            dev.display_label.as_str(),
                         )
                         .changed()
                     {
                         dirty = true;
+                        let _ =
+                            tx_intent.send(UiIntent::SetOutputDevice(s.playback_device.clone()));
                     }
                 }
             });

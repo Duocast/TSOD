@@ -5,7 +5,7 @@ use ringbuf::{
 };
 use std::cell::UnsafeCell;
 
-use crate::ui::model::{AudioBackend, AudioDeviceId, AudioDeviceInfo};
+use crate::ui::model::{disambiguate_display_labels, AudioBackend, AudioDeviceId, AudioDeviceInfo};
 
 pub struct Capture {
     backend: CaptureBackend,
@@ -80,10 +80,12 @@ impl Capture {
 pub fn enumerate_input_devices() -> Vec<AudioDeviceInfo> {
     let mut devices = vec![AudioDeviceInfo {
         key: AudioDeviceId::default_input(),
-        label: "(system default)".to_string(),
+        label: "Default (system)".to_string(),
+        display_label: "Default (system)".to_string(),
         is_default: true,
     }];
     devices.extend(CaptureBackend::enumerate_input_devices());
+    disambiguate_display_labels(&mut devices);
     devices
 }
 
@@ -97,7 +99,7 @@ fn cpal_backend() -> AudioBackend {
 }
 #[cfg(target_os = "linux")]
 fn cpal_backend() -> AudioBackend {
-    AudioBackend::PulseAudio
+    AudioBackend::Pulse
 }
 #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
 fn cpal_backend() -> AudioBackend {
@@ -139,7 +141,12 @@ mod linux {
                 let thread = std::thread::Builder::new()
                     .name("tsod-pipewire-capture".to_string())
                     .spawn(move || {
-                        if let Err(e) = run_pipewire_capture(sample_rate, channels, prod) {
+                        if let Err(e) = run_pipewire_capture(
+                            sample_rate,
+                            channels,
+                            prod,
+                            preferred_device.map(str::to_string),
+                        ) {
                             eprintln!("pipewire capture thread failed: {e:#}");
                         }
                     })
@@ -161,7 +168,7 @@ mod linux {
 
         pub fn enumerate_input_devices() -> Vec<AudioDeviceInfo> {
             if pipewire_is_available() {
-                return Vec::new();
+                return enumerate_pipewire_inputs();
             }
             CpalCapture::enumerate_input_devices()
         }
@@ -190,6 +197,7 @@ mod linux {
         sample_rate: u32,
         channels: u16,
         mut prod: HeapProd<i16>,
+        preferred_device: Option<String>,
     ) -> Result<()> {
         pw::init();
 
@@ -198,16 +206,23 @@ mod linux {
             .context("create PipeWire context")?;
         let core = context.connect(None).context("connect PipeWire core")?;
 
-        let stream = pw::stream::StreamBox::new(
-            &core,
-            "tsod-capture",
+        let props = if let Some(target) = preferred_device.as_deref() {
             properties! {
                 *pw::keys::MEDIA_TYPE => "Audio",
                 *pw::keys::MEDIA_CATEGORY => "Capture",
                 *pw::keys::MEDIA_ROLE => "Communication",
-            },
-        )
-        .context("create PipeWire capture stream")?;
+                *pw::keys::TARGET_OBJECT => target,
+            }
+        } else {
+            properties! {
+                *pw::keys::MEDIA_TYPE => "Audio",
+                *pw::keys::MEDIA_CATEGORY => "Capture",
+                *pw::keys::MEDIA_ROLE => "Communication",
+            }
+        };
+
+        let stream = pw::stream::StreamBox::new(&core, "tsod-capture", props)
+            .context("create PipeWire capture stream")?;
 
         let ch = channels;
         let listener = stream
@@ -283,6 +298,63 @@ mod linux {
         let _listener = listener;
         mainloop.run();
         Ok(())
+    }
+
+    fn enumerate_pipewire_inputs() -> Vec<AudioDeviceInfo> {
+        let Ok(output) = std::process::Command::new("pw-dump").output() else {
+            return Vec::new();
+        };
+        if !output.status.success() {
+            return Vec::new();
+        }
+        let Ok(json) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else {
+            return Vec::new();
+        };
+        let Some(entries) = json.as_array() else {
+            return Vec::new();
+        };
+
+        let mut devices = Vec::new();
+        for entry in entries {
+            let Some(info) = entry.get("info") else {
+                continue;
+            };
+            let Some(props) = info.get("props") else {
+                continue;
+            };
+            let media_class = props
+                .get("media.class")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            if media_class != "Audio/Source" {
+                continue;
+            }
+            let node_name = props
+                .get("node.name")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            if node_name.is_empty() {
+                continue;
+            }
+            let label = props
+                .get("node.description")
+                .or_else(|| props.get("node.nick"))
+                .or_else(|| props.get("node.name"))
+                .and_then(|v| v.as_str())
+                .unwrap_or(node_name)
+                .to_string();
+            devices.push(AudioDeviceInfo {
+                key: AudioDeviceId {
+                    backend: AudioBackend::PipeWire,
+                    direction: AudioDirection::Input,
+                    id: node_name.to_string(),
+                },
+                label: label.clone(),
+                display_label: label,
+                is_default: false,
+            });
+        }
+        devices
     }
 
     use crate::audio::resample::LinearResampler;
@@ -416,7 +488,8 @@ mod linux {
         device
             .description()
             .ok()
-            .map(|desc| desc.name().to_string())
+            .map(|desc| desc.to_string())
+            .or_else(|| device.name().ok())
             .filter(|name| !name.trim().is_empty())
     }
 
@@ -429,7 +502,8 @@ mod linux {
                 direction: AudioDirection::Input,
                 id: id_str,
             },
-            label,
+            label: label.clone(),
+            display_label: label,
             is_default: false,
         })
     }
@@ -440,14 +514,7 @@ mod linux {
                 return Ok(device);
             }
         }
-        find_input_device_by_name(host, id)
-    }
-
-    fn find_input_device_by_name(host: &cpal::Host, name: &str) -> Result<cpal::Device> {
-        let mut devices = host.input_devices().context("enumerate input devices")?;
-        devices
-            .find(|dev| device_label(dev).as_deref() == Some(name))
-            .ok_or_else(|| anyhow!("no matching input device"))
+        Err(anyhow!("no matching input device id: {id}"))
     }
 
     fn native_input_config(dev: &cpal::Device) -> Result<cpal::SupportedStreamConfig> {
@@ -652,7 +719,8 @@ mod non_linux {
         device
             .description()
             .ok()
-            .map(|desc| desc.name().to_string())
+            .map(|desc| desc.to_string())
+            .or_else(|| device.name().ok())
             .filter(|name| !name.trim().is_empty())
     }
 
@@ -665,7 +733,8 @@ mod non_linux {
                 direction: AudioDirection::Input,
                 id: id_str,
             },
-            label,
+            label: label.clone(),
+            display_label: label,
             is_default: false,
         })
     }
@@ -676,14 +745,7 @@ mod non_linux {
                 return Ok(device);
             }
         }
-        find_input_device_by_name(host, id)
-    }
-
-    fn find_input_device_by_name(host: &cpal::Host, name: &str) -> Result<cpal::Device> {
-        let mut devices = host.input_devices().context("enumerate input devices")?;
-        devices
-            .find(|dev| device_label(dev).as_deref() == Some(name))
-            .ok_or_else(|| anyhow!("no matching input device"))
+        Err(anyhow!("no matching input device id: {id}"))
     }
 
     fn native_input_config(dev: &cpal::Device) -> Result<cpal::SupportedStreamConfig> {

@@ -38,7 +38,7 @@ use std::sync::{
 use std::sync::{Mutex as StdMutex, OnceLock};
 use tokio::sync::{watch, Mutex, RwLock};
 use tokio::time::{sleep, Duration, Instant};
-use tracing::{debug, warn, Level};
+use tracing::{debug, info, warn, Level};
 use tracing_subscriber::EnvFilter;
 use ui::model::AudioDeviceId;
 use ui::model::{FecMode, PerUserAudioSettings};
@@ -293,7 +293,8 @@ async fn app_task(
     });
 
     // Load persisted settings and send to UI
-    let saved_settings = settings_io::load_settings();
+    let mut saved_settings = settings_io::load_settings();
+    settings_io::migrate_audio_device_ids(&mut saved_settings, &input_devices, &output_devices);
     if !saved_settings.identity_nickname.trim().is_empty() {
         cfg.display_name = saved_settings.identity_nickname.trim().to_string();
         let _ = tx_event.send(UiEvent::SetNick(cfg.display_name.clone()));
@@ -764,6 +765,7 @@ fn start_capture_with_fallback(
     preferred_device: Option<&str>,
 ) -> Result<audio::capture::Capture> {
     if let Some(device) = preferred_device {
+        info!("audio open input by id: {device}");
         match audio::capture::Capture::start_with_device(
             sample_rate,
             channels,
@@ -784,6 +786,7 @@ fn start_playout_with_fallback(
     preferred_mode: Option<&str>,
 ) -> Result<audio::playout::Playout> {
     if let Some(device) = preferred_device {
+        info!("audio open output by id: {device}");
         match audio::playout::Playout::start_with_mode(
             sample_rate,
             channels,
@@ -810,6 +813,25 @@ async fn restart_audio_streams(
     let preferred_input = preferred_device_id(&selected.input_device);
     let preferred_output = preferred_device_id(&selected.output_device);
     let preferred_mode = selected.playback_mode.as_deref();
+    let input_label = resolve_device_label(&selected.input_device, true);
+    let output_label = resolve_device_label(&selected.output_device, false);
+
+    info!(
+        "switch input -> {:?} {} ({})",
+        selected.input_device.backend, selected.input_device.id, input_label
+    );
+    info!(
+        "switch output -> {:?} {} ({})",
+        selected.output_device.backend, selected.output_device.id, output_label
+    );
+    let _ = tx_event.send(UiEvent::AppendLog(format!(
+        "[audio] switch input -> {:?} {} ({})",
+        selected.input_device.backend, selected.input_device.id, input_label
+    )));
+    let _ = tx_event.send(UiEvent::AppendLog(format!(
+        "[audio] switch output -> {:?} {} ({})",
+        selected.output_device.backend, selected.output_device.id, output_label
+    )));
 
     let new_capture = start_capture_with_fallback(sample_rate, channels, frame_ms, preferred_input)
         .context("restart capture")?;
@@ -837,6 +859,21 @@ async fn restart_audio_streams(
     )));
 
     Ok(())
+}
+
+fn resolve_device_label(device: &AudioDeviceId, input: bool) -> String {
+    if device.is_default() {
+        return "Default (system)".to_string();
+    }
+    let all = if input {
+        audio::capture::enumerate_input_devices()
+    } else {
+        audio::playout::enumerate_output_devices()
+    };
+    all.into_iter()
+        .find(|d| d.key == *device)
+        .map(|d| d.display_label)
+        .unwrap_or_else(|| "Unknown device".to_string())
 }
 
 fn split_server_host_port(server: &str) -> (String, u16) {

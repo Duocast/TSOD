@@ -13,7 +13,8 @@ const MAX_LOG_LINES: usize = 1000;
 pub enum AudioBackend {
     Auto,
     Wasapi,
-    PulseAudio,
+    #[serde(alias = "PulseAudio")]
+    Pulse,
     PipeWire,
     CoreAudio,
     Alsa,
@@ -61,7 +62,39 @@ impl AudioDeviceId {
 pub struct AudioDeviceInfo {
     pub key: AudioDeviceId,
     pub label: String,
+    #[serde(default)]
+    pub display_label: String,
     pub is_default: bool,
+}
+
+pub fn disambiguate_display_labels(devices: &mut [AudioDeviceInfo]) {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for device in devices.iter() {
+        *counts.entry(device.label.clone()).or_insert(0) += 1;
+    }
+
+    for device in devices.iter_mut() {
+        let short_id = short_device_id(&device.key.id);
+        if counts.get(&device.label).copied().unwrap_or_default() > 1 {
+            device.display_label = format!("{} — {}", device.label, short_id);
+        } else {
+            device.display_label = device.label.clone();
+        }
+    }
+}
+
+fn short_device_id(id: &str) -> String {
+    let compact: String = id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect::<String>();
+    if compact.len() >= 8 {
+        compact[compact.len() - 8..].to_string()
+    } else if compact.is_empty() {
+        "unknown".to_string()
+    } else {
+        compact
+    }
 }
 
 fn deserialize_input_device_id<'de, D>(deserializer: D) -> Result<AudioDeviceId, D::Error>
