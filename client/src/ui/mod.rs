@@ -228,9 +228,15 @@ impl eframe::App for VpApp {
                     if ui.button("Server Settings").clicked() {
                         self.model.show_permissions_center = true;
                         self.model.permissions_tab = model::PermissionsTab::Roles;
+                        let _ = self
+                            .tx_intent
+                            .send(model::UiIntent::RefreshPermissionsCenter);
                     }
                     if ui.button("Permissions").clicked() {
                         self.model.show_permissions_center = true;
+                        let _ = self
+                            .tx_intent
+                            .send(model::UiIntent::RefreshPermissionsCenter);
                     }
                     if ui.button("Telemetry").clicked() {
                         self.model.show_telemetry = !self.model.show_telemetry;

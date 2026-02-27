@@ -730,6 +730,47 @@ impl Gateway {
                     let resp = pb::ServerToClient { request_id: req_id, session_id: Some(pb::SessionId { value: session_id.clone() }), sent_at: Some(now_ts()), error: None, event_seq: 0, payload: Some(pb::server_to_client::Payload::PermEvalEffective(pb::PermEvaluateEffectiveResponse { entries: entries.into_iter().map(|(cap,allowed)| pb::PermEvaluateEntry { cap, allowed }).collect(), explain: vec![] })) };
                     if let Err(e) = write_delimited(&mut send, &resp).await { warn!("control write failed: {:#}", e); break; }
                 }
+                Some(pb::client_to_server::Payload::PermListUsers(_)) => {
+                    let (users, editor_highest_role_position, editor_is_admin) =
+                        self.control.perm_list_users(&ctx).await?;
+                    let resp = pb::ServerToClient {
+                        request_id: req_id,
+                        session_id: Some(pb::SessionId {
+                            value: session_id.clone(),
+                        }),
+                        sent_at: Some(now_ts()),
+                        error: None,
+                        event_seq: 0,
+                        payload: Some(pb::server_to_client::Payload::PermListUsers(
+                            pb::PermListUsersResponse {
+                                users: users
+                                    .into_iter()
+                                    .map(|u| pb::PermUserSummary {
+                                        user_id: Some(pb::UserId {
+                                            value: u.user_id.0.to_string(),
+                                        }),
+                                        display_name: u.display_name,
+                                        joined_at: u.joined_at.map(|t| pb::Timestamp {
+                                            unix_millis: t.timestamp_millis(),
+                                        }),
+                                        last_seen: u.last_seen.map(|t| pb::Timestamp {
+                                            unix_millis: t.timestamp_millis(),
+                                        }),
+                                        highest_role_position: u.highest_role_position,
+                                        role_ids: u.role_ids,
+                                        is_admin: u.is_admin,
+                                    })
+                                    .collect(),
+                                editor_highest_role_position,
+                                editor_is_admin,
+                            },
+                        )),
+                    };
+                    if let Err(e) = write_delimited(&mut send, &resp).await {
+                        warn!("control write failed: {:#}", e);
+                        break;
+                    }
+                }
                 _ => {
                     // Ignore other messages for now.
                 }

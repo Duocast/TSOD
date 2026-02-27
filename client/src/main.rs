@@ -1996,6 +1996,70 @@ async fn connect_and_run_session(
                                 ));
                             }
                         }
+                        UiIntent::RefreshPermissionsCenter => {
+                            let req = pb::PermListUsersRequest {
+                                server_id: None,
+                            };
+                            match dispatcher
+                                .send_request(
+                                    pb::client_to_server::Payload::PermListUsers(req),
+                                    Duration::from_secs(5),
+                                )
+                                .await
+                            {
+                                Ok(Ok(resp)) => {
+                                    if let Some(pb::server_to_client::Payload::PermListUsers(
+                                        payload,
+                                    )) = resp.payload
+                                    {
+                                        let members = payload
+                                            .users
+                                            .into_iter()
+                                            .map(|u| ui::model::MemberPermissionDraft {
+                                                display_name: if u.display_name.trim().is_empty() {
+                                                    u.user_id
+                                                        .as_ref()
+                                                        .map(|id| id.value.clone())
+                                                        .unwrap_or_else(|| "unknown".into())
+                                                } else {
+                                                    u.display_name
+                                                },
+                                                user_id: u
+                                                    .user_id
+                                                    .map(|id| id.value)
+                                                    .unwrap_or_default(),
+                                                highest_role_index: u
+                                                    .highest_role_position
+                                                    .max(0)
+                                                    as usize,
+                                                role_assignments: Vec::new(),
+                                                can_mute_members: u.is_admin,
+                                                can_deafen_members: u.is_admin,
+                                                can_move_members: u.is_admin,
+                                                can_kick_members: u.is_admin,
+                                            })
+                                            .collect();
+                                        let _ = tx_event.send(UiEvent::PermissionsMembersLoaded {
+                                            members,
+                                            current_user_max_role: payload
+                                                .editor_highest_role_position
+                                                .max(0)
+                                                as usize,
+                                            can_moderate_members: payload.editor_is_admin,
+                                        });
+                                    } else {
+                                        let _ = tx_event.send(UiEvent::AppendLog(
+                                            "[perm] unexpected response to perm_list_users".into(),
+                                        ));
+                                    }
+                                }
+                                Ok(Err(e)) | Err(e) => {
+                                    let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                        "[perm] list users failed: {e:#}"
+                                    )));
+                                }
+                            }
+                        }
                         UiIntent::PokeUser { user_id, message } => {
                             if let Err(e) = dispatcher.poke_user(&user_id, &message).await {
                                 let _ = tx_event.send(UiEvent::AppendLog(format!("[moderation] poke failed: {e:#}")));

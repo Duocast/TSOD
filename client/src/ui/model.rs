@@ -133,6 +133,11 @@ pub enum UiEvent {
 
     // Settings loaded from disk
     SettingsLoaded(Box<AppSettings>),
+    PermissionsMembersLoaded {
+        members: Vec<MemberPermissionDraft>,
+        current_user_max_role: usize,
+        can_moderate_members: bool,
+    },
 }
 
 // ── Intents from UI to backend ─────────────────────────────────────────
@@ -270,6 +275,7 @@ pub enum UiIntent {
 
     // Settings: Save to disk
     SaveSettings(Box<AppSettings>),
+    RefreshPermissionsCenter,
 }
 
 // ── Persisted application settings ────────────────────────────────────
@@ -1198,38 +1204,7 @@ impl Default for UiModel {
             permissions_view_as_mode: PermissionViewAsMode::Role,
             permissions_view_as_name: "@everyone".into(),
             permissions_member_search: String::new(),
-            permissions_members: vec![
-                MemberPermissionDraft {
-                    display_name: "Alice".into(),
-                    user_id: "u001".into(),
-                    highest_role_index: 2,
-                    role_assignments: vec![true, false, true],
-                    can_mute_members: true,
-                    can_deafen_members: true,
-                    can_move_members: true,
-                    can_kick_members: true,
-                },
-                MemberPermissionDraft {
-                    display_name: "Bob".into(),
-                    user_id: "u002".into(),
-                    highest_role_index: 1,
-                    role_assignments: vec![true, true, false],
-                    can_mute_members: true,
-                    can_deafen_members: false,
-                    can_move_members: true,
-                    can_kick_members: false,
-                },
-                MemberPermissionDraft {
-                    display_name: "Charlie".into(),
-                    user_id: "u003".into(),
-                    highest_role_index: 0,
-                    role_assignments: vec![true, false, false],
-                    can_mute_members: false,
-                    can_deafen_members: false,
-                    can_move_members: false,
-                    can_kick_members: false,
-                },
-            ],
+            permissions_members: vec![],
             permissions_selected_member: 0,
             permissions_advanced_enabled: false,
             permissions_actor_power: PermissionPowerDraft {
@@ -1631,6 +1606,16 @@ impl UiModel {
                 self.settings = *s.clone();
                 self.settings_draft = *s;
                 self.sync_settings_to_runtime();
+            }
+            UiEvent::PermissionsMembersLoaded {
+                members,
+                current_user_max_role,
+                can_moderate_members,
+            } => {
+                self.permissions_members = members;
+                self.permissions_current_user_max_role = current_user_max_role;
+                self.permissions_can_moderate_members = can_moderate_members;
+                self.permissions_selected_member = 0;
             }
         }
 

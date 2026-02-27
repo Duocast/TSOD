@@ -10,7 +10,8 @@ use crate::{
     ids::{ChannelId, MessageId, OutboxId, ServerId, UserId},
     model::{
         AuditEntry, Channel, ChannelListItem, ChatMessage, Member, OutboxEvent, OutboxEventRow,
-        PermAuditRow, PermChannelOverrideRecord, PermRoleRecord, PermissionRequest,
+        PermAuditRow, PermChannelOverrideRecord, PermRoleRecord, PermUserSummaryRecord,
+        PermissionRequest,
     },
     perms::Decision,
 };
@@ -94,6 +95,11 @@ pub trait ControlRepo: Send + Sync {
         tx: &mut Transaction<'_, Postgres>,
         server: ServerId,
     ) -> ControlResult<Vec<PermRoleRecord>>;
+    async fn perm_list_users(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        server: ServerId,
+    ) -> ControlResult<Vec<PermUserSummaryRecord>>;
     async fn perm_upsert_role(
         &self,
         tx: &mut Transaction<'_, Postgres>,
@@ -604,6 +610,68 @@ impl ControlRepo for PgControlRepo {
                 color: r.get("color"),
                 role_position: r.get("position"),
                 is_everyone: r.get("is_everyone"),
+            })
+            .collect())
+    }
+
+    async fn perm_list_users(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        server: ServerId,
+    ) -> ControlResult<Vec<PermUserSummaryRecord>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                au.user_id,
+                COALESCE(MAX(m.display_name), CONCAT('user-', LEFT(au.user_id::text, 8))) AS display_name,
+                MIN(m.joined_at) AS joined_at,
+                MAX(ad.last_seen) AS last_seen,
+                COALESCE(MAX(r.position), 0) AS highest_role_position,
+                COALESCE(array_agg(DISTINCT ur.role_id) FILTER (WHERE ur.role_id IS NOT NULL), ARRAY[]::text[]) AS role_ids
+            FROM auth_users au
+            LEFT JOIN auth_devices ad
+              ON ad.user_id = au.user_id
+             AND ad.revoked_at IS NULL
+            LEFT JOIN members m
+              ON m.server_id = $1
+             AND m.user_id = au.user_id
+            LEFT JOIN user_roles ur
+              ON ur.server_id = $1
+             AND ur.user_id = au.user_id
+            LEFT JOIN roles r
+              ON r.server_id = ur.server_id
+             AND r.id = ur.role_id
+            WHERE EXISTS (
+                SELECT 1
+                FROM user_roles urx
+                WHERE urx.server_id = $1
+                  AND urx.user_id = au.user_id
+            )
+               OR EXISTS (
+                SELECT 1
+                FROM members mx
+                WHERE mx.server_id = $1
+                  AND mx.user_id = au.user_id
+            )
+            GROUP BY au.user_id
+            ORDER BY lower(COALESCE(MAX(m.display_name), CONCAT('user-', LEFT(au.user_id::text, 8)))) ASC
+            "#,
+        )
+        .bind(server.0)
+        .fetch_all(&mut **tx)
+        .await
+        .context("perm list users")?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| PermUserSummaryRecord {
+                user_id: UserId(r.get("user_id")),
+                display_name: r.get("display_name"),
+                joined_at: r.get("joined_at"),
+                last_seen: r.get("last_seen"),
+                highest_role_position: r.get("highest_role_position"),
+                role_ids: r.get("role_ids"),
+                is_admin: false,
             })
             .collect())
     }
