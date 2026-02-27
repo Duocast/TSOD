@@ -41,6 +41,14 @@ use tracing::debug;
 /// ---- Project-facing types ----
 use vp_control::ids::{ChannelId, UserId};
 
+/// Absolute QUIC DATAGRAM size negotiated by both client and server transports.
+pub const QUIC_MAX_DATAGRAM_BYTES: usize = 1200;
+/// Bytes added when server forwards a client packet (sender UUID + channel UUID).
+pub const FORWARDER_ADDED_HEADER_BYTES: usize = 32;
+/// Maximum inbound client packet size that still fits after forwarder metadata is stamped.
+pub const MAX_INBOUND_VOICE_DATAGRAM_BYTES: usize =
+    QUIC_MAX_DATAGRAM_BYTES - FORWARDER_ADDED_HEADER_BYTES;
+
 /// Sender/receiver datagram output handle. This should send a datagram to a QUIC Connection.
 #[async_trait::async_trait]
 pub trait DatagramTx: Send + Sync {
@@ -123,7 +131,7 @@ pub struct VoiceForwarderConfig {
 impl Default for VoiceForwarderConfig {
     fn default() -> Self {
         Self {
-            max_datagram_bytes: 1500,
+            max_datagram_bytes: MAX_INBOUND_VOICE_DATAGRAM_BYTES,
             min_datagram_bytes: 20,
             sender_pps_limit: 200,        // plenty for 5–20ms frames
             sender_bps_limit: 512 * 1024, // 512kbps per sender max
