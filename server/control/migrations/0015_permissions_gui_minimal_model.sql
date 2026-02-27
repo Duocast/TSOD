@@ -6,10 +6,20 @@ ALTER TABLE roles
   ADD COLUMN IF NOT EXISTS position INTEGER,
   ADD COLUMN IF NOT EXISTS is_system BOOLEAN NOT NULL DEFAULT FALSE;
 
--- Keep legacy role_position in sync with new position.
+-- Assign unique positions per server (role_position may be 0 for all
+-- pre-existing rows, which would violate the unique index below).
 UPDATE roles
-SET position = role_position
-WHERE position IS NULL;
+SET position = sub.rn
+FROM (
+  SELECT id,
+         ROW_NUMBER() OVER (
+           PARTITION BY server_id
+           ORDER BY role_position DESC, created_at
+         ) - 1 AS rn
+  FROM roles
+  WHERE position IS NULL
+) sub
+WHERE roles.id = sub.id;
 
 ALTER TABLE roles
   ALTER COLUMN position SET NOT NULL;
