@@ -46,7 +46,7 @@ pub fn load_or_generate_tls(
     }
 }
 
-fn generate_self_signed(extra_self_signed_sans: &[String]) -> Result<rcgen::CertifiedKey> {
+fn generate_self_signed(extra_self_signed_sans: &[String]) -> Result<rcgen::CertifiedKey<KeyPair>> {
     let mut params = CertificateParams::new(vec![DEFAULT_SELF_SIGNED_DNS_SAN.to_string()])?;
     params
         .distinguished_name
