@@ -18,7 +18,7 @@ use crate::{
 
 use vp_control::ids::{ChannelId, ServerId, UserId};
 use vp_control::model::{ChannelCreate, JoinChannel, SendMessage};
-use vp_control::{ControlRepo, ControlService, PgControlRepo, RequestContext};
+use vp_control::{ControlError, ControlRepo, ControlService, PgControlRepo, RequestContext};
 use vp_media::voice_forwarder::VoiceForwarder;
 
 const CONTROL_STREAM_MAX_MSG: usize = 256 * 1024; // 256KB
@@ -255,6 +255,7 @@ impl Gateway {
 
                 let req_id = msg.request_id.clone();
 
+            let request_result: Result<()> = {
             match msg.payload {
                 Some(pb::client_to_server::Payload::JoinChannelRequest(r)) => {
                     let ch = parse_channel_id(r.channel_id.as_ref())?;
@@ -590,10 +591,9 @@ impl Gateway {
                     let target = r
                         .target_user_id
                         .as_ref()
-                        .ok_or_else(|| anyhow!("target_user_id missing"))?;
-                    let target = UserId(
-                        uuid::Uuid::parse_str(&target.value).context("invalid target_user_id")?,
-                    );
+                        .ok_or(ControlError::InvalidArgument("target_user_id missing"))?;
+                    let target = UserId(uuid::Uuid::parse_str(&target.value)
+                        .map_err(|_| ControlError::InvalidArgument("invalid target_user_id"))?);
                     tracing::info!(actor=%ctx.user_id.0,target=%target.0,"poke request");
                     self.control
                         .poke_user(&ctx, target, &identity.display_name, r.message)
@@ -646,6 +646,33 @@ impl Gateway {
                 }
                 _ => {
                     // Ignore other messages for now.
+                }
+            }
+            Ok(())
+            };
+
+            if let Err(err) = request_result {
+                warn!(
+                    session_id = %session_id,
+                    user_id = %user_id.0,
+                    error = %err,
+                    "request failed"
+                );
+
+                let resp = pb::ServerToClient {
+                    request_id: req_id,
+                    session_id: Some(pb::SessionId {
+                        value: session_id.clone(),
+                    }),
+                    sent_at: Some(now_ts()),
+                    error: Some(error_from_anyhow(&err)),
+                    event_seq: 0,
+                    payload: None,
+                };
+
+                if let Err(e) = write_delimited(&mut send, &resp).await {
+                    warn!("control write failed: {:#}", e);
+                    break;
                 }
             }
             }
@@ -877,10 +904,37 @@ fn normalize_preferred_display_name(value: &str) -> Option<String> {
 }
 
 fn parse_channel_id(ch: Option<&pb::ChannelId>) -> Result<ChannelId> {
-    let ch = ch.ok_or_else(|| anyhow!("channel_id missing"))?;
-    Ok(ChannelId(
-        uuid::Uuid::parse_str(&ch.value).context("invalid channel_id")?,
-    ))
+    let ch = ch.ok_or(ControlError::InvalidArgument("channel_id missing"))?;
+    Ok(ChannelId(uuid::Uuid::parse_str(&ch.value).map_err(
+        |_| ControlError::InvalidArgument("invalid channel_id"),
+    )?))
+}
+
+fn error_from_anyhow(err: &anyhow::Error) -> pb::Error {
+    let (code, message) = if let Some(control_err) = err.downcast_ref::<ControlError>() {
+        match control_err {
+            ControlError::NotFound(msg) => (pb::error::Code::NotFound as i32, *msg),
+            ControlError::AlreadyExists(msg) => (pb::error::Code::AlreadyExists as i32, *msg),
+            ControlError::InvalidArgument(msg) => (pb::error::Code::InvalidArgument as i32, *msg),
+            ControlError::PermissionDenied(msg) => (pb::error::Code::PermissionDenied as i32, *msg),
+            ControlError::ResourceExhausted(msg) => {
+                (pb::error::Code::ResourceExhausted as i32, *msg)
+            }
+            ControlError::FailedPrecondition(msg) => {
+                (pb::error::Code::FailedPrecondition as i32, *msg)
+            }
+            ControlError::Db(_) => (pb::error::Code::Unavailable as i32, "database unavailable"),
+            ControlError::Anyhow(_) => (pb::error::Code::Internal as i32, "internal error"),
+        }
+    } else {
+        (pb::error::Code::Internal as i32, "internal error")
+    };
+
+    pb::Error {
+        code,
+        message: message.to_string(),
+        detail: format!("{:#}", err),
+    }
 }
 
 fn now_ts() -> pb::Timestamp {
