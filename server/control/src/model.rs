@@ -131,6 +131,31 @@ impl AuditEntry {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PermRoleRecord {
+    pub role_id: String,
+    pub name: String,
+    pub color: i32,
+    pub role_position: i32,
+    pub is_everyone: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PermChannelOverrideRecord {
+    pub channel_id: ChannelId,
+    pub role_id: Option<String>,
+    pub user_id: Option<UserId>,
+    pub cap: String,
+    pub effect: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PermAuditRow {
+    pub action: String,
+    pub target_type: String,
+    pub target_id: String,
+    pub created_at: DateTime<Utc>,
+}
 /// Permission check request (repo decides allow/deny)
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PermissionRequest {

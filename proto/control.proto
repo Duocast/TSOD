@@ -130,6 +130,17 @@ message ClientToServer {
     SendDmRequest send_dm_request = 182;
     GetDmHistoryRequest get_dm_history_request = 183;
     CloseDmChannelRequest close_dm_channel_request = 184;
+
+    // Admin permissions RPCs
+    PermListRolesRequest perm_list_roles = 200;
+    PermUpsertRoleRequest perm_upsert_role = 201;
+    PermDeleteRoleRequest perm_delete_role = 202;
+    PermSetRoleCapsRequest perm_set_role_caps = 203;
+    PermAssignRolesRequest perm_assign_roles = 204;
+    PermListChannelOverridesRequest perm_list_chan_ovr = 205;
+    PermSetChannelOverrideRequest perm_set_chan_ovr = 206;
+    PermAuditQueryRequest perm_audit_query = 207;
+    PermEvaluateEffectiveRequest perm_eval_effective = 208;
   }
 }
 
@@ -255,6 +266,18 @@ message ServerToClient {
     SendDmResponse send_dm_response = 182;
     GetDmHistoryResponse get_dm_history_response = 183;
     CloseDmChannelResponse close_dm_channel_response = 184;
+
+    // Admin permissions responses
+    PermListRolesResponse perm_list_roles = 200;
+    PermUpsertRoleResponse perm_upsert_role = 201;
+    PermDeleteRoleResponse perm_delete_role = 202;
+    PermSetRoleCapsResponse perm_set_role_caps = 203;
+    PermAssignRolesResponse perm_assign_roles = 204;
+    PermListChannelOverridesResponse perm_list_chan_ovr = 205;
+    PermSetChannelOverrideResponse perm_set_chan_ovr = 206;
+    PermAuditQueryResponse perm_audit_query = 207;
+    PermEvaluateEffectiveResponse perm_eval_effective = 208;
+    PushEvent permissions_push_event = 209;
   }
 }
 

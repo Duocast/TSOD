@@ -6,11 +6,11 @@ use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
 use crate::{
-    errors::ControlResult,
+    errors::{ControlError, ControlResult},
     ids::{ChannelId, MessageId, OutboxId, ServerId, UserId},
     model::{
         AuditEntry, Channel, ChannelListItem, ChatMessage, Member, OutboxEvent, OutboxEventRow,
-        PermissionRequest,
+        PermAuditRow, PermChannelOverrideRecord, PermRoleRecord, PermissionRequest,
     },
     perms::Decision,
 };
@@ -88,6 +88,105 @@ pub trait ControlRepo: Send + Sync {
         server: ServerId,
         channel: ChannelId,
     ) -> ControlResult<i64>;
+
+    async fn perm_list_roles(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        server: ServerId,
+    ) -> ControlResult<Vec<PermRoleRecord>>;
+    async fn perm_upsert_role(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        server: ServerId,
+        role_id: Option<&str>,
+        name: &str,
+        color: i32,
+        position: i32,
+    ) -> ControlResult<PermRoleRecord>;
+    async fn perm_delete_role(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        server: ServerId,
+        role_id: &str,
+    ) -> ControlResult<bool>;
+    async fn perm_replace_role_caps(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        role_id: &str,
+        caps: &[(String, String)],
+    ) -> ControlResult<()> {
+        let server_id: Option<uuid::Uuid> =
+            sqlx::query_scalar("SELECT server_id FROM roles WHERE id=$1")
+                .bind(role_id)
+                .fetch_optional(&mut **tx)
+                .await
+                .context("perm role server lookup")?;
+        let server_id = server_id.ok_or(ControlError::NotFound("role"))?;
+
+        sqlx::query("DELETE FROM role_caps WHERE role_id=$1 AND server_id=$2")
+            .bind(role_id)
+            .bind(server_id)
+            .execute(&mut **tx)
+            .await
+            .context("perm clear role caps")?;
+        for (cap, effect) in caps {
+            let allowed = effect == "grant";
+            sqlx::query(
+                "INSERT INTO role_caps (server_id, role_id, cap, effect, allowed) VALUES ($1,$2,$3,$4,$5)",
+            )
+            .bind(server_id)
+            .bind(role_id)
+            .bind(cap)
+            .bind(effect)
+            .bind(allowed)
+            .execute(&mut **tx)
+            .await
+            .context("perm insert role cap")?;
+        }
+        Ok(())
+    }
+
+    async fn perm_replace_user_roles(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        server: ServerId,
+        user: UserId,
+        role_ids: &[String],
+    ) -> ControlResult<()>;
+    async fn perm_list_channel_overrides(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        channel: ChannelId,
+    ) -> ControlResult<Vec<PermChannelOverrideRecord>>;
+    async fn perm_set_channel_override(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        rec: &PermChannelOverrideRecord,
+    ) -> ControlResult<()>;
+    async fn perm_query_audit(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        server: ServerId,
+        limit: i64,
+    ) -> ControlResult<Vec<PermAuditRow>>;
+    async fn perm_actor_max_role_position(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        server: ServerId,
+        user: UserId,
+    ) -> ControlResult<i32>;
+    async fn perm_user_max_role_position(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        server: ServerId,
+        user: UserId,
+    ) -> ControlResult<i32>;
+    async fn perm_get_role(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        server: ServerId,
+        role_id: &str,
+    ) -> ControlResult<Option<PermRoleRecord>>;
 
     // Permissions
     async fn decide_permission(
@@ -482,6 +581,333 @@ impl ControlRepo for PgControlRepo {
     }
 
     // -------------------------
+    // Admin permissions RPC backing ops
+    // -------------------------
+
+    async fn perm_list_roles(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        server: ServerId,
+    ) -> ControlResult<Vec<PermRoleRecord>> {
+        let rows = sqlx::query(
+            "SELECT id, name, COALESCE(color,0) AS color, position, is_everyone FROM roles WHERE server_id=$1 ORDER BY position ASC, id ASC",
+        )
+        .bind(server.0)
+        .fetch_all(&mut **tx)
+        .await
+        .context("perm list roles")?;
+        Ok(rows
+            .into_iter()
+            .map(|r| PermRoleRecord {
+                role_id: r.get("id"),
+                name: r.get("name"),
+                color: r.get("color"),
+                role_position: r.get("position"),
+                is_everyone: r.get("is_everyone"),
+            })
+            .collect())
+    }
+
+    async fn perm_upsert_role(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        server: ServerId,
+        role_id: Option<&str>,
+        name: &str,
+        color: i32,
+        position: i32,
+    ) -> ControlResult<PermRoleRecord> {
+        let rid = role_id.unwrap_or("role");
+        let row = if role_id.is_some() {
+            sqlx::query("UPDATE roles SET name=$3, color=$4, position=$5 WHERE server_id=$1 AND id=$2 RETURNING id,name,color,position,is_everyone")
+                .bind(server.0).bind(rid).bind(name).bind(color).bind(position)
+                .fetch_optional(&mut **tx).await.context("perm update role")?
+        } else {
+            let generated = format!("role_{}", uuid::Uuid::new_v4().simple());
+            sqlx::query("INSERT INTO roles (id, server_id, name, color, position, is_everyone, created_at) VALUES ($1,$2,$3,$4,$5,false,NOW()) RETURNING id,name,color,position,is_everyone")
+                .bind(generated).bind(server.0).bind(name).bind(color).bind(position)
+                .fetch_optional(&mut **tx).await.context("perm create role")?
+        }.ok_or(ControlError::NotFound("role"))?;
+        Ok(PermRoleRecord {
+            role_id: row.get("id"),
+            name: row.get("name"),
+            color: row.get("color"),
+            role_position: row.get("position"),
+            is_everyone: row.get("is_everyone"),
+        })
+    }
+
+    async fn perm_delete_role(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        server: ServerId,
+        role_id: &str,
+    ) -> ControlResult<bool> {
+        let n = sqlx::query("DELETE FROM roles WHERE server_id=$1 AND id=$2 AND is_everyone=false")
+            .bind(server.0)
+            .bind(role_id)
+            .execute(&mut **tx)
+            .await
+            .context("perm delete role")?
+            .rows_affected();
+        Ok(n > 0)
+    }
+
+    async fn perm_replace_role_caps(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        role_id: &str,
+        caps: &[(String, String)],
+    ) -> ControlResult<()> {
+        let server_id: Option<uuid::Uuid> =
+            sqlx::query_scalar("SELECT server_id FROM roles WHERE id=$1")
+                .bind(role_id)
+                .fetch_optional(&mut **tx)
+                .await
+                .context("perm role server lookup")?;
+        let server_id = server_id.ok_or(ControlError::NotFound("role"))?;
+
+        sqlx::query("DELETE FROM role_caps WHERE role_id=$1 AND server_id=$2")
+            .bind(role_id)
+            .bind(server_id)
+            .execute(&mut **tx)
+            .await
+            .context("perm clear role caps")?;
+        for (cap, effect) in caps {
+            let allowed = effect == "grant";
+            sqlx::query(
+                "INSERT INTO role_caps (server_id, role_id, cap, effect, allowed) VALUES ($1,$2,$3,$4,$5)",
+            )
+            .bind(server_id)
+            .bind(role_id)
+            .bind(cap)
+            .bind(effect)
+            .bind(allowed)
+            .execute(&mut **tx)
+            .await
+            .context("perm insert role cap")?;
+        }
+        Ok(())
+    }
+
+    async fn perm_replace_user_roles(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        server: ServerId,
+        user: UserId,
+        role_ids: &[String],
+    ) -> ControlResult<()> {
+        sqlx::query("DELETE FROM user_roles WHERE server_id=$1 AND user_id=$2")
+            .bind(server.0)
+            .bind(user.0)
+            .execute(&mut **tx)
+            .await
+            .context("perm clear user roles")?;
+        for rid in role_ids {
+            sqlx::query("INSERT INTO user_roles (server_id, user_id, role_id) VALUES ($1,$2,$3)")
+                .bind(server.0)
+                .bind(user.0)
+                .bind(rid)
+                .execute(&mut **tx)
+                .await
+                .context("perm insert user role")?;
+        }
+        Ok(())
+    }
+
+    async fn perm_list_channel_overrides(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        channel: ChannelId,
+    ) -> ControlResult<Vec<PermChannelOverrideRecord>> {
+        let mut out = Vec::new();
+        let rows = sqlx::query(
+            "SELECT server_id, channel_id, user_id, cap, effect FROM channel_user_overrides WHERE channel_id=$1",
+        )
+        .bind(channel.0)
+        .fetch_all(&mut **tx)
+        .await
+        .context("perm list user overrides")?;
+        for r in rows {
+            out.push(PermChannelOverrideRecord {
+                channel_id: ChannelId(r.get("channel_id")),
+                role_id: None,
+                user_id: Some(UserId(r.get("user_id"))),
+                cap: r.get("cap"),
+                effect: r.get("effect"),
+            });
+        }
+        let rows2=sqlx::query("SELECT server_id, channel_id, role_id, cap, effect FROM channel_role_overrides WHERE channel_id=$1")
+            .bind(channel.0).fetch_all(&mut **tx).await.context("perm list role overrides")?;
+        for r in rows2 {
+            out.push(PermChannelOverrideRecord {
+                channel_id: ChannelId(r.get("channel_id")),
+                role_id: Some(r.get("role_id")),
+                user_id: None,
+                cap: r.get("cap"),
+                effect: r.get("effect"),
+            });
+        }
+        Ok(out)
+    }
+
+    async fn perm_set_channel_override(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        rec: &PermChannelOverrideRecord,
+    ) -> ControlResult<()> {
+        let server_id: Option<uuid::Uuid> =
+            sqlx::query_scalar("SELECT server_id FROM channels WHERE id=$1")
+                .bind(rec.channel_id.0)
+                .fetch_optional(&mut **tx)
+                .await
+                .context("perm channel server lookup")?;
+        let server_id = server_id.ok_or(ControlError::NotFound("channel"))?;
+
+        if rec.effect == "inherit" {
+            if let Some(role_id) = &rec.role_id {
+                sqlx::query("DELETE FROM channel_role_overrides WHERE server_id=$1 AND channel_id=$2 AND role_id=$3 AND cap=$4")
+                    .bind(server_id)
+                    .bind(rec.channel_id.0)
+                    .bind(role_id)
+                    .bind(&rec.cap)
+                    .execute(&mut **tx)
+                    .await
+                    .context("perm delete role override")?;
+            } else if let Some(user_id) = rec.user_id {
+                sqlx::query(
+                    "DELETE FROM channel_user_overrides WHERE server_id=$1 AND channel_id=$2 AND user_id=$3 AND cap=$4",
+                )
+                .bind(server_id)
+                .bind(rec.channel_id.0)
+                .bind(user_id.0)
+                .bind(&rec.cap)
+                .execute(&mut **tx)
+                .await
+                .context("perm delete user override")?;
+            }
+            return Ok(());
+        }
+
+        if let Some(role_id) = &rec.role_id {
+            sqlx::query(
+                "DELETE FROM channel_role_overrides WHERE server_id=$1 AND channel_id=$2 AND role_id=$3 AND cap=$4",
+            )
+            .bind(server_id)
+            .bind(rec.channel_id.0)
+            .bind(role_id)
+            .bind(&rec.cap)
+            .execute(&mut **tx)
+            .await?;
+            sqlx::query("INSERT INTO channel_role_overrides (server_id, channel_id, role_id, cap, effect) VALUES ($1,$2,$3,$4,$5)")
+                .bind(server_id)
+                .bind(rec.channel_id.0)
+                .bind(role_id)
+                .bind(&rec.cap)
+                .bind(&rec.effect)
+                .execute(&mut **tx)
+                .await
+                .context("perm upsert role override")?;
+        } else if let Some(user_id) = rec.user_id {
+            sqlx::query(
+                "DELETE FROM channel_user_overrides WHERE server_id=$1 AND channel_id=$2 AND user_id=$3 AND cap=$4",
+            )
+            .bind(server_id)
+            .bind(rec.channel_id.0)
+            .bind(user_id.0)
+            .bind(&rec.cap)
+            .execute(&mut **tx)
+            .await?;
+            sqlx::query("INSERT INTO channel_user_overrides (server_id, channel_id, user_id, cap, effect) VALUES ($1,$2,$3,$4,$5)")
+                .bind(server_id)
+                .bind(rec.channel_id.0)
+                .bind(user_id.0)
+                .bind(&rec.cap)
+                .bind(&rec.effect)
+                .execute(&mut **tx)
+                .await
+                .context("perm upsert user override")?;
+        }
+        Ok(())
+    }
+
+    async fn perm_query_audit(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        server: ServerId,
+        limit: i64,
+    ) -> ControlResult<Vec<PermAuditRow>> {
+        let rows=sqlx::query("SELECT action,target_type,target_id,created_at FROM audit_log WHERE server_id=$1 ORDER BY created_at DESC LIMIT $2")
+            .bind(server.0).bind(limit).fetch_all(&mut **tx).await.context("perm query audit")?;
+        Ok(rows
+            .into_iter()
+            .map(|r| PermAuditRow {
+                action: r.get("action"),
+                target_type: r.get("target_type"),
+                target_id: r.get("target_id"),
+                created_at: r.get("created_at"),
+            })
+            .collect())
+    }
+
+    async fn perm_actor_max_role_position(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        server: ServerId,
+        user: UserId,
+    ) -> ControlResult<i32> {
+        let pos: Option<i32> = sqlx::query_scalar(
+            "SELECT MAX(r.position) FROM roles r LEFT JOIN user_roles ur ON ur.server_id=$1 AND ur.user_id=$2 AND ur.role_id=r.id WHERE r.server_id=$1 AND (r.is_everyone = TRUE OR ur.role_id IS NOT NULL)",
+        )
+        .bind(server.0)
+        .bind(user.0)
+        .fetch_one(&mut **tx)
+        .await
+        .context("perm actor max role position")?;
+        Ok(pos.unwrap_or(0))
+    }
+
+    async fn perm_user_max_role_position(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        server: ServerId,
+        user: UserId,
+    ) -> ControlResult<i32> {
+        let pos: Option<i32> = sqlx::query_scalar(
+            "SELECT MAX(r.position) FROM roles r LEFT JOIN user_roles ur ON ur.server_id=$1 AND ur.user_id=$2 AND ur.role_id=r.id WHERE r.server_id=$1 AND (r.is_everyone = TRUE OR ur.role_id IS NOT NULL)",
+        )
+        .bind(server.0)
+        .bind(user.0)
+        .fetch_one(&mut **tx)
+        .await
+        .context("perm target max role position")?;
+        Ok(pos.unwrap_or(0))
+    }
+
+    async fn perm_get_role(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        server: ServerId,
+        role_id: &str,
+    ) -> ControlResult<Option<PermRoleRecord>> {
+        let row = sqlx::query(
+            "SELECT id, name, COALESCE(color,0) AS color, position, is_everyone FROM roles WHERE server_id=$1 AND id=$2",
+        )
+        .bind(server.0)
+        .bind(role_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .context("perm get role")?;
+        Ok(row.map(|r| PermRoleRecord {
+            role_id: r.get("id"),
+            name: r.get("name"),
+            color: r.get("color"),
+            role_position: r.get("position"),
+            is_everyone: r.get("is_everyone"),
+        }))
+    }
+
+    // -------------------------
     // Permissions
     // -------------------------
 
@@ -500,9 +926,9 @@ impl ControlRepo for PgControlRepo {
         // Base permission from roles in hierarchy order:
         // @everyone first, then regular roles by position (low -> high),
         // where later rows override earlier ones.
-        let base_role_effect: Option<String> = sqlx::query_scalar(
+        let base_role_allowed: Option<bool> = sqlx::query_scalar(
             r#"
-            SELECT rc.effect
+            SELECT rc.allowed
             FROM role_caps rc
             JOIN roles r ON r.id = rc.role_id
             LEFT JOIN user_roles ur
@@ -511,8 +937,9 @@ impl ControlRepo for PgControlRepo {
              AND ur.role_id = r.id
             WHERE r.server_id = $1
               AND rc.cap = $3
+              AND rc.server_id = $1
               AND (r.is_everyone = TRUE OR ur.role_id IS NOT NULL)
-            ORDER BY r.is_everyone DESC, r.role_position ASC, r.id ASC
+            ORDER BY r.is_everyone DESC, r.position ASC, r.id ASC
             "#,
         )
         .bind(req.server_id.0)
@@ -522,7 +949,7 @@ impl ControlRepo for PgControlRepo {
         .await
         .context("decide_permission base role effect")?;
 
-        let base_allowed = base_role_effect.as_deref() == Some("grant");
+        let base_allowed = base_role_allowed.unwrap_or(false);
 
         let overwrite_decision = if let Some(channel_id) = req.channel_id {
             // Discord-like channel overwrite evaluation:
@@ -533,7 +960,8 @@ impl ControlRepo for PgControlRepo {
                 SELECT cro.effect
                 FROM channel_role_overrides cro
                 JOIN roles r ON r.id = cro.role_id
-                WHERE cro.channel_id = $1
+                WHERE cro.server_id = $2
+                  AND cro.channel_id = $1
                   AND r.server_id = $2
                   AND r.is_everyone = TRUE
                   AND cro.cap = $3
@@ -556,9 +984,10 @@ impl ControlRepo for PgControlRepo {
                  AND ur.user_id = $3
                  AND ur.role_id = cro.role_id
                 JOIN roles r ON r.id = ur.role_id
-                WHERE cro.channel_id = $1
+                WHERE cro.server_id = $2
+                  AND cro.channel_id = $1
                   AND cro.cap = $4
-                ORDER BY r.role_position ASC, r.id ASC
+                ORDER BY r.position ASC, r.id ASC
                 "#,
             )
             .bind(channel_id.0)
@@ -572,8 +1001,9 @@ impl ControlRepo for PgControlRepo {
             let member_override_effect: Option<String> = sqlx::query_scalar(
                 r#"
                 SELECT effect
-                FROM channel_overrides
-                WHERE channel_id = $1
+                FROM channel_user_overrides
+                WHERE server_id = $4
+                  AND channel_id = $1
                   AND user_id = $2
                   AND cap = $3
                 ORDER BY effect DESC
@@ -582,6 +1012,7 @@ impl ControlRepo for PgControlRepo {
             .bind(channel_id.0)
             .bind(req.user_id.0)
             .bind(cap)
+            .bind(req.server_id.0)
             .fetch_optional(&mut **tx)
             .await
             .context("decide_permission member overwrite")?;

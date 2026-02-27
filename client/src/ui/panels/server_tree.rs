@@ -370,6 +370,7 @@ fn show_channel(
             model.show_permissions_center = true;
             model.permissions_tab = crate::ui::model::PermissionsTab::Channels;
             model.permissions_channel_scope_name = ch.name.clone();
+            model.permissions_selected_channel_id = Some(ch.id.clone());
             ui.close();
         }
         if ui.button("Delete channel").clicked() {

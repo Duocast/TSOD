@@ -74,7 +74,17 @@ async fn handle_record(
         vec![parse_user_id_field(&rec.payload_json, "target_user_id")?]
     } else if matches!(
         rec.topic.as_str(),
-        "channel.created" | "channels.created" | "channel.renamed" | "channel.deleted"
+        "channel.created"
+            | "channels.created"
+            | "channel.renamed"
+            | "channel.deleted"
+            | "perm.role.upserted"
+            | "perm.role.deleted"
+            | "perm.role.order_changed"
+            | "perm.role.caps_changed"
+            | "perm.user.roles_changed"
+            | "perm.channel.overrides_changed"
+            | "perm.audit.appended"
     ) {
         hub.connected_users()
     } else {
@@ -449,6 +459,160 @@ fn translate_record(rec: &OutboxEventRow) -> Result<(ChannelId, pb::ServerToClie
                 )),
             ))
         }
+
+        "perm.role.upserted" => {
+            let role_id = rec
+                .payload_json
+                .get("role_id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let name = rec
+                .payload_json
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let position = rec
+                .payload_json
+                .get("position")
+                .and_then(Value::as_i64)
+                .unwrap_or(0)
+                .max(0) as u32;
+            Ok((
+                ChannelId(uuid::Uuid::nil()),
+                server_push(pb::server_to_client::Payload::PermissionsPushEvent(
+                    pb::PushEvent {
+                        evt: Some(pb::push_event::Evt::RoleUpserted(pb::RoleUpserted {
+                            role_id,
+                            name,
+                            position,
+                        })),
+                    },
+                )),
+            ))
+        }
+        "perm.role.deleted" => {
+            let role_id = rec
+                .payload_json
+                .get("role_id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            Ok((
+                ChannelId(uuid::Uuid::nil()),
+                server_push(pb::server_to_client::Payload::PermissionsPushEvent(
+                    pb::PushEvent {
+                        evt: Some(pb::push_event::Evt::RoleDeleted(pb::RoleDeleted {
+                            role_id,
+                        })),
+                    },
+                )),
+            ))
+        }
+        "perm.role.order_changed" => {
+            let role_ids = rec
+                .payload_json
+                .get("role_ids")
+                .and_then(Value::as_array)
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(Value::as_str)
+                        .map(ToString::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+            Ok((
+                ChannelId(uuid::Uuid::nil()),
+                server_push(pb::server_to_client::Payload::PermissionsPushEvent(
+                    pb::PushEvent {
+                        evt: Some(pb::push_event::Evt::RoleOrder(pb::RoleOrderChanged {
+                            role_ids,
+                        })),
+                    },
+                )),
+            ))
+        }
+        "perm.role.caps_changed" => {
+            let role_id = rec
+                .payload_json
+                .get("role_id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            Ok((
+                ChannelId(uuid::Uuid::nil()),
+                server_push(pb::server_to_client::Payload::PermissionsPushEvent(
+                    pb::PushEvent {
+                        evt: Some(pb::push_event::Evt::RoleCaps(pb::RoleCapsChanged {
+                            role_id,
+                        })),
+                    },
+                )),
+            ))
+        }
+        "perm.user.roles_changed" => {
+            let user_id = parse_user_id_field(&rec.payload_json, "user_id")?;
+            Ok((
+                ChannelId(uuid::Uuid::nil()),
+                server_push(pb::server_to_client::Payload::PermissionsPushEvent(
+                    pb::PushEvent {
+                        evt: Some(pb::push_event::Evt::UserRoles(pb::UserRolesChanged {
+                            user_id: Some(pb::UserId {
+                                value: user_id.0.to_string(),
+                            }),
+                        })),
+                    },
+                )),
+            ))
+        }
+        "perm.channel.overrides_changed" => {
+            let channel_id = parse_channel_id_field(&rec.payload_json, "channel_id")?;
+            Ok((
+                channel_id,
+                server_push(pb::server_to_client::Payload::PermissionsPushEvent(
+                    pb::PushEvent {
+                        evt: Some(pb::push_event::Evt::ChanOvr(pb::ChannelOverridesChanged {
+                            channel_id: Some(pb::ChannelId {
+                                value: channel_id.0.to_string(),
+                            }),
+                        })),
+                    },
+                )),
+            ))
+        }
+        "perm.audit.appended" => {
+            let action = rec
+                .payload_json
+                .get("action")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let target_type = rec
+                .payload_json
+                .get("target_type")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let target_id = rec
+                .payload_json
+                .get("target_id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            Ok((
+                ChannelId(uuid::Uuid::nil()),
+                server_push(pb::server_to_client::Payload::PermissionsPushEvent(
+                    pb::PushEvent {
+                        evt: Some(pb::push_event::Evt::AuditAppended(pb::AuditAppended {
+                            action,
+                            target_type,
+                            target_id,
+                        })),
+                    },
+                )),
+            ))
+        }
         other => Err(anyhow!("unsupported outbox event type: {other}")),
     }
 }
@@ -507,7 +671,17 @@ fn apply_cache_side_effects(membership: &MembershipCache, rec: &OutboxEventRow) 
                 .unwrap_or(false);
             membership.update_deafen(user_id, channel_id, deafened);
         }
-        "channel.created" | "channels.created" | "channel.renamed" | "channel.deleted" => {
+        "channel.created"
+        | "channels.created"
+        | "channel.renamed"
+        | "channel.deleted"
+        | "perm.role.upserted"
+        | "perm.role.deleted"
+        | "perm.role.order_changed"
+        | "perm.role.caps_changed"
+        | "perm.user.roles_changed"
+        | "perm.channel.overrides_changed"
+        | "perm.audit.appended" => {
             // no membership side-effects; event is still consumed/acked.
         }
         _ => {}

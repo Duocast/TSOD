@@ -857,6 +857,21 @@ pub struct UiModel {
     pub permissions_channel_scope_name: String,
     pub permissions_can_moderate_members: bool,
     pub permissions_roles: Vec<RoleDraft>,
+    pub permissions_selected_channel_id: Option<String>,
+    pub permissions_private_channel: bool,
+    pub permissions_override_tab: PermissionOverrideTab,
+    pub permissions_role_overrides: Vec<PermissionOverrideDraft>,
+    pub permissions_member_overrides: Vec<PermissionOverrideDraft>,
+    pub permissions_view_as_mode: PermissionViewAsMode,
+    pub permissions_view_as_name: String,
+    pub permissions_member_search: String,
+    pub permissions_selected_member: usize,
+    pub permissions_members: Vec<PermissionMemberDraft>,
+    pub permissions_advanced_enabled: bool,
+    pub permissions_actor_preview: usize,
+    pub permissions_target_preview: usize,
+    pub permissions_actor_power: PermissionPowerDraft,
+    pub permissions_target_needed_power: PermissionPowerDraft,
 }
 
 #[derive(Debug, Clone)]
@@ -964,6 +979,61 @@ pub struct RoleDraft {
     pub mentionable: bool,
     pub protected: bool,
     pub administrative: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionOverrideTab {
+    Roles,
+    Members,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionViewAsMode {
+    Role,
+    Member,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionValue {
+    Inherit,
+    Allow,
+    Deny,
+}
+
+impl PermissionValue {
+    pub fn cycle(self) -> Self {
+        match self {
+            PermissionValue::Inherit => PermissionValue::Allow,
+            PermissionValue::Allow => PermissionValue::Deny,
+            PermissionValue::Deny => PermissionValue::Inherit,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PermissionOverrideDraft {
+    pub subject_name: String,
+    pub capabilities: Vec<PermissionValue>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PermissionMemberDraft {
+    pub user_id: String,
+    pub display_name: String,
+    pub role_assignments: Vec<bool>,
+    pub highest_role_index: usize,
+    pub can_mute_members: bool,
+    pub can_deafen_members: bool,
+    pub can_move_members: bool,
+    pub can_kick_members: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct PermissionPowerDraft {
+    pub mute_power: u16,
+    pub move_power: u16,
+    pub kick_power: u16,
+    pub manage_roles_power: u16,
 }
 
 impl Default for UiModel {
@@ -1093,6 +1163,89 @@ impl Default for UiModel {
                     administrative: true,
                 },
             ],
+            permissions_selected_channel_id: None,
+            permissions_private_channel: false,
+            permissions_override_tab: PermissionOverrideTab::Roles,
+            permissions_role_overrides: vec![
+                PermissionOverrideDraft {
+                    subject_name: "@everyone".into(),
+                    capabilities: vec![
+                        PermissionValue::Allow,
+                        PermissionValue::Allow,
+                        PermissionValue::Inherit,
+                        PermissionValue::Inherit,
+                    ],
+                },
+                PermissionOverrideDraft {
+                    subject_name: "Moderator".into(),
+                    capabilities: vec![
+                        PermissionValue::Allow,
+                        PermissionValue::Allow,
+                        PermissionValue::Allow,
+                        PermissionValue::Allow,
+                    ],
+                },
+            ],
+            permissions_member_overrides: vec![PermissionOverrideDraft {
+                subject_name: "Ari".into(),
+                capabilities: vec![
+                    PermissionValue::Allow,
+                    PermissionValue::Deny,
+                    PermissionValue::Inherit,
+                    PermissionValue::Allow,
+                ],
+            }],
+            permissions_view_as_mode: PermissionViewAsMode::Role,
+            permissions_view_as_name: "@everyone".into(),
+            permissions_member_search: String::new(),
+            permissions_selected_member: 0,
+            permissions_members: vec![
+                PermissionMemberDraft {
+                    user_id: "u-100".into(),
+                    display_name: "Ari".into(),
+                    role_assignments: vec![true, true, false],
+                    highest_role_index: 1,
+                    can_mute_members: true,
+                    can_deafen_members: true,
+                    can_move_members: true,
+                    can_kick_members: false,
+                },
+                PermissionMemberDraft {
+                    user_id: "u-101".into(),
+                    display_name: "Morgan".into(),
+                    role_assignments: vec![true, false, false],
+                    highest_role_index: 0,
+                    can_mute_members: false,
+                    can_deafen_members: false,
+                    can_move_members: false,
+                    can_kick_members: false,
+                },
+                PermissionMemberDraft {
+                    user_id: "u-102".into(),
+                    display_name: "Sage".into(),
+                    role_assignments: vec![true, true, true],
+                    highest_role_index: 2,
+                    can_mute_members: true,
+                    can_deafen_members: true,
+                    can_move_members: true,
+                    can_kick_members: true,
+                },
+            ],
+            permissions_advanced_enabled: false,
+            permissions_actor_preview: 0,
+            permissions_target_preview: 1,
+            permissions_actor_power: PermissionPowerDraft {
+                mute_power: 50,
+                move_power: 50,
+                kick_power: 50,
+                manage_roles_power: 50,
+            },
+            permissions_target_needed_power: PermissionPowerDraft {
+                mute_power: 30,
+                move_power: 30,
+                kick_power: 60,
+                manage_roles_power: 40,
+            },
         }
     }
 }

@@ -203,3 +203,212 @@ message DeletePrivilegeKeyRequest {
   PrivilegeKeyId key_id = 1;
 }
 message DeletePrivilegeKeyResponse {}
+
+// ── Admin permissions RPCs (request/response correlated by envelope request_id) ─────────
+
+message PermRole {
+  string role_id = 1;
+  string name = 2;
+  uint32 color = 3;
+  uint32 position = 4;
+  bool is_everyone = 5;
+  bool is_system = 6;
+}
+
+message PermCapabilityEffect {
+  string cap = 1;
+  string effect = 2; // grant|deny
+}
+
+message PermCapUpdate {
+  string cap = 1;
+  bool allowed = 2;
+}
+
+message PermRoleFlags {
+  bool is_everyone = 1;
+  bool is_system = 2;
+}
+
+message PermRoleWithCaps {
+  PermRole role = 1;
+  repeated PermCapUpdate role_caps = 2;
+}
+
+message PermListRolesRequest {
+  ServerId server_id = 1;
+  bool include_caps = 2;
+}
+message PermListRolesResponse {
+  repeated PermRole roles = 1;
+  repeated PermRoleWithCaps roles_with_caps = 2;
+}
+
+message PermUpsertRoleRequest {
+  ServerId server_id = 1;
+  string role_id = 2; // empty => create
+  string name = 3;
+  uint32 color = 4;
+  uint32 position = 5;
+}
+message PermUpsertRoleResponse {
+  PermRole role = 1;
+}
+
+message PermDeleteRoleRequest {
+  ServerId server_id = 1;
+  string role_id = 2;
+}
+message PermDeleteRoleResponse {}
+
+message PermSetRoleCapsRequest {
+  ServerId server_id = 1;
+  string role_id = 2;
+  repeated PermCapabilityEffect caps = 3; // legacy
+  repeated PermCapUpdate cap_updates = 4;
+}
+message PermSetRoleCapsResponse {}
+
+message PermAssignRolesRequest {
+  ServerId server_id = 1;
+  UserId user_id = 2;
+  repeated string role_ids = 3;
+}
+
+message PermAssignRolesPatch {
+  repeated string add = 1;
+  repeated string remove = 2;
+}
+
+message PermAssignRolesResponse {
+  repeated string role_ids = 1;
+}
+
+message PermChannelOverride {
+  ChannelId channel_id = 1;
+  oneof target {
+    string role_id = 2;
+    UserId user_id = 3;
+  }
+  string cap = 4;
+  string effect = 5; // inherit|grant|deny
+}
+
+message PermListChannelOverridesRequest {
+  ServerId server_id = 1;
+  ChannelId channel_id = 2;
+}
+
+message PermRoleOverride {
+  string role_id = 1;
+  string cap = 2;
+  string effect = 3;
+}
+
+message PermUserOverride {
+  UserId user_id = 1;
+  string cap = 2;
+  string effect = 3;
+}
+
+message PermListChannelOverridesResponse {
+  repeated PermChannelOverride overrides = 1; // legacy flat list
+  repeated PermRoleOverride role_overrides = 2;
+  repeated PermUserOverride user_overrides = 3;
+}
+
+message PermSetChannelOverrideRequest {
+  PermChannelOverride override = 1; // legacy single update
+  ServerId server_id = 2;
+  ChannelId channel_id = 3;
+  oneof principal {
+    string role_id = 4;
+    UserId user_id = 5;
+  }
+  repeated PermCapabilityEffect cap_effects = 6;
+}
+message PermSetChannelOverrideResponse {}
+
+message PermAuditQueryRequest {
+  ServerId server_id = 1;
+  uint32 limit = 2;
+  uint32 offset = 3;
+}
+message PermAuditRow {
+  string action = 1;
+  string target_type = 2;
+  string target_id = 3;
+  Timestamp created_at = 4;
+}
+message PermAuditQueryResponse {
+  repeated PermAuditRow rows = 1;
+}
+
+message PermEvaluateEffectiveRequest {
+  ServerId server_id = 1;
+  ChannelId channel_id = 2;
+  UserId user_id = 3;
+  repeated string caps = 4;
+}
+message PermEvaluateEntry {
+  string cap = 1;
+  bool allowed = 2;
+}
+
+message PermEvaluateExplain {
+  string cap = 1;
+  string source = 2; // role|channel_role_override|channel_user_override
+  string detail = 3;
+}
+
+message PermEvaluateEffectiveResponse {
+  repeated PermEvaluateEntry entries = 1;
+  repeated PermEvaluateExplain explain = 2;
+}
+
+
+// ── Permission push events ────────────────────────────────────────────
+
+message RoleUpserted {
+  string role_id = 1;
+  string name = 2;
+  uint32 position = 3;
+}
+
+message RoleDeleted {
+  string role_id = 1;
+}
+
+message RoleOrderChanged {
+  repeated string role_ids = 1;
+}
+
+message RoleCapsChanged {
+  string role_id = 1;
+}
+
+message UserRolesChanged {
+  UserId user_id = 1;
+}
+
+message ChannelOverridesChanged {
+  ChannelId channel_id = 1;
+}
+
+message AuditAppended {
+  string action = 1;
+  string target_type = 2;
+  string target_id = 3;
+}
+
+message PushEvent {
+  oneof evt {
+    RoleUpserted role_upserted = 1;
+    RoleDeleted role_deleted = 2;
+    RoleOrderChanged role_order = 3;
+    RoleCapsChanged role_caps = 4;
+    UserRolesChanged user_roles = 5;
+    ChannelOverridesChanged chan_ovr = 6;
+    AuditAppended audit_appended = 7;
+  }
+}
