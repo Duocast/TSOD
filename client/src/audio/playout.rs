@@ -428,43 +428,17 @@ mod linux {
     }
 
     fn device_name(device: &cpal::Device) -> Option<String> {
-        fn push_unique(parts: &mut Vec<String>, value: Option<&str>) {
-            let Some(value) = value.map(str::trim).filter(|v| !v.is_empty()) else {
-                return;
-            };
-            let already_present = parts.iter().any(|part| part.eq_ignore_ascii_case(value));
-            if !already_present {
-                parts.push(value.to_string());
-            }
-        }
-
-        if let Ok(desc) = device.description() {
-            let base = desc.name().trim();
-            if base.is_empty() {
-                return None;
-            }
-
-            let mut parts = Vec::with_capacity(4);
-            // Extended lines typically carry the most user-friendly endpoint labels.
-            for line in desc.extended() {
-                push_unique(&mut parts, Some(line));
-            }
-            push_unique(&mut parts, Some(base));
-            push_unique(&mut parts, desc.driver());
-            push_unique(&mut parts, desc.manufacturer());
-
-            if parts.is_empty() {
-                return None;
-            }
-
-            let primary = parts.remove(0);
-            if parts.is_empty() {
-                return Some(primary);
-            }
-            return Some(format!("{primary} — {}", parts.join(" • ")));
-        }
-
-        device.name().ok().filter(|name| !name.trim().is_empty())
+        device
+            .name()
+            .ok()
+            .filter(|name| !name.trim().is_empty())
+            .or_else(|| {
+                device
+                    .description()
+                    .ok()
+                    .map(|desc| desc.name().to_string())
+                    .filter(|name| !name.trim().is_empty())
+            })
     }
 
     fn find_output_device_by_name(host: &cpal::Host, name: &str) -> Result<cpal::Device> {
@@ -686,43 +660,17 @@ mod non_linux {
     }
 
     fn device_name(device: &cpal::Device) -> Option<String> {
-        fn push_unique(parts: &mut Vec<String>, value: Option<&str>) {
-            let Some(value) = value.map(str::trim).filter(|v| !v.is_empty()) else {
-                return;
-            };
-            let already_present = parts.iter().any(|part| part.eq_ignore_ascii_case(value));
-            if !already_present {
-                parts.push(value.to_string());
-            }
-        }
-
-        if let Ok(desc) = device.description() {
-            let base = desc.name().trim();
-            if base.is_empty() {
-                return None;
-            }
-
-            let mut parts = Vec::with_capacity(4);
-            // Extended lines typically carry the most user-friendly endpoint labels.
-            for line in desc.extended() {
-                push_unique(&mut parts, Some(line));
-            }
-            push_unique(&mut parts, Some(base));
-            push_unique(&mut parts, desc.driver());
-            push_unique(&mut parts, desc.manufacturer());
-
-            if parts.is_empty() {
-                return None;
-            }
-
-            let primary = parts.remove(0);
-            if parts.is_empty() {
-                return Some(primary);
-            }
-            return Some(format!("{primary} — {}", parts.join(" • ")));
-        }
-
-        device.name().ok().filter(|name| !name.trim().is_empty())
+        device
+            .name()
+            .ok()
+            .filter(|name| !name.trim().is_empty())
+            .or_else(|| {
+                device
+                    .description()
+                    .ok()
+                    .map(|desc| desc.name().to_string())
+                    .filter(|name| !name.trim().is_empty())
+            })
     }
 
     fn find_output_device_by_name(host: &cpal::Host, name: &str) -> Result<cpal::Device> {
