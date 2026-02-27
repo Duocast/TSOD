@@ -6,30 +6,30 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0"
 async-trait = "0.1"
-bytes = "1.6"
+bytes = "1.11.1"
 chrono = "0.4"
 clap = { version = "4.5", features = ["derive", "env"] }
-dashmap = "5.5"
-prost = "0.13"
+dashmap = "6.1"
+prost = "0.14.3"
 rcgen = "0.13"
 rustls-pemfile = "2"
 serde_json = "1.0"
 http-body-util = "0.1"
 hyper-util = { version = "0.1", features = ["tokio"] }
-hyper = { version = "1.5", features = ["server", "http1"] }
+hyper = { version = "1.8.1", features = ["server", "http1"] }
 serde = { version = "1", features = ["derive"] }
 scopeguard = "1.2"
-tokio = { version = "1.37", features = ["rt-multi-thread", "macros", "time", "signal", "sync", "fs", "io-util"] }
+tokio = { version = "1.49", features = ["rt-multi-thread", "macros", "time", "signal", "sync", "fs", "io-util"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
-uuid = { version = "1.10", features = ["v4"] }
+uuid = { version = "1.21", features = ["v4"] }
 
 quinn = "0.11"
 rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
 ring = "0.17"
 sha2 = "0.10"
 hex = "0.4"
-infer = "0.16"
+infer = "0.19"
 
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json", "macros", "migrate"] }
 
@@ -39,4 +39,4 @@ vp-metrics = { path = "../metrics" }
 vp-route-hash = { path = "../../shared/route-hash" }
 
 [build-dependencies]
-prost-build = "0.13"
+prost-build = "0.14.3"
