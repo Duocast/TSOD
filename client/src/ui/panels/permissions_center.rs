@@ -97,23 +97,24 @@ fn show_roles_tab(ui: &mut egui::Ui, model: &mut UiModel) {
         });
         left.separator();
 
-        for (idx, role) in model.permissions_roles.iter().enumerate() {
+        let role_count = model.permissions_roles.len();
+        for idx in 0..role_count {
+            let color = parse_hex_color(&model.permissions_roles[idx].color_hex);
+            let label_text = format!(
+                "{} ({})",
+                model.permissions_roles[idx].name, model.permissions_roles[idx].member_count
+            );
+            let selected = model.permissions_selected_role == idx;
             left.horizontal(|ui| {
-                ui.colored_label(parse_hex_color(&role.color_hex), "■");
-                if ui
-                    .selectable_label(
-                        model.permissions_selected_role == idx,
-                        format!("{} ({})", role.name, role.member_count),
-                    )
-                    .clicked()
-                {
+                ui.colored_label(color, "■");
+                if ui.selectable_label(selected, label_text).clicked() {
                     model.permissions_selected_role = idx;
                 }
                 if idx > 0 && ui.small_button("↑").clicked() {
                     model.permissions_roles.swap(idx, idx - 1);
                     model.permissions_selected_role = idx - 1;
                 }
-                if idx + 1 < model.permissions_roles.len() && ui.small_button("↓").clicked() {
+                if idx + 1 < role_count && ui.small_button("↓").clicked() {
                     model.permissions_roles.swap(idx, idx + 1);
                     model.permissions_selected_role = idx + 1;
                 }
@@ -291,31 +292,30 @@ fn show_channel_tree(ui: &mut egui::Ui, model: &mut UiModel) {
 }
 
 fn show_overrides_editor(ui: &mut egui::Ui, model: &mut UiModel) {
-    let overrides = if model.permissions_override_tab == PermissionOverrideTab::Roles {
+    let is_roles = model.permissions_override_tab == PermissionOverrideTab::Roles;
+    let overrides = if is_roles {
         &mut model.permissions_role_overrides
     } else {
         &mut model.permissions_member_overrides
     };
 
     egui::ScrollArea::vertical().show(ui, |ui| {
-        for row in overrides {
+        for row in &mut *overrides {
             show_override_row(ui, row);
             ui.add_space(4.0);
         }
     });
 
-    ui.horizontal(|ui| {
-        if ui.button("Add override").clicked() {
-            overrides.push(PermissionOverrideDraft {
-                subject_name: if model.permissions_override_tab == PermissionOverrideTab::Roles {
-                    "New Role".into()
-                } else {
-                    "New Member".into()
-                },
-                capabilities: vec![PermissionValue::Inherit; CHANNEL_CAPABILITIES.len()],
-            });
-        }
-    });
+    if ui.button("Add override").clicked() {
+        overrides.push(PermissionOverrideDraft {
+            subject_name: if is_roles {
+                "New Role".into()
+            } else {
+                "New Member".into()
+            },
+            capabilities: vec![PermissionValue::Inherit; CHANNEL_CAPABILITIES.len()],
+        });
+    }
 }
 
 fn show_override_row(ui: &mut egui::Ui, row: &mut PermissionOverrideDraft) {
