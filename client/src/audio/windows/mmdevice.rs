@@ -9,12 +9,9 @@ use windows::{
             eCapture, eMultimedia, eRender, IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator,
             DEVICE_STATE_ACTIVE,
         },
-        System::{
-            Com::{
-                CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize,
-                StructuredStorage::STGM_READ, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
-            },
-            Variant::{PropVariantClear, PROPVARIANT, VT_LPWSTR},
+        System::Com::{
+            CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize,
+            StructuredStorage::STGM_READ, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
         },
         UI::Shell::PropertiesSystem::PROPERTYKEY,
     },
@@ -106,27 +103,18 @@ fn property_string(
     store: &windows::Win32::UI::Shell::PropertiesSystem::IPropertyStore,
     key: &PROPERTYKEY,
 ) -> Result<String> {
-    let mut value = PROPVARIANT::default();
-    unsafe {
+    let value = unsafe {
         store
-            .GetValue(key, &mut value)
-            .context("read endpoint property value")?;
-    }
-
-    let result = unsafe {
-        if value.Anonymous.Anonymous.vt != VT_LPWSTR.0 as u16 {
-            Err(anyhow!("property variant is not VT_LPWSTR"))
-        } else {
-            let wide = PWSTR(value.Anonymous.Anonymous.Anonymous.pwszVal);
-            pwstr_to_string_no_free(wide)
-        }
+            .GetValue(key)
+            .context("read endpoint property value")?
     };
 
-    unsafe {
-        PropVariantClear(&mut value).context("clear endpoint property value")?;
+    let s = value.to_string();
+    if s.is_empty() {
+        Err(anyhow!("property value is empty or not a string type"))
+    } else {
+        Ok(s)
     }
-
-    result
 }
 
 fn pwstr_to_string_and_free(pwstr: PWSTR) -> Result<String> {
@@ -161,7 +149,7 @@ struct ComScope;
 impl ComScope {
     fn new() -> Result<Self> {
         unsafe {
-            CoInitializeEx(None, COINIT_MULTITHREADED).context("initialize COM for MMDevice")?;
+            CoInitializeEx(None, COINIT_MULTITHREADED).ok().context("initialize COM for MMDevice")?;
         }
         Ok(Self)
     }
