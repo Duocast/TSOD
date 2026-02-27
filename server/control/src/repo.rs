@@ -12,7 +12,7 @@ use crate::{
         AuditEntry, Channel, ChannelListItem, ChatMessage, Member, OutboxEvent, OutboxEventRow,
         PermissionRequest,
     },
-    perms::{Capability, Decision},
+    perms::Decision,
 };
 
 #[async_trait]
@@ -487,19 +487,105 @@ impl ControlRepo for PgControlRepo {
 
     async fn decide_permission(
         &self,
-        _tx: &mut Transaction<'_, Postgres>,
+        tx: &mut Transaction<'_, Postgres>,
         req: &PermissionRequest,
     ) -> ControlResult<Decision> {
         if req.is_admin {
             return Ok(Decision::Allow);
         }
 
-        // Safe baseline allow-list; deny by default (avoids referencing unknown Capability variants).
-        match req.capability {
-            Capability::JoinChannel => Ok(Decision::Allow),
-            Capability::SendMessage => Ok(Decision::Allow),
-            Capability::CreateChannel => Ok(Decision::Deny),
-            _ => Ok(Decision::Deny),
+        let cap = req.capability.as_str();
+
+        let role_denied: bool = sqlx::query_scalar(
+            r#"
+            SELECT EXISTS(
+                SELECT 1
+                FROM user_roles ur
+                JOIN role_caps rc ON rc.role_id = ur.role_id
+                WHERE ur.server_id = $1
+                  AND ur.user_id = $2
+                  AND rc.cap = $3
+                  AND rc.effect = 'deny'
+            )
+            "#,
+        )
+        .bind(req.server_id.0)
+        .bind(req.user_id.0)
+        .bind(cap)
+        .fetch_one(&mut **tx)
+        .await
+        .context("decide_permission role deny")?;
+
+        let role_granted: bool = sqlx::query_scalar(
+            r#"
+            SELECT EXISTS(
+                SELECT 1
+                FROM user_roles ur
+                JOIN role_caps rc ON rc.role_id = ur.role_id
+                WHERE ur.server_id = $1
+                  AND ur.user_id = $2
+                  AND rc.cap = $3
+                  AND rc.effect = 'grant'
+            )
+            "#,
+        )
+        .bind(req.server_id.0)
+        .bind(req.user_id.0)
+        .bind(cap)
+        .fetch_one(&mut **tx)
+        .await
+        .context("decide_permission role grant")?;
+
+        let (override_denied, override_granted) = if let Some(channel_id) = req.channel_id {
+            let denied: bool = sqlx::query_scalar(
+                r#"
+                SELECT EXISTS(
+                    SELECT 1
+                    FROM channel_overrides
+                    WHERE channel_id = $1
+                      AND user_id = $2
+                      AND cap = $3
+                      AND effect = 'deny'
+                )
+                "#,
+            )
+            .bind(channel_id.0)
+            .bind(req.user_id.0)
+            .bind(cap)
+            .fetch_one(&mut **tx)
+            .await
+            .context("decide_permission override deny")?;
+
+            let granted: bool = sqlx::query_scalar(
+                r#"
+                SELECT EXISTS(
+                    SELECT 1
+                    FROM channel_overrides
+                    WHERE channel_id = $1
+                      AND user_id = $2
+                      AND cap = $3
+                      AND effect = 'grant'
+                )
+                "#,
+            )
+            .bind(channel_id.0)
+            .bind(req.user_id.0)
+            .bind(cap)
+            .fetch_one(&mut **tx)
+            .await
+            .context("decide_permission override grant")?;
+
+            (denied, granted)
+        } else {
+            (false, false)
+        };
+
+        if role_denied || override_denied {
+            Ok(Decision::Deny)
+        } else if role_granted || override_granted {
+            Ok(Decision::Allow)
+        } else {
+            Ok(Decision::Deny)
         }
     }
 
