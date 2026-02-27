@@ -4,7 +4,9 @@
 //!             Notifications, Whisper, Screen Share, Video Call, Security
 
 use crate::settings_io;
-use crate::ui::model::{AppSettings, CaptureMode, FecMode, SettingsPage, UiIntent, UiModel};
+use crate::ui::model::{
+    AppSettings, AudioDeviceInfo, CaptureMode, FecMode, SettingsPage, UiIntent, UiModel,
+};
 use crate::ui::theme;
 use crossbeam_channel::Sender;
 use eframe::egui;
@@ -313,7 +315,7 @@ fn page_application(
 fn page_capture(
     ui: &mut egui::Ui,
     s: &mut AppSettings,
-    input_devices: &[String],
+    input_devices: &[AudioDeviceInfo],
     loopback_active: bool,
     vad_level: Option<f32>,
     mic_test_waveform: &[f32],
@@ -325,26 +327,21 @@ fn page_capture(
 
     ui.horizontal(|ui: &mut egui::Ui| {
         ui.label("Input Device:");
+        let selected_label = input_devices
+            .iter()
+            .find(|d| d.key == s.capture_device)
+            .map(|d| d.label.as_str())
+            .unwrap_or("(system default)");
         egui::ComboBox::from_id_salt("cap_device")
-            .selected_text(&s.capture_device)
+            .selected_text(selected_label)
             .width(300.0)
             .show_ui(ui, |ui: &mut egui::Ui| {
-                if ui
-                    .selectable_value(
-                        &mut s.capture_device,
-                        "(system default)".to_string(),
-                        "(system default)",
-                    )
-                    .changed()
-                {
-                    dirty = true;
-                }
-                for dev_name in input_devices {
+                for dev in input_devices {
                     if ui
                         .selectable_value(
                             &mut s.capture_device,
-                            dev_name.clone(),
-                            dev_name.as_str(),
+                            dev.key.clone(),
+                            dev.label.as_str(),
                         )
                         .changed()
                     {
@@ -661,7 +658,7 @@ fn draw_mic_test_waveform(ui: &mut egui::Ui, samples: &[f32]) {
 fn page_playback(
     ui: &mut egui::Ui,
     s: &mut AppSettings,
-    output_devices: &[String],
+    output_devices: &[AudioDeviceInfo],
     playback_modes: &[String],
     connected: bool,
     tx_intent: &Sender<UiIntent>,
@@ -672,26 +669,21 @@ fn page_playback(
 
     ui.horizontal(|ui: &mut egui::Ui| {
         ui.label("Output Device:");
+        let selected_label = output_devices
+            .iter()
+            .find(|d| d.key == s.playback_device)
+            .map(|d| d.label.as_str())
+            .unwrap_or("(system default)");
         egui::ComboBox::from_id_salt("play_device")
-            .selected_text(&s.playback_device)
+            .selected_text(selected_label)
             .width(300.0)
             .show_ui(ui, |ui: &mut egui::Ui| {
-                if ui
-                    .selectable_value(
-                        &mut s.playback_device,
-                        "(system default)".to_string(),
-                        "(system default)",
-                    )
-                    .changed()
-                {
-                    dirty = true;
-                }
-                for dev_name in output_devices {
+                for dev in output_devices {
                     if ui
                         .selectable_value(
                             &mut s.playback_device,
-                            dev_name.clone(),
-                            dev_name.as_str(),
+                            dev.key.clone(),
+                            dev.label.as_str(),
                         )
                         .changed()
                     {

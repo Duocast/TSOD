@@ -9,6 +9,117 @@ const MAX_MESSAGES_PER_CHANNEL: usize = 500;
 /// Maximum number of log lines.
 const MAX_LOG_LINES: usize = 1000;
 
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash)]
+pub enum AudioBackend {
+    Auto,
+    Wasapi,
+    PulseAudio,
+    PipeWire,
+    CoreAudio,
+    Alsa,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash)]
+pub enum AudioDirection {
+    Input,
+    Output,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash)]
+pub struct AudioDeviceId {
+    pub backend: AudioBackend,
+    pub direction: AudioDirection,
+    pub id: String,
+}
+
+impl AudioDeviceId {
+    pub const DEFAULT_ID: &'static str = "default";
+
+    pub fn default_input() -> Self {
+        Self {
+            backend: AudioBackend::Auto,
+            direction: AudioDirection::Input,
+            id: Self::DEFAULT_ID.to_string(),
+        }
+    }
+
+    pub fn default_output() -> Self {
+        Self {
+            backend: AudioBackend::Auto,
+            direction: AudioDirection::Output,
+            id: Self::DEFAULT_ID.to_string(),
+        }
+    }
+
+    pub fn is_default(&self) -> bool {
+        self.id == Self::DEFAULT_ID
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AudioDeviceInfo {
+    pub key: AudioDeviceId,
+    pub label: String,
+    pub is_default: bool,
+}
+
+fn deserialize_input_device_id<'de, D>(deserializer: D) -> Result<AudioDeviceId, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum LegacyOrNew {
+        Legacy(String),
+        New(AudioDeviceId),
+    }
+
+    match <LegacyOrNew as serde::Deserialize>::deserialize(deserializer)? {
+        LegacyOrNew::Legacy(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() || trimmed == "(system default)" {
+                Ok(AudioDeviceId::default_input())
+            } else {
+                Ok(AudioDeviceId {
+                    backend: AudioBackend::Unknown,
+                    direction: AudioDirection::Input,
+                    id: trimmed.to_string(),
+                })
+            }
+        }
+        LegacyOrNew::New(id) => Ok(id),
+    }
+}
+
+fn deserialize_output_device_id<'de, D>(deserializer: D) -> Result<AudioDeviceId, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum LegacyOrNew {
+        Legacy(String),
+        New(AudioDeviceId),
+    }
+
+    match <LegacyOrNew as serde::Deserialize>::deserialize(deserializer)? {
+        LegacyOrNew::Legacy(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() || trimmed == "(system default)" {
+                Ok(AudioDeviceId::default_output())
+            } else {
+                Ok(AudioDeviceId {
+                    backend: AudioBackend::Unknown,
+                    direction: AudioDirection::Output,
+                    id: trimmed.to_string(),
+                })
+            }
+        }
+        LegacyOrNew::New(id) => Ok(id),
+    }
+}
+
 // ── Events from backend to UI ──────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -114,8 +225,8 @@ pub enum UiEvent {
 
     // Audio devices
     SetAudioDevices {
-        input_devices: Vec<String>,
-        output_devices: Vec<String>,
+        input_devices: Vec<AudioDeviceInfo>,
+        output_devices: Vec<AudioDeviceInfo>,
         playback_modes: Vec<String>,
     },
 
@@ -266,8 +377,8 @@ pub enum UiIntent {
     SetAgcEnabled(bool),
     SetEchoCancellation(bool),
     SetVadThreshold(f32),
-    SetInputDevice(String),
-    SetOutputDevice(String),
+    SetInputDevice(AudioDeviceId),
+    SetOutputDevice(AudioDeviceId),
     SetPlaybackMode(String),
     SetInputGain(f32),
     SetOutputGain(f32),
@@ -314,7 +425,11 @@ pub enum UiIntent {
 #[serde(default)]
 pub struct AppSettings {
     // ─── Capture ───
-    pub capture_device: String,
+    #[serde(
+        default = "AudioDeviceId::default_input",
+        deserialize_with = "deserialize_input_device_id"
+    )]
+    pub capture_device: AudioDeviceId,
     pub capture_mode: CaptureMode,
     pub ptt_key: String,
     pub ptt_delay_ms: u32,
@@ -330,7 +445,11 @@ pub struct AppSettings {
     pub fec_strength: u8,
 
     // ─── Playback ───
-    pub playback_device: String,
+    #[serde(
+        default = "AudioDeviceId::default_output",
+        deserialize_with = "deserialize_output_device_id"
+    )]
+    pub playback_device: AudioDeviceId,
     pub playback_mode: String,
     pub output_gain: f32,
     pub per_user_audio: HashMap<String, PerUserAudioSettings>,
@@ -404,7 +523,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             // Capture
-            capture_device: "(system default)".into(),
+            capture_device: AudioDeviceId::default_input(),
             capture_mode: CaptureMode::PushToTalk,
             ptt_key: "Space".into(),
             ptt_delay_ms: 300,
@@ -420,7 +539,7 @@ impl Default for AppSettings {
             fec_strength: 50,
 
             // Playback
-            playback_device: "(system default)".into(),
+            playback_device: AudioDeviceId::default_output(),
             playback_mode: "Automatically use best mode".into(),
             output_gain: 1.0,
             per_user_audio: HashMap::new(),
@@ -833,8 +952,8 @@ pub struct UiModel {
     pub connection_details: VecDeque<String>,
 
     // Audio devices (enumerated at runtime)
-    pub input_devices: Vec<String>,
-    pub output_devices: Vec<String>,
+    pub input_devices: Vec<AudioDeviceInfo>,
+    pub output_devices: Vec<AudioDeviceInfo>,
     pub playback_modes: Vec<String>,
 
     // Mic test loopback (runtime)
