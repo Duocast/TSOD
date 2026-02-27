@@ -312,7 +312,7 @@ async fn is_user_admin(
             FROM user_roles
             WHERE server_id = $1
               AND user_id = $2
-              AND role_id = 'admin'
+              AND role_id IN ('admin', 'owner')
         ) AS is_admin
         "#,
     )
