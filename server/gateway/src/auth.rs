@@ -221,8 +221,49 @@ async fn lookup_or_create_user_for_device(
         return Err(err).context("insert auth device")?;
     }
 
+    assign_owner_role_if_missing(&mut tx, server_id, user_id).await?;
+
     tx.commit().await.context("commit new device auth")?;
     Ok(user_id)
+}
+
+async fn assign_owner_role_if_missing(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    server_id: uuid::Uuid,
+    user_id: uuid::Uuid,
+) -> Result<()> {
+    let has_owner = sqlx::query(
+        r#"
+        SELECT EXISTS(
+            SELECT 1
+            FROM user_roles
+            WHERE server_id = $1
+              AND role_id = 'owner'
+        ) AS has_owner
+        "#,
+    )
+    .bind(server_id)
+    .fetch_one(&mut **tx)
+    .await
+    .context("check existing owner role")?
+    .try_get::<bool, _>("has_owner")?;
+
+    if !has_owner {
+        sqlx::query(
+            r#"
+            INSERT INTO user_roles (server_id, user_id, role_id)
+            VALUES ($1, $2, 'owner')
+            ON CONFLICT (server_id, user_id, role_id) DO NOTHING
+            "#,
+        )
+        .bind(server_id)
+        .bind(user_id)
+        .execute(&mut **tx)
+        .await
+        .context("assign initial owner role")?;
+    }
+
+    Ok(())
 }
 
 async fn is_user_admin(
