@@ -490,99 +490,131 @@ impl ControlRepo for PgControlRepo {
         tx: &mut Transaction<'_, Postgres>,
         req: &PermissionRequest,
     ) -> ControlResult<Decision> {
+        // Admin/owner bypass.
         if req.is_admin {
             return Ok(Decision::Allow);
         }
 
         let cap = req.capability.as_str();
 
-        let role_denied: bool = sqlx::query_scalar(
+        // Base permission from roles in hierarchy order:
+        // @everyone first, then regular roles by position (low -> high),
+        // where later rows override earlier ones.
+        let base_role_effect: Option<String> = sqlx::query_scalar(
             r#"
-            SELECT EXISTS(
-                SELECT 1
-                FROM user_roles ur
-                JOIN role_caps rc ON rc.role_id = ur.role_id
-                WHERE ur.server_id = $1
-                  AND ur.user_id = $2
-                  AND rc.cap = $3
-                  AND rc.effect = 'deny'
-            )
+            SELECT rc.effect
+            FROM role_caps rc
+            JOIN roles r ON r.id = rc.role_id
+            LEFT JOIN user_roles ur
+              ON ur.server_id = $1
+             AND ur.user_id = $2
+             AND ur.role_id = r.id
+            WHERE r.server_id = $1
+              AND rc.cap = $3
+              AND (r.is_everyone = TRUE OR ur.role_id IS NOT NULL)
+            ORDER BY r.is_everyone DESC, r.role_position ASC, r.id ASC
             "#,
         )
         .bind(req.server_id.0)
         .bind(req.user_id.0)
         .bind(cap)
-        .fetch_one(&mut **tx)
+        .fetch_optional(&mut **tx)
         .await
-        .context("decide_permission role deny")?;
+        .context("decide_permission base role effect")?;
 
-        let role_granted: bool = sqlx::query_scalar(
-            r#"
-            SELECT EXISTS(
-                SELECT 1
-                FROM user_roles ur
-                JOIN role_caps rc ON rc.role_id = ur.role_id
-                WHERE ur.server_id = $1
-                  AND ur.user_id = $2
-                  AND rc.cap = $3
-                  AND rc.effect = 'grant'
-            )
-            "#,
-        )
-        .bind(req.server_id.0)
-        .bind(req.user_id.0)
-        .bind(cap)
-        .fetch_one(&mut **tx)
-        .await
-        .context("decide_permission role grant")?;
+        let base_allowed = base_role_effect.as_deref() == Some("grant");
 
-        let (override_denied, override_granted) = if let Some(channel_id) = req.channel_id {
-            let denied: bool = sqlx::query_scalar(
+        let overwrite_decision = if let Some(channel_id) = req.channel_id {
+            // Discord-like channel overwrite evaluation:
+            // @everyone role overwrite -> role overwrites -> user overwrite,
+            // with deny winning over allow at overwrite layer.
+            let everyone_role_override: Option<String> = sqlx::query_scalar(
                 r#"
-                SELECT EXISTS(
-                    SELECT 1
-                    FROM channel_overrides
-                    WHERE channel_id = $1
-                      AND user_id = $2
-                      AND cap = $3
-                      AND effect = 'deny'
-                )
+                SELECT cro.effect
+                FROM channel_role_overrides cro
+                JOIN roles r ON r.id = cro.role_id
+                WHERE cro.channel_id = $1
+                  AND r.server_id = $2
+                  AND r.is_everyone = TRUE
+                  AND cro.cap = $3
+                ORDER BY cro.effect DESC
+                "#,
+            )
+            .bind(channel_id.0)
+            .bind(req.server_id.0)
+            .bind(cap)
+            .fetch_optional(&mut **tx)
+            .await
+            .context("decide_permission everyone overwrite")?;
+
+            let role_overwrite_effects: Vec<String> = sqlx::query_scalar(
+                r#"
+                SELECT cro.effect
+                FROM channel_role_overrides cro
+                JOIN user_roles ur
+                  ON ur.server_id = $2
+                 AND ur.user_id = $3
+                 AND ur.role_id = cro.role_id
+                JOIN roles r ON r.id = ur.role_id
+                WHERE cro.channel_id = $1
+                  AND cro.cap = $4
+                ORDER BY r.role_position ASC, r.id ASC
+                "#,
+            )
+            .bind(channel_id.0)
+            .bind(req.server_id.0)
+            .bind(req.user_id.0)
+            .bind(cap)
+            .fetch_all(&mut **tx)
+            .await
+            .context("decide_permission role overwrites")?;
+
+            let member_override_effect: Option<String> = sqlx::query_scalar(
+                r#"
+                SELECT effect
+                FROM channel_overrides
+                WHERE channel_id = $1
+                  AND user_id = $2
+                  AND cap = $3
+                ORDER BY effect DESC
                 "#,
             )
             .bind(channel_id.0)
             .bind(req.user_id.0)
             .bind(cap)
-            .fetch_one(&mut **tx)
+            .fetch_optional(&mut **tx)
             .await
-            .context("decide_permission override deny")?;
+            .context("decide_permission member overwrite")?;
 
-            let granted: bool = sqlx::query_scalar(
-                r#"
-                SELECT EXISTS(
-                    SELECT 1
-                    FROM channel_overrides
-                    WHERE channel_id = $1
-                      AND user_id = $2
-                      AND cap = $3
-                      AND effect = 'grant'
-                )
-                "#,
-            )
-            .bind(channel_id.0)
-            .bind(req.user_id.0)
-            .bind(cap)
-            .fetch_one(&mut **tx)
-            .await
-            .context("decide_permission override grant")?;
+            let mut has_allow = false;
+            let mut has_deny = false;
 
-            (denied, granted)
+            for effect in everyone_role_override
+                .iter()
+                .chain(role_overwrite_effects.iter())
+                .chain(member_override_effect.iter())
+            {
+                match effect.as_str() {
+                    "deny" => has_deny = true,
+                    "grant" => has_allow = true,
+                    _ => {}
+                }
+            }
+
+            if has_deny {
+                Some(Decision::Deny)
+            } else if has_allow {
+                Some(Decision::Allow)
+            } else {
+                None
+            }
         } else {
-            (false, false)
+            None
         };
 
-        if role_denied || override_denied {
-            Ok(Decision::Deny)
-        } else if role_granted || override_granted {
+        if let Some(decision) = overwrite_decision {
+            Ok(decision)
+        } else if base_allowed {
             Ok(Decision::Allow)
         } else {
             Ok(Decision::Deny)
