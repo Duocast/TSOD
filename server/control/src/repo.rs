@@ -138,12 +138,11 @@ pub trait ControlRepo: Send + Sync {
         for (cap, effect) in caps {
             let allowed = effect == "grant";
             sqlx::query(
-                "INSERT INTO role_caps (server_id, role_id, cap, effect, allowed) VALUES ($1,$2,$3,$4,$5)",
+                "INSERT INTO role_caps (server_id, role_id, cap, allowed) VALUES ($1,$2,$3,$4)",
             )
             .bind(server_id)
             .bind(role_id)
             .bind(cap)
-            .bind(effect)
             .bind(allowed)
             .execute(&mut **tx)
             .await
@@ -744,12 +743,11 @@ impl ControlRepo for PgControlRepo {
         for (cap, effect) in caps {
             let allowed = effect == "grant";
             sqlx::query(
-                "INSERT INTO role_caps (server_id, role_id, cap, effect, allowed) VALUES ($1,$2,$3,$4,$5)",
+                "INSERT INTO role_caps (server_id, role_id, cap, allowed) VALUES ($1,$2,$3,$4)",
             )
             .bind(server_id)
             .bind(role_id)
             .bind(cap)
-            .bind(effect)
             .bind(allowed)
             .execute(&mut **tx)
             .await

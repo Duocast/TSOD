@@ -220,10 +220,10 @@ async fn ensure_baseline_capabilities(
     ] {
         sqlx::query(
             r#"
-            INSERT INTO role_caps (server_id, role_id, cap, effect, allowed)
-            VALUES ($1, $2, $3, 'grant', TRUE)
+            INSERT INTO role_caps (server_id, role_id, cap, allowed)
+            VALUES ($1, $2, $3, TRUE)
             ON CONFLICT (server_id, role_id, cap) DO UPDATE
-            SET effect='grant', allowed=TRUE
+            SET allowed=TRUE
             "#,
         )
         .bind(server_id)
