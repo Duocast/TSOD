@@ -206,26 +206,25 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                     ui.close();
                 }
                 ui.separator();
-                let mute_label = if member.muted { "Unmute" } else { "Mute" };
-                if ui.button(mute_label).clicked() {
-                    let _ = tx_intent.send(UiIntent::MuteUser {
-                        user_id: member.user_id.clone(),
-                        muted: !member.muted,
-                    });
+                if ui.button("Roles…").clicked() {
+                    model.show_permissions_center = true;
+                    model.permissions_tab = crate::ui::model::PermissionsTab::Members;
                     ui.close();
                 }
+
+                let tooltip = "Missing permission: Move Members / Mute Members / Deafen Members";
+                let mute_label = if member.muted { "Unmute" } else { "Mute" };
+                ui.add_enabled(false, egui::Button::new(mute_label))
+                    .on_disabled_hover_text(tooltip);
                 let deafen_label = if member.deafened {
                     "Undeafen"
                 } else {
                     "Deafen"
                 };
-                if ui.button(deafen_label).clicked() {
-                    let _ = tx_intent.send(UiIntent::DeafenUser {
-                        user_id: member.user_id.clone(),
-                        deafened: !member.deafened,
-                    });
-                    ui.close();
-                }
+                ui.add_enabled(false, egui::Button::new(deafen_label))
+                    .on_disabled_hover_text(tooltip);
+                ui.add_enabled(false, egui::Button::new("Move…"))
+                    .on_disabled_hover_text("Missing permission: Move Members");
                 ui.separator();
                 if ui.button("Get Connection Info").clicked() {
                     model.show_member_connection_info = true;
