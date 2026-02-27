@@ -4,7 +4,6 @@ use ringbuf::{
     HeapProd, HeapRb,
 };
 use std::cell::UnsafeCell;
-use std::collections::HashSet;
 
 pub struct Playout {
     backend: PlayoutBackend,
@@ -89,49 +88,11 @@ impl Playout {
 }
 
 pub fn enumerate_output_devices() -> Vec<String> {
-    dedupe_device_names(PlayoutBackend::enumerate_output_devices())
+    PlayoutBackend::enumerate_output_devices()
 }
 
 pub fn enumerate_playback_modes() -> Vec<String> {
     PlayoutBackend::enumerate_playback_modes()
-}
-
-fn dedupe_device_names(device_names: Vec<String>) -> Vec<String> {
-    let mut seen = HashSet::new();
-    let mut deduped = Vec::with_capacity(device_names.len());
-    for name in device_names {
-        if seen.insert(name.clone()) {
-            deduped.push(name);
-        }
-    }
-    deduped
-}
-
-#[cfg(test)]
-mod tests {
-    use super::dedupe_device_names;
-
-    #[test]
-    fn dedupe_device_names_keeps_first_entry_order() {
-        let devices = vec![
-            "Speakers".to_string(),
-            "Headset".to_string(),
-            "Speakers".to_string(),
-            "HDMI".to_string(),
-            "Headset".to_string(),
-        ];
-
-        let deduped = dedupe_device_names(devices);
-
-        assert_eq!(
-            deduped,
-            vec![
-                "Speakers".to_string(),
-                "Headset".to_string(),
-                "HDMI".to_string()
-            ]
-        );
-    }
 }
 
 #[cfg(target_os = "linux")]
@@ -457,10 +418,7 @@ mod linux {
         fn enumerate_output_devices() -> Vec<String> {
             let host = cpal::default_host();
             host.output_devices()
-                .map(|devs| {
-                    devs.filter_map(|d| d.description().ok().map(|desc| desc.name().to_string()))
-                        .collect()
-                })
+                .map(|devs| devs.filter_map(|d| device_name(&d)).collect())
                 .unwrap_or_default()
         }
 
@@ -469,16 +427,24 @@ mod linux {
         }
     }
 
+    fn device_name(device: &cpal::Device) -> Option<String> {
+        device
+            .name()
+            .ok()
+            .filter(|name| !name.trim().is_empty())
+            .or_else(|| {
+                device
+                    .description()
+                    .ok()
+                    .map(|desc| desc.name().to_string())
+                    .filter(|name| !name.trim().is_empty())
+            })
+    }
+
     fn find_output_device_by_name(host: &cpal::Host, name: &str) -> Result<cpal::Device> {
         let mut devices = host.output_devices().context("enumerate output devices")?;
         devices
-            .find(|dev| {
-                dev.description()
-                    .ok()
-                    .map(|d| d.name().to_string())
-                    .as_deref()
-                    == Some(name)
-            })
+            .find(|dev| device_name(dev).as_deref() == Some(name))
             .ok_or_else(|| anyhow!("no matching output device"))
     }
 
@@ -677,10 +643,7 @@ mod non_linux {
         pub fn enumerate_output_devices() -> Vec<String> {
             let host = cpal::default_host();
             host.output_devices()
-                .map(|devs| {
-                    devs.filter_map(|d| d.description().ok().map(|desc| desc.name().to_string()))
-                        .collect()
-                })
+                .map(|devs| devs.filter_map(|d| device_name(&d)).collect())
                 .unwrap_or_default()
         }
 
@@ -696,16 +659,24 @@ mod non_linux {
         }
     }
 
+    fn device_name(device: &cpal::Device) -> Option<String> {
+        device
+            .name()
+            .ok()
+            .filter(|name| !name.trim().is_empty())
+            .or_else(|| {
+                device
+                    .description()
+                    .ok()
+                    .map(|desc| desc.name().to_string())
+                    .filter(|name| !name.trim().is_empty())
+            })
+    }
+
     fn find_output_device_by_name(host: &cpal::Host, name: &str) -> Result<cpal::Device> {
         let mut devices = host.output_devices().context("enumerate output devices")?;
         devices
-            .find(|dev| {
-                dev.description()
-                    .ok()
-                    .map(|d| d.name().to_string())
-                    .as_deref()
-                    == Some(name)
-            })
+            .find(|dev| device_name(dev).as_deref() == Some(name))
             .ok_or_else(|| anyhow!("no matching output device"))
     }
 

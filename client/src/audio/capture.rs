@@ -4,7 +4,6 @@ use ringbuf::{
     HeapCons, HeapRb,
 };
 use std::cell::UnsafeCell;
-use std::collections::HashSet;
 
 pub struct Capture {
     backend: CaptureBackend,
@@ -77,45 +76,7 @@ impl Capture {
 }
 
 pub fn enumerate_input_devices() -> Vec<String> {
-    dedupe_device_names(CaptureBackend::enumerate_input_devices())
-}
-
-fn dedupe_device_names(device_names: Vec<String>) -> Vec<String> {
-    let mut seen = HashSet::new();
-    let mut deduped = Vec::with_capacity(device_names.len());
-    for name in device_names {
-        if seen.insert(name.clone()) {
-            deduped.push(name);
-        }
-    }
-    deduped
-}
-
-#[cfg(test)]
-mod tests {
-    use super::dedupe_device_names;
-
-    #[test]
-    fn dedupe_device_names_keeps_first_entry_order() {
-        let devices = vec![
-            "Microphone".to_string(),
-            "Line In".to_string(),
-            "Microphone".to_string(),
-            "USB Mic".to_string(),
-            "Line In".to_string(),
-        ];
-
-        let deduped = dedupe_device_names(devices);
-
-        assert_eq!(
-            deduped,
-            vec![
-                "Microphone".to_string(),
-                "Line In".to_string(),
-                "USB Mic".to_string()
-            ]
-        );
-    }
+    CaptureBackend::enumerate_input_devices()
 }
 
 #[cfg(target_os = "linux")]
@@ -415,10 +376,7 @@ mod linux {
         fn enumerate_input_devices() -> Vec<String> {
             let host = cpal::default_host();
             host.input_devices()
-                .map(|devs| {
-                    devs.filter_map(|d| d.description().ok().map(|desc| desc.name().to_string()))
-                        .collect()
-                })
+                .map(|devs| devs.filter_map(|d| device_name(&d)).collect())
                 .unwrap_or_default()
         }
 
@@ -427,16 +385,24 @@ mod linux {
         }
     }
 
+    fn device_name(device: &cpal::Device) -> Option<String> {
+        device
+            .name()
+            .ok()
+            .filter(|name| !name.trim().is_empty())
+            .or_else(|| {
+                device
+                    .description()
+                    .ok()
+                    .map(|desc| desc.name().to_string())
+                    .filter(|name| !name.trim().is_empty())
+            })
+    }
+
     fn find_input_device_by_name(host: &cpal::Host, name: &str) -> Result<cpal::Device> {
         let mut devices = host.input_devices().context("enumerate input devices")?;
         devices
-            .find(|dev| {
-                dev.description()
-                    .ok()
-                    .map(|d| d.name().to_string())
-                    .as_deref()
-                    == Some(name)
-            })
+            .find(|dev| device_name(dev).as_deref() == Some(name))
             .ok_or_else(|| anyhow!("no matching input device"))
     }
 
@@ -628,10 +594,7 @@ mod non_linux {
         pub fn enumerate_input_devices() -> Vec<String> {
             let host = cpal::default_host();
             host.input_devices()
-                .map(|devs| {
-                    devs.filter_map(|d| d.description().ok().map(|desc| desc.name().to_string()))
-                        .collect()
-                })
+                .map(|devs| devs.filter_map(|d| device_name(&d)).collect())
                 .unwrap_or_default()
         }
 
@@ -640,16 +603,24 @@ mod non_linux {
         }
     }
 
+    fn device_name(device: &cpal::Device) -> Option<String> {
+        device
+            .name()
+            .ok()
+            .filter(|name| !name.trim().is_empty())
+            .or_else(|| {
+                device
+                    .description()
+                    .ok()
+                    .map(|desc| desc.name().to_string())
+                    .filter(|name| !name.trim().is_empty())
+            })
+    }
+
     fn find_input_device_by_name(host: &cpal::Host, name: &str) -> Result<cpal::Device> {
         let mut devices = host.input_devices().context("enumerate input devices")?;
         devices
-            .find(|dev| {
-                dev.description()
-                    .ok()
-                    .map(|d| d.name().to_string())
-                    .as_deref()
-                    == Some(name)
-            })
+            .find(|dev| device_name(dev).as_deref() == Some(name))
             .ok_or_else(|| anyhow!("no matching input device"))
     }
 
