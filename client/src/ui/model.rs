@@ -1051,7 +1051,7 @@ pub struct PermissionAuditRow {
     pub action: String,
     pub target_type: String,
     pub target_id: String,
-    pub created_at_unix_millis: i64,
+    pub created_at_unix_millis: Option<i64>,
 }
 
 impl Default for UiModel {
