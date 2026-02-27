@@ -125,7 +125,8 @@ async fn main() -> Result<()> {
     let mut transport = TransportConfig::default();
     transport.max_concurrent_bidi_streams(64u32.into());
     transport.max_concurrent_uni_streams(64u32.into());
-    transport.datagram_receive_buffer_size(Some(1024 * 1024));
+    // In quinn 0.11, max_datagram_frame_size is advertised from datagram_receive_buffer_size.
+    transport.datagram_receive_buffer_size(Some(1200));
     transport.datagram_send_buffer_size(1024 * 1024);
     transport.keep_alive_interval(Some(std::time::Duration::from_secs(10)));
     server_config.transport_config(Arc::new(transport));
