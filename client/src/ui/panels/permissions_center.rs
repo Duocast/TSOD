@@ -1,4 +1,7 @@
-use crate::ui::model::{PermissionsTab, UiModel};
+use crate::ui::model::{
+    PermissionOverrideDraft, PermissionOverrideTab, PermissionValue, PermissionViewAsMode,
+    PermissionsTab, UiModel,
+};
 use crate::ui::theme;
 use eframe::egui;
 
@@ -34,6 +37,8 @@ const PERMISSION_GROUPS: &[(&str, &[&str])] = &[
     ("Admin", &["Administrator / All permissions"]),
 ];
 
+const CHANNEL_CAPABILITIES: &[&str] = &["View Channel", "Connect", "Speak", "Send Messages"];
+
 pub fn show_permissions_center(ctx: &egui::Context, model: &mut UiModel) {
     if !model.show_permissions_center {
         return;
@@ -44,9 +49,9 @@ pub fn show_permissions_center(ctx: &egui::Context, model: &mut UiModel) {
         .open(&mut open)
         .collapsible(false)
         .resizable(true)
-        .default_width(980.0)
-        .default_height(640.0)
-        .min_width(780.0)
+        .default_width(1180.0)
+        .default_height(700.0)
+        .min_width(920.0)
         .show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
                 for tab in PermissionsTab::ALL {
@@ -211,16 +216,226 @@ fn show_roles_tab(ui: &mut egui::Ui, model: &mut UiModel) {
 }
 
 fn show_channels_tab(ui: &mut egui::Ui, model: &mut UiModel) {
-    ui.label("Channel permission overrides are managed from Edit Channel → Permissions.");
-    ui.add_space(8.0);
-    ui.horizontal(|ui| {
-        ui.label("Selected channel scope:");
-        ui.text_edit_singleline(&mut model.permissions_channel_scope_name);
+    ui.columns(3, |columns| {
+        let (left_slice, right_slice) = columns.split_at_mut(1);
+        let left = &mut left_slice[0];
+        let (center_slice, view_slice) = right_slice.split_at_mut(1);
+        let center = &mut center_slice[0];
+        let view = &mut view_slice[0];
+
+        left.heading("Channels");
+        left.separator();
+        show_channel_tree(left, model);
+
+        center.heading("Channel Permissions");
+        center.colored_label(
+            theme::text_muted(),
+            format!("Editing #{}", model.permissions_channel_scope_name),
+        );
+        center.separator();
+        center
+            .checkbox(&mut model.permissions_private_channel, "Private channel")
+            .on_hover_text(
+                "Deny @everyone View/Connect and then explicitly allow selected roles or members.",
+            );
+
+        if model.permissions_private_channel {
+            center.colored_label(
+                theme::text_muted(),
+                "Private mode applies: deny @everyone view/join, then add explicit allows.",
+            );
+        }
+
+        center.add_space(8.0);
+        center.horizontal(|ui| {
+            ui.label("Overrides:");
+            ui.selectable_value(
+                &mut model.permissions_override_tab,
+                PermissionOverrideTab::Roles,
+                "Role overrides",
+            );
+            ui.selectable_value(
+                &mut model.permissions_override_tab,
+                PermissionOverrideTab::Members,
+                "Member overrides",
+            );
+        });
+
+        center.separator();
+        show_overrides_editor(center, model);
+
+        view.heading("View as…");
+        view.separator();
+        ui_view_as_panel(view, model);
     });
-    ui.separator();
-    ui.label(
-        "Tip: right-click a channel in the server tree and choose Edit Channel… then Permissions…",
+}
+
+fn show_channel_tree(ui: &mut egui::Ui, model: &mut UiModel) {
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        for channel in &model.channels {
+            let selected = model
+                .permissions_selected_channel_id
+                .as_ref()
+                .is_some_and(|id| id == &channel.id);
+            let label = match channel.channel_type {
+                crate::ui::model::ChannelType::Category => format!("📁 {}", channel.name),
+                crate::ui::model::ChannelType::Voice => format!("🔊 {}", channel.name),
+                crate::ui::model::ChannelType::Text => format!("# {}", channel.name),
+            };
+            if ui.selectable_label(selected, label).clicked() {
+                model.permissions_selected_channel_id = Some(channel.id.clone());
+                model.permissions_channel_scope_name = channel.name.clone();
+            }
+        }
+    });
+}
+
+fn show_overrides_editor(ui: &mut egui::Ui, model: &mut UiModel) {
+    let overrides = if model.permissions_override_tab == PermissionOverrideTab::Roles {
+        &mut model.permissions_role_overrides
+    } else {
+        &mut model.permissions_member_overrides
+    };
+
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        for row in overrides {
+            show_override_row(ui, row);
+            ui.add_space(4.0);
+        }
+    });
+
+    ui.horizontal(|ui| {
+        if ui.button("Add override").clicked() {
+            overrides.push(PermissionOverrideDraft {
+                subject_name: if model.permissions_override_tab == PermissionOverrideTab::Roles {
+                    "New Role".into()
+                } else {
+                    "New Member".into()
+                },
+                capabilities: vec![PermissionValue::Inherit; CHANNEL_CAPABILITIES.len()],
+            });
+        }
+    });
+}
+
+fn show_override_row(ui: &mut egui::Ui, row: &mut PermissionOverrideDraft) {
+    ui.group(|ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Role/User");
+            ui.text_edit_singleline(&mut row.subject_name);
+            if ui.small_button("Reset").clicked() {
+                row.capabilities.fill(PermissionValue::Inherit);
+            }
+        });
+
+        for (idx, cap) in CHANNEL_CAPABILITIES.iter().enumerate() {
+            ui.horizontal(|ui| {
+                ui.label(*cap);
+                if idx >= row.capabilities.len() {
+                    row.capabilities.push(PermissionValue::Inherit);
+                }
+                tri_state_button(ui, &mut row.capabilities[idx], *cap);
+            });
+        }
+    });
+}
+
+fn tri_state_button(ui: &mut egui::Ui, value: &mut PermissionValue, capability: &str) {
+    let (text, fill, source) = match *value {
+        PermissionValue::Inherit => ("·", theme::text_muted(), "Inherited from role/server base"),
+        PermissionValue::Allow => (
+            "✓",
+            egui::Color32::from_rgb(69, 179, 107),
+            "Explicitly allowed on this channel",
+        ),
+        PermissionValue::Deny => (
+            "✕",
+            theme::COLOR_DANGER,
+            "Explicitly denied on this channel",
+        ),
+    };
+
+    let response = ui.add(
+        egui::Button::new(text)
+            .fill(fill)
+            .min_size(egui::vec2(24.0, 20.0)),
     );
+    if response.clicked() {
+        *value = value.cycle();
+    }
+    response.on_hover_text(format!("{}\nSource: {}", capability, source));
+}
+
+fn ui_view_as_panel(ui: &mut egui::Ui, model: &mut UiModel) {
+    ui.horizontal(|ui| {
+        ui.selectable_value(
+            &mut model.permissions_view_as_mode,
+            PermissionViewAsMode::Role,
+            "Role",
+        );
+        ui.selectable_value(
+            &mut model.permissions_view_as_mode,
+            PermissionViewAsMode::Member,
+            "Member",
+        );
+    });
+    ui.horizontal(|ui| {
+        ui.label("Subject");
+        ui.text_edit_singleline(&mut model.permissions_view_as_name);
+    });
+
+    ui.separator();
+    ui.label("Computed effective permissions");
+
+    let effective = compute_effective_permissions(model);
+    for (cap, state, reason) in effective {
+        let (symbol, color) = match state {
+            PermissionValue::Allow => ("✓", egui::Color32::from_rgb(69, 179, 107)),
+            PermissionValue::Deny => ("✕", theme::COLOR_DANGER),
+            PermissionValue::Inherit => ("·", theme::text_muted()),
+        };
+        ui.horizontal_wrapped(|ui| {
+            ui.colored_label(color, symbol);
+            ui.label(cap);
+            ui.colored_label(theme::text_muted(), format!("— {}", reason));
+        });
+    }
+}
+
+fn compute_effective_permissions(model: &UiModel) -> Vec<(&'static str, PermissionValue, String)> {
+    CHANNEL_CAPABILITIES
+        .iter()
+        .enumerate()
+        .map(|(idx, cap)| {
+            let mut state = PermissionValue::Inherit;
+            let mut reason = "Inherited from server base".to_string();
+
+            if model.permissions_private_channel && (*cap == "View Channel" || *cap == "Connect") {
+                state = PermissionValue::Deny;
+                reason = "Private channel baseline denies @everyone".into();
+            }
+
+            let overrides = if model.permissions_view_as_mode == PermissionViewAsMode::Role {
+                &model.permissions_role_overrides
+            } else {
+                &model.permissions_member_overrides
+            };
+
+            if let Some(row) = overrides.iter().find(|r| {
+                r.subject_name
+                    .eq_ignore_ascii_case(&model.permissions_view_as_name)
+            }) {
+                if let Some(v) = row.capabilities.get(idx).copied() {
+                    if v != PermissionValue::Inherit {
+                        state = v;
+                        reason = format!("Channel override on {}", row.subject_name);
+                    }
+                }
+            }
+
+            (*cap, state, reason)
+        })
+        .collect()
 }
 
 fn show_members_tab(ui: &mut egui::Ui, _model: &mut UiModel) {

@@ -857,6 +857,13 @@ pub struct UiModel {
     pub permissions_channel_scope_name: String,
     pub permissions_can_moderate_members: bool,
     pub permissions_roles: Vec<RoleDraft>,
+    pub permissions_selected_channel_id: Option<String>,
+    pub permissions_private_channel: bool,
+    pub permissions_override_tab: PermissionOverrideTab,
+    pub permissions_role_overrides: Vec<PermissionOverrideDraft>,
+    pub permissions_member_overrides: Vec<PermissionOverrideDraft>,
+    pub permissions_view_as_mode: PermissionViewAsMode,
+    pub permissions_view_as_name: String,
 }
 
 #[derive(Debug, Clone)]
@@ -964,6 +971,41 @@ pub struct RoleDraft {
     pub mentionable: bool,
     pub protected: bool,
     pub administrative: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionOverrideTab {
+    Roles,
+    Members,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionViewAsMode {
+    Role,
+    Member,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionValue {
+    Inherit,
+    Allow,
+    Deny,
+}
+
+impl PermissionValue {
+    pub fn cycle(self) -> Self {
+        match self {
+            PermissionValue::Inherit => PermissionValue::Allow,
+            PermissionValue::Allow => PermissionValue::Deny,
+            PermissionValue::Deny => PermissionValue::Inherit,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PermissionOverrideDraft {
+    pub subject_name: String,
+    pub capabilities: Vec<PermissionValue>,
 }
 
 impl Default for UiModel {
@@ -1093,6 +1135,40 @@ impl Default for UiModel {
                     administrative: true,
                 },
             ],
+            permissions_selected_channel_id: None,
+            permissions_private_channel: false,
+            permissions_override_tab: PermissionOverrideTab::Roles,
+            permissions_role_overrides: vec![
+                PermissionOverrideDraft {
+                    subject_name: "@everyone".into(),
+                    capabilities: vec![
+                        PermissionValue::Allow,
+                        PermissionValue::Allow,
+                        PermissionValue::Inherit,
+                        PermissionValue::Inherit,
+                    ],
+                },
+                PermissionOverrideDraft {
+                    subject_name: "Moderator".into(),
+                    capabilities: vec![
+                        PermissionValue::Allow,
+                        PermissionValue::Allow,
+                        PermissionValue::Allow,
+                        PermissionValue::Allow,
+                    ],
+                },
+            ],
+            permissions_member_overrides: vec![PermissionOverrideDraft {
+                subject_name: "Ari".into(),
+                capabilities: vec![
+                    PermissionValue::Allow,
+                    PermissionValue::Deny,
+                    PermissionValue::Inherit,
+                    PermissionValue::Allow,
+                ],
+            }],
+            permissions_view_as_mode: PermissionViewAsMode::Role,
+            permissions_view_as_name: "@everyone".into(),
         }
     }
 }
