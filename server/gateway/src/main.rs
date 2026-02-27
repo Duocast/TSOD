@@ -1,4 +1,5 @@
 mod auth;
+mod bootstrap;
 mod config;
 mod frame;
 mod gateway;
@@ -11,6 +12,7 @@ mod tls;
 pub mod proto;
 
 use anyhow::Result;
+use bootstrap::{ensure_core_state, BootstrapConfig};
 use clap::Parser;
 use config::Config;
 use gateway::Gateway;
@@ -141,17 +143,33 @@ async fn main() -> Result<()> {
         .map(uuid::Uuid::parse_str)
         .transpose()?;
 
+    ensure_core_state(
+        &pool,
+        server_id.0,
+        None,
+        BootstrapConfig {
+            bootstrap_owner_user_id,
+            owner_bootstrap_policy: cfg.owner_bootstrap_policy,
+            dev_repair_orphan_user_roles: cfg.dev_repair_orphan_user_roles,
+        },
+    )
+    .await?;
+
     let auth_provider: Arc<dyn auth::AuthProvider> = if cfg.dev_mode {
         Arc::new(DeviceAuthProvider::new(
             pool.clone(),
             server_id.0,
             bootstrap_owner_user_id,
+            cfg.owner_bootstrap_policy,
+            cfg.dev_repair_orphan_user_roles,
         ))
     } else {
         Arc::new(DeviceAuthProvider::new(
             pool.clone(),
             server_id.0,
             bootstrap_owner_user_id,
+            cfg.owner_bootstrap_policy,
+            cfg.dev_repair_orphan_user_roles,
         ))
     };
 
