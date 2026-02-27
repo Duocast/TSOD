@@ -531,7 +531,6 @@ mod linux {
             .description()
             .ok()
             .map(|desc| desc.to_string())
-            .or_else(|| device.name().ok())
             .filter(|name| !name.trim().is_empty())
     }
 
@@ -776,7 +775,6 @@ mod non_linux {
             .description()
             .ok()
             .map(|desc| desc.to_string())
-            .or_else(|| device.name().ok())
             .filter(|name| !name.trim().is_empty())
     }
 

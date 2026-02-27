@@ -287,8 +287,8 @@ async fn app_task(
     let output_devices = audio::playout::enumerate_output_devices();
     let playback_modes = audio::playout::enumerate_playback_modes();
     let _ = tx_event.send(UiEvent::SetAudioDevices {
-        input_devices,
-        output_devices,
+        input_devices: input_devices.clone(),
+        output_devices: output_devices.clone(),
         playback_modes,
     });
 
