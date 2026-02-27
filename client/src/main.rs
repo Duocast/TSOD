@@ -1996,7 +1996,51 @@ async fn connect_and_run_session(
                                 ));
                             }
                         }
-                        UiIntent::RefreshPermissionsCenter => {
+                        UiIntent::PermsOpen => {
+                            let req = pb::PermListRolesRequest {
+                                server_id: None,
+                                include_caps: false,
+                            };
+                            let mut role_order: Vec<String> = Vec::new();
+                            match dispatcher
+                                .send_request(
+                                    pb::client_to_server::Payload::PermListRoles(req),
+                                    Duration::from_secs(5),
+                                )
+                                .await
+                            {
+                                Ok(Ok(resp)) => {
+                                    if let Some(pb::server_to_client::Payload::PermListRoles(
+                                        payload,
+                                    )) = resp.payload
+                                    {
+                                        let roles = payload
+                                            .roles
+                                            .into_iter()
+                                            .map(|r| {
+                                                role_order.push(r.role_id.clone());
+                                                ui::model::RoleDraft {
+                                                    role_id: r.role_id,
+                                                    name: r.name,
+                                                    color_hex: format!("#{:06X}", r.color & 0x00FF_FFFF),
+                                                    member_count: 0,
+                                                    hoist: false,
+                                                    mentionable: false,
+                                                    protected: r.is_everyone || r.is_system,
+                                                    administrative: false,
+                                                }
+                                            })
+                                            .collect();
+                                        let _ = tx_event.send(UiEvent::PermissionsRolesLoaded { roles });
+                                    }
+                                }
+                                Ok(Err(e)) | Err(e) => {
+                                    let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                        "[perm] list roles failed: {e:#}"
+                                    )));
+                                }
+                            }
+
                             let req = pb::PermListUsersRequest {
                                 server_id: None,
                             };
@@ -2012,7 +2056,7 @@ async fn connect_and_run_session(
                                         payload,
                                     )) = resp.payload
                                     {
-                                        let members = payload
+                                        let mut members = payload
                                             .users
                                             .into_iter()
                                             .map(|u| ui::model::MemberPermissionDraft {
@@ -2032,13 +2076,22 @@ async fn connect_and_run_session(
                                                     .highest_role_position
                                                     .max(0)
                                                     as usize,
-                                                role_assignments: Vec::new(),
+                                                role_assignments: role_order
+                                                    .iter()
+                                                    .map(|id| u.role_ids.iter().any(|rid| rid == id))
+                                                    .collect(),
+                                                role_ids: u.role_ids,
                                                 can_mute_members: u.is_admin,
                                                 can_deafen_members: u.is_admin,
                                                 can_move_members: u.is_admin,
                                                 can_kick_members: u.is_admin,
                                             })
                                             .collect();
+                                        for member in &mut members {
+                                            if member.role_assignments.len() < role_order.len() {
+                                                member.role_assignments.resize(role_order.len(), false);
+                                            }
+                                        }
                                         let _ = tx_event.send(UiEvent::PermissionsMembersLoaded {
                                             members,
                                             current_user_max_role: payload
@@ -2057,6 +2110,60 @@ async fn connect_and_run_session(
                                     let _ = tx_event.send(UiEvent::AppendLog(format!(
                                         "[perm] list users failed: {e:#}"
                                     )));
+                                }
+                            }
+
+                            if let Some(active_channel_id) = active_channel.clone() {
+                                let req = pb::PermListChannelOverridesRequest {
+                                    server_id: None,
+                                    channel_id: Some(pb::ChannelId {
+                                        value: active_channel_id.clone(),
+                                    }),
+                                };
+                                match dispatcher
+                                    .send_request(
+                                        pb::client_to_server::Payload::PermListChanOvr(req),
+                                        Duration::from_secs(5),
+                                    )
+                                    .await
+                                {
+                                    Ok(Ok(resp)) => {
+                                        if let Some(pb::server_to_client::Payload::PermListChanOvr(payload)) = resp.payload {
+                                            let mut role_overrides = Vec::new();
+                                            let mut member_overrides = Vec::new();
+                                            for ov in payload.overrides {
+                                                let mut row = ui::model::PermissionOverrideDraft {
+                                                    role_id: None,
+                                                    user_id: None,
+                                                    subject_name: "unknown".into(),
+                                                    capabilities: vec![ui::model::PermissionValue::Inherit; 4],
+                                                };
+                                                match ov.target {
+                                                    Some(pb::perm_channel_override::Target::RoleId(role_id)) => {
+                                                        row.subject_name = role_id.clone();
+                                                        row.role_id = Some(role_id);
+                                                        role_overrides.push(row);
+                                                    }
+                                                    Some(pb::perm_channel_override::Target::UserId(user_id)) => {
+                                                        row.subject_name = user_id.value.clone();
+                                                        row.user_id = Some(user_id.value);
+                                                        member_overrides.push(row);
+                                                    }
+                                                    None => {}
+                                                }
+                                            }
+                                            let _ = tx_event.send(UiEvent::PermissionsChannelOverridesLoaded {
+                                                channel_id: active_channel_id,
+                                                role_overrides,
+                                                member_overrides,
+                                            });
+                                        }
+                                    }
+                                    Ok(Err(e)) | Err(e) => {
+                                        let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                            "[perm] list channel overrides failed: {e:#}"
+                                        )));
+                                    }
                                 }
                             }
 
@@ -2133,6 +2240,114 @@ async fn connect_and_run_session(
                                 let action = pb::moderation_action_request::Action::Kick(pb::KickUser { reason });
                                 if let Err(e) = dispatcher.moderate_user(ch, &user_id, action).await {
                                     let _ = tx_event.send(UiEvent::AppendLog(format!("[moderation] kick failed: {e:#}")));
+                                }
+                            }
+                        }
+                        UiIntent::PermsSaveRoleEdits {
+                            role_id,
+                            name,
+                            color,
+                            position,
+                            caps,
+                        } => {
+                            let req = pb::PermUpsertRoleRequest {
+                                server_id: None,
+                                role_id,
+                                name,
+                                color,
+                                position,
+                            };
+                            match dispatcher
+                                .send_request(
+                                    pb::client_to_server::Payload::PermUpsertRole(req),
+                                    Duration::from_secs(5),
+                                )
+                                .await
+                            {
+                                Ok(Ok(resp)) => {
+                                    let Some(pb::server_to_client::Payload::PermUpsertRole(payload)) = resp.payload else { continue; };
+                                    if let Some(role) = payload.role {
+                                        let req = pb::PermSetRoleCapsRequest {
+                                            server_id: None,
+                                            role_id: role.role_id,
+                                            caps: caps
+                                                .into_iter()
+                                                .map(|(cap, effect)| pb::PermCapabilityEffect { cap, effect })
+                                                .collect(),
+                                            cap_updates: vec![],
+                                        };
+                                        let _ = dispatcher
+                                            .send_request(
+                                                pb::client_to_server::Payload::PermSetRoleCaps(req),
+                                                Duration::from_secs(5),
+                                            )
+                                            .await;
+                                    }
+                                }
+                                Ok(Err(e)) | Err(e) => {
+                                    let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                        "[perm] save role failed: {e:#}"
+                                    )));
+                                }
+                            }
+                        }
+                        UiIntent::PermsAssignRoles { user_id, role_ids } => {
+                            let req = pb::PermAssignRolesRequest {
+                                server_id: None,
+                                user_id: Some(pb::UserId { value: user_id }),
+                                role_ids,
+                            };
+                            if let Err(e) = dispatcher
+                                .send_request(
+                                    pb::client_to_server::Payload::PermAssignRoles(req),
+                                    Duration::from_secs(5),
+                                )
+                                .await
+                            {
+                                let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                    "[perm] assign roles failed: {e:#}"
+                                )));
+                            }
+                        }
+                        UiIntent::PermsSetChannelOverride {
+                            channel_id,
+                            role_id,
+                            user_id,
+                            cap,
+                            effect,
+                        } => {
+                            let target = if let Some(role_id) = role_id {
+                                Some(pb::perm_channel_override::Target::RoleId(role_id))
+                            } else if let Some(user_id) = user_id {
+                                Some(pb::perm_channel_override::Target::UserId(pb::UserId {
+                                    value: user_id,
+                                }))
+                            } else {
+                                None
+                            };
+                            if let Some(target) = target {
+                                let req = pb::PermSetChannelOverrideRequest {
+                                    r#override: Some(pb::PermChannelOverride {
+                                        channel_id: Some(pb::ChannelId { value: channel_id }),
+                                        target: Some(target),
+                                        cap,
+                                        effect,
+                                    }),
+                                    server_id: None,
+                                    channel_id: None,
+                                    principal: None,
+                                    cap_effects: vec![],
+                                };
+                                if let Err(e) = dispatcher
+                                    .send_request(
+                                        pb::client_to_server::Payload::PermSetChanOvr(req),
+                                        Duration::from_secs(5),
+                                    )
+                                    .await
+                                {
+                                    let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                        "[perm] set channel override failed: {e:#}"
+                                    )));
                                 }
                             }
                         }

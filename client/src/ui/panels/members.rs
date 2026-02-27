@@ -209,7 +209,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                 if ui.button("Roles…").clicked() {
                     model.show_permissions_center = true;
                     model.permissions_tab = crate::ui::model::PermissionsTab::Members;
-                    let _ = tx_intent.send(UiIntent::RefreshPermissionsCenter);
+                    let _ = tx_intent.send(UiIntent::PermsOpen);
                     ui.close();
                 }
 

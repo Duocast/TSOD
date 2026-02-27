@@ -138,6 +138,14 @@ pub enum UiEvent {
         current_user_max_role: usize,
         can_moderate_members: bool,
     },
+    PermissionsRolesLoaded {
+        roles: Vec<RoleDraft>,
+    },
+    PermissionsChannelOverridesLoaded {
+        channel_id: String,
+        role_overrides: Vec<PermissionOverrideDraft>,
+        member_overrides: Vec<PermissionOverrideDraft>,
+    },
     PermissionsAuditLoaded {
         rows: Vec<PermissionAuditRow>,
     },
@@ -278,7 +286,25 @@ pub enum UiIntent {
 
     // Settings: Save to disk
     SaveSettings(Box<AppSettings>),
-    RefreshPermissionsCenter,
+    PermsOpen,
+    PermsSaveRoleEdits {
+        role_id: String,
+        name: String,
+        color: u32,
+        position: u32,
+        caps: Vec<(String, String)>,
+    },
+    PermsAssignRoles {
+        user_id: String,
+        role_ids: Vec<String>,
+    },
+    PermsSetChannelOverride {
+        channel_id: String,
+        role_id: Option<String>,
+        user_id: Option<String>,
+        cap: String,
+        effect: String,
+    },
 }
 
 // ── Persisted application settings ────────────────────────────────────
@@ -982,6 +1008,7 @@ impl PermissionsTab {
 
 #[derive(Debug, Clone)]
 pub struct RoleDraft {
+    pub role_id: String,
     pub name: String,
     pub color_hex: String,
     pub member_count: u32,
@@ -1022,6 +1049,8 @@ impl PermissionValue {
 
 #[derive(Debug, Clone)]
 pub struct PermissionOverrideDraft {
+    pub role_id: Option<String>,
+    pub user_id: Option<String>,
     pub subject_name: String,
     pub capabilities: Vec<PermissionValue>,
 }
@@ -1040,6 +1069,7 @@ pub struct MemberPermissionDraft {
     pub user_id: String,
     pub highest_role_index: usize,
     pub role_assignments: Vec<bool>,
+    pub role_ids: Vec<String>,
     pub can_mute_members: bool,
     pub can_deafen_members: bool,
     pub can_move_members: bool,
@@ -1149,70 +1179,15 @@ impl Default for UiModel {
             permissions_tab: PermissionsTab::Roles,
             permissions_selected_role: 0,
             permissions_search: String::new(),
-            permissions_current_user_max_role: 2,
+            permissions_current_user_max_role: 0,
             permissions_channel_scope_name: "General".into(),
             permissions_can_moderate_members: false,
-            permissions_roles: vec![
-                RoleDraft {
-                    name: "@everyone".into(),
-                    color_hex: "#99AAB5".into(),
-                    member_count: 18,
-                    hoist: false,
-                    mentionable: false,
-                    protected: true,
-                    administrative: false,
-                },
-                RoleDraft {
-                    name: "Moderator".into(),
-                    color_hex: "#57F287".into(),
-                    member_count: 4,
-                    hoist: true,
-                    mentionable: true,
-                    protected: false,
-                    administrative: false,
-                },
-                RoleDraft {
-                    name: "Owner".into(),
-                    color_hex: "#FEE75C".into(),
-                    member_count: 1,
-                    hoist: true,
-                    mentionable: false,
-                    protected: true,
-                    administrative: true,
-                },
-            ],
+            permissions_roles: vec![],
             permissions_selected_channel_id: None,
             permissions_private_channel: false,
             permissions_override_tab: PermissionOverrideTab::Roles,
-            permissions_role_overrides: vec![
-                PermissionOverrideDraft {
-                    subject_name: "@everyone".into(),
-                    capabilities: vec![
-                        PermissionValue::Allow,
-                        PermissionValue::Allow,
-                        PermissionValue::Inherit,
-                        PermissionValue::Inherit,
-                    ],
-                },
-                PermissionOverrideDraft {
-                    subject_name: "Moderator".into(),
-                    capabilities: vec![
-                        PermissionValue::Allow,
-                        PermissionValue::Allow,
-                        PermissionValue::Allow,
-                        PermissionValue::Allow,
-                    ],
-                },
-            ],
-            permissions_member_overrides: vec![PermissionOverrideDraft {
-                subject_name: "Ari".into(),
-                capabilities: vec![
-                    PermissionValue::Allow,
-                    PermissionValue::Deny,
-                    PermissionValue::Inherit,
-                    PermissionValue::Allow,
-                ],
-            }],
+            permissions_role_overrides: vec![],
+            permissions_member_overrides: vec![],
             permissions_view_as_mode: PermissionViewAsMode::Role,
             permissions_view_as_name: "@everyone".into(),
             permissions_member_search: String::new(),
@@ -1629,6 +1604,19 @@ impl UiModel {
                 self.permissions_current_user_max_role = current_user_max_role;
                 self.permissions_can_moderate_members = can_moderate_members;
                 self.permissions_selected_member = 0;
+            }
+            UiEvent::PermissionsRolesLoaded { roles } => {
+                self.permissions_roles = roles;
+                self.permissions_selected_role = 0;
+            }
+            UiEvent::PermissionsChannelOverridesLoaded {
+                channel_id,
+                role_overrides,
+                member_overrides,
+            } => {
+                self.permissions_selected_channel_id = Some(channel_id);
+                self.permissions_role_overrides = role_overrides;
+                self.permissions_member_overrides = member_overrides;
             }
             UiEvent::PermissionsAuditLoaded { rows } => {
                 self.permissions_audit_rows = rows;

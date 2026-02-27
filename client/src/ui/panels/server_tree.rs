@@ -92,12 +92,12 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
             if ui.button("Server Settings…").clicked() {
                 model.show_permissions_center = true;
                 model.permissions_tab = crate::ui::model::PermissionsTab::Roles;
-                let _ = tx_intent.send(UiIntent::RefreshPermissionsCenter);
+                let _ = tx_intent.send(UiIntent::PermsOpen);
                 ui.close();
             }
             if ui.button("Permissions…").clicked() {
                 model.show_permissions_center = true;
-                let _ = tx_intent.send(UiIntent::RefreshPermissionsCenter);
+                let _ = tx_intent.send(UiIntent::PermsOpen);
                 ui.close();
             }
             ui.separator();
@@ -373,7 +373,7 @@ fn show_channel(
             model.permissions_tab = crate::ui::model::PermissionsTab::Channels;
             model.permissions_channel_scope_name = ch.name.clone();
             model.permissions_selected_channel_id = Some(ch.id.clone());
-            let _ = tx_intent.send(UiIntent::RefreshPermissionsCenter);
+            let _ = tx_intent.send(UiIntent::PermsOpen);
             ui.close();
         }
         if ui.button("Delete channel").clicked() {
