@@ -2086,7 +2086,7 @@ async fn connect_and_run_session(
                                                 target_id: row.target_id,
                                                 created_at_unix_millis: row
                                                     .created_at
-                                                    .map_or(0, |ts| ts.unix_millis),
+                                                    .map(|ts| ts.unix_millis),
                                             })
                                             .collect();
                                         let _ = tx_event.send(UiEvent::PermissionsAuditLoaded {

@@ -593,10 +593,10 @@ fn show_audit_tab(ui: &mut egui::Ui, model: &UiModel) {
 
     egui::ScrollArea::vertical().show(ui, |ui| {
         for row in &model.permissions_audit_rows {
-            let timestamp = Local
-                .timestamp_millis_opt(row.created_at_unix_millis)
-                .single()
-                .map(|ts| ts.format("%H:%M:%S").to_string())
+            let timestamp = row
+                .created_at_unix_millis
+                .and_then(|unix_millis| Local.timestamp_millis_opt(unix_millis).single())
+                .map(|ts| ts.format("%Y-%m-%d %H:%M:%S").to_string())
                 .unwrap_or_else(|| "unknown-time".to_string());
             ui.monospace(format!(
                 "[{timestamp}] {}  {}:{}",
