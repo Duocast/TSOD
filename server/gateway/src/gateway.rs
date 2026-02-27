@@ -18,7 +18,7 @@ use crate::{
 
 use vp_control::ids::{ChannelId, ServerId, UserId};
 use vp_control::model::{ChannelCreate, JoinChannel, SendMessage};
-use vp_control::{ControlError, ControlRepo, ControlService, PgControlRepo, RequestContext};
+use vp_control::{ControlRepo, ControlService, PgControlRepo, RequestContext};
 use vp_media::voice_forwarder::VoiceForwarder;
 
 const CONTROL_STREAM_MAX_MSG: usize = 256 * 1024; // 256KB
@@ -255,7 +255,6 @@ impl Gateway {
 
                 let req_id = msg.request_id.clone();
 
-                let req_result: Result<()> = async {
             match msg.payload {
                 Some(pb::client_to_server::Payload::JoinChannelRequest(r)) => {
                     let ch = parse_channel_id(r.channel_id.as_ref())?;
@@ -649,41 +648,6 @@ impl Gateway {
                     // Ignore other messages for now.
                 }
             }
-
-                    Ok(())
-                }
-                .await;
-
-                if let Err(err) = req_result {
-                    let (code, message) = classify_request_error(&err);
-                    warn!(
-                        session_id = %session_id,
-                        user_id = %user_id.0,
-                        request_id = ?req_id.as_ref().map(|r| r.value),
-                        code = ?code,
-                        "control request failed: {:#}",
-                        err
-                    );
-
-                    let resp = pb::ServerToClient {
-                        request_id: req_id,
-                        session_id: Some(pb::SessionId {
-                            value: session_id.clone(),
-                        }),
-                        sent_at: Some(now_ts()),
-                        error: Some(pb::Error {
-                            code: code as i32,
-                            message,
-                            detail: err.to_string(),
-                        }),
-                        event_seq: 0,
-                        payload: None,
-                    };
-                    if let Err(e) = write_delimited(&mut send, &resp).await {
-                        warn!("control write failed: {:#}", e);
-                        break;
-                    }
-                }
             }
 
             Ok(())
@@ -917,36 +881,6 @@ fn parse_channel_id(ch: Option<&pb::ChannelId>) -> Result<ChannelId> {
     Ok(ChannelId(
         uuid::Uuid::parse_str(&ch.value).context("invalid channel_id")?,
     ))
-}
-
-fn classify_request_error(err: &anyhow::Error) -> (pb::error::Code, String) {
-    if let Some(ctrl) = err.downcast_ref::<ControlError>() {
-        return match ctrl {
-            ControlError::PermissionDenied(msg) => {
-                (pb::error::Code::PermissionDenied, msg.to_string())
-            }
-            ControlError::NotFound(msg) => (pb::error::Code::NotFound, msg.to_string()),
-            ControlError::AlreadyExists(msg) => (pb::error::Code::AlreadyExists, msg.to_string()),
-            ControlError::InvalidArgument(msg) => {
-                (pb::error::Code::InvalidArgument, msg.to_string())
-            }
-            ControlError::ResourceExhausted(msg) => {
-                (pb::error::Code::ResourceExhausted, msg.to_string())
-            }
-            ControlError::FailedPrecondition(msg) => {
-                (pb::error::Code::FailedPrecondition, msg.to_string())
-            }
-            ControlError::Db(_) | ControlError::Anyhow(_) => (
-                pb::error::Code::Internal,
-                "internal server error".to_string(),
-            ),
-        };
-    }
-
-    (
-        pb::error::Code::Internal,
-        "internal server error".to_string(),
-    )
 }
 
 fn now_ts() -> pb::Timestamp {
