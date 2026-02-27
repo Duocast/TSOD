@@ -228,15 +228,11 @@ impl eframe::App for VpApp {
                     if ui.button("Server Settings").clicked() {
                         self.model.show_permissions_center = true;
                         self.model.permissions_tab = model::PermissionsTab::Roles;
-                        let _ = self
-                            .tx_intent
-                            .send(model::UiIntent::RefreshPermissionsCenter);
+                        let _ = self.tx_intent.send(model::UiIntent::PermsOpen);
                     }
                     if ui.button("Permissions").clicked() {
                         self.model.show_permissions_center = true;
-                        let _ = self
-                            .tx_intent
-                            .send(model::UiIntent::RefreshPermissionsCenter);
+                        let _ = self.tx_intent.send(model::UiIntent::PermsOpen);
                     }
                     if ui.button("Telemetry").clicked() {
                         self.model.show_telemetry = !self.model.show_telemetry;
@@ -579,7 +575,7 @@ impl eframe::App for VpApp {
         // Create channel dialog (floating)
         panels::server_tree::show_create_channel_dialog(ctx, &mut self.model, &self.tx_intent);
         panels::server_tree::show_channel_dialogs(ctx, &mut self.model, &self.tx_intent);
-        panels::permissions_center::show_permissions_center(ctx, &mut self.model);
+        panels::permissions_center::show_permissions_center(ctx, &mut self.model, &self.tx_intent);
 
         // Central panel: connection status + chat messages + input
         egui::CentralPanel::default().show(ctx, |ui| {

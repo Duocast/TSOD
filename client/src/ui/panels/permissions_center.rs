@@ -1,9 +1,10 @@
 use crate::ui::model::{
     PermissionOverrideDraft, PermissionOverrideTab, PermissionValue, PermissionViewAsMode,
-    PermissionsTab, UiModel,
+    PermissionsTab, UiIntent, UiModel,
 };
 use crate::ui::theme;
 use chrono::{Local, TimeZone};
+use crossbeam_channel::Sender;
 use eframe::egui;
 
 const PERMISSION_GROUPS: &[(&str, &[&str])] = &[
@@ -40,7 +41,11 @@ const PERMISSION_GROUPS: &[(&str, &[&str])] = &[
 
 const CHANNEL_CAPABILITIES: &[&str] = &["View Channel", "Connect", "Speak", "Send Messages"];
 
-pub fn show_permissions_center(ctx: &egui::Context, model: &mut UiModel) {
+pub fn show_permissions_center(
+    ctx: &egui::Context,
+    model: &mut UiModel,
+    tx_intent: &Sender<UiIntent>,
+) {
     if !model.show_permissions_center {
         return;
     }
@@ -67,9 +72,9 @@ pub fn show_permissions_center(ctx: &egui::Context, model: &mut UiModel) {
             ui.separator();
 
             match model.permissions_tab {
-                PermissionsTab::Roles => show_roles_tab(ui, model),
-                PermissionsTab::Channels => show_channels_tab(ui, model),
-                PermissionsTab::Members => show_members_tab(ui, model),
+                PermissionsTab::Roles => show_roles_tab(ui, model, tx_intent),
+                PermissionsTab::Channels => show_channels_tab(ui, model, tx_intent),
+                PermissionsTab::Members => show_members_tab(ui, model, tx_intent),
                 PermissionsTab::AuditLog => show_audit_tab(ui, model),
                 PermissionsTab::Advanced => show_advanced_tab(ui, model),
             }
@@ -80,7 +85,7 @@ pub fn show_permissions_center(ctx: &egui::Context, model: &mut UiModel) {
     }
 }
 
-fn show_roles_tab(ui: &mut egui::Ui, model: &mut UiModel) {
+fn show_roles_tab(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>) {
     ui.columns(2, |columns| {
         let (left_slice, right_slice) = columns.split_at_mut(1);
         let left = &mut left_slice[0];
@@ -88,7 +93,15 @@ fn show_roles_tab(ui: &mut egui::Ui, model: &mut UiModel) {
 
         left.heading("Roles");
         left.horizontal(|ui| {
-            ui.small_button("Create");
+            if ui.small_button("Create").clicked() {
+                let _ = tx_intent.send(UiIntent::PermsSaveRoleEdits {
+                    role_id: String::new(),
+                    name: "New Role".into(),
+                    color: 0,
+                    position: model.permissions_roles.len() as u32,
+                    caps: vec![],
+                });
+            }
             ui.small_button("Clone");
             let protected = model
                 .permissions_roles
@@ -209,7 +222,15 @@ fn show_roles_tab(ui: &mut egui::Ui, model: &mut UiModel) {
                 ui.label("• Role metadata updated");
                 ui.label("• Permission toggles changed");
                 ui.horizontal(|ui| {
-                    ui.button("Save");
+                    if ui.button("Save").clicked() {
+                        let _ = tx_intent.send(UiIntent::PermsSaveRoleEdits {
+                            role_id: role.role_id.clone(),
+                            name: role.name.clone(),
+                            color: parse_hex_color_u32(&role.color_hex),
+                            position: model.permissions_selected_role as u32,
+                            caps: vec![],
+                        });
+                    }
                     ui.button("Discard");
                 });
             });
@@ -217,7 +238,7 @@ fn show_roles_tab(ui: &mut egui::Ui, model: &mut UiModel) {
     });
 }
 
-fn show_channels_tab(ui: &mut egui::Ui, model: &mut UiModel) {
+fn show_channels_tab(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>) {
     ui.columns(3, |columns| {
         let (left_slice, right_slice) = columns.split_at_mut(1);
         let left = &mut left_slice[0];
@@ -264,7 +285,7 @@ fn show_channels_tab(ui: &mut egui::Ui, model: &mut UiModel) {
         });
 
         center.separator();
-        show_overrides_editor(center, model);
+        show_overrides_editor(center, model, tx_intent);
 
         view.heading("View as…");
         view.separator();
@@ -292,7 +313,7 @@ fn show_channel_tree(ui: &mut egui::Ui, model: &mut UiModel) {
     });
 }
 
-fn show_overrides_editor(ui: &mut egui::Ui, model: &mut UiModel) {
+fn show_overrides_editor(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>) {
     let is_roles = model.permissions_override_tab == PermissionOverrideTab::Roles;
     let overrides = if is_roles {
         &mut model.permissions_role_overrides
@@ -302,13 +323,20 @@ fn show_overrides_editor(ui: &mut egui::Ui, model: &mut UiModel) {
 
     egui::ScrollArea::vertical().show(ui, |ui| {
         for row in &mut *overrides {
-            show_override_row(ui, row);
+            show_override_row(
+                ui,
+                row,
+                model.permissions_selected_channel_id.clone(),
+                tx_intent,
+            );
             ui.add_space(4.0);
         }
     });
 
     if ui.button("Add override").clicked() {
         overrides.push(PermissionOverrideDraft {
+            role_id: None,
+            user_id: None,
             subject_name: if is_roles {
                 "New Role".into()
             } else {
@@ -319,7 +347,12 @@ fn show_overrides_editor(ui: &mut egui::Ui, model: &mut UiModel) {
     }
 }
 
-fn show_override_row(ui: &mut egui::Ui, row: &mut PermissionOverrideDraft) {
+fn show_override_row(
+    ui: &mut egui::Ui,
+    row: &mut PermissionOverrideDraft,
+    selected_channel_id: Option<String>,
+    tx_intent: &Sender<UiIntent>,
+) {
     ui.group(|ui| {
         ui.horizontal_wrapped(|ui| {
             ui.label("Role/User");
@@ -335,13 +368,28 @@ fn show_override_row(ui: &mut egui::Ui, row: &mut PermissionOverrideDraft) {
                 if idx >= row.capabilities.len() {
                     row.capabilities.push(PermissionValue::Inherit);
                 }
-                tri_state_button(ui, &mut row.capabilities[idx], *cap);
+                if tri_state_button(ui, &mut row.capabilities[idx], *cap) {
+                    if let Some(channel_id) = &selected_channel_id {
+                        let _ = tx_intent.send(UiIntent::PermsSetChannelOverride {
+                            channel_id: channel_id.clone(),
+                            role_id: row.role_id.clone(),
+                            user_id: row.user_id.clone(),
+                            cap: cap.to_ascii_lowercase().replace(' ', "_"),
+                            effect: match row.capabilities[idx] {
+                                PermissionValue::Allow => "grant",
+                                PermissionValue::Deny => "deny",
+                                PermissionValue::Inherit => "inherit",
+                            }
+                            .into(),
+                        });
+                    }
+                }
             });
         }
     });
 }
 
-fn tri_state_button(ui: &mut egui::Ui, value: &mut PermissionValue, capability: &str) {
+fn tri_state_button(ui: &mut egui::Ui, value: &mut PermissionValue, capability: &str) -> bool {
     let (text, fill, source) = match *value {
         PermissionValue::Inherit => ("·", theme::text_muted(), "Inherited from role/server base"),
         PermissionValue::Allow => (
@@ -363,8 +411,10 @@ fn tri_state_button(ui: &mut egui::Ui, value: &mut PermissionValue, capability: 
     );
     if response.clicked() {
         *value = value.cycle();
+        return true;
     }
     response.on_hover_text(format!("{}\nSource: {}", capability, source));
+    false
 }
 
 fn ui_view_as_panel(ui: &mut egui::Ui, model: &mut UiModel) {
@@ -439,7 +489,7 @@ fn compute_effective_permissions(model: &UiModel) -> Vec<(&'static str, Permissi
         .collect()
 }
 
-fn show_members_tab(ui: &mut egui::Ui, model: &mut UiModel) {
+fn show_members_tab(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>) {
     ui.columns(2, |columns| {
         let (left_slice, right_slice) = columns.split_at_mut(1);
         let left = &mut left_slice[0];
@@ -538,6 +588,16 @@ fn show_members_tab(ui: &mut egui::Ui, model: &mut UiModel) {
                     if assigned && role_idx > member.highest_role_index {
                         member.highest_role_index = role_idx;
                     }
+                    let role_ids = model
+                        .permissions_roles
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(idx, role)| member.role_assignments.get(idx).copied().and_then(|on| on.then_some(role.role_id.clone())))
+                        .collect();
+                    let _ = tx_intent.send(UiIntent::PermsAssignRoles {
+                        user_id: member.user_id.clone(),
+                        role_ids,
+                    });
                 }
 
                 if !can_edit_role {
@@ -784,4 +844,9 @@ fn parse_hex_color(hex: &str) -> egui::Color32 {
         return theme::text_muted();
     };
     egui::Color32::from_rgb(r, g, b)
+}
+
+fn parse_hex_color_u32(hex: &str) -> u32 {
+    let s = hex.trim_start_matches('#');
+    u32::from_str_radix(s, 16).unwrap_or(0)
 }
