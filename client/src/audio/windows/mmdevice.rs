@@ -5,15 +5,15 @@ use windows::{
         Devices::FunctionDiscovery::{
             PKEY_DeviceInterface_FriendlyName, PKEY_Device_DeviceDesc, PKEY_Device_FriendlyName,
         },
+        Foundation::PROPERTYKEY,
         Media::Audio::{
             eCapture, eMultimedia, eRender, IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator,
             DEVICE_STATE_ACTIVE,
         },
         System::Com::{
             CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize,
-            StructuredStorage::STGM_READ, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
+            CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, STGM_READ,
         },
-        UI::Shell::PropertiesSystem::PROPERTYKEY,
     },
 };
 
