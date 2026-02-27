@@ -864,14 +864,6 @@ pub struct UiModel {
     pub permissions_member_overrides: Vec<PermissionOverrideDraft>,
     pub permissions_view_as_mode: PermissionViewAsMode,
     pub permissions_view_as_name: String,
-    pub permissions_member_search: String,
-    pub permissions_selected_member: usize,
-    pub permissions_members: Vec<PermissionMemberDraft>,
-    pub permissions_advanced_enabled: bool,
-    pub permissions_actor_preview: usize,
-    pub permissions_target_preview: usize,
-    pub permissions_actor_power: PermissionPowerDraft,
-    pub permissions_target_needed_power: PermissionPowerDraft,
 }
 
 #[derive(Debug, Clone)]
@@ -1014,26 +1006,6 @@ impl PermissionValue {
 pub struct PermissionOverrideDraft {
     pub subject_name: String,
     pub capabilities: Vec<PermissionValue>,
-}
-
-#[derive(Debug, Clone)]
-pub struct PermissionMemberDraft {
-    pub user_id: String,
-    pub display_name: String,
-    pub role_assignments: Vec<bool>,
-    pub highest_role_index: usize,
-    pub can_mute_members: bool,
-    pub can_deafen_members: bool,
-    pub can_move_members: bool,
-    pub can_kick_members: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct PermissionPowerDraft {
-    pub mute_power: u16,
-    pub move_power: u16,
-    pub kick_power: u16,
-    pub manage_roles_power: u16,
 }
 
 impl Default for UiModel {
@@ -1197,55 +1169,6 @@ impl Default for UiModel {
             }],
             permissions_view_as_mode: PermissionViewAsMode::Role,
             permissions_view_as_name: "@everyone".into(),
-            permissions_member_search: String::new(),
-            permissions_selected_member: 0,
-            permissions_members: vec![
-                PermissionMemberDraft {
-                    user_id: "u-100".into(),
-                    display_name: "Ari".into(),
-                    role_assignments: vec![true, true, false],
-                    highest_role_index: 1,
-                    can_mute_members: true,
-                    can_deafen_members: true,
-                    can_move_members: true,
-                    can_kick_members: false,
-                },
-                PermissionMemberDraft {
-                    user_id: "u-101".into(),
-                    display_name: "Morgan".into(),
-                    role_assignments: vec![true, false, false],
-                    highest_role_index: 0,
-                    can_mute_members: false,
-                    can_deafen_members: false,
-                    can_move_members: false,
-                    can_kick_members: false,
-                },
-                PermissionMemberDraft {
-                    user_id: "u-102".into(),
-                    display_name: "Sage".into(),
-                    role_assignments: vec![true, true, true],
-                    highest_role_index: 2,
-                    can_mute_members: true,
-                    can_deafen_members: true,
-                    can_move_members: true,
-                    can_kick_members: true,
-                },
-            ],
-            permissions_advanced_enabled: false,
-            permissions_actor_preview: 0,
-            permissions_target_preview: 1,
-            permissions_actor_power: PermissionPowerDraft {
-                mute_power: 50,
-                move_power: 50,
-                kick_power: 50,
-                manage_roles_power: 50,
-            },
-            permissions_target_needed_power: PermissionPowerDraft {
-                mute_power: 30,
-                move_power: 30,
-                kick_power: 60,
-                manage_roles_power: 40,
-            },
         }
     }
 }
