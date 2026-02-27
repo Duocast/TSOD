@@ -5,7 +5,7 @@ use ringbuf::{
 };
 use std::cell::UnsafeCell;
 
-use crate::ui::model::{AudioBackend, AudioDeviceId, AudioDeviceInfo, AudioDirection};
+use crate::ui::model::{AudioBackend, AudioDeviceId, AudioDeviceInfo};
 
 pub struct Capture {
     backend: CaptureBackend,
@@ -115,6 +115,8 @@ mod linux {
         atomic::{AtomicBool, Ordering},
         Arc,
     };
+
+    use crate::ui::model::{AudioDeviceId, AudioDeviceInfo, AudioDirection};
 
     enum LinuxCaptureBackend {
         PipeWire,
@@ -401,7 +403,7 @@ mod linux {
         fn enumerate_input_devices() -> Vec<AudioDeviceInfo> {
             let host = cpal::default_host();
             host.input_devices()
-                .map(|devs| devs.filter_map(|d| device_name(&d)).collect())
+                .map(|devs| devs.filter_map(|d| device_info(&d)).collect())
                 .unwrap_or_default()
         }
 
@@ -410,24 +412,41 @@ mod linux {
         }
     }
 
-    fn device_name(device: &cpal::Device) -> Option<String> {
+    fn device_label(device: &cpal::Device) -> Option<String> {
         device
-            .name()
+            .description()
             .ok()
+            .map(|desc| desc.name().to_string())
             .filter(|name| !name.trim().is_empty())
-            .or_else(|| {
-                device
-                    .description()
-                    .ok()
-                    .map(|desc| desc.name().to_string())
-                    .filter(|name| !name.trim().is_empty())
-            })
+    }
+
+    fn device_info(device: &cpal::Device) -> Option<AudioDeviceInfo> {
+        let id_str = device.id().ok()?.to_string();
+        let label = device_label(device)?;
+        Some(AudioDeviceInfo {
+            key: AudioDeviceId {
+                backend: super::cpal_backend(),
+                direction: AudioDirection::Input,
+                id: id_str,
+            },
+            label,
+            is_default: false,
+        })
+    }
+
+    fn find_input_device_by_id(host: &cpal::Host, id: &str) -> Result<cpal::Device> {
+        if let Ok(device_id) = id.parse::<cpal::DeviceId>() {
+            if let Some(device) = host.device_by_id(&device_id) {
+                return Ok(device);
+            }
+        }
+        find_input_device_by_name(host, id)
     }
 
     fn find_input_device_by_name(host: &cpal::Host, name: &str) -> Result<cpal::Device> {
         let mut devices = host.input_devices().context("enumerate input devices")?;
         devices
-            .find(|dev| device_name(dev).as_deref() == Some(name))
+            .find(|dev| device_label(dev).as_deref() == Some(name))
             .ok_or_else(|| anyhow!("no matching input device"))
     }
 
@@ -502,6 +521,7 @@ mod non_linux {
     };
 
     use crate::audio::resample::LinearResampler;
+    use crate::ui::model::{AudioDeviceId, AudioDeviceInfo, AudioDirection};
 
     pub struct CpalCapture {
         _stream: cpal::Stream,
@@ -619,7 +639,7 @@ mod non_linux {
         pub fn enumerate_input_devices() -> Vec<AudioDeviceInfo> {
             let host = cpal::default_host();
             host.input_devices()
-                .map(|devs| devs.filter_map(|d| device_name(&d)).collect())
+                .map(|devs| devs.filter_map(|d| device_info(&d)).collect())
                 .unwrap_or_default()
         }
 
@@ -628,24 +648,41 @@ mod non_linux {
         }
     }
 
-    fn device_name(device: &cpal::Device) -> Option<String> {
+    fn device_label(device: &cpal::Device) -> Option<String> {
         device
-            .name()
+            .description()
             .ok()
+            .map(|desc| desc.name().to_string())
             .filter(|name| !name.trim().is_empty())
-            .or_else(|| {
-                device
-                    .description()
-                    .ok()
-                    .map(|desc| desc.name().to_string())
-                    .filter(|name| !name.trim().is_empty())
-            })
+    }
+
+    fn device_info(device: &cpal::Device) -> Option<AudioDeviceInfo> {
+        let id_str = device.id().ok()?.to_string();
+        let label = device_label(device)?;
+        Some(AudioDeviceInfo {
+            key: AudioDeviceId {
+                backend: super::cpal_backend(),
+                direction: AudioDirection::Input,
+                id: id_str,
+            },
+            label,
+            is_default: false,
+        })
+    }
+
+    fn find_input_device_by_id(host: &cpal::Host, id: &str) -> Result<cpal::Device> {
+        if let Ok(device_id) = id.parse::<cpal::DeviceId>() {
+            if let Some(device) = host.device_by_id(&device_id) {
+                return Ok(device);
+            }
+        }
+        find_input_device_by_name(host, id)
     }
 
     fn find_input_device_by_name(host: &cpal::Host, name: &str) -> Result<cpal::Device> {
         let mut devices = host.input_devices().context("enumerate input devices")?;
         devices
-            .find(|dev| device_name(dev).as_deref() == Some(name))
+            .find(|dev| device_label(dev).as_deref() == Some(name))
             .ok_or_else(|| anyhow!("no matching input device"))
     }
 
