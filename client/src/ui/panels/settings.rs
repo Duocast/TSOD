@@ -38,7 +38,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                         } else {
                             egui::Color32::TRANSPARENT
                         })
-                        .rounding(4.0)
+                        .corner_radius(4.0)
                         .min_size(egui::vec2(150.0, 28.0));
 
                     if ui.add(btn).clicked() {
@@ -65,7 +65,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                     } else {
                         theme::muted_button_fill()
                     })
-                    .rounding(4.0);
+                    .corner_radius(4.0);
 
                     if ui.add(apply_btn).clicked() && dirty {
                         model.settings = model.settings_draft.clone();
@@ -572,7 +572,7 @@ fn page_capture(
             )
             .fill(btn_color)
             .min_size(egui::vec2(160.0, 28.0))
-            .rounding(4.0),
+            .corner_radius(4.0),
         )
         .clicked()
     {

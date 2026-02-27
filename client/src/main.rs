@@ -2056,7 +2056,7 @@ async fn connect_and_run_session(
                                         payload,
                                     )) = resp.payload
                                     {
-                                        let mut members = payload
+                                        let mut members: Vec<ui::model::MemberPermissionDraft> = payload
                                             .users
                                             .into_iter()
                                             .map(|u| ui::model::MemberPermissionDraft {
