@@ -847,6 +847,16 @@ pub struct UiModel {
     pub settings_draft: AppSettings,
     pub settings_page: SettingsPage,
     pub settings_dirty: bool,
+
+    // Permissions Center
+    pub show_permissions_center: bool,
+    pub permissions_tab: PermissionsTab,
+    pub permissions_selected_role: usize,
+    pub permissions_search: String,
+    pub permissions_current_user_max_role: usize,
+    pub permissions_channel_scope_name: String,
+    pub permissions_can_moderate_members: bool,
+    pub permissions_roles: Vec<RoleDraft>,
 }
 
 #[derive(Debug, Clone)]
@@ -914,6 +924,46 @@ pub enum NotificationKind {
     Poke,
     Mention,
     Error,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionsTab {
+    Roles,
+    Channels,
+    Members,
+    AuditLog,
+    Advanced,
+}
+
+impl PermissionsTab {
+    pub const ALL: [PermissionsTab; 5] = [
+        PermissionsTab::Roles,
+        PermissionsTab::Channels,
+        PermissionsTab::Members,
+        PermissionsTab::AuditLog,
+        PermissionsTab::Advanced,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PermissionsTab::Roles => "Roles",
+            PermissionsTab::Channels => "Channels",
+            PermissionsTab::Members => "Members",
+            PermissionsTab::AuditLog => "Audit Log",
+            PermissionsTab::Advanced => "Advanced",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RoleDraft {
+    pub name: String,
+    pub color_hex: String,
+    pub member_count: u32,
+    pub hoist: bool,
+    pub mentionable: bool,
+    pub protected: bool,
+    pub administrative: bool,
 }
 
 impl Default for UiModel {
@@ -1007,6 +1057,42 @@ impl Default for UiModel {
             settings_draft,
             settings_page: SettingsPage::Capture,
             settings_dirty: false,
+            show_permissions_center: false,
+            permissions_tab: PermissionsTab::Roles,
+            permissions_selected_role: 0,
+            permissions_search: String::new(),
+            permissions_current_user_max_role: 2,
+            permissions_channel_scope_name: "General".into(),
+            permissions_can_moderate_members: false,
+            permissions_roles: vec![
+                RoleDraft {
+                    name: "@everyone".into(),
+                    color_hex: "#99AAB5".into(),
+                    member_count: 18,
+                    hoist: false,
+                    mentionable: false,
+                    protected: true,
+                    administrative: false,
+                },
+                RoleDraft {
+                    name: "Moderator".into(),
+                    color_hex: "#57F287".into(),
+                    member_count: 4,
+                    hoist: true,
+                    mentionable: true,
+                    protected: false,
+                    administrative: false,
+                },
+                RoleDraft {
+                    name: "Owner".into(),
+                    color_hex: "#FEE75C".into(),
+                    member_count: 1,
+                    hoist: true,
+                    mentionable: false,
+                    protected: true,
+                    administrative: true,
+                },
+            ],
         }
     }
 }

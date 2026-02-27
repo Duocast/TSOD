@@ -89,6 +89,16 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
         ui.painter()
             .rect_filled(filler_rect, 0.0, egui::Color32::TRANSPARENT);
         filler_resp.context_menu(|ui| {
+            if ui.button("Server Settings…").clicked() {
+                model.show_permissions_center = true;
+                model.permissions_tab = crate::ui::model::PermissionsTab::Roles;
+                ui.close();
+            }
+            if ui.button("Permissions…").clicked() {
+                model.show_permissions_center = true;
+                ui.close();
+            }
+            ui.separator();
             if ui.button("Create channel").clicked() {
                 model.show_create_channel = true;
                 model.create_channel_parent_id = None;
@@ -350,10 +360,16 @@ fn show_channel(
             });
             ui.close();
         }
-        if ui.button("Edit channel").clicked() {
+        if ui.button("Edit Channel…").clicked() {
             model.rename_channel_target_id = Some(ch.id.clone());
             model.rename_channel_name = ch.name.clone();
             model.show_rename_channel = true;
+            ui.close();
+        }
+        if ui.button("Permissions…").clicked() {
+            model.show_permissions_center = true;
+            model.permissions_tab = crate::ui::model::PermissionsTab::Channels;
+            model.permissions_channel_scope_name = ch.name.clone();
             ui.close();
         }
         if ui.button("Delete channel").clicked() {
