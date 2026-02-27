@@ -37,7 +37,7 @@ pub fn load_or_generate_tls(
             let cert = generate_self_signed(extra_self_signed_sans)
                 .context("failed generating self-signed cert")?;
             let cert_der: CertificateDer<'static> = cert.cert.der().clone();
-            let key_der = PrivateKeyDer::Pkcs8(cert.key_pair.serialize_der().into());
+            let key_der = PrivateKeyDer::Pkcs8(cert.signing_key.serialize_der().into());
             Ok((vec![cert_der], key_der))
         }
         _ => Err(anyhow!(
@@ -74,5 +74,5 @@ fn generate_self_signed(extra_self_signed_sans: &[String]) -> Result<rcgen::Cert
 
     let key_pair = KeyPair::generate()?;
     let cert = params.self_signed(&key_pair)?;
-    Ok(rcgen::CertifiedKey { cert, key_pair })
+    Ok(rcgen::CertifiedKey { cert, signing_key: key_pair })
 }
