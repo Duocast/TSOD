@@ -2859,7 +2859,7 @@ fn make_endpoint_with_optional_pinning(cfg: &Config) -> Result<quinn::Endpoint> 
 }
 
 fn make_pinned_endpoint(pin_sha256: [u8; 32], alpn: &str) -> Result<quinn::Endpoint> {
-    use quinn::{ClientConfig, Endpoint};
+    use quinn::Endpoint;
     use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
     use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
     use rustls::{DigitallySignedStruct, SignatureScheme};
@@ -2929,9 +2929,7 @@ fn make_pinned_endpoint(pin_sha256: [u8; 32], alpn: &str) -> Result<quinn::Endpo
     crypto.alpn_protocols = vec![alpn.as_bytes().to_vec()];
 
     let mut endpoint = Endpoint::client("[::]:0".parse::<SocketAddr>()?)?;
-    endpoint.set_default_client_config(ClientConfig::new(Arc::new(
-        quinn::crypto::rustls::QuicClientConfig::try_from(crypto)?,
-    )));
+    endpoint.set_default_client_config(net::quic::client_config_with_transport(crypto)?);
     Ok(endpoint)
 }
 
