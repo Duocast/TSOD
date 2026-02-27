@@ -40,6 +40,7 @@ use tokio::sync::{watch, Mutex, RwLock};
 use tokio::time::{sleep, Duration, Instant};
 use tracing::{debug, warn, Level};
 use tracing_subscriber::EnvFilter;
+use ui::model::AudioDeviceId;
 use ui::model::{FecMode, PerUserAudioSettings};
 use ui::{UiEvent, UiIntent, VpApp};
 
@@ -319,8 +320,8 @@ async fn app_task(
     let frame_ms = 20u32;
 
     let selected_audio = Arc::new(Mutex::new(AudioSelection {
-        input_device: normalize_device_name(&saved_settings.capture_device),
-        output_device: normalize_device_name(&saved_settings.playback_device),
+        input_device: saved_settings.capture_device.clone(),
+        output_device: saved_settings.playback_device.clone(),
         playback_mode: normalize_playback_mode(&saved_settings.playback_mode),
     }));
 
@@ -472,10 +473,9 @@ async fn app_task(
                                 }
                             }
                             UiIntent::SetInputDevice(dev) => {
-                                let selected = normalize_device_name(&dev);
                                 {
                                     let mut state = selected_audio.lock().await;
-                                    state.input_device = selected;
+                                    state.input_device = dev;
                                 }
                                 if let Err(e) = restart_audio_streams(
                                     &capture,
@@ -494,10 +494,9 @@ async fn app_task(
                                 }
                             }
                             UiIntent::SetOutputDevice(dev) => {
-                                let selected = normalize_device_name(&dev);
                                 {
                                     let mut state = selected_audio.lock().await;
-                                    state.output_device = selected;
+                                    state.output_device = dev;
                                 }
                                 if let Err(e) = restart_audio_streams(
                                     &capture,
@@ -734,19 +733,18 @@ fn choose_initial_selected_channel(
         })
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 struct AudioSelection {
-    input_device: Option<String>,
-    output_device: Option<String>,
+    input_device: AudioDeviceId,
+    output_device: AudioDeviceId,
     playback_mode: Option<String>,
 }
 
-fn normalize_device_name(name: &str) -> Option<String> {
-    let trimmed = name.trim();
-    if trimmed.is_empty() || trimmed == "(system default)" {
+fn preferred_device_id(device: &AudioDeviceId) -> Option<&str> {
+    if device.is_default() {
         None
     } else {
-        Some(trimmed.to_string())
+        Some(device.id.as_str())
     }
 }
 
@@ -809,8 +807,8 @@ async fn restart_audio_streams(
     frame_ms: u32,
 ) -> Result<()> {
     let selected = selection.lock().await.clone();
-    let preferred_input = selected.input_device.as_deref();
-    let preferred_output = selected.output_device.as_deref();
+    let preferred_input = preferred_device_id(&selected.input_device);
+    let preferred_output = preferred_device_id(&selected.output_device);
     let preferred_mode = selected.playback_mode.as_deref();
 
     let new_capture = start_capture_with_fallback(sample_rate, channels, frame_ms, preferred_input)
@@ -1835,10 +1833,9 @@ async fn connect_and_run_session(
                             ));
                         }
                         UiIntent::SetInputDevice(dev) => {
-                            let selected = normalize_device_name(&dev);
                             {
                                 let mut state = selected_audio.lock().await;
-                                state.input_device = selected;
+                                state.input_device = dev;
                             }
                             if let Err(e) = restart_audio_streams(
                                 &capture,
@@ -1857,10 +1854,9 @@ async fn connect_and_run_session(
                             }
                         }
                         UiIntent::SetOutputDevice(dev) => {
-                            let selected = normalize_device_name(&dev);
                             {
                                 let mut state = selected_audio.lock().await;
-                                state.output_device = selected;
+                                state.output_device = dev;
                             }
                             if let Err(e) = restart_audio_streams(
                                 &capture,
@@ -1964,8 +1960,8 @@ async fn connect_and_run_session(
 
                             {
                                 let mut state = selected_audio.lock().await;
-                                state.input_device = normalize_device_name(&settings.capture_device);
-                                state.output_device = normalize_device_name(&settings.playback_device);
+                                state.input_device = settings.capture_device.clone();
+                                state.output_device = settings.playback_device.clone();
                                 state.playback_mode = normalize_playback_mode(&settings.playback_mode);
                             }
 

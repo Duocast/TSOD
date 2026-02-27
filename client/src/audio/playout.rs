@@ -5,6 +5,8 @@ use ringbuf::{
 };
 use std::cell::UnsafeCell;
 
+use crate::ui::model::{AudioBackend, AudioDeviceId, AudioDeviceInfo, AudioDirection};
+
 pub struct Playout {
     backend: PlayoutBackend,
     prod: UnsafeCell<HeapProd<i16>>,
@@ -87,12 +89,35 @@ impl Playout {
     }
 }
 
-pub fn enumerate_output_devices() -> Vec<String> {
-    PlayoutBackend::enumerate_output_devices()
+pub fn enumerate_output_devices() -> Vec<AudioDeviceInfo> {
+    let mut devices = vec![AudioDeviceInfo {
+        key: AudioDeviceId::default_output(),
+        label: "(system default)".to_string(),
+        is_default: true,
+    }];
+    devices.extend(PlayoutBackend::enumerate_output_devices());
+    devices
 }
 
 pub fn enumerate_playback_modes() -> Vec<String> {
     PlayoutBackend::enumerate_playback_modes()
+}
+
+#[cfg(target_os = "windows")]
+fn cpal_backend() -> AudioBackend {
+    AudioBackend::Wasapi
+}
+#[cfg(target_os = "macos")]
+fn cpal_backend() -> AudioBackend {
+    AudioBackend::CoreAudio
+}
+#[cfg(target_os = "linux")]
+fn cpal_backend() -> AudioBackend {
+    AudioBackend::PulseAudio
+}
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+fn cpal_backend() -> AudioBackend {
+    AudioBackend::Unknown
 }
 
 #[cfg(target_os = "linux")]
@@ -162,9 +187,9 @@ mod linux {
             })
         }
 
-        pub fn enumerate_output_devices() -> Vec<String> {
+        pub fn enumerate_output_devices() -> Vec<AudioDeviceInfo> {
             if pipewire_is_available() {
-                return vec!["PipeWire default output".to_string()];
+                return Vec::new();
             }
             CpalPlayout::enumerate_output_devices()
         }
@@ -316,7 +341,7 @@ mod linux {
         ) -> Result<Self> {
             let host = cpal::default_host();
             let dev = if let Some(name) = preferred_device {
-                find_output_device_by_name(&host, name)
+                find_output_device_by_id(&host, name)
                     .with_context(|| format!("output device '{name}' not found"))?
             } else {
                 host.default_output_device()
@@ -415,7 +440,7 @@ mod linux {
             })
         }
 
-        fn enumerate_output_devices() -> Vec<String> {
+        fn enumerate_output_devices() -> Vec<AudioDeviceInfo> {
             let host = cpal::default_host();
             host.output_devices()
                 .map(|devs| devs.filter_map(|d| device_name(&d)).collect())
@@ -540,7 +565,7 @@ mod non_linux {
         ) -> Result<Self> {
             let host = cpal::default_host();
             let dev = if let Some(name) = preferred_device {
-                find_output_device_by_name(&host, name)
+                find_output_device_by_id(&host, name)
                     .with_context(|| format!("output device '{name}' not found"))?
             } else {
                 host.default_output_device()
@@ -640,7 +665,7 @@ mod non_linux {
             })
         }
 
-        pub fn enumerate_output_devices() -> Vec<String> {
+        pub fn enumerate_output_devices() -> Vec<AudioDeviceInfo> {
             let host = cpal::default_host();
             host.output_devices()
                 .map(|devs| devs.filter_map(|d| device_name(&d)).collect())
