@@ -149,6 +149,7 @@ async fn lookup_or_create_user_for_device(
         .context("update device last_seen")?;
 
         assign_default_member_role(&mut tx, server_id, existing_user_id).await?;
+        assign_owner_role_if_missing(&mut tx, server_id, existing_user_id).await?;
         ensure_bootstrap_owner_role(&mut tx, server_id, bootstrap_owner_user_id).await?;
 
         tx.commit().await.context("commit existing device auth")?;
@@ -223,6 +224,7 @@ async fn lookup_or_create_user_for_device(
                 .await
                 .context("update device last_seen after conflict")?;
                 assign_default_member_role(&mut tx, server_id, existing_user_id).await?;
+                assign_owner_role_if_missing(&mut tx, server_id, existing_user_id).await?;
                 ensure_bootstrap_owner_role(&mut tx, server_id, bootstrap_owner_user_id).await?;
                 tx.commit().await.context("commit conflict device auth")?;
                 return Ok(existing_user_id);
