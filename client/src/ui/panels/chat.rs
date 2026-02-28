@@ -127,6 +127,13 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                 .desired_width(ui.available_width() - 70.0)
                 .frame(true),
         );
+        response.context_menu(|ui| {
+            if ui.button("Paste").clicked() {
+                ui.ctx()
+                    .send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+                ui.close();
+            }
+        });
 
         model.chat_input_focused = response.has_focus();
 
@@ -915,10 +922,22 @@ fn render_linkified_text(ui: &mut egui::Ui, text: &str) {
         for segment in segments {
             match segment {
                 MessageSegment::Text(value) => {
-                    ui.label(value);
+                    let response = ui.label(&value);
+                    response.context_menu(|ui| {
+                        if ui.button("Copy").clicked() {
+                            ui.ctx().copy_text(value.clone());
+                            ui.close();
+                        }
+                    });
                 }
                 MessageSegment::Url(url) => {
-                    ui.add(egui::Hyperlink::from_label_and_url(url.clone(), url));
+                    let response = ui.add(egui::Hyperlink::from_label_and_url(url.clone(), &url));
+                    response.context_menu(|ui| {
+                        if ui.button("Copy").clicked() {
+                            ui.ctx().copy_text(url.clone());
+                            ui.close();
+                        }
+                    });
                 }
             }
         }
