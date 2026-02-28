@@ -834,6 +834,7 @@ pub struct ChannelEntry {
     pub position: u32,
     pub member_count: u32,
     pub user_limit: u32,
+    pub bitrate_bps: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1008,6 +1009,8 @@ pub struct UiModel {
     pub show_rename_channel: bool,
     pub delete_channel_target_id: Option<String>,
     pub show_delete_channel_confirm: bool,
+    pub show_channel_info: bool,
+    pub channel_info_target_id: Option<String>,
     pub channel_collapsed: HashMap<String, bool>,
     pub default_channel_id: Option<String>,
     pub last_event_seq: u64,
@@ -1303,6 +1306,8 @@ impl Default for UiModel {
             show_rename_channel: false,
             delete_channel_target_id: None,
             show_delete_channel_confirm: false,
+            show_channel_info: false,
+            channel_info_target_id: None,
             channel_collapsed: HashMap::new(),
             default_channel_id: None,
             last_event_seq: 0,
@@ -2151,6 +2156,7 @@ mod tests {
             position: 0,
             member_count: 0,
             user_limit: 0,
+            bitrate_bps: 64_000,
         }));
         model.apply_event(UiEvent::ChannelCreated(ChannelEntry {
             id: "c1".into(),
@@ -2160,6 +2166,7 @@ mod tests {
             position: 0,
             member_count: 0,
             user_limit: 0,
+            bitrate_bps: 64_000,
         }));
 
         assert_eq!(model.channels.iter().filter(|c| c.id == "c1").count(), 1);
@@ -2180,6 +2187,7 @@ mod tests {
             position: 0,
             member_count: 0,
             user_limit: 0,
+            bitrate_bps: 64_000,
         }]));
 
         model.apply_event(UiEvent::ChannelRenamed(ChannelEntry {
@@ -2190,6 +2198,7 @@ mod tests {
             position: 0,
             member_count: 0,
             user_limit: 0,
+            bitrate_bps: 64_000,
         }));
 
         assert_eq!(model.channels.len(), 1);
@@ -2208,6 +2217,7 @@ mod tests {
                 position: 0,
                 member_count: 0,
                 user_limit: 0,
+                bitrate_bps: 64_000,
             },
             ChannelEntry {
                 id: "c1".into(),
@@ -2217,6 +2227,7 @@ mod tests {
                 position: 0,
                 member_count: 0,
                 user_limit: 0,
+                bitrate_bps: 64_000,
             },
             ChannelEntry {
                 id: "c1-child".into(),
@@ -2226,6 +2237,7 @@ mod tests {
                 position: 0,
                 member_count: 0,
                 user_limit: 0,
+                bitrate_bps: 64_000,
             },
         ]));
         model.apply_event(UiEvent::SetDefaultChannelId(Some("default".into())));
@@ -2251,6 +2263,7 @@ mod tests {
             position: 0,
             member_count: 0,
             user_limit: 0,
+            bitrate_bps: 64_000,
         }]));
         model.channel_collapsed.insert("parent".into(), true);
 
@@ -2262,6 +2275,7 @@ mod tests {
             position: 0,
             member_count: 0,
             user_limit: 0,
+            bitrate_bps: 64_000,
         }));
 
         assert_eq!(
@@ -2287,6 +2301,7 @@ mod tests {
                 position: 0,
                 member_count: 0,
                 user_limit: 0,
+                bitrate_bps: 64_000,
             },
             ChannelEntry {
                 id: "c2".into(),
@@ -2296,6 +2311,7 @@ mod tests {
                 position: 0,
                 member_count: 0,
                 user_limit: 0,
+                bitrate_bps: 64_000,
             },
         ]));
 
@@ -2307,6 +2323,7 @@ mod tests {
             position: 0,
             member_count: 0,
             user_limit: 0,
+            bitrate_bps: 64_000,
         }));
         model.apply_event(UiEvent::ChannelDeleted {
             channel_id: "c2".into(),
@@ -2426,6 +2443,7 @@ mod tests {
             position: 0,
             member_count: 0,
             user_limit: 0,
+            bitrate_bps: 64_000,
         });
 
         model.apply_event(UiEvent::SetChannelName(

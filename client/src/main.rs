@@ -646,6 +646,7 @@ fn apply_authoritative_snapshot(
             position: info.position,
             member_count: 0,
             user_limit: info.user_limit,
+            bitrate_bps: info.bitrate,
         })
         .collect::<Vec<_>>();
 
@@ -1312,6 +1313,7 @@ async fn connect_and_run_session(
                                         position: channel.position,
                                         member_count: 0,
                                         user_limit: channel.user_limit,
+                                        bitrate_bps: channel.bitrate,
                                     },
                                 ));
                             }
@@ -1337,6 +1339,7 @@ async fn connect_and_run_session(
                                         position: channel.position,
                                         member_count: 0,
                                         user_limit: channel.user_limit,
+                                        bitrate_bps: channel.bitrate,
                                     },
                                 ));
                             }
