@@ -5,7 +5,7 @@
 
 use crate::settings_io;
 use crate::ui::model::{
-    AppSettings, AudioDeviceInfo, CaptureMode, FecMode, SettingsPage, UiIntent, UiModel,
+    AppSettings, AudioDeviceInfo, CaptureMode, FecMode, SettingsPage, UiEvent, UiIntent, UiModel,
 };
 use crate::ui::theme;
 use crossbeam_channel::Sender;
@@ -101,9 +101,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                     .show(ui, |ui: &mut egui::Ui| {
                         ui.set_min_width(ui.available_width().max(440.0));
                         let dirty = match model.settings_page {
-                            SettingsPage::Application => {
-                                page_application(ui, &mut model.settings_draft, &model.log)
-                            }
+                            SettingsPage::Application => page_application(ui, model),
                             SettingsPage::Capture => page_capture(
                                 ui,
                                 &mut model.settings_draft,
@@ -205,11 +203,9 @@ fn hint(ui: &mut egui::Ui, text: &str) {
 
 // ── Application ───────────────────────────────────────────────────────
 
-fn page_application(
-    ui: &mut egui::Ui,
-    s: &mut AppSettings,
-    log: &std::collections::VecDeque<String>,
-) -> bool {
+fn page_application(ui: &mut egui::Ui, model: &mut UiModel) -> bool {
+    let s = &mut model.settings_draft;
+    let log = &model.log;
     let mut dirty = false;
 
     section(ui, "General");
@@ -292,6 +288,21 @@ fn page_application(
     egui::CollapsingHeader::new("Debug Log")
         .default_open(false)
         .show(ui, |ui: &mut egui::Ui| {
+            if ui.button("Export as .txt").clicked() {
+                match export_debug_log(log) {
+                    Ok(Some(path)) => model.apply_event(UiEvent::AppendLog(format!(
+                        "[debug] exported log to {}",
+                        path.display()
+                    ))),
+                    Ok(None) => {}
+                    Err(err) => {
+                        model.apply_event(UiEvent::AppendLog(format!(
+                            "[debug] failed to export log: {err}"
+                        )));
+                    }
+                }
+            }
+            ui.add_space(6.0);
             egui::ScrollArea::vertical()
                 .max_height(200.0)
                 .stick_to_bottom(true)
@@ -308,6 +319,28 @@ fn page_application(
         });
 
     dirty
+}
+
+fn export_debug_log(log: &std::collections::VecDeque<String>) -> Result<Option<PathBuf>, String> {
+    let Some(path) = rfd::FileDialog::new()
+        .set_title("Export debug log")
+        .add_filter("Text", &["txt"])
+        .set_file_name("tsod-debug-log.txt")
+        .save_file()
+    else {
+        return Ok(None);
+    };
+
+    let mut contents = String::new();
+    for line in log {
+        contents.push_str(line);
+        contents.push('\n');
+    }
+
+    std::fs::write(&path, contents)
+        .map_err(|err| format!("could not write {}: {err}", path.display()))?;
+
+    Ok(Some(path))
 }
 
 // ── Capture ───────────────────────────────────────────────────────────
