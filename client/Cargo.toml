@@ -74,3 +74,6 @@ windows = { version = "0.62.2", features = [
   "Win32_UI_Shell_PropertiesSystem",
 ] }
 
+
+[patch.crates-io]
+wasapi = { path = "../vendor/wasapi" }

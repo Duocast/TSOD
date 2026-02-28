@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Context, Result};
-use wasapi::{Device, DeviceEnumerator, Direction};
+use wasapi::{Device, DeviceEnumerator, DeviceState, Direction};
 
 pub struct ComGuard {
     initialized: bool,
@@ -15,9 +15,7 @@ impl ComGuard {
         if sta_result.is_ok() {
             Ok(Self { initialized: true })
         } else {
-            Err(anyhow!(
-                "initialize COM for WASAPI failed: {sta_result:?}"
-            ))
+            Err(anyhow!("initialize COM for WASAPI failed: {sta_result:?}"))
         }
     }
 }
@@ -59,12 +57,46 @@ pub fn default_endpoint_id(direction: Direction) -> Option<String> {
 
 pub fn open_device(direction: Direction, preferred_id: Option<&str>) -> Result<Device> {
     let enumerator = DeviceEnumerator::new().context("create WASAPI device enumerator")?;
-    match preferred_id {
-        Some(id) => enumerator
-            .get_device(id)
-            .with_context(|| format!("open WASAPI device by endpoint id: {id}")),
-        None => enumerator
-            .get_default_device(&direction)
-            .context("open default WASAPI device"),
+
+    if let Some(id) = preferred_id {
+        match enumerator.get_device(id) {
+            Ok(device) => {
+                let state = device.get_state().with_context(|| {
+                    format!("read WASAPI device state for selected endpoint id: {id}")
+                })?;
+                if state == DeviceState::Active {
+                    return Ok(device);
+                }
+
+                tracing::warn!(
+                    "[wasapi] selected endpoint is not Active (id={} state={}); falling back to default",
+                    id,
+                    state
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    "[wasapi] open by id failed (id={}): {}; falling back to default",
+                    id,
+                    error
+                );
+            }
+        }
     }
+
+    let default_device = enumerator
+        .get_default_device(&direction)
+        .context("open default WASAPI device")?;
+
+    let default_state = default_device
+        .get_state()
+        .context("read default WASAPI device state")?;
+    if default_state != DeviceState::Active {
+        return Err(anyhow!(
+            "default WASAPI device is not Active: {}",
+            default_state
+        ));
+    }
+
+    Ok(default_device)
 }
