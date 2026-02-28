@@ -205,7 +205,6 @@ fn hint(ui: &mut egui::Ui, text: &str) {
 
 fn page_application(ui: &mut egui::Ui, model: &mut UiModel) -> bool {
     let s = &mut model.settings_draft;
-    let log = &model.log;
     let mut dirty = false;
 
     section(ui, "General");
@@ -289,7 +288,7 @@ fn page_application(ui: &mut egui::Ui, model: &mut UiModel) -> bool {
         .default_open(false)
         .show(ui, |ui: &mut egui::Ui| {
             if ui.button("Export as .txt").clicked() {
-                match export_debug_log(log) {
+                match export_debug_log(&model.log) {
                     Ok(Some(path)) => model.apply_event(UiEvent::AppendLog(format!(
                         "[debug] exported log to {}",
                         path.display()
@@ -307,7 +306,7 @@ fn page_application(ui: &mut egui::Ui, model: &mut UiModel) -> bool {
                 .max_height(200.0)
                 .stick_to_bottom(true)
                 .show(ui, |ui: &mut egui::Ui| {
-                    for line in log.iter() {
+                    for line in model.log.iter() {
                         ui.label(
                             egui::RichText::new(line)
                                 .small()
