@@ -44,8 +44,8 @@ impl WasapiPlayout {
                     preferred_device.as_deref(),
                     &stop_thread,
                 ) {
+                    error!("[wasapi playout] thread failed: {error:#}");
                     unhealthy_thread.store(true, Ordering::Relaxed);
-                    error!("[wasapi playout] thread failure: {error:#}");
                 }
             })
             .context("spawn WASAPI playout thread")?;
@@ -137,11 +137,20 @@ fn run_playout_thread(
     let device_rate = mix.get_samplespersec();
     let device_channels = mix.get_nchannels().max(1) as usize;
     let block_align = mix.get_blockalign() as usize;
+    let bits_per_sample = mix.get_bitspersample() as u16;
+    let valid_bits = mix.get_validbitspersample() as u16;
     let sample_type = mix.get_subformat().context("get WASAPI sample type")?;
 
     info!(
-        "[wasapi playout] open device id={} name={} mix={}Hz {}ch {:?}",
-        endpoint_id, friendly_name, device_rate, device_channels, sample_type
+        "[wasapi playout] open device id={} name={} mix: {}Hz {}ch block_align={} bits={} valid={} type={:?}",
+        endpoint_id,
+        friendly_name,
+        device_rate,
+        device_channels,
+        block_align,
+        bits_per_sample,
+        valid_bits,
+        sample_type
     );
 
     let mode = StreamMode::EventsShared {
@@ -150,6 +159,10 @@ fn run_playout_thread(
     };
     audio_client
         .initialize_client(&mix, &Direction::Render, &mode)
+        .map_err(|error| {
+            tracing::error!("[wasapi playout] initialize_client failed: {error:#}");
+            error
+        })
         .context("initialize WASAPI shared render stream")?;
     let handle = audio_client
         .set_get_eventhandle()
@@ -159,6 +172,10 @@ fn run_playout_thread(
         .context("get WASAPI render client")?;
     audio_client
         .start_stream()
+        .map_err(|error| {
+            tracing::error!("[wasapi playout] start_stream failed: {error:#}");
+            error
+        })
         .context("start WASAPI render stream")?;
 
     let mut resampler = LinearResampler::new(sample_rate, device_rate);
@@ -169,6 +186,10 @@ fn run_playout_thread(
     while !stop.load(Ordering::Relaxed) {
         handle
             .wait_for_event(500)
+            .map_err(|error| {
+                tracing::error!("[wasapi playout] wait_for_event failed: {error:#}");
+                error
+            })
             .context("wait for WASAPI render event")?;
         let avail = audio_client
             .get_available_space_in_frames()
@@ -188,11 +209,15 @@ fn run_playout_thread(
             device_channels,
             sample_type,
             &source_resampled,
-            mix.get_validbitspersample() as u16,
+            valid_bits,
         )?;
 
         render
             .write_to_device(avail, &bytes, Some(flags))
+            .map_err(|error| {
+                tracing::error!("[wasapi playout] write_to_device failed: {error:#}");
+                error
+            })
             .context("write WASAPI render buffer")?;
     }
 
