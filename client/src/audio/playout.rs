@@ -1,11 +1,15 @@
 use anyhow::Result;
+use crossbeam_channel::Sender;
 use ringbuf::{
     traits::{Producer, Split},
     HeapProd, HeapRb,
 };
 use std::cell::UnsafeCell;
 
-use crate::ui::model::{disambiguate_display_labels, AudioBackend, AudioDeviceId, AudioDeviceInfo};
+use crate::ui::{
+    model::{disambiguate_display_labels, AudioBackend, AudioDeviceId, AudioDeviceInfo},
+    UiEvent,
+};
 
 pub struct Playout {
     backend: PlayoutBackend,
@@ -42,15 +46,16 @@ unsafe impl Sync for Playout {}
 
 impl Playout {
     pub fn start(sample_rate: u32, channels: u16) -> Result<Self> {
-        Self::start_with_device(sample_rate, channels, None)
+        Self::start_with_device(sample_rate, channels, None, None)
     }
 
     pub fn start_with_device(
         sample_rate: u32,
         channels: u16,
         preferred_device: Option<&str>,
+        tx_event: Option<Sender<UiEvent>>,
     ) -> Result<Self> {
-        Self::start_with_mode(sample_rate, channels, preferred_device, None)
+        Self::start_with_mode(sample_rate, channels, preferred_device, None, tx_event)
     }
 
     pub fn start_with_mode(
@@ -58,6 +63,7 @@ impl Playout {
         channels: u16,
         preferred_device: Option<&str>,
         preferred_mode: Option<&str>,
+        tx_event: Option<Sender<UiEvent>>,
     ) -> Result<Self> {
         let rb = HeapRb::<i16>::new(sample_rate as usize * channels as usize);
         let (prod, cons) = rb.split();
@@ -69,6 +75,7 @@ impl Playout {
             cons,
             preferred_device,
             preferred_mode,
+            tx_event,
         )?;
 
         #[cfg(not(target_os = "linux"))]
@@ -78,6 +85,7 @@ impl Playout {
             cons,
             preferred_device,
             preferred_mode,
+            tx_event,
         )?;
 
         Ok(Self {
@@ -138,6 +146,7 @@ mod linux {
     use cpal::{
         traits::DeviceTrait, traits::HostTrait, traits::StreamTrait, FromSample, SizedSample,
     };
+    use crossbeam_channel::Sender;
     use pipewire as pw;
     use pw::properties::properties;
     use ringbuf::{traits::Consumer, HeapCons};
@@ -147,7 +156,10 @@ mod linux {
     };
     use tracing::info;
 
-    use crate::ui::model::{AudioBackend, AudioDeviceId, AudioDeviceInfo, AudioDirection};
+    use crate::ui::{
+        model::{AudioBackend, AudioDeviceId, AudioDeviceInfo, AudioDirection},
+        UiEvent,
+    };
 
     enum LinuxPlayoutBackend {
         PipeWire,
@@ -166,6 +178,7 @@ mod linux {
             cons: HeapCons<i16>,
             preferred_device: Option<&str>,
             preferred_mode: Option<&str>,
+            tx_event: Option<Sender<UiEvent>>,
         ) -> Result<Self> {
             let prefer_pipewire = preferred_mode
                 .map(|mode| mode == super::PLAYBACK_MODE_PIPEWIRE)
@@ -176,6 +189,9 @@ mod linux {
 
             if !prefer_pulse && pipewire_is_available() {
                 let preferred_device_owned = preferred_device.map(str::to_string);
+                let tx_event_thread = tx_event.clone();
+                let reported = Arc::new(AtomicBool::new(false));
+                let reported_thread = reported.clone();
                 let thread = std::thread::Builder::new()
                     .name("tsod-pipewire-playout".to_string())
                     .spawn(move || {
@@ -186,6 +202,16 @@ mod linux {
                             preferred_device_owned,
                         ) {
                             eprintln!("pipewire playout thread failed: {e:#}");
+                            if reported_thread
+                                .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                                .is_ok()
+                            {
+                                if let Some(tx) = &tx_event_thread {
+                                    let _ = tx.send(UiEvent::AppendLog(format!(
+                                        "[audio] pipewire playout thread failed: {e:#}"
+                                    )));
+                                }
+                            }
                         }
                     })
                     .context("spawn PipeWire playout thread")?;
@@ -201,7 +227,8 @@ mod linux {
             }
 
             eprintln!("PipeWire unavailable, falling back to PulseAudio playback via CPAL");
-            let pulse = CpalPlayout::start(sample_rate, channels, cons, preferred_device)?;
+            let pulse =
+                CpalPlayout::start(sample_rate, channels, cons, preferred_device, tx_event)?;
             Ok(Self {
                 _thread: None,
                 backend: LinuxPlayoutBackend::Pulse(pulse),
@@ -426,6 +453,7 @@ mod linux {
             channels: u16,
             cons: HeapCons<i16>,
             preferred_device: Option<&str>,
+            tx_event: Option<Sender<UiEvent>>,
         ) -> Result<Self> {
             let host = cpal::default_host();
             let dev = if let Some(name) = preferred_device {
@@ -445,6 +473,8 @@ mod linux {
             let stream_cfg = native_output_config(&dev)?;
             let unhealthy = Arc::new(AtomicBool::new(false));
             let unhealthy_cb = unhealthy.clone();
+            let reported = Arc::new(AtomicBool::new(false));
+            let reported_cb = reported.clone();
             let stream = match stream_cfg.sample_format() {
                 cpal::SampleFormat::I8 => build_output_stream::<i8>(
                     &dev,
@@ -453,6 +483,8 @@ mod linux {
                     channels,
                     cons,
                     unhealthy_cb,
+                    tx_event.clone(),
+                    reported_cb.clone(),
                 )?,
                 cpal::SampleFormat::I16 => build_output_stream::<i16>(
                     &dev,
@@ -461,6 +493,8 @@ mod linux {
                     channels,
                     cons,
                     unhealthy_cb,
+                    tx_event.clone(),
+                    reported_cb.clone(),
                 )?,
                 cpal::SampleFormat::I32 => build_output_stream::<i32>(
                     &dev,
@@ -469,6 +503,8 @@ mod linux {
                     channels,
                     cons,
                     unhealthy_cb,
+                    tx_event.clone(),
+                    reported_cb.clone(),
                 )?,
                 cpal::SampleFormat::I64 => build_output_stream::<i64>(
                     &dev,
@@ -477,6 +513,8 @@ mod linux {
                     channels,
                     cons,
                     unhealthy_cb,
+                    tx_event.clone(),
+                    reported_cb.clone(),
                 )?,
                 cpal::SampleFormat::U8 => build_output_stream::<u8>(
                     &dev,
@@ -485,6 +523,8 @@ mod linux {
                     channels,
                     cons,
                     unhealthy_cb,
+                    tx_event.clone(),
+                    reported_cb.clone(),
                 )?,
                 cpal::SampleFormat::U16 => build_output_stream::<u16>(
                     &dev,
@@ -493,6 +533,8 @@ mod linux {
                     channels,
                     cons,
                     unhealthy_cb,
+                    tx_event.clone(),
+                    reported_cb.clone(),
                 )?,
                 cpal::SampleFormat::U32 => build_output_stream::<u32>(
                     &dev,
@@ -501,6 +543,8 @@ mod linux {
                     channels,
                     cons,
                     unhealthy_cb,
+                    tx_event.clone(),
+                    reported_cb.clone(),
                 )?,
                 cpal::SampleFormat::U64 => build_output_stream::<u64>(
                     &dev,
@@ -509,6 +553,8 @@ mod linux {
                     channels,
                     cons,
                     unhealthy_cb,
+                    tx_event.clone(),
+                    reported_cb.clone(),
                 )?,
                 cpal::SampleFormat::F32 => build_output_stream::<f32>(
                     &dev,
@@ -517,6 +563,8 @@ mod linux {
                     channels,
                     cons,
                     unhealthy_cb,
+                    tx_event.clone(),
+                    reported_cb.clone(),
                 )?,
                 cpal::SampleFormat::F64 => build_output_stream::<f64>(
                     &dev,
@@ -525,6 +573,8 @@ mod linux {
                     channels,
                     cons,
                     unhealthy_cb,
+                    tx_event.clone(),
+                    reported_cb.clone(),
                 )?,
                 other => return Err(anyhow!("unsupported output sample format: {other:?}")),
             };
@@ -647,6 +697,8 @@ mod linux {
         source_channels: u16,
         mut cons: HeapCons<i16>,
         unhealthy: Arc<AtomicBool>,
+        tx_event: Option<Sender<UiEvent>>,
+        reported: Arc<AtomicBool>,
     ) -> Result<cpal::Stream>
     where
         T: SizedSample + FromSample<f32>,
@@ -690,7 +742,17 @@ mod linux {
             },
             move |err| {
                 unhealthy.store(true, Ordering::Relaxed);
-                eprintln!("playout err: {err}")
+                eprintln!("playout err: {err}");
+                if reported
+                    .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok()
+                {
+                    if let Some(tx) = &tx_event {
+                        let _ = tx.send(UiEvent::AppendLog(format!(
+                            "[audio] playout stream error: {err}"
+                        )));
+                    }
+                }
             },
             None,
         )
@@ -704,6 +766,7 @@ mod non_linux {
     use cpal::{
         traits::DeviceTrait, traits::HostTrait, traits::StreamTrait, FromSample, SizedSample,
     };
+    use crossbeam_channel::Sender;
     use ringbuf::{traits::Consumer, HeapCons};
     use std::sync::{
         atomic::{AtomicBool, Ordering},
@@ -714,7 +777,10 @@ mod non_linux {
     use crate::audio::resample::LinearResampler;
     #[cfg(target_os = "windows")]
     use crate::audio::windows::mmdevice;
-    use crate::ui::model::{AudioDeviceId, AudioDeviceInfo, AudioDirection};
+    use crate::ui::{
+        model::{AudioDeviceId, AudioDeviceInfo, AudioDirection},
+        UiEvent,
+    };
 
     pub struct CpalPlayout {
         _stream: cpal::Stream,
@@ -728,6 +794,7 @@ mod non_linux {
             cons: HeapCons<i16>,
             preferred_device: Option<&str>,
             _preferred_mode: Option<&str>,
+            tx_event: Option<Sender<UiEvent>>,
         ) -> Result<Self> {
             let host = cpal::default_host();
             let dev = if let Some(name) = preferred_device {
@@ -747,6 +814,8 @@ mod non_linux {
             let stream_cfg = native_output_config(&dev)?;
             let unhealthy = Arc::new(AtomicBool::new(false));
             let unhealthy_cb = unhealthy.clone();
+            let reported = Arc::new(AtomicBool::new(false));
+            let reported_cb = reported.clone();
 
             let stream = match stream_cfg.sample_format() {
                 cpal::SampleFormat::I8 => build_output_stream::<i8>(
@@ -756,6 +825,8 @@ mod non_linux {
                     channels,
                     cons,
                     unhealthy_cb,
+                    tx_event.clone(),
+                    reported_cb.clone(),
                 )?,
                 cpal::SampleFormat::I16 => build_output_stream::<i16>(
                     &dev,
@@ -764,6 +835,8 @@ mod non_linux {
                     channels,
                     cons,
                     unhealthy_cb,
+                    tx_event.clone(),
+                    reported_cb.clone(),
                 )?,
                 cpal::SampleFormat::I32 => build_output_stream::<i32>(
                     &dev,
@@ -772,6 +845,8 @@ mod non_linux {
                     channels,
                     cons,
                     unhealthy_cb,
+                    tx_event.clone(),
+                    reported_cb.clone(),
                 )?,
                 cpal::SampleFormat::I64 => build_output_stream::<i64>(
                     &dev,
@@ -780,6 +855,8 @@ mod non_linux {
                     channels,
                     cons,
                     unhealthy_cb,
+                    tx_event.clone(),
+                    reported_cb.clone(),
                 )?,
                 cpal::SampleFormat::U8 => build_output_stream::<u8>(
                     &dev,
@@ -788,6 +865,8 @@ mod non_linux {
                     channels,
                     cons,
                     unhealthy_cb,
+                    tx_event.clone(),
+                    reported_cb.clone(),
                 )?,
                 cpal::SampleFormat::U16 => build_output_stream::<u16>(
                     &dev,
@@ -796,6 +875,8 @@ mod non_linux {
                     channels,
                     cons,
                     unhealthy_cb,
+                    tx_event.clone(),
+                    reported_cb.clone(),
                 )?,
                 cpal::SampleFormat::U32 => build_output_stream::<u32>(
                     &dev,
@@ -804,6 +885,8 @@ mod non_linux {
                     channels,
                     cons,
                     unhealthy_cb,
+                    tx_event.clone(),
+                    reported_cb.clone(),
                 )?,
                 cpal::SampleFormat::U64 => build_output_stream::<u64>(
                     &dev,
@@ -812,6 +895,8 @@ mod non_linux {
                     channels,
                     cons,
                     unhealthy_cb,
+                    tx_event.clone(),
+                    reported_cb.clone(),
                 )?,
                 cpal::SampleFormat::F32 => build_output_stream::<f32>(
                     &dev,
@@ -820,6 +905,8 @@ mod non_linux {
                     channels,
                     cons,
                     unhealthy_cb,
+                    tx_event.clone(),
+                    reported_cb.clone(),
                 )?,
                 cpal::SampleFormat::F64 => build_output_stream::<f64>(
                     &dev,
@@ -828,6 +915,8 @@ mod non_linux {
                     channels,
                     cons,
                     unhealthy_cb,
+                    tx_event.clone(),
+                    reported_cb.clone(),
                 )?,
                 other => return Err(anyhow!("unsupported output sample format: {other:?}")),
             };
@@ -966,6 +1055,8 @@ mod non_linux {
         source_channels: u16,
         mut cons: HeapCons<i16>,
         unhealthy: Arc<AtomicBool>,
+        tx_event: Option<Sender<UiEvent>>,
+        reported: Arc<AtomicBool>,
     ) -> Result<cpal::Stream>
     where
         T: SizedSample + FromSample<f32>,
@@ -1014,7 +1105,17 @@ mod non_linux {
             },
             move |err| {
                 unhealthy.store(true, Ordering::Relaxed);
-                eprintln!("playout err: {err}")
+                eprintln!("playout err: {err}");
+                if reported
+                    .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok()
+                {
+                    if let Some(tx) = &tx_event {
+                        let _ = tx.send(UiEvent::AppendLog(format!(
+                            "[audio] playout stream error: {err}"
+                        )));
+                    }
+                }
             },
             None,
         )

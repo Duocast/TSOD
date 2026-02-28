@@ -1,11 +1,15 @@
 use anyhow::Result;
+use crossbeam_channel::Sender;
 use ringbuf::{
     traits::{Consumer, Split},
     HeapCons, HeapRb,
 };
 use std::cell::UnsafeCell;
 
-use crate::ui::model::{disambiguate_display_labels, AudioBackend, AudioDeviceId, AudioDeviceInfo};
+use crate::ui::{
+    model::{disambiguate_display_labels, AudioBackend, AudioDeviceId, AudioDeviceInfo},
+    UiEvent,
+};
 
 pub struct Capture {
     backend: CaptureBackend,
@@ -38,7 +42,7 @@ unsafe impl Sync for Capture {}
 
 impl Capture {
     pub fn start(sample_rate: u32, channels: u16, frame_ms: u32) -> Result<Self> {
-        Self::start_with_device(sample_rate, channels, frame_ms, None)
+        Self::start_with_device(sample_rate, channels, frame_ms, None, None)
     }
 
     pub fn start_with_device(
@@ -46,16 +50,19 @@ impl Capture {
         channels: u16,
         frame_ms: u32,
         preferred_device: Option<&str>,
+        tx_event: Option<Sender<UiEvent>>,
     ) -> Result<Self> {
         let frame_samples = (sample_rate as usize * frame_ms as usize / 1000) * channels as usize;
         let rb = HeapRb::<i16>::new(frame_samples * 50);
         let (prod, cons) = rb.split();
 
         #[cfg(target_os = "linux")]
-        let backend = CaptureBackend::start(sample_rate, channels, prod, preferred_device)?;
+        let backend =
+            CaptureBackend::start(sample_rate, channels, prod, preferred_device, tx_event)?;
 
         #[cfg(not(target_os = "linux"))]
-        let backend = CaptureBackend::start(sample_rate, channels, prod, preferred_device)?;
+        let backend =
+            CaptureBackend::start(sample_rate, channels, prod, preferred_device, tx_event)?;
 
         Ok(Self {
             backend,
@@ -120,6 +127,7 @@ fn cpal_backend() -> AudioBackend {
 mod linux {
     use anyhow::{anyhow, Context, Result};
     use cpal::{traits::DeviceTrait, traits::HostTrait, traits::StreamTrait, SizedSample};
+    use crossbeam_channel::Sender;
     use pipewire as pw;
     use pw::properties::properties;
     use ringbuf::{traits::Producer, HeapProd};
@@ -130,7 +138,10 @@ mod linux {
 
     use tracing::info;
 
-    use crate::ui::model::{AudioBackend, AudioDeviceId, AudioDeviceInfo, AudioDirection};
+    use crate::ui::{
+        model::{AudioBackend, AudioDeviceId, AudioDeviceInfo, AudioDirection},
+        UiEvent,
+    };
 
     enum LinuxCaptureBackend {
         PipeWire,
@@ -148,9 +159,13 @@ mod linux {
             channels: u16,
             prod: HeapProd<i16>,
             preferred_device: Option<&str>,
+            tx_event: Option<Sender<UiEvent>>,
         ) -> Result<Self> {
             if pipewire_is_available() {
                 let preferred_device_owned = preferred_device.map(str::to_string);
+                let tx_event_thread = tx_event.clone();
+                let reported = Arc::new(AtomicBool::new(false));
+                let reported_thread = reported.clone();
                 let thread = std::thread::Builder::new()
                     .name("tsod-pipewire-capture".to_string())
                     .spawn(move || {
@@ -161,6 +176,16 @@ mod linux {
                             preferred_device_owned,
                         ) {
                             eprintln!("pipewire capture thread failed: {e:#}");
+                            if reported_thread
+                                .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                                .is_ok()
+                            {
+                                if let Some(tx) = &tx_event_thread {
+                                    let _ = tx.send(UiEvent::AppendLog(format!(
+                                        "[audio] pipewire capture thread failed: {e:#}"
+                                    )));
+                                }
+                            }
                         }
                     })
                     .context("spawn PipeWire capture thread")?;
@@ -172,7 +197,8 @@ mod linux {
             }
 
             eprintln!("PipeWire unavailable, falling back to PulseAudio capture via CPAL");
-            let pulse = CpalCapture::start(sample_rate, channels, prod, preferred_device)?;
+            let pulse =
+                CpalCapture::start(sample_rate, channels, prod, preferred_device, tx_event)?;
             Ok(Self {
                 _thread: None,
                 backend: LinuxCaptureBackend::Pulse(pulse),
@@ -385,6 +411,7 @@ mod linux {
             channels: u16,
             prod: HeapProd<i16>,
             preferred_device: Option<&str>,
+            tx_event: Option<Sender<UiEvent>>,
         ) -> Result<Self> {
             let host = cpal::default_host();
             let dev = if let Some(name) = preferred_device {
@@ -404,6 +431,8 @@ mod linux {
             let stream_cfg = native_input_config(&dev)?;
             let unhealthy = Arc::new(AtomicBool::new(false));
             let unhealthy_cb = unhealthy.clone();
+            let reported = Arc::new(AtomicBool::new(false));
+            let reported_cb = reported.clone();
             let stream = match stream_cfg.sample_format() {
                 cpal::SampleFormat::I8 => build_input_stream::<i8>(
                     &dev,
@@ -412,6 +441,8 @@ mod linux {
                     channels,
                     prod,
                     unhealthy_cb,
+                    tx_event.clone(),
+                    reported_cb.clone(),
                 )?,
                 cpal::SampleFormat::I16 => build_input_stream::<i16>(
                     &dev,
@@ -420,6 +451,8 @@ mod linux {
                     channels,
                     prod,
                     unhealthy_cb,
+                    tx_event.clone(),
+                    reported_cb.clone(),
                 )?,
                 cpal::SampleFormat::I32 => build_input_stream::<i32>(
                     &dev,
@@ -428,6 +461,8 @@ mod linux {
                     channels,
                     prod,
                     unhealthy_cb,
+                    tx_event.clone(),
+                    reported_cb.clone(),
                 )?,
                 cpal::SampleFormat::I64 => build_input_stream::<i64>(
                     &dev,
@@ -436,6 +471,8 @@ mod linux {
                     channels,
                     prod,
                     unhealthy_cb,
+                    tx_event.clone(),
+                    reported_cb.clone(),
                 )?,
                 cpal::SampleFormat::U8 => build_input_stream::<u8>(
                     &dev,
@@ -444,6 +481,8 @@ mod linux {
                     channels,
                     prod,
                     unhealthy_cb,
+                    tx_event.clone(),
+                    reported_cb.clone(),
                 )?,
                 cpal::SampleFormat::U16 => build_input_stream::<u16>(
                     &dev,
@@ -452,6 +491,8 @@ mod linux {
                     channels,
                     prod,
                     unhealthy_cb,
+                    tx_event.clone(),
+                    reported_cb.clone(),
                 )?,
                 cpal::SampleFormat::U32 => build_input_stream::<u32>(
                     &dev,
@@ -460,6 +501,8 @@ mod linux {
                     channels,
                     prod,
                     unhealthy_cb,
+                    tx_event.clone(),
+                    reported_cb.clone(),
                 )?,
                 cpal::SampleFormat::U64 => build_input_stream::<u64>(
                     &dev,
@@ -468,6 +511,8 @@ mod linux {
                     channels,
                     prod,
                     unhealthy_cb,
+                    tx_event.clone(),
+                    reported_cb.clone(),
                 )?,
                 cpal::SampleFormat::F32 => build_input_stream::<f32>(
                     &dev,
@@ -476,6 +521,8 @@ mod linux {
                     channels,
                     prod,
                     unhealthy_cb,
+                    tx_event.clone(),
+                    reported_cb.clone(),
                 )?,
                 cpal::SampleFormat::F64 => build_input_stream::<f64>(
                     &dev,
@@ -484,6 +531,8 @@ mod linux {
                     channels,
                     prod,
                     unhealthy_cb,
+                    tx_event.clone(),
+                    reported_cb.clone(),
                 )?,
                 other => return Err(anyhow!("unsupported input sample format: {other:?}")),
             };
@@ -606,6 +655,8 @@ mod linux {
         target_channels: u16,
         mut prod: HeapProd<i16>,
         unhealthy: Arc<AtomicBool>,
+        tx_event: Option<Sender<UiEvent>>,
+        reported: Arc<AtomicBool>,
     ) -> Result<cpal::Stream>
     where
         T: SizedSample,
@@ -646,7 +697,17 @@ mod linux {
             },
             move |err| {
                 unhealthy.store(true, Ordering::Relaxed);
-                eprintln!("capture err: {err}")
+                eprintln!("capture err: {err}");
+                if reported
+                    .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok()
+                {
+                    if let Some(tx) = &tx_event {
+                        let _ = tx.send(UiEvent::AppendLog(format!(
+                            "[audio] capture stream error: {err}"
+                        )));
+                    }
+                }
             },
             None,
         )
@@ -658,6 +719,7 @@ mod linux {
 mod non_linux {
     use anyhow::{anyhow, Context, Result};
     use cpal::{traits::DeviceTrait, traits::HostTrait, traits::StreamTrait, SizedSample};
+    use crossbeam_channel::Sender;
     use ringbuf::{traits::Producer, HeapProd};
     use std::sync::{
         atomic::{AtomicBool, Ordering},
@@ -668,7 +730,10 @@ mod non_linux {
     use crate::audio::resample::LinearResampler;
     #[cfg(target_os = "windows")]
     use crate::audio::windows::mmdevice;
-    use crate::ui::model::{AudioDeviceId, AudioDeviceInfo, AudioDirection};
+    use crate::ui::{
+        model::{AudioDeviceId, AudioDeviceInfo, AudioDirection},
+        UiEvent,
+    };
 
     pub struct CpalCapture {
         _stream: cpal::Stream,
@@ -681,6 +746,7 @@ mod non_linux {
             channels: u16,
             prod: HeapProd<i16>,
             preferred_device: Option<&str>,
+            tx_event: Option<Sender<UiEvent>>,
         ) -> Result<Self> {
             let host = cpal::default_host();
             let dev = if let Some(name) = preferred_device {
@@ -700,6 +766,8 @@ mod non_linux {
             let stream_cfg = native_input_config(&dev)?;
             let unhealthy = Arc::new(AtomicBool::new(false));
             let unhealthy_cb = unhealthy.clone();
+            let reported = Arc::new(AtomicBool::new(false));
+            let reported_cb = reported.clone();
             let stream = match stream_cfg.sample_format() {
                 cpal::SampleFormat::I8 => build_input_stream::<i8>(
                     &dev,
@@ -708,6 +776,8 @@ mod non_linux {
                     channels,
                     prod,
                     unhealthy_cb,
+                    tx_event.clone(),
+                    reported_cb.clone(),
                 )?,
                 cpal::SampleFormat::I16 => build_input_stream::<i16>(
                     &dev,
@@ -716,6 +786,8 @@ mod non_linux {
                     channels,
                     prod,
                     unhealthy_cb,
+                    tx_event.clone(),
+                    reported_cb.clone(),
                 )?,
                 cpal::SampleFormat::I32 => build_input_stream::<i32>(
                     &dev,
@@ -724,6 +796,8 @@ mod non_linux {
                     channels,
                     prod,
                     unhealthy_cb,
+                    tx_event.clone(),
+                    reported_cb.clone(),
                 )?,
                 cpal::SampleFormat::I64 => build_input_stream::<i64>(
                     &dev,
@@ -732,6 +806,8 @@ mod non_linux {
                     channels,
                     prod,
                     unhealthy_cb,
+                    tx_event.clone(),
+                    reported_cb.clone(),
                 )?,
                 cpal::SampleFormat::U8 => build_input_stream::<u8>(
                     &dev,
@@ -740,6 +816,8 @@ mod non_linux {
                     channels,
                     prod,
                     unhealthy_cb,
+                    tx_event.clone(),
+                    reported_cb.clone(),
                 )?,
                 cpal::SampleFormat::U16 => build_input_stream::<u16>(
                     &dev,
@@ -748,6 +826,8 @@ mod non_linux {
                     channels,
                     prod,
                     unhealthy_cb,
+                    tx_event.clone(),
+                    reported_cb.clone(),
                 )?,
                 cpal::SampleFormat::U32 => build_input_stream::<u32>(
                     &dev,
@@ -756,6 +836,8 @@ mod non_linux {
                     channels,
                     prod,
                     unhealthy_cb,
+                    tx_event.clone(),
+                    reported_cb.clone(),
                 )?,
                 cpal::SampleFormat::U64 => build_input_stream::<u64>(
                     &dev,
@@ -764,6 +846,8 @@ mod non_linux {
                     channels,
                     prod,
                     unhealthy_cb,
+                    tx_event.clone(),
+                    reported_cb.clone(),
                 )?,
                 cpal::SampleFormat::F32 => build_input_stream::<f32>(
                     &dev,
@@ -772,6 +856,8 @@ mod non_linux {
                     channels,
                     prod,
                     unhealthy_cb,
+                    tx_event.clone(),
+                    reported_cb.clone(),
                 )?,
                 cpal::SampleFormat::F64 => build_input_stream::<f64>(
                     &dev,
@@ -780,6 +866,8 @@ mod non_linux {
                     channels,
                     prod,
                     unhealthy_cb,
+                    tx_event.clone(),
+                    reported_cb.clone(),
                 )?,
                 other => return Err(anyhow!("unsupported input sample format: {other:?}")),
             };
@@ -911,6 +999,8 @@ mod non_linux {
         target_channels: u16,
         mut prod: HeapProd<i16>,
         unhealthy: Arc<AtomicBool>,
+        tx_event: Option<Sender<UiEvent>>,
+        reported: Arc<AtomicBool>,
     ) -> Result<cpal::Stream>
     where
         T: SizedSample,
@@ -951,7 +1041,17 @@ mod non_linux {
             },
             move |err| {
                 unhealthy.store(true, Ordering::Relaxed);
-                eprintln!("capture err: {err}")
+                eprintln!("capture err: {err}");
+                if reported
+                    .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok()
+                {
+                    if let Some(tx) = &tx_event {
+                        let _ = tx.send(UiEvent::AppendLog(format!(
+                            "[audio] capture stream error: {err}"
+                        )));
+                    }
+                }
             },
             None,
         )
