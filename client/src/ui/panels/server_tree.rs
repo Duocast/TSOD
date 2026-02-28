@@ -1,5 +1,6 @@
 //! Server / channel tree sidebar panel.
 
+use crate::proto::voiceplatform::v1 as pb;
 use crate::ui::model::{ChannelType, UiIntent, UiModel};
 use crate::ui::theme;
 use crossbeam_channel::Sender;
@@ -450,7 +451,7 @@ fn show_channel_info_details(ui: &mut egui::Ui, ch: &crate::ui::model::ChannelEn
     info_row(ui, "Type", channel_kind);
 
     if ch.channel_type != ChannelType::Category {
-        let codec = codec_label_for_bitrate(ch.bitrate_bps);
+        let codec = codec_label(ch.opus_profile, ch.bitrate_bps);
         info_row(ui, "Audio Codec", codec);
         info_row(ui, "Quality", &format!("{} kbps", ch.bitrate_bps / 1000));
         let max_people = if ch.user_limit == 0 {
@@ -469,13 +470,20 @@ fn info_row(ui: &mut egui::Ui, label: &str, value: &str) {
     });
 }
 
-fn codec_label_for_bitrate(bitrate_bps: u32) -> &'static str {
-    if bitrate_bps >= 160_000 {
-        "Opus Music"
-    } else {
-        "Opus Voice"
+fn codec_label(opus_profile: i32, bitrate_bps: u32) -> &'static str {
+    match pb::OpusProfile::try_from(opus_profile).ok() {
+        Some(pb::OpusProfile::OpusMusic) => "Opus Music",
+        Some(pb::OpusProfile::OpusVoice) => "Opus Voice",
+        _ => {
+            if bitrate_bps >= 160_000 {
+                "Opus Music"
+            } else {
+                "Opus Voice"
+            }
+        }
     }
 }
+
 
 fn show_create_tab_standard(ui: &mut egui::Ui, model: &mut UiModel) {
     // Channel name

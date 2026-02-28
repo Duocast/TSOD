@@ -278,8 +278,8 @@ impl ControlRepo for PgControlRepo {
     ) -> ControlResult<()> {
         sqlx::query(
             r#"
-            INSERT INTO channels (id, server_id, name, parent_id, max_members, max_talkers, created_at, updated_at)
-            VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
+            INSERT INTO channels (id, server_id, name, parent_id, max_members, max_talkers, channel_type, description, bitrate_bps, opus_profile, created_at, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
             "#,
         )
         .bind(ch.id.0)
@@ -288,6 +288,10 @@ impl ControlRepo for PgControlRepo {
         .bind(ch.parent_id.map(|p| p.0))
         .bind(ch.max_members)
         .bind(ch.max_talkers)
+        .bind(ch.channel_type)
+        .bind(&ch.description)
+        .bind(ch.bitrate_bps)
+        .bind(ch.opus_profile)
         .execute(&mut **tx)
         .await
         .context("insert channels")?;
@@ -302,7 +306,7 @@ impl ControlRepo for PgControlRepo {
     ) -> ControlResult<Option<Channel>> {
         let row = sqlx::query(
             r#"
-            SELECT id, server_id, name, parent_id, max_members, max_talkers, created_at, updated_at
+            SELECT id, server_id, name, parent_id, max_members, max_talkers, channel_type, description, bitrate_bps, opus_profile, created_at, updated_at
             FROM channels
             WHERE server_id = $1 AND id = $2
             "#,
@@ -320,6 +324,10 @@ impl ControlRepo for PgControlRepo {
             parent_id: r.get::<Option<Uuid>, _>("parent_id").map(ChannelId),
             max_members: r.get::<Option<i32>, _>("max_members"),
             max_talkers: r.get::<Option<i32>, _>("max_talkers"),
+            channel_type: r.get::<i32, _>("channel_type"),
+            description: r.get::<String, _>("description"),
+            bitrate_bps: r.get::<i32, _>("bitrate_bps"),
+            opus_profile: r.get::<i32, _>("opus_profile"),
             created_at: r.get::<DateTime<Utc>, _>("created_at"),
             updated_at: r.get::<DateTime<Utc>, _>("updated_at"),
         }))
@@ -332,7 +340,7 @@ impl ControlRepo for PgControlRepo {
     ) -> ControlResult<Vec<ChannelListItem>> {
         let rows = sqlx::query(
             r#"
-            SELECT id, name, parent_id, max_members, max_talkers
+            SELECT id, name, parent_id, max_members, max_talkers, channel_type, description, bitrate_bps, opus_profile
             FROM channels
             WHERE server_id = $1
             ORDER BY name ASC
@@ -351,6 +359,10 @@ impl ControlRepo for PgControlRepo {
                 parent_id: r.get::<Option<Uuid>, _>("parent_id").map(ChannelId),
                 max_members: r.get::<Option<i32>, _>("max_members"),
                 max_talkers: r.get::<Option<i32>, _>("max_talkers"),
+                channel_type: r.get::<i32, _>("channel_type"),
+                description: r.get::<String, _>("description"),
+                bitrate_bps: r.get::<i32, _>("bitrate_bps"),
+                opus_profile: r.get::<i32, _>("opus_profile"),
             });
         }
         Ok(out)
@@ -368,7 +380,7 @@ impl ControlRepo for PgControlRepo {
             UPDATE channels
             SET name = $3, updated_at = NOW()
             WHERE server_id = $1 AND id = $2
-            RETURNING id, server_id, name, parent_id, max_members, max_talkers, created_at, updated_at
+            RETURNING id, server_id, name, parent_id, max_members, max_talkers, channel_type, description, bitrate_bps, opus_profile, created_at, updated_at
             "#,
         )
         .bind(server.0)
@@ -385,6 +397,10 @@ impl ControlRepo for PgControlRepo {
             parent_id: r.get::<Option<Uuid>, _>("parent_id").map(ChannelId),
             max_members: r.get::<Option<i32>, _>("max_members"),
             max_talkers: r.get::<Option<i32>, _>("max_talkers"),
+            channel_type: r.get::<i32, _>("channel_type"),
+            description: r.get::<String, _>("description"),
+            bitrate_bps: r.get::<i32, _>("bitrate_bps"),
+            opus_profile: r.get::<i32, _>("opus_profile"),
             created_at: r.get::<DateTime<Utc>, _>("created_at"),
             updated_at: r.get::<DateTime<Utc>, _>("updated_at"),
         }))

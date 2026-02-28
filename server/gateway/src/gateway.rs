@@ -314,7 +314,7 @@ impl Gateway {
                         channel_id: Some(pb::ChannelId {
                             value: ch.0.to_string(),
                         }),
-                        name: chan.name,
+                        name: chan.name.clone(),
                         members: members
                             .into_iter()
                             .map(|m| pb::ChannelMember {
@@ -327,7 +327,21 @@ impl Gateway {
                                 ..Default::default()
                             })
                             .collect(),
-                        ..Default::default()
+                        info: Some(pb::ChannelInfo {
+                            channel_id: Some(pb::ChannelId {
+                                value: ch.0.to_string(),
+                            }),
+                            name: chan.name,
+                            channel_type: chan.channel_type,
+                            description: chan.description,
+                            parent_channel_id: chan.parent_id.map(|pid| pb::ChannelId {
+                                value: pid.0.to_string(),
+                            }),
+                            user_limit: chan.max_members.unwrap_or_default().max(0) as u32,
+                            bitrate: chan.bitrate_bps.max(0) as u32,
+                            opus_profile: chan.opus_profile,
+                            ..Default::default()
+                        }),
                     };
 
                     let resp = pb::ServerToClient {
@@ -389,6 +403,8 @@ impl Gateway {
                         .as_ref()
                         .and_then(|pid| uuid::Uuid::parse_str(&pid.value).ok())
                         .map(ChannelId);
+                    let user_limit = r.user_limit;
+                    let bitrate_bps = (r.bitrate as i32).clamp(8_000, 510_000);
                     let created = self
                         .control
                         .create_channel(
@@ -396,8 +412,16 @@ impl Gateway {
                             ChannelCreate {
                                 name: r.name,
                                 parent_id: parent,
-                                max_members: None,
+                                max_members: if user_limit == 0 {
+                                    None
+                                } else {
+                                    Some(user_limit as i32)
+                                },
                                 max_talkers: None,
+                                channel_type: r.channel_type,
+                                description: r.description,
+                                bitrate_bps,
+                                opus_profile: r.opus_profile,
                             },
                         )
                         .await?;
@@ -407,9 +431,23 @@ impl Gateway {
                         channel_id: Some(pb::ChannelId {
                             value: created.id.0.to_string(),
                         }),
-                        name: created.name,
+                        name: created.name.clone(),
                         members: vec![],
-                        ..Default::default()
+                        info: Some(pb::ChannelInfo {
+                            channel_id: Some(pb::ChannelId {
+                                value: created.id.0.to_string(),
+                            }),
+                            name: created.name,
+                            channel_type: created.channel_type,
+                            description: created.description,
+                            parent_channel_id: created.parent_id.map(|pid| pb::ChannelId {
+                                value: pid.0.to_string(),
+                            }),
+                            user_limit: created.max_members.unwrap_or_default().max(0) as u32,
+                            bitrate: created.bitrate_bps.max(0) as u32,
+                            opus_profile: created.opus_profile,
+                            ..Default::default()
+                        }),
                     };
 
                     let resp = pb::ServerToClient {
@@ -451,8 +489,12 @@ impl Gateway {
                                     parent_channel_id: renamed.parent_id.map(|pid| pb::ChannelId {
                                         value: pid.0.to_string(),
                                     }),
+                                    channel_type: renamed.channel_type,
+                                    description: renamed.description,
                                     user_limit: renamed.max_members.unwrap_or_default().max(0)
                                         as u32,
+                                    bitrate: renamed.bitrate_bps.max(0) as u32,
+                                    opus_profile: renamed.opus_profile,
                                     ..Default::default()
                                 }),
                             },
@@ -969,10 +1011,14 @@ impl Gateway {
                         value: channel.id.0.to_string(),
                     }),
                     name: channel.name.clone(),
+                    channel_type: channel.channel_type,
+                    description: channel.description.clone(),
                     parent_channel_id: channel.parent_id.map(|pid| pb::ChannelId {
                         value: pid.0.to_string(),
                     }),
                     user_limit: channel.max_members.unwrap_or_default().max(0) as u32,
+                    bitrate: channel.bitrate_bps.max(0) as u32,
+                    opus_profile: channel.opus_profile,
                     ..Default::default()
                 }),
             });

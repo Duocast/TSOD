@@ -304,6 +304,7 @@ impl ControlDispatcher {
         name: &str,
         description: &str,
         channel_type: u8,
+        codec: u8,
         bitrate: u32,
         user_limit: u32,
         parent_channel_id: Option<&str>,
@@ -312,12 +313,17 @@ impl ControlDispatcher {
             1 => pb::ChannelType::Text as i32,
             _ => pb::ChannelType::Voice as i32,
         };
+        let opus_profile = match codec {
+            1 => pb::OpusProfile::OpusMusic as i32,
+            _ => pb::OpusProfile::OpusVoice as i32,
+        };
         let req = pb::CreateChannelRequest {
             name: name.into(),
             description: description.into(),
             channel_type: ch_type,
             bitrate,
             user_limit,
+            opus_profile,
             parent_channel_id: parent_channel_id.map(|value| pb::ChannelId {
                 value: value.to_string(),
             }),

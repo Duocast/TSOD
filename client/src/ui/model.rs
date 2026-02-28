@@ -844,7 +844,9 @@ pub struct ChannelEntry {
     pub position: u32,
     pub member_count: u32,
     pub user_limit: u32,
+    pub description: String,
     pub bitrate_bps: u32,
+    pub opus_profile: i32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2166,7 +2168,9 @@ mod tests {
             position: 0,
             member_count: 0,
             user_limit: 0,
+            description: String::new(),
             bitrate_bps: 64_000,
+            opus_profile: 1,
         }));
         model.apply_event(UiEvent::ChannelCreated(ChannelEntry {
             id: "c1".into(),
@@ -2176,7 +2180,9 @@ mod tests {
             position: 0,
             member_count: 0,
             user_limit: 0,
+            description: String::new(),
             bitrate_bps: 64_000,
+            opus_profile: 1,
         }));
 
         assert_eq!(model.channels.iter().filter(|c| c.id == "c1").count(), 1);
@@ -2197,7 +2203,9 @@ mod tests {
             position: 0,
             member_count: 0,
             user_limit: 0,
+            description: String::new(),
             bitrate_bps: 64_000,
+            opus_profile: 1,
         }]));
 
         model.apply_event(UiEvent::ChannelRenamed(ChannelEntry {
@@ -2208,7 +2216,9 @@ mod tests {
             position: 0,
             member_count: 0,
             user_limit: 0,
+            description: String::new(),
             bitrate_bps: 64_000,
+            opus_profile: 1,
         }));
 
         assert_eq!(model.channels.len(), 1);
@@ -2227,7 +2237,9 @@ mod tests {
                 position: 0,
                 member_count: 0,
                 user_limit: 0,
+                description: String::new(),
                 bitrate_bps: 64_000,
+                opus_profile: 1,
             },
             ChannelEntry {
                 id: "c1".into(),
@@ -2237,7 +2249,9 @@ mod tests {
                 position: 0,
                 member_count: 0,
                 user_limit: 0,
+                description: String::new(),
                 bitrate_bps: 64_000,
+                opus_profile: 1,
             },
             ChannelEntry {
                 id: "c1-child".into(),
@@ -2247,7 +2261,9 @@ mod tests {
                 position: 0,
                 member_count: 0,
                 user_limit: 0,
+                description: String::new(),
                 bitrate_bps: 64_000,
+                opus_profile: 1,
             },
         ]));
         model.apply_event(UiEvent::SetDefaultChannelId(Some("default".into())));
@@ -2273,7 +2289,9 @@ mod tests {
             position: 0,
             member_count: 0,
             user_limit: 0,
+            description: String::new(),
             bitrate_bps: 64_000,
+            opus_profile: 1,
         }]));
         model.channel_collapsed.insert("parent".into(), true);
 
@@ -2285,7 +2303,9 @@ mod tests {
             position: 0,
             member_count: 0,
             user_limit: 0,
+            description: String::new(),
             bitrate_bps: 64_000,
+            opus_profile: 1,
         }));
 
         assert_eq!(
@@ -2311,7 +2331,9 @@ mod tests {
                 position: 0,
                 member_count: 0,
                 user_limit: 0,
+                description: String::new(),
                 bitrate_bps: 64_000,
+                opus_profile: 1,
             },
             ChannelEntry {
                 id: "c2".into(),
@@ -2321,7 +2343,9 @@ mod tests {
                 position: 0,
                 member_count: 0,
                 user_limit: 0,
+                description: String::new(),
                 bitrate_bps: 64_000,
+                opus_profile: 1,
             },
         ]));
 
@@ -2333,7 +2357,9 @@ mod tests {
             position: 0,
             member_count: 0,
             user_limit: 0,
+            description: String::new(),
             bitrate_bps: 64_000,
+            opus_profile: 1,
         }));
         model.apply_event(UiEvent::ChannelDeleted {
             channel_id: "c2".into(),
@@ -2453,7 +2479,9 @@ mod tests {
             position: 0,
             member_count: 0,
             user_limit: 0,
+            description: String::new(),
             bitrate_bps: 64_000,
+            opus_profile: 1,
         });
 
         model.apply_event(UiEvent::SetChannelName(

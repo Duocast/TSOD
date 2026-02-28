@@ -16,6 +16,10 @@ pub struct Channel {
     pub parent_id: Option<ChannelId>,
     pub max_members: Option<i32>,
     pub max_talkers: Option<i32>,
+    pub channel_type: i32,
+    pub description: String,
+    pub bitrate_bps: i32,
+    pub opus_profile: i32,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -28,6 +32,10 @@ pub struct ChannelListItem {
     pub parent_id: Option<ChannelId>,
     pub max_members: Option<i32>,
     pub max_talkers: Option<i32>,
+    pub channel_type: i32,
+    pub description: String,
+    pub bitrate_bps: i32,
+    pub opus_profile: i32,
 }
 
 /// Create channel input
@@ -37,6 +45,10 @@ pub struct ChannelCreate {
     pub parent_id: Option<ChannelId>,
     pub max_members: Option<i32>,
     pub max_talkers: Option<i32>,
+    pub channel_type: i32,
+    pub description: String,
+    pub bitrate_bps: i32,
+    pub opus_profile: i32,
 }
 
 /// Join channel input
