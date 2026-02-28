@@ -509,6 +509,7 @@ fn page_capture(
             ui.add(egui::Slider::new(&mut s.agc_target_db, -30.0..=-6.0).suffix(" dBFS"));
             if (s.agc_target_db - prev).abs() > 0.1 {
                 dirty = true;
+                let _ = tx_intent.send(UiIntent::SetAgcTargetDb(s.agc_target_db));
             }
         });
     }
@@ -531,6 +532,7 @@ fn page_capture(
         .changed()
     {
         dirty = true;
+        let _ = tx_intent.send(UiIntent::SetTypingAttenuation(s.typing_attenuation));
     }
     hint(ui, "Reduces keyboard click noise while you type.");
 
@@ -547,6 +549,7 @@ fn page_capture(
             });
         if s.fec_mode != prev {
             dirty = true;
+            let _ = tx_intent.send(UiIntent::SetFecMode(s.fec_mode));
         }
     });
 
@@ -563,6 +566,7 @@ fn page_capture(
         );
         if s.fec_strength != prev {
             dirty = true;
+            let _ = tx_intent.send(UiIntent::SetFecStrength(s.fec_strength));
         }
     }
 
@@ -796,6 +800,7 @@ fn page_playback(
         .changed()
     {
         dirty = true;
+        let _ = tx_intent.send(UiIntent::SetOutputAutoLevel(s.output_auto_level));
     }
     hint(
         ui,
@@ -807,6 +812,7 @@ fn page_playback(
         .changed()
     {
         dirty = true;
+        let _ = tx_intent.send(UiIntent::SetMonoExpansion(s.mono_expansion));
     }
     hint(
         ui,
@@ -820,6 +826,7 @@ fn page_playback(
         .changed()
     {
         dirty = true;
+        let _ = tx_intent.send(UiIntent::SetComfortNoise(s.comfort_noise));
     }
     hint(
         ui,
@@ -833,6 +840,7 @@ fn page_playback(
             ui.add(egui::Slider::new(&mut s.comfort_noise_level, 0.0..=0.1).step_by(0.005));
             if (s.comfort_noise_level - prev).abs() > 0.0001 {
                 dirty = true;
+                let _ = tx_intent.send(UiIntent::SetComfortNoiseLevel(s.comfort_noise_level));
             }
         });
     }
@@ -847,6 +855,7 @@ fn page_playback(
         .changed()
     {
         dirty = true;
+        let _ = tx_intent.send(UiIntent::SetDuckingEnabled(s.ducking_enabled));
     }
     hint(
         ui,
@@ -860,6 +869,7 @@ fn page_playback(
             ui.add(egui::Slider::new(&mut s.ducking_attenuation_db, -40..=0).suffix(" dB"));
             if s.ducking_attenuation_db != prev {
                 dirty = true;
+                let _ = tx_intent.send(UiIntent::SetDuckingAttenuationDb(s.ducking_attenuation_db));
             }
         });
     }
