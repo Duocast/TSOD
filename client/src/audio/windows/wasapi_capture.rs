@@ -4,7 +4,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
-use tracing::{error, info};
+use tracing::{debug, error, info};
 use wasapi::{Direction, SampleType, StreamMode};
 
 use crate::audio::resample::LinearResampler;
@@ -130,6 +130,7 @@ fn run_capture_thread(
     let bits_per_sample = mix.get_bitspersample() as u16;
     let valid_bits = mix.get_validbitspersample() as u16;
     let sample_type = mix.get_subformat().context("get WASAPI sample type")?;
+    let bytes_per_sample = block_align / device_channels;
 
     info!(
         "[wasapi capture] open device id={} name={} mix: {}Hz {}ch block_align={} bits={} valid={} type={:?}",
@@ -142,6 +143,15 @@ fn run_capture_thread(
         valid_bits,
         sample_type
     );
+    if bytes_per_sample == 3 || valid_bits == 24 {
+        debug!(
+            "[wasapi capture] 24-bit path active: bytes_per_sample={} valid_bits={} block_align={} channels={}",
+            bytes_per_sample,
+            valid_bits,
+            block_align,
+            device_channels
+        );
+    }
 
     let mode = StreamMode::EventsShared {
         autoconvert: false,
@@ -215,6 +225,7 @@ fn run_capture_thread(
                     &mut mono,
                     &read_buf,
                     frames as usize,
+                    block_align,
                     device_channels,
                     sample_type,
                     valid_bits,
@@ -240,17 +251,43 @@ fn decode_interleaved_to_mono(
     out: &mut Vec<f32>,
     data: &[u8],
     frames: usize,
+    block_align: usize,
     channels: usize,
     sample_type: SampleType,
     valid_bits: u16,
 ) {
+    out.clear();
     out.reserve(frames);
+
+    if channels == 0 || block_align == 0 || block_align % channels != 0 {
+        error!(
+            "[wasapi capture] invalid frame layout: block_align={} channels={}",
+            block_align, channels
+        );
+        out.resize(frames, 0.0);
+        return;
+    }
+
+    let bytes_per_sample = block_align / channels;
+    let scale = int_scale(valid_bits);
+
     match sample_type {
         SampleType::Float => {
-            for frame in data.chunks_exact(channels * 4).take(frames) {
+            if bytes_per_sample != 4 {
+                error!(
+                    "[wasapi capture] unsupported float bytes_per_sample={} (block_align={} channels={})",
+                    bytes_per_sample,
+                    block_align,
+                    channels
+                );
+                out.resize(frames, 0.0);
+                return;
+            }
+
+            for frame in data.chunks_exact(block_align).take(frames) {
                 let mut sum = 0.0f32;
                 for ch in 0..channels {
-                    let base = ch * 4;
+                    let base = ch * bytes_per_sample;
                     let sample = f32::from_le_bytes([
                         frame[base],
                         frame[base + 1],
@@ -262,33 +299,73 @@ fn decode_interleaved_to_mono(
                 out.push(sum / channels as f32);
             }
         }
-        SampleType::Int => {
-            if valid_bits <= 16 {
-                for frame in data.chunks_exact(channels * 2).take(frames) {
+        SampleType::Int => match bytes_per_sample {
+            2 => {
+                for frame in data.chunks_exact(block_align).take(frames) {
                     let mut sum = 0.0f32;
                     for ch in 0..channels {
-                        let base = ch * 2;
-                        let sample = i16::from_le_bytes([frame[base], frame[base + 1]]);
-                        sum += sample as f32 / i16::MAX as f32;
+                        let base = ch * bytes_per_sample;
+                        let sample = i16::from_le_bytes([frame[base], frame[base + 1]]) as i32;
+                        sum += sample as f32 / scale;
                     }
                     out.push(sum / channels as f32);
                 }
-            } else {
-                for frame in data.chunks_exact(channels * 4).take(frames) {
+            }
+            3 => {
+                for frame in data.chunks_exact(block_align).take(frames) {
                     let mut sum = 0.0f32;
                     for ch in 0..channels {
-                        let base = ch * 4;
-                        let sample = i32::from_le_bytes([
+                        let base = ch * bytes_per_sample;
+                        let mut sample = (frame[base] as i32)
+                            | ((frame[base + 1] as i32) << 8)
+                            | ((frame[base + 2] as i32) << 16);
+                        if (sample & 0x0080_0000) != 0 {
+                            sample |= !0x00FF_FFFF;
+                        }
+                        sum += sample as f32 / scale;
+                    }
+                    out.push(sum / channels as f32);
+                }
+            }
+            4 => {
+                for frame in data.chunks_exact(block_align).take(frames) {
+                    let mut sum = 0.0f32;
+                    for ch in 0..channels {
+                        let base = ch * bytes_per_sample;
+                        let mut sample = i32::from_le_bytes([
                             frame[base],
                             frame[base + 1],
                             frame[base + 2],
                             frame[base + 3],
                         ]);
-                        sum += sample as f32 / i32::MAX as f32;
+                        if valid_bits > 0 && valid_bits < 32 {
+                            let shift = 32 - valid_bits;
+                            sample = (sample << shift) >> shift;
+                        }
+                        sum += sample as f32 / scale;
                     }
                     out.push(sum / channels as f32);
                 }
             }
-        }
+            _ => {
+                error!(
+                        "[wasapi capture] unsupported integer bytes_per_sample={} (block_align={} channels={} valid_bits={})",
+                        bytes_per_sample,
+                        block_align,
+                        channels,
+                        valid_bits
+                    );
+                out.resize(frames, 0.0);
+                return;
+            }
+        },
+    }
+}
+
+fn int_scale(valid_bits: u16) -> f32 {
+    match valid_bits {
+        0 => 1.0,
+        1..=31 => ((1_i64 << (valid_bits - 1)) - 1) as f32,
+        _ => i32::MAX as f32,
     }
 }
