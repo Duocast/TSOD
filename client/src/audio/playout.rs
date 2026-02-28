@@ -20,7 +20,17 @@ pub const PLAYBACK_MODE_WASAPI: &str = "WASAPI";
 #[cfg(target_os = "linux")]
 type PlayoutBackend = linux::LinuxPlayout;
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "windows")]
+type PlayoutBackend = crate::audio::windows::wasapi_playout::WasapiPlayout;
+
+#[cfg(target_os = "macos")]
+type PlayoutBackend = non_linux::CpalPlayout;
+
+#[cfg(all(
+    not(target_os = "linux"),
+    not(target_os = "windows"),
+    not(target_os = "macos")
+))]
 type PlayoutBackend = non_linux::CpalPlayout;
 
 // SAFETY: The `UnsafeCell<HeapProd<i16>>` is only ever accessed from a single
@@ -687,7 +697,7 @@ mod linux {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(not(target_os = "linux"), not(target_os = "windows")))]
 mod non_linux {
     use anyhow::{anyhow, Context, Result};
     use cpal::{
