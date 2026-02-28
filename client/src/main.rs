@@ -122,6 +122,102 @@ struct VoiceTelemetryCounters {
     peak_stream_level_bits: AtomicU32,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct ChannelAudioMode {
+    opus_profile: i32,
+    bitrate_bps: u32,
+}
+
+impl Default for ChannelAudioMode {
+    fn default() -> Self {
+        Self {
+            opus_profile: pb::OpusProfile::OpusVoice as i32,
+            bitrate_bps: 64_000,
+        }
+    }
+}
+
+fn is_music_channel(mode: ChannelAudioMode) -> bool {
+    matches!(
+        pb::OpusProfile::try_from(mode.opus_profile).ok(),
+        Some(pb::OpusProfile::OpusMusic)
+    ) || mode.bitrate_bps >= 160_000
+}
+
+#[derive(Debug)]
+struct MissingWaitController {
+    ewma_late_ms: f32,
+    ewma_jitter_ms: f32,
+    missing_wait_ms: f32,
+    last_adjust_log_ms: u64,
+    last_logged_wait_ms: f32,
+    last_arrival_ms: Option<u64>,
+    last_packet_ts_ms: Option<u32>,
+}
+
+impl MissingWaitController {
+    const MIN_WAIT_MS: f32 = 40.0;
+    const MAX_WAIT_MS: f32 = 200.0;
+    const ADJUST_ALPHA: f32 = 0.05;
+
+    fn new() -> Self {
+        Self {
+            ewma_late_ms: 0.0,
+            ewma_jitter_ms: 0.0,
+            missing_wait_ms: Self::MIN_WAIT_MS,
+            last_adjust_log_ms: 0,
+            last_logged_wait_ms: Self::MIN_WAIT_MS,
+            last_arrival_ms: None,
+            last_packet_ts_ms: None,
+        }
+    }
+
+    fn observe_packet(&mut self, now_ms: u64, packet_ts_ms: u32, frame_ms: u32) {
+        if let (Some(last_arrival), Some(last_ts)) = (self.last_arrival_ms, self.last_packet_ts_ms)
+        {
+            let arrival_delta = now_ms.saturating_sub(last_arrival) as f32;
+            let ts_delta = packet_ts_ms.wrapping_sub(last_ts);
+            let expected_delta = if ts_delta == 0 {
+                frame_ms as f32
+            } else {
+                ts_delta as f32
+            };
+            let jitter_ms = (arrival_delta - expected_delta).abs();
+            self.ewma_jitter_ms = 0.9 * self.ewma_jitter_ms + 0.1 * jitter_ms;
+
+            let expected_arrival_ms =
+                last_arrival.saturating_add(expected_delta.max(frame_ms as f32) as u64);
+            let late_ms = now_ms.saturating_sub(expected_arrival_ms) as f32;
+            self.ewma_late_ms = 0.9 * self.ewma_late_ms + 0.1 * late_ms;
+        }
+        self.last_arrival_ms = Some(now_ms);
+        self.last_packet_ts_ms = Some(packet_ts_ms);
+        self.update_missing_wait(now_ms);
+    }
+
+    fn update_missing_wait(&mut self, now_ms: u64) {
+        let target = (Self::MIN_WAIT_MS + 2.0 * self.ewma_jitter_ms + self.ewma_late_ms)
+            .clamp(Self::MIN_WAIT_MS, Self::MAX_WAIT_MS);
+        let prev = self.missing_wait_ms;
+        self.missing_wait_ms = prev + (target - prev) * Self::ADJUST_ALPHA;
+        if (self.missing_wait_ms - self.last_logged_wait_ms).abs() >= 20.0
+            && now_ms.saturating_sub(self.last_adjust_log_ms) >= 1_000
+        {
+            self.last_adjust_log_ms = now_ms;
+            self.last_logged_wait_ms = self.missing_wait_ms;
+            info!(
+                "[audio] jitter: missing_wait_ms adjusted to {}ms (ewma_jitter={:.1}ms ewma_late={:.1}ms)",
+                self.missing_wait_ms.round() as u64,
+                self.ewma_jitter_ms,
+                self.ewma_late_ms
+            );
+        }
+    }
+
+    fn missing_wait_ms(&self) -> u64 {
+        self.missing_wait_ms.round() as u64
+    }
+}
 impl VoiceTelemetryCounters {
     fn observe_peak_stream_level(&self, level: f32) {
         let mut current = self.peak_stream_level_bits.load(Ordering::Relaxed);
@@ -400,6 +496,7 @@ async fn app_task(
     let loopback_active = Arc::new(AtomicBool::new(false));
     let session_voice_active = Arc::new(AtomicBool::new(false));
     let active_voice_channel_route = Arc::new(AtomicU32::new(0));
+    let active_channel_audio_mode = Arc::new(std::sync::RwLock::new(ChannelAudioMode::default()));
     let voice_counters = Arc::new(VoiceTelemetryCounters::default());
     let send_queue_drop_count = Arc::new(AtomicU32::new(0));
 
@@ -435,6 +532,7 @@ async fn app_task(
             playout.clone(),
             capture_dsp.clone(),
             active_voice_channel_route.clone(),
+            active_channel_audio_mode.clone(),
             selected_audio.clone(),
             ptt_active.clone(),
             self_muted.clone(),
@@ -1091,6 +1189,7 @@ async fn connect_and_run_session(
     playout: Arc<RwLock<Arc<audio::playout::Playout>>>,
     capture_dsp: Option<Arc<Mutex<audio::dsp::CaptureDsp>>>,
     active_voice_channel_route: Arc<AtomicU32>,
+    active_channel_audio_mode: Arc<std::sync::RwLock<ChannelAudioMode>>,
     selected_audio: Arc<Mutex<AudioSelection>>,
     ptt_active: Arc<AtomicBool>,
     self_muted: Arc<AtomicBool>,
@@ -1654,6 +1753,14 @@ async fn connect_and_run_session(
             .map(vp_route_hash::channel_route_hash)
             .unwrap_or(0);
         active_voice_channel_route.store(route, Ordering::Relaxed);
+        if let Some(ch) = channels.iter().find(|ch| ch.id == *channel_id) {
+            if let Ok(mut mode) = active_channel_audio_mode.write() {
+                *mode = ChannelAudioMode {
+                    opus_profile: ch.opus_profile,
+                    bitrate_bps: ch.bitrate_bps,
+                };
+            }
+        }
     } else {
         active_voice_channel_route.store(0, Ordering::Relaxed);
     }
@@ -1676,6 +1783,7 @@ async fn connect_and_run_session(
         capture_dsp.clone(),
         tx_event.clone(),
         active_voice_channel_route.clone(),
+        active_channel_audio_mode.clone(),
         ptt_active.clone(),
         self_muted.clone(),
         self_deafened.clone(),
@@ -1920,6 +2028,16 @@ async fn connect_and_run_session(
                                         );
                                     }
                                     active_channel = Some(channel_id.clone());
+                                    if let Ok(mut mode) = active_channel_audio_mode.write() {
+                                        *mode = ChannelAudioMode {
+                                            opus_profile: state
+                                                .channel
+                                                .as_ref()
+                                                .map(|c| c.opus_profile)
+                                                .unwrap_or(pb::OpusProfile::OpusVoice as i32),
+                                            bitrate_bps: state.channel.as_ref().map(|c| c.bitrate).unwrap_or(64_000),
+                                        };
+                                    }
                                     if let Some(local_member) =
                                         state.members.iter().find(|m| {
                                             m.user_id
@@ -1975,6 +2093,9 @@ async fn connect_and_run_session(
                                 }
                             }
                             active_channel = None;
+                            if let Ok(mut mode) = active_channel_audio_mode.write() {
+                                *mode = ChannelAudioMode::default();
+                            }
                             server_deafened.store(false, Ordering::Relaxed);
                             active_voice_channel_route.store(0, Ordering::Relaxed);
                             let _ = tx_event.send(UiEvent::SetActiveVoiceRoute(0));
@@ -2945,6 +3066,7 @@ async fn voice_send_loop(
     capture_dsp: Option<Arc<Mutex<audio::dsp::CaptureDsp>>>,
     tx_event: Sender<UiEvent>,
     active_voice_channel_route: Arc<AtomicU32>,
+    active_channel_audio_mode: Arc<std::sync::RwLock<ChannelAudioMode>>,
     ptt_active: Arc<AtomicBool>,
     self_muted: Arc<AtomicBool>,
     self_deafened: Arc<AtomicBool>,
@@ -2973,6 +3095,8 @@ async fn voice_send_loop(
     let mut vad_report_counter = 0u32;
     let mut stream_ts_ms = 0u32;
     let mut last_local_speaking = false;
+    let mut vad_hysteresis =
+        audio::dsp::vad::VadHysteresis::from_timing(0.6, 0.45, 60, 300, frame_ms);
 
     loop {
         tick.tick().await;
@@ -3021,12 +3145,17 @@ async fn voice_send_loop(
             continue;
         }
 
+        let channel_mode = active_channel_audio_mode
+            .read()
+            .map(|mode| *mode)
+            .unwrap_or_default();
+        let music_channel = is_music_channel(channel_mode);
+
         // Apply DSP pipeline (noise suppression + AGC + VAD)
-        let mut is_voice = true;
+        let mut vad_score = 1.0_f32;
         if let Some(ref dsp) = capture_dsp {
             let mut d = dsp.lock().await;
-            d.process_frame(&mut pcm);
-            is_voice = d.is_voice_active();
+            vad_score = d.process_frame(&mut pcm);
 
             // Report VAD level to GUI periodically
             vad_report_counter += 1;
@@ -3035,7 +3164,23 @@ async fn voice_send_loop(
             }
         }
 
-        if !is_voice {
+        let gated_on = if push_to_talk {
+            ptt_active.load(Ordering::Relaxed)
+        } else if music_channel {
+            true
+        } else {
+            vad_hysteresis.update(vad_score)
+        };
+
+        if gated_on != last_local_speaking {
+            if gated_on {
+                debug!("[audio] vad gate ON (score={:.2})", vad_score);
+            } else {
+                debug!("[audio] vad gate OFF (hangover elapsed)");
+            }
+        }
+
+        if !gated_on {
             let mut attenuation_db =
                 u32_to_f32(audio_runtime.denoise_attenuation_db.load(Ordering::Relaxed));
             if audio_runtime.typing_attenuation.load(Ordering::Relaxed) {
@@ -3049,8 +3194,7 @@ async fn voice_send_loop(
             }
         }
 
-        // Skip sending if VAD says no voice (and not PTT mode)
-        let speaking_now = push_to_talk || is_voice;
+        let speaking_now = gated_on;
         if speaking_now != last_local_speaking {
             last_local_speaking = speaking_now;
             let _ = tx_event.send(UiEvent::VoiceActivity {
@@ -3085,7 +3229,7 @@ async fn voice_send_loop(
             ssrc,
             seq,
             stream_ts_ms,
-            is_voice,
+            gated_on,
             &enc_out[..n],
         );
         seq = seq.wrapping_add(1);
@@ -3122,7 +3266,6 @@ async fn voice_recv_loop(
     const SPEAKING_HANGOVER_MS: u64 = 350;
     const STREAM_IDLE_DROP_MS: u64 = 10_000;
     const PLC_MAX_FRAMES: usize = 5;
-    const JITTER_MISSING_WAIT_MS: u64 = 40;
     let sample_rate = 48_000u32;
     let channels = 1usize;
     let frame_ms = 20u32;
@@ -3176,6 +3319,7 @@ async fn voice_recv_loop(
                     stream.user_id = Some(user_id.to_string());
                 }
                 stream.jitter.push(packet.seq, packet.payload.to_vec());
+                stream.missing_wait.observe_packet(now_ms, packet.ts_ms, frame_ms);
             }
             _ = tick.tick() => {
                 if self_deafened.load(Ordering::Relaxed) || server_deafened.load(Ordering::Relaxed) {
@@ -3205,7 +3349,7 @@ async fn voice_recv_loop(
 
                     let ready = stream
                         .jitter
-                        .pop_ready(now_ms, JITTER_MISSING_WAIT_MS);
+                        .pop_ready(now_ms, stream.missing_wait.missing_wait_ms());
 
                     match ready {
                         audio::jitter::PopResult::Frame(frame) => {
@@ -3404,6 +3548,7 @@ struct InboundStreamState {
     last_packet_wall_ms: u64,
     last_voice_frame_wall_ms: u64,
     plc_frames: usize,
+    missing_wait: MissingWaitController,
     speaking: bool,
     last_emitted_speaking: bool,
 }
@@ -3423,6 +3568,7 @@ impl InboundStreamState {
             last_packet_wall_ms: 0,
             last_voice_frame_wall_ms: 0,
             plc_frames: 0,
+            missing_wait: MissingWaitController::new(),
             speaking: false,
             last_emitted_speaking: false,
         }
