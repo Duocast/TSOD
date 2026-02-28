@@ -489,6 +489,61 @@ impl<R: ControlRepo> ControlService<R> {
         Ok(())
     }
 
+    pub async fn disconnect_user(&self, ctx: &RequestContext) -> ControlResult<Vec<ChannelId>> {
+        let mut tx = <R as ControlRepo>::tx(&self.repo).await?;
+
+        let channels = <R as ControlRepo>::list_member_channels_for_user(
+            &self.repo,
+            &mut tx,
+            ctx.server_id,
+            ctx.user_id,
+        )
+        .await?;
+
+        for channel_id in &channels {
+            <R as ControlRepo>::delete_member(
+                &self.repo,
+                &mut tx,
+                ctx.server_id,
+                *channel_id,
+                ctx.user_id,
+            )
+            .await?;
+
+            <R as ControlRepo>::insert_audit(
+                &self.repo,
+                &mut tx,
+                &AuditEntry::new(
+                    ctx.server_id,
+                    Some(ctx.user_id),
+                    "member.leave",
+                    "channel",
+                    channel_id.0.to_string(),
+                    json!({ "user_id": ctx.user_id.0 }),
+                ),
+            )
+            .await?;
+
+            <R as ControlRepo>::insert_outbox(
+                &self.repo,
+                &mut tx,
+                &OutboxEvent {
+                    id: OutboxId(Uuid::new_v4()),
+                    server_id: ctx.server_id,
+                    topic: "presence.member_left".to_string(),
+                    payload_json: json!({
+                        "channel_id": channel_id.0,
+                        "user_id": ctx.user_id.0
+                    }),
+                },
+            )
+            .await?;
+        }
+
+        tx.commit().await?;
+        Ok(channels)
+    }
+
     pub async fn set_voice_mute(
         &self,
         ctx: &RequestContext,

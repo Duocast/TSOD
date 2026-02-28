@@ -859,21 +859,23 @@ impl Gateway {
         }
         .await;
 
-        if let Some(ch) = current_channel {
-            if let Err(e) = self.control.leave_channel(&ctx, ch).await {
+        match self.control.disconnect_user(&ctx).await {
+            Ok(channels) => {
+                self.membership.remove_user(user_id);
+                for ch in channels {
+                    if let Some(mut cur) = self.membership.members_of(ch) {
+                        cur.retain(|u| *u != user_id);
+                        let max = self.membership.max_talkers_of(ch).unwrap_or(4);
+                        self.membership.set_channel_state(ch, max, cur);
+                    }
+                }
+            }
+            Err(e) => {
                 warn!(
                     user_id = %user_id.0,
-                    channel_id = %ch.0,
                     error = %e,
-                    "disconnect cleanup leave_channel failed"
+                    "disconnect cleanup failed"
                 );
-            } else {
-                self.membership.remove_user(user_id);
-                if let Some(mut cur) = self.membership.members_of(ch) {
-                    cur.retain(|u| *u != user_id);
-                    let max = self.membership.max_talkers_of(ch).unwrap_or(4);
-                    self.membership.set_channel_state(ch, max, cur);
-                }
             }
         }
 
