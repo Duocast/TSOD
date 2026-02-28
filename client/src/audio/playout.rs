@@ -1,10 +1,10 @@
 use anyhow::Result;
 use crossbeam_channel::Sender;
+use parking_lot::Mutex;
 use ringbuf::{
     traits::{Producer, Split},
     HeapProd, HeapRb,
 };
-use std::cell::UnsafeCell;
 
 use crate::ui::{
     model::{disambiguate_display_labels, AudioBackend, AudioDeviceId, AudioDeviceInfo},
@@ -13,7 +13,7 @@ use crate::ui::{
 
 pub struct Playout {
     backend: PlayoutBackend,
-    prod: UnsafeCell<HeapProd<i16>>,
+    prod: Mutex<HeapProd<i16>>,
 }
 
 pub const PLAYBACK_MODE_AUTO: &str = "Automatically use best mode";
@@ -36,13 +36,6 @@ type PlayoutBackend = non_linux::CpalPlayout;
     not(target_os = "macos")
 ))]
 type PlayoutBackend = non_linux::CpalPlayout;
-
-// SAFETY: The `UnsafeCell<HeapProd<i16>>` is only ever accessed from a single
-// writer thread via `push_pcm`. The consumer half lives on the audio-backend
-// callback thread and never touches `prod`. Because exactly one thread holds a
-// `&mut` reference at any time, the Send + Sync impls are sound.
-unsafe impl Send for Playout {}
-unsafe impl Sync for Playout {}
 
 impl Playout {
     pub fn start(sample_rate: u32, channels: u16) -> Result<Self> {
@@ -90,13 +83,13 @@ impl Playout {
 
         Ok(Self {
             backend,
-            prod: UnsafeCell::new(prod),
+            prod: Mutex::new(prod),
         })
     }
 
     pub fn push_pcm(&self, pcm: &[i16]) {
         let _ = &self.backend;
-        let prod = unsafe { &mut *self.prod.get() };
+        let mut prod = self.prod.lock();
         for &s in pcm {
             let _ = prod.try_push(s);
         }

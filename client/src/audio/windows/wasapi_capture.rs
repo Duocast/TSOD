@@ -1,10 +1,11 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use crossbeam_channel::Sender;
 use ringbuf::{traits::Producer, HeapProd};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
+use std::time::{Duration, Instant};
 use tracing::{debug, error, info};
 use wasapi::{Direction, SampleType, StreamMode};
 
@@ -150,11 +151,16 @@ fn run_capture_thread(
     let block_align = mix.get_blockalign() as usize;
     let bits_per_sample = mix.get_bitspersample() as u16;
     let valid_bits = mix.get_validbitspersample() as u16;
+    let effective_valid_bits = match valid_bits {
+        0 => bits_per_sample,
+        _ => valid_bits,
+    }
+    .clamp(1, 32);
     let sample_type = mix.get_subformat().context("get WASAPI sample type")?;
     let bytes_per_sample = block_align / device_channels;
 
     info!(
-        "[wasapi capture] open device id={} name={} mix: {}Hz {}ch block_align={} bits={} valid={} type={:?}",
+        "[wasapi capture] open device id={} name={} mix: {}Hz {}ch block_align={} bits={} valid={} effective_valid={} type={:?}",
         endpoint_id,
         friendly_name,
         device_rate,
@@ -162,13 +168,15 @@ fn run_capture_thread(
         block_align,
         bits_per_sample,
         valid_bits,
+        effective_valid_bits,
         sample_type
     );
     if bytes_per_sample == 3 || valid_bits == 24 {
         debug!(
-            "[wasapi capture] 24-bit path active: bytes_per_sample={} valid_bits={} block_align={} channels={}",
+            "[wasapi capture] 24-bit path active: bytes_per_sample={} valid_bits={} effective_valid_bits={} block_align={} channels={}",
             bytes_per_sample,
             valid_bits,
+            effective_valid_bits,
             block_align,
             device_channels
         );
@@ -205,12 +213,20 @@ fn run_capture_thread(
     let mut read_buf = Vec::<u8>::new();
     let mut mono = Vec::<f32>::new();
     let mut resampled = Vec::<f32>::new();
+    let mut last_frame_instant = Instant::now();
 
     while !stop.load(Ordering::Relaxed) {
         match handle.wait_for_event(500) {
             Ok(()) => {}
             Err(wasapi::WasapiError::EventTimeout) => {
                 consecutive_timeouts = consecutive_timeouts.saturating_add(1);
+                let stalled_for = last_frame_instant.elapsed();
+                if stalled_for >= Duration::from_secs(5) {
+                    return Err(anyhow!(
+                        "WASAPI capture stalled: no frames for {}ms",
+                        stalled_for.as_millis()
+                    ));
+                }
                 if consecutive_timeouts == 121 {
                     tracing::warn!("[wasapi capture] wait_for_event timed out repeatedly; stream remains alive");
                 }
@@ -248,6 +264,10 @@ fn run_capture_thread(
                 })
                 .context("read WASAPI capture packet")?;
 
+            if frames > 0 {
+                last_frame_instant = Instant::now();
+            }
+
             mono.clear();
             if info.flags.silent {
                 mono.resize(frames as usize, 0.0);
@@ -259,7 +279,7 @@ fn run_capture_thread(
                     block_align,
                     device_channels,
                     sample_type,
-                    valid_bits,
+                    effective_valid_bits,
                 );
             }
 

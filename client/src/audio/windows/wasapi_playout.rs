@@ -160,11 +160,16 @@ fn run_playout_thread(
     let block_align = mix.get_blockalign() as usize;
     let bits_per_sample = mix.get_bitspersample() as u16;
     let valid_bits = mix.get_validbitspersample() as u16;
+    let effective_valid_bits = match valid_bits {
+        0 => bits_per_sample,
+        _ => valid_bits,
+    }
+    .clamp(1, 32);
     let sample_type = mix.get_subformat().context("get WASAPI sample type")?;
     let bytes_per_sample = block_align / device_channels;
 
     info!(
-        "[wasapi playout] open device id={} name={} mix: {}Hz {}ch block_align={} bits={} valid={} type={:?}",
+        "[wasapi playout] open device id={} name={} mix: {}Hz {}ch block_align={} bits={} valid={} effective_valid={} type={:?}",
         endpoint_id,
         friendly_name,
         device_rate,
@@ -172,14 +177,16 @@ fn run_playout_thread(
         block_align,
         bits_per_sample,
         valid_bits,
+        effective_valid_bits,
         sample_type
     );
 
     if bytes_per_sample == 3 || valid_bits == 24 {
         debug!(
-            "[wasapi playout] 24-bit path active: bytes_per_sample={} valid_bits={} block_align={} channels={}",
+            "[wasapi playout] 24-bit path active: bytes_per_sample={} valid_bits={} effective_valid_bits={} block_align={} channels={}",
             bytes_per_sample,
             valid_bits,
+            effective_valid_bits,
             block_align,
             device_channels
         );
@@ -215,12 +222,20 @@ fn run_playout_thread(
     let mut consecutive_timeouts = 0u32;
     let mut source_mono = Vec::<f32>::new();
     let mut source_resampled = Vec::<f32>::new();
+    let mut last_write_instant = std::time::Instant::now();
 
     while !stop.load(Ordering::Relaxed) {
         match handle.wait_for_event(500) {
             Ok(()) => {}
             Err(wasapi::WasapiError::EventTimeout) => {
                 consecutive_timeouts = consecutive_timeouts.saturating_add(1);
+                let stalled_for = last_write_instant.elapsed();
+                if stalled_for >= std::time::Duration::from_secs(5) {
+                    return Err(anyhow!(
+                        "WASAPI playout stalled: no successful writes for {}ms",
+                        stalled_for.as_millis()
+                    ));
+                }
                 if consecutive_timeouts == 121 {
                     tracing::warn!("[wasapi playout] wait_for_event timed out repeatedly; stream remains alive");
                 }
@@ -252,7 +267,7 @@ fn run_playout_thread(
             device_channels,
             sample_type,
             &source_resampled,
-            valid_bits,
+            effective_valid_bits,
         )?;
 
         render
@@ -262,6 +277,7 @@ fn run_playout_thread(
                 error
             })
             .context("write WASAPI render buffer")?;
+        last_write_instant = std::time::Instant::now();
     }
 
     let _ = audio_client.stop_stream();
