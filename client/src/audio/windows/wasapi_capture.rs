@@ -136,9 +136,12 @@ fn run_capture_thread(
         .or_else(|_| device.get_description())
         .unwrap_or_else(|_| "Unknown device".to_string());
 
-    let mut audio_client = device
-        .get_iaudioclient()
-        .context("get WASAPI audio client")?;
+    let mut audio_client = device.get_iaudioclient().with_context(|| {
+        format!(
+            "get WASAPI audio client (id={} name={})",
+            endpoint_id, friendly_name
+        )
+    })?;
     let mix = audio_client
         .get_mixformat()
         .context("get WASAPI mix format")?;
