@@ -1,19 +1,25 @@
 use anyhow::Result;
 use crossbeam_channel::Sender;
+use parking_lot::Mutex;
 use ringbuf::{
     traits::{Consumer, Split},
     HeapCons, HeapRb,
 };
-use std::cell::UnsafeCell;
 
 use crate::ui::{
     model::{disambiguate_display_labels, AudioBackend, AudioDeviceId, AudioDeviceInfo},
     UiEvent,
 };
 
+struct CaptureConsState {
+    cons: HeapCons<i16>,
+    stash: Vec<i16>,
+    underflow_counter: usize,
+}
+
 pub struct Capture {
     backend: CaptureBackend,
-    cons: UnsafeCell<HeapCons<i16>>,
+    cons: Mutex<CaptureConsState>,
     frame_samples: usize,
 }
 
@@ -32,13 +38,6 @@ type CaptureBackend = non_linux::CpalCapture;
     not(target_os = "macos")
 ))]
 type CaptureBackend = non_linux::CpalCapture;
-
-// SAFETY: The `UnsafeCell<HeapCons<i16>>` is only ever accessed from a single
-// reader thread via `read_frame`. The producer half lives on the audio-backend
-// callback thread and never touches `cons`. Because exactly one thread holds a
-// `&mut` reference at any time, the Send + Sync impls are sound.
-unsafe impl Send for Capture {}
-unsafe impl Sync for Capture {}
 
 impl Capture {
     pub fn start(sample_rate: u32, channels: u16, frame_ms: u32) -> Result<Self> {
@@ -66,7 +65,11 @@ impl Capture {
 
         Ok(Self {
             backend,
-            cons: UnsafeCell::new(cons),
+            cons: Mutex::new(CaptureConsState {
+                cons,
+                stash: Vec::with_capacity(frame_samples * 2),
+                underflow_counter: 0,
+            }),
             frame_samples,
         })
     }
@@ -76,17 +79,44 @@ impl Capture {
         if out.len() != self.frame_samples {
             return false;
         }
-        let mut got = 0usize;
-        let cons = unsafe { &mut *self.cons.get() };
-        while got < out.len() {
-            if let Some(v) = cons.try_pop() {
-                out[got] = v;
-                got += 1;
+        let mut state = self.cons.lock();
+
+        let mut tmp = Vec::with_capacity(self.frame_samples);
+        if !state.stash.is_empty() {
+            let take = state.stash.len().min(self.frame_samples);
+            tmp.extend_from_slice(&state.stash[..take]);
+            state.stash.drain(..take);
+        }
+
+        while tmp.len() < self.frame_samples {
+            if let Some(v) = state.cons.try_pop() {
+                tmp.push(v);
             } else {
                 break;
             }
         }
-        got == out.len()
+
+        if tmp.len() < self.frame_samples {
+            let mut new_stash = tmp;
+            new_stash.extend_from_slice(&state.stash);
+            state.stash = new_stash;
+            state.underflow_counter += 1;
+            if state.underflow_counter == 200 {
+                tracing::warn!(
+                    "[audio] capture underflow: waiting for full frame (stash_len={} frame={})",
+                    state.stash.len(),
+                    self.frame_samples
+                );
+            }
+            return false;
+        }
+
+        out.copy_from_slice(&tmp[..self.frame_samples]);
+        if tmp.len() > self.frame_samples {
+            state.stash.extend_from_slice(&tmp[self.frame_samples..]);
+        }
+        state.underflow_counter = 0;
+        true
     }
 
     pub fn is_healthy(&self) -> bool {
