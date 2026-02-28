@@ -508,7 +508,6 @@ mod linux {
         devices
     }
 
-    use crate::audio::resample::LinearResampler;
     #[cfg(target_os = "windows")]
     use crate::audio::windows::mmdevice;
 

@@ -578,7 +578,7 @@ mod linux {
             info!(
                 endpoint_id = %selected_id,
                 friendly_name = %selected_name,
-                sample_rate = stream_cfg.sample_rate().0,
+                sample_rate = stream_cfg.sample_rate(),
                 channels = stream_cfg.channels(),
                 "starting output stream"
             );
