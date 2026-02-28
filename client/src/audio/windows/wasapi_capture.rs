@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use crossbeam_channel::Sender;
 use ringbuf::{traits::Producer, HeapProd};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -8,7 +9,10 @@ use tracing::{debug, error, info};
 use wasapi::{Direction, SampleType, StreamMode};
 
 use crate::audio::resample::LinearResampler;
-use crate::ui::model::{AudioBackend, AudioDeviceId, AudioDeviceInfo, AudioDirection};
+use crate::ui::{
+    model::{AudioBackend, AudioDeviceId, AudioDeviceInfo, AudioDirection},
+    UiEvent,
+};
 
 use super::wasapi_common::{default_endpoint_id, enumerate_endpoints, open_device, ComGuard};
 
@@ -24,12 +28,16 @@ impl WasapiCapture {
         channels: u16,
         prod: HeapProd<i16>,
         preferred_device: Option<&str>,
+        tx_event: Option<Sender<UiEvent>>,
     ) -> Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         let unhealthy = Arc::new(AtomicBool::new(false));
         let stop_thread = stop.clone();
         let unhealthy_thread = unhealthy.clone();
         let preferred_device = preferred_device.map(str::to_string);
+        let tx_event_thread = tx_event.clone();
+        let reported = Arc::new(AtomicBool::new(false));
+        let reported_thread = reported.clone();
 
         let thread = std::thread::Builder::new()
             .name("tsod-wasapi-capture".to_string())
@@ -43,6 +51,16 @@ impl WasapiCapture {
                 ) {
                     error!("[wasapi capture] thread failed: {error:#}");
                     unhealthy_thread.store(true, Ordering::Relaxed);
+                    if reported_thread
+                        .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                        .is_ok()
+                    {
+                        if let Some(tx) = &tx_event_thread {
+                            let _ = tx.send(UiEvent::AppendLog(format!(
+                                "[audio] wasapi capture thread failed: {error:#}"
+                            )));
+                        }
+                    }
                 }
             })
             .context("spawn WASAPI capture thread")?;
@@ -180,18 +198,26 @@ fn run_capture_thread(
 
     let mut resampler = LinearResampler::new(device_rate, sample_rate);
     let target_channels = channels.max(1) as usize;
+    let mut consecutive_timeouts = 0u32;
     let mut read_buf = Vec::<u8>::new();
     let mut mono = Vec::<f32>::new();
     let mut resampled = Vec::<f32>::new();
 
     while !stop.load(Ordering::Relaxed) {
-        handle
-            .wait_for_event(500)
-            .map_err(|error| {
+        match handle.wait_for_event(500) {
+            Ok(()) => {}
+            Err(wasapi::WasapiError::EventTimeout) => {
+                consecutive_timeouts = consecutive_timeouts.saturating_add(1);
+                if consecutive_timeouts == 121 {
+                    tracing::warn!("[wasapi capture] wait_for_event timed out repeatedly; stream remains alive");
+                }
+                continue;
+            }
+            Err(error) => {
                 tracing::error!("[wasapi capture] wait_for_event failed: {error:#}");
-                error
-            })
-            .context("wait for WASAPI capture event")?;
+                return Err(error).context("wait for WASAPI capture event");
+            }
+        }
 
         loop {
             let next_packet = capture
@@ -203,6 +229,8 @@ fn run_capture_thread(
             if packet_frames == 0 {
                 break;
             }
+
+            consecutive_timeouts = 0;
 
             let packet_bytes = packet_frames as usize * block_align;
             if read_buf.len() < packet_bytes {

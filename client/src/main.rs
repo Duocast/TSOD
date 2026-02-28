@@ -357,12 +357,14 @@ async fn app_task(
         channels,
         frame_ms,
         preferred_device_id(&initial_selection.input_device),
+        &tx_event,
     )?)));
     let playout = Arc::new(RwLock::new(Arc::new(start_playout_with_fallback(
         sample_rate,
         channels,
         preferred_device_id(&initial_selection.output_device),
         initial_selection.playback_mode.as_deref(),
+        &tx_event,
     )?)));
 
     // DSP pipeline
@@ -906,6 +908,7 @@ fn start_capture_with_fallback(
     channels: u16,
     frame_ms: u32,
     preferred_device: Option<&str>,
+    tx_event: &Sender<UiEvent>,
 ) -> Result<audio::capture::Capture> {
     if let Some(device) = preferred_device {
         info!("audio open input by id: {device}");
@@ -914,12 +917,34 @@ fn start_capture_with_fallback(
             channels,
             frame_ms,
             Some(device),
+            Some(tx_event.clone()),
         ) {
             Ok(capture) => return Ok(capture),
-            Err(_) => {}
+            Err(e) => {
+                warn!(
+                    "[audio] open input by id failed: {device} err={e:#}; falling back to default"
+                );
+                let _ = tx_event.send(UiEvent::AppendLog(format!(
+                    "[audio] open input by id failed: {device} err={e:#}; falling back to default"
+                )));
+            }
         }
     }
-    audio::capture::Capture::start_with_device(sample_rate, channels, frame_ms, None)
+    match audio::capture::Capture::start_with_device(
+        sample_rate,
+        channels,
+        frame_ms,
+        None,
+        Some(tx_event.clone()),
+    ) {
+        Ok(capture) => Ok(capture),
+        Err(e) => {
+            let _ = tx_event.send(UiEvent::AppendLog(format!(
+                "[audio] open input default failed: err={e:#}"
+            )));
+            Err(e)
+        }
+    }
 }
 
 fn start_playout_with_fallback(
@@ -927,6 +952,7 @@ fn start_playout_with_fallback(
     channels: u16,
     preferred_device: Option<&str>,
     preferred_mode: Option<&str>,
+    tx_event: &Sender<UiEvent>,
 ) -> Result<audio::playout::Playout> {
     if let Some(device) = preferred_device {
         info!("audio open output by id: {device}");
@@ -935,12 +961,34 @@ fn start_playout_with_fallback(
             channels,
             Some(device),
             preferred_mode,
+            Some(tx_event.clone()),
         ) {
             Ok(playout) => return Ok(playout),
-            Err(_) => {}
+            Err(e) => {
+                warn!(
+                    "[audio] open output by id failed: {device} err={e:#}; falling back to default"
+                );
+                let _ = tx_event.send(UiEvent::AppendLog(format!(
+                    "[audio] open output by id failed: {device} err={e:#}; falling back to default"
+                )));
+            }
         }
     }
-    audio::playout::Playout::start_with_mode(sample_rate, channels, None, preferred_mode)
+    match audio::playout::Playout::start_with_mode(
+        sample_rate,
+        channels,
+        None,
+        preferred_mode,
+        Some(tx_event.clone()),
+    ) {
+        Ok(playout) => Ok(playout),
+        Err(e) => {
+            let _ = tx_event.send(UiEvent::AppendLog(format!(
+                "[audio] open output default failed: err={e:#}"
+            )));
+            Err(e)
+        }
+    }
 }
 
 async fn restart_audio_streams(
@@ -976,11 +1024,17 @@ async fn restart_audio_streams(
         selected.output_device.backend, selected.output_device.id, output_label
     )));
 
-    let new_capture = start_capture_with_fallback(sample_rate, channels, frame_ms, preferred_input)
-        .context("restart capture")?;
-    let new_playout =
-        start_playout_with_fallback(sample_rate, channels, preferred_output, preferred_mode)
-            .context("restart playout")?;
+    let new_capture =
+        start_capture_with_fallback(sample_rate, channels, frame_ms, preferred_input, tx_event)
+            .context("restart capture")?;
+    let new_playout = start_playout_with_fallback(
+        sample_rate,
+        channels,
+        preferred_output,
+        preferred_mode,
+        tx_event,
+    )
+    .context("restart playout")?;
 
     {
         let mut cap = capture.write().await;

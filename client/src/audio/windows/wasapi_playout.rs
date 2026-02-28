@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Context, Result};
+use crossbeam_channel::Sender;
 use ringbuf::{traits::Consumer, HeapCons};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -9,7 +10,10 @@ use wasapi::{BufferFlags, Direction, SampleType, StreamMode};
 
 use crate::{
     audio::resample::LinearResampler,
-    ui::model::{AudioBackend, AudioDeviceId, AudioDeviceInfo, AudioDirection},
+    ui::{
+        model::{AudioBackend, AudioDeviceId, AudioDeviceInfo, AudioDirection},
+        UiEvent,
+    },
 };
 
 use super::wasapi_common::{default_endpoint_id, enumerate_endpoints, open_device, ComGuard};
@@ -27,12 +31,16 @@ impl WasapiPlayout {
         cons: HeapCons<i16>,
         preferred_device: Option<&str>,
         _preferred_mode: Option<&str>,
+        tx_event: Option<Sender<UiEvent>>,
     ) -> Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         let unhealthy = Arc::new(AtomicBool::new(false));
         let stop_thread = stop.clone();
         let unhealthy_thread = unhealthy.clone();
         let preferred_device = preferred_device.map(str::to_string);
+        let tx_event_thread = tx_event.clone();
+        let reported = Arc::new(AtomicBool::new(false));
+        let reported_thread = reported.clone();
 
         let thread = std::thread::Builder::new()
             .name("tsod-wasapi-playout".to_string())
@@ -46,6 +54,16 @@ impl WasapiPlayout {
                 ) {
                     error!("[wasapi playout] thread failed: {error:#}");
                     unhealthy_thread.store(true, Ordering::Relaxed);
+                    if reported_thread
+                        .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                        .is_ok()
+                    {
+                        if let Some(tx) = &tx_event_thread {
+                            let _ = tx.send(UiEvent::AppendLog(format!(
+                                "[audio] wasapi playout thread failed: {error:#}"
+                            )));
+                        }
+                    }
                 }
             })
             .context("spawn WASAPI playout thread")?;
@@ -191,23 +209,33 @@ fn run_playout_thread(
 
     let mut resampler = LinearResampler::new(sample_rate, device_rate);
     let source_channels = channels.max(1) as usize;
+    let mut consecutive_timeouts = 0u32;
     let mut source_mono = Vec::<f32>::new();
     let mut source_resampled = Vec::<f32>::new();
 
     while !stop.load(Ordering::Relaxed) {
-        handle
-            .wait_for_event(500)
-            .map_err(|error| {
+        match handle.wait_for_event(500) {
+            Ok(()) => {}
+            Err(wasapi::WasapiError::EventTimeout) => {
+                consecutive_timeouts = consecutive_timeouts.saturating_add(1);
+                if consecutive_timeouts == 121 {
+                    tracing::warn!("[wasapi playout] wait_for_event timed out repeatedly; stream remains alive");
+                }
+                continue;
+            }
+            Err(error) => {
                 tracing::error!("[wasapi playout] wait_for_event failed: {error:#}");
-                error
-            })
-            .context("wait for WASAPI render event")?;
+                return Err(error).context("wait for WASAPI render event");
+            }
+        }
         let avail = audio_client
             .get_available_space_in_frames()
             .context("query WASAPI render space")? as usize;
         if avail == 0 {
             continue;
         }
+
+        consecutive_timeouts = 0;
 
         fill_source_mono(&mut cons, &mut source_mono, avail, source_channels);
         source_resampled.clear();
