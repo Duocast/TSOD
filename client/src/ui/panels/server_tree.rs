@@ -90,12 +90,6 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
         ui.painter()
             .rect_filled(filler_rect, 0.0, egui::Color32::TRANSPARENT);
         filler_resp.context_menu(|ui| {
-            if ui.button("Server Settings…").clicked() {
-                model.show_permissions_center = true;
-                model.permissions_tab = crate::ui::model::PermissionsTab::Roles;
-                let _ = tx_intent.send(UiIntent::PermsOpen);
-                ui.close();
-            }
             if ui.button("Permissions…").clicked() {
                 model.show_permissions_center = true;
                 let _ = tx_intent.send(UiIntent::PermsOpen);
