@@ -448,6 +448,7 @@ async fn app_task(
             channels,
             frame_ms,
             &mut shutdown_rx,
+            &mut saved_settings,
         )
         .await
         {
@@ -1034,6 +1035,7 @@ async fn connect_and_run_session(
     channels: u16,
     frame_ms: u32,
     shutdown_rx: &mut watch::Receiver<bool>,
+    saved_settings: &mut ui::model::AppSettings,
 ) -> Result<()> {
     let _ = tx_event.send(UiEvent::SetConnected(false));
     let _ = tx_event.send(UiEvent::SetAuthed(false));
@@ -2184,7 +2186,7 @@ async fn connect_and_run_session(
                             }
                         }
                         UiIntent::ApplySettings(ref settings) => {
-                            saved_settings = (**settings).clone();
+                            *saved_settings = (**settings).clone();
                             // Apply all settings to the audio pipeline
                             if let Some(ref dsp) = capture_dsp {
                                 let mut d = dsp.lock().await;
