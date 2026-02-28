@@ -1753,11 +1753,13 @@ async fn connect_and_run_session(
             .map(vp_route_hash::channel_route_hash)
             .unwrap_or(0);
         active_voice_channel_route.store(route, Ordering::Relaxed);
-        if let Some(ch) = channels.iter().find(|ch| ch.id == *channel_id) {
+        if let Some(info) = snapshot.channels.iter().filter_map(|ch| ch.info.as_ref()).find(|info| {
+            info.channel_id.as_ref().map(|id| id.value.as_str()) == Some(channel_id.as_str())
+        }) {
             if let Ok(mut mode) = active_channel_audio_mode.write() {
                 *mode = ChannelAudioMode {
-                    opus_profile: ch.opus_profile,
-                    bitrate_bps: ch.bitrate_bps,
+                    opus_profile: info.opus_profile,
+                    bitrate_bps: info.bitrate,
                 };
             }
         }
@@ -2031,11 +2033,11 @@ async fn connect_and_run_session(
                                     if let Ok(mut mode) = active_channel_audio_mode.write() {
                                         *mode = ChannelAudioMode {
                                             opus_profile: state
-                                                .channel
+                                                .info
                                                 .as_ref()
                                                 .map(|c| c.opus_profile)
                                                 .unwrap_or(pb::OpusProfile::OpusVoice as i32),
-                                            bitrate_bps: state.channel.as_ref().map(|c| c.bitrate).unwrap_or(64_000),
+                                            bitrate_bps: state.info.as_ref().map(|c| c.bitrate).unwrap_or(64_000),
                                         };
                                     }
                                     if let Some(local_member) =
