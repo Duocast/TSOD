@@ -41,8 +41,8 @@ impl WasapiCapture {
                     preferred_device.as_deref(),
                     &stop_thread,
                 ) {
+                    error!("[wasapi capture] thread failed: {error:#}");
                     unhealthy_thread.store(true, Ordering::Relaxed);
-                    error!("[wasapi capture] thread failure: {error:#}");
                 }
             })
             .context("spawn WASAPI capture thread")?;
@@ -127,11 +127,20 @@ fn run_capture_thread(
     let device_rate = mix.get_samplespersec();
     let device_channels = mix.get_nchannels().max(1) as usize;
     let block_align = mix.get_blockalign() as usize;
+    let bits_per_sample = mix.get_bitspersample() as u16;
+    let valid_bits = mix.get_validbitspersample() as u16;
     let sample_type = mix.get_subformat().context("get WASAPI sample type")?;
 
     info!(
-        "[wasapi capture] open device id={} name={} mix={}Hz {}ch {:?}",
-        endpoint_id, friendly_name, device_rate, device_channels, sample_type
+        "[wasapi capture] open device id={} name={} mix: {}Hz {}ch block_align={} bits={} valid={} type={:?}",
+        endpoint_id,
+        friendly_name,
+        device_rate,
+        device_channels,
+        block_align,
+        bits_per_sample,
+        valid_bits,
+        sample_type
     );
 
     let mode = StreamMode::EventsShared {
@@ -140,6 +149,10 @@ fn run_capture_thread(
     };
     audio_client
         .initialize_client(&mix, &Direction::Capture, &mode)
+        .map_err(|error| {
+            tracing::error!("[wasapi capture] initialize_client failed: {error:#}");
+            error
+        })
         .context("initialize WASAPI shared capture stream")?;
     let handle = audio_client
         .set_get_eventhandle()
@@ -149,6 +162,10 @@ fn run_capture_thread(
         .context("get WASAPI capture client")?;
     audio_client
         .start_stream()
+        .map_err(|error| {
+            tracing::error!("[wasapi capture] start_stream failed: {error:#}");
+            error
+        })
         .context("start WASAPI capture stream")?;
 
     let mut resampler = LinearResampler::new(device_rate, sample_rate);
@@ -160,6 +177,10 @@ fn run_capture_thread(
     while !stop.load(Ordering::Relaxed) {
         handle
             .wait_for_event(500)
+            .map_err(|error| {
+                tracing::error!("[wasapi capture] wait_for_event failed: {error:#}");
+                error
+            })
             .context("wait for WASAPI capture event")?;
 
         loop {
@@ -180,6 +201,10 @@ fn run_capture_thread(
 
             let (frames, info) = capture
                 .read_from_device(&mut read_buf[..packet_bytes])
+                .map_err(|error| {
+                    tracing::error!("[wasapi capture] read_from_device failed: {error:#}");
+                    error
+                })
                 .context("read WASAPI capture packet")?;
 
             mono.clear();
@@ -192,7 +217,7 @@ fn run_capture_thread(
                     frames as usize,
                     device_channels,
                     sample_type,
-                    mix.get_validbitspersample() as u16,
+                    valid_bits,
                 );
             }
 
