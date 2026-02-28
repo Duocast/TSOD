@@ -147,7 +147,7 @@ mod linux {
     };
     use tracing::info;
 
-    use crate::ui::model::{AudioDeviceId, AudioDeviceInfo, AudioDirection};
+    use crate::ui::model::{AudioBackend, AudioDeviceId, AudioDeviceInfo, AudioDirection};
 
     enum LinuxPlayoutBackend {
         PipeWire,
@@ -175,6 +175,7 @@ mod linux {
                 .unwrap_or(false);
 
             if !prefer_pulse && pipewire_is_available() {
+                let preferred_device_owned = preferred_device.map(str::to_string);
                 let thread = std::thread::Builder::new()
                     .name("tsod-pipewire-playout".to_string())
                     .spawn(move || {
@@ -182,7 +183,7 @@ mod linux {
                             sample_rate,
                             channels,
                             cons,
-                            preferred_device.map(str::to_string),
+                            preferred_device_owned,
                         ) {
                             eprintln!("pipewire playout thread failed: {e:#}");
                         }

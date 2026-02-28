@@ -130,7 +130,7 @@ mod linux {
 
     use tracing::info;
 
-    use crate::ui::model::{AudioDeviceId, AudioDeviceInfo, AudioDirection};
+    use crate::ui::model::{AudioBackend, AudioDeviceId, AudioDeviceInfo, AudioDirection};
 
     enum LinuxCaptureBackend {
         PipeWire,
@@ -150,6 +150,7 @@ mod linux {
             preferred_device: Option<&str>,
         ) -> Result<Self> {
             if pipewire_is_available() {
+                let preferred_device_owned = preferred_device.map(str::to_string);
                 let thread = std::thread::Builder::new()
                     .name("tsod-pipewire-capture".to_string())
                     .spawn(move || {
@@ -157,7 +158,7 @@ mod linux {
                             sample_rate,
                             channels,
                             prod,
-                            preferred_device.map(str::to_string),
+                            preferred_device_owned,
                         ) {
                             eprintln!("pipewire capture thread failed: {e:#}");
                         }
