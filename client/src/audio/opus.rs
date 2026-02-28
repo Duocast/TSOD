@@ -1,5 +1,11 @@
 use anyhow::Result;
 
+#[derive(Debug, Clone, Copy)]
+pub enum OpusEncoderProfile {
+    Voice,
+    Music,
+}
+
 pub struct OpusEncoder {
     enc: opus::Encoder,
     encoded_scratch: Vec<u8>,
@@ -11,13 +17,17 @@ pub struct OpusDecoder {
 }
 
 impl OpusEncoder {
-    pub fn new(sample_rate: u32, channels: u8) -> Result<Self> {
+    pub fn new(sample_rate: u32, channels: u8, profile: OpusEncoderProfile) -> Result<Self> {
         let ch = if channels == 2 {
             opus::Channels::Stereo
         } else {
             opus::Channels::Mono
         };
-        let enc = opus::Encoder::new(sample_rate, ch, opus::Application::Voip)?;
+        let application = match profile {
+            OpusEncoderProfile::Voice => opus::Application::Voip,
+            OpusEncoderProfile::Music => opus::Application::Audio,
+        };
+        let enc = opus::Encoder::new(sample_rate, ch, application)?;
         Ok(Self {
             enc,
             encoded_scratch: vec![0u8; 4000],
@@ -31,6 +41,11 @@ impl OpusEncoder {
     pub fn encode_reuse(&mut self, pcm: &[i16]) -> Result<&[u8]> {
         let n = self.enc.encode(pcm, &mut self.encoded_scratch)?;
         Ok(&self.encoded_scratch[..n])
+    }
+
+    pub fn set_bitrate(&mut self, bps: i32) -> Result<()> {
+        self.enc.set_bitrate(opus::Bitrate::Bits(bps.max(8_000)))?;
+        Ok(())
     }
 
     pub fn set_inband_fec(&mut self, enabled: bool) -> Result<()> {

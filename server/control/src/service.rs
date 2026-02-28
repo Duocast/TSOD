@@ -59,6 +59,11 @@ impl<R: ControlRepo> ControlService<R> {
             .await?;
 
         let now = Utc::now();
+        let bitrate_bps = req.bitrate_bps.clamp(8_000, 510_000);
+        let opus_profile = match req.opus_profile {
+            1 | 2 => req.opus_profile,
+            _ => 1,
+        };
         let ch = Channel {
             id: ChannelId(Uuid::new_v4()),
             server_id: ctx.server_id,
@@ -66,6 +71,10 @@ impl<R: ControlRepo> ControlService<R> {
             parent_id: req.parent_id,
             max_members: req.max_members,
             max_talkers: req.max_talkers,
+            channel_type: req.channel_type,
+            description: req.description,
+            bitrate_bps,
+            opus_profile,
             created_at: now,
             updated_at: now,
         };
@@ -82,7 +91,15 @@ impl<R: ControlRepo> ControlService<R> {
                 "channel.create",
                 "channel",
                 ch.id.0.to_string(),
-                json!({ "name": ch.name, "parent_id": ch.parent_id.map(|p| p.0) }),
+                json!({
+                    "name": ch.name,
+                    "parent_id": ch.parent_id.map(|p| p.0),
+                    "channel_type": ch.channel_type,
+                    "description": ch.description,
+                    "bitrate_bps": ch.bitrate_bps,
+                    "opus_profile": ch.opus_profile,
+                    "max_members": ch.max_members,
+                }),
             ),
         )
         .await?;
@@ -102,6 +119,10 @@ impl<R: ControlRepo> ControlService<R> {
                     "parent_channel_id": ch.parent_id.map(|p| p.0),
                     "max_members": ch.max_members,
                     "max_talkers": ch.max_talkers,
+                    "channel_type": ch.channel_type,
+                    "description": ch.description,
+                    "bitrate_bps": ch.bitrate_bps,
+                    "opus_profile": ch.opus_profile,
                     "created_at": ch.created_at,
                     "updated_at": ch.updated_at,
                 }),
@@ -198,6 +219,11 @@ impl<R: ControlRepo> ControlService<R> {
                     "channel_id": renamed.id.0,
                     "name": renamed.name,
                     "parent_channel_id": renamed.parent_id.map(|p| p.0),
+                    "max_members": renamed.max_members,
+                    "channel_type": renamed.channel_type,
+                    "description": renamed.description,
+                    "bitrate_bps": renamed.bitrate_bps,
+                    "opus_profile": renamed.opus_profile,
                     "updated_at": renamed.updated_at,
                 }),
             },

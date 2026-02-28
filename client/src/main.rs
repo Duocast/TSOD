@@ -344,6 +344,7 @@ async fn app_task(
     let encoder = Arc::new(Mutex::new(audio::opus::OpusEncoder::new(
         sample_rate,
         channels as u8,
+        audio::opus::OpusEncoderProfile::Voice,
     )?));
     {
         let mut enc = encoder.lock().await;
@@ -749,6 +750,21 @@ fn should_apply_event_seq(
     true
 }
 
+fn pb_channel_type_to_ui(channel_type: i32) -> ui::model::ChannelType {
+    match pb::ChannelType::try_from(channel_type).ok() {
+        Some(pb::ChannelType::Text) => ui::model::ChannelType::Text,
+        Some(pb::ChannelType::Category) => ui::model::ChannelType::Category,
+        _ => ui::model::ChannelType::Voice,
+    }
+}
+
+fn opus_profile_from_pb(opus_profile: i32) -> audio::opus::OpusEncoderProfile {
+    match pb::OpusProfile::try_from(opus_profile).ok() {
+        Some(pb::OpusProfile::OpusMusic) => audio::opus::OpusEncoderProfile::Music,
+        _ => audio::opus::OpusEncoderProfile::Voice,
+    }
+}
+
 fn apply_authoritative_snapshot(
     snapshot: &pb::InitialStateSnapshot,
     tx_event: &Sender<UiEvent>,
@@ -765,12 +781,14 @@ fn apply_authoritative_snapshot(
                 .map(|id| id.value.clone())
                 .unwrap_or_default(),
             name: info.name.clone(),
-            channel_type: ui::model::ChannelType::Voice,
+            channel_type: pb_channel_type_to_ui(info.channel_type),
             parent_id: info.parent_channel_id.as_ref().map(|pid| pid.value.clone()),
             position: info.position,
             member_count: 0,
             user_limit: info.user_limit,
+            description: info.description.clone(),
             bitrate_bps: info.bitrate,
+            opus_profile: info.opus_profile,
         })
         .collect::<Vec<_>>();
 
@@ -1433,12 +1451,14 @@ async fn connect_and_run_session(
                                     ui::model::ChannelEntry {
                                         id: ch_id.value,
                                         name: channel.name,
-                                        channel_type: ui::model::ChannelType::Voice,
+                                        channel_type: pb_channel_type_to_ui(channel.channel_type),
                                         parent_id: channel.parent_channel_id.map(|pid| pid.value),
                                         position: channel.position,
                                         member_count: 0,
                                         user_limit: channel.user_limit,
+                                        description: channel.description,
                                         bitrate_bps: channel.bitrate,
+                                        opus_profile: channel.opus_profile,
                                     },
                                 ));
                             }
@@ -1459,12 +1479,14 @@ async fn connect_and_run_session(
                                     ui::model::ChannelEntry {
                                         id: ch_id.value,
                                         name: channel.name,
-                                        channel_type: ui::model::ChannelType::Voice,
+                                        channel_type: pb_channel_type_to_ui(channel.channel_type),
                                         parent_id: channel.parent_channel_id.map(|pid| pid.value),
                                         position: channel.position,
                                         member_count: 0,
                                         user_limit: channel.user_limit,
+                                        description: channel.description,
                                         bitrate_bps: channel.bitrate,
+                                        opus_profile: channel.opus_profile,
                                     },
                                 ));
                             }
@@ -1816,6 +1838,25 @@ async fn connect_and_run_session(
                         UiIntent::JoinChannel { channel_id } => {
                             match dispatcher.join_channel(&channel_id).await {
                                 Ok(state) => {
+                                    if let Some(info) = state.info.as_ref() {
+                                        let mut enc = encoder.lock().await;
+                                        match audio::opus::OpusEncoder::new(
+                                            sample_rate,
+                                            channels as u8,
+                                            opus_profile_from_pb(info.opus_profile),
+                                        ) {
+                                            Ok(mut new_encoder) => {
+                                                let _ = new_encoder.set_bitrate(info.bitrate as i32);
+                                                let _ = apply_fec_encoder_settings(&mut new_encoder, &audio_runtime);
+                                                *enc = new_encoder;
+                                            }
+                                            Err(e) => {
+                                                let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                                    "[audio] failed to reconfigure encoder: {e:#}"
+                                                )));
+                                            }
+                                        }
+                                    }
                                     for member in &state.members {
                                         debug!(
                                             channel_id = %channel_id,
@@ -1884,8 +1925,8 @@ async fn connect_and_run_session(
                             active_voice_channel_route.store(0, Ordering::Relaxed);
                             let _ = tx_event.send(UiEvent::SetActiveVoiceRoute(0));
                         }
-                        UiIntent::CreateChannel { name, description, channel_type, codec: _, quality, user_limit, parent_channel_id } => {
-                            match dispatcher.create_channel(&name, &description, channel_type, quality * 1000, user_limit, parent_channel_id.as_deref()).await {
+                        UiIntent::CreateChannel { name, description, channel_type, codec, quality, user_limit, parent_channel_id } => {
+                            match dispatcher.create_channel(&name, &description, channel_type, codec, quality * 1000, user_limit, parent_channel_id.as_deref()).await {
                                 Ok(ch_id) => {
                                     let _ = tx_event.send(UiEvent::AppendLog(
                                         format!("[ctl] created channel '{name}' ({ch_id})"),

@@ -397,6 +397,16 @@ fn translate_record(rec: &OutboxEventRow) -> Result<(ChannelId, pb::ServerToClie
                 .map(|value| pb::ChannelId {
                     value: value.to_string(),
                 });
+            let channel_type = parse_i32_field_default(&rec.payload_json, "channel_type", 2);
+            let description = rec
+                .payload_json
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let user_limit = parse_u32_field_default(&rec.payload_json, "max_members", 0);
+            let bitrate = parse_u32_field_default(&rec.payload_json, "bitrate_bps", 64_000);
+            let opus_profile = parse_i32_field_default(&rec.payload_json, "opus_profile", 1);
 
             Ok((
                 channel_id,
@@ -407,7 +417,12 @@ fn translate_record(rec: &OutboxEventRow) -> Result<(ChannelId, pb::ServerToClie
                                 value: channel_id.0.to_string(),
                             }),
                             name,
+                            channel_type,
+                            description,
                             parent_channel_id,
+                            user_limit,
+                            bitrate,
+                            opus_profile,
                             ..Default::default()
                         }),
                     },
@@ -429,6 +444,16 @@ fn translate_record(rec: &OutboxEventRow) -> Result<(ChannelId, pb::ServerToClie
                 .map(|value| pb::ChannelId {
                     value: value.to_string(),
                 });
+            let channel_type = parse_i32_field_default(&rec.payload_json, "channel_type", 2);
+            let description = rec
+                .payload_json
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let user_limit = parse_u32_field_default(&rec.payload_json, "max_members", 0);
+            let bitrate = parse_u32_field_default(&rec.payload_json, "bitrate_bps", 64_000);
+            let opus_profile = parse_i32_field_default(&rec.payload_json, "opus_profile", 1);
 
             Ok((
                 channel_id,
@@ -439,7 +464,12 @@ fn translate_record(rec: &OutboxEventRow) -> Result<(ChannelId, pb::ServerToClie
                                 value: channel_id.0.to_string(),
                             }),
                             name,
+                            channel_type,
+                            description,
                             parent_channel_id,
+                            user_limit,
+                            bitrate,
+                            opus_profile,
                             ..Default::default()
                         }),
                     },
@@ -707,6 +737,27 @@ fn parse_user_id_field(v: &Value, field: &str) -> Result<UserId> {
 
 fn parse_message_id_field(v: &Value, field: &str) -> Result<MessageId> {
     Ok(MessageId(parse_uuid(v, field)?))
+}
+
+fn parse_i32_field_default(v: &Value, field: &str, default: i32) -> i32 {
+    v.get(field)
+        .and_then(Value::as_i64)
+        .and_then(|n| i32::try_from(n).ok())
+        .unwrap_or(default)
+}
+
+fn parse_u32_field_default(v: &Value, field: &str, default: u32) -> u32 {
+    v.get(field)
+        .and_then(|value| {
+            if value.is_null() {
+                return Some(default as u64);
+            }
+            value
+                .as_u64()
+                .or_else(|| value.as_i64().map(|n| n.max(0) as u64))
+        })
+        .and_then(|n| u32::try_from(n).ok())
+        .unwrap_or(default)
 }
 
 fn json_attachments_to_pb(v: Value) -> Vec<pb::AttachmentRef> {
