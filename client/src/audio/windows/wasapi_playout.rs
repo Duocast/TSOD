@@ -5,7 +5,7 @@ use std::sync::{
     Arc,
 };
 use tracing::{error, info};
-use wasapi::{AudioClient, AudioRenderClient, BufferFlags, Direction, SampleType, StreamMode};
+use wasapi::{BufferFlags, Direction, SampleType, StreamMode};
 
 use crate::{
     audio::resample::LinearResampler,
