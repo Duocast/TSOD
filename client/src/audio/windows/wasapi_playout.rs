@@ -6,7 +6,7 @@ use std::sync::{
     Arc,
 };
 use tracing::{debug, error, info};
-use wasapi::{BufferFlags, Direction, SampleType, StreamMode};
+use wasapi::{BufferFlags, Direction, SampleType, ShareMode, StreamMode, WaveFormat};
 
 use crate::{
     audio::resample::LinearResampler,
@@ -155,23 +155,74 @@ fn run_playout_thread(
     let mix = audio_client
         .get_mixformat()
         .context("get WASAPI mix format")?;
-    let device_rate = mix.get_samplespersec();
-    let device_channels = mix.get_nchannels().max(1) as usize;
-    let block_align = mix.get_blockalign() as usize;
-    let bits_per_sample = mix.get_bitspersample() as u16;
-    let valid_bits = mix.get_validbitspersample() as u16;
+    let mix_rate = mix.get_samplespersec();
+    let mix_channels = mix.get_nchannels().max(1) as usize;
+    let mix_block_align = mix.get_blockalign() as usize;
+    let mix_bits_per_sample = mix.get_bitspersample() as u16;
+    let mix_valid_bits = mix.get_validbitspersample() as u16;
+    let mix_sample_type = mix.get_subformat().context("get WASAPI mix sample type")?;
+
+    let mut stream_format = mix.clone();
+    if sample_rate != mix_rate {
+        let requested = WaveFormat::new(
+            mix_bits_per_sample as usize,
+            mix_valid_bits.max(1) as usize,
+            &mix_sample_type,
+            sample_rate as usize,
+            mix_channels,
+            Some(mix.get_dwchannelmask()),
+        );
+
+        match audio_client.is_supported(&requested, &ShareMode::Shared) {
+            Ok(None) => {
+                info!(
+                    "[wasapi playout] selected endpoint supports requested shared rate {}; using requested stream format",
+                    sample_rate
+                );
+                stream_format = requested;
+            }
+            Ok(Some(closest)) => {
+                let closest_rate = closest.get_samplespersec();
+                info!(
+                    "[wasapi playout] requested shared rate {} not directly supported; closest shared format is {}Hz",
+                    sample_rate, closest_rate
+                );
+                stream_format = closest;
+            }
+            Err(error) => {
+                debug!(
+                    "[wasapi playout] shared support query for {}Hz failed ({error:#}); using mix format {}Hz",
+                    sample_rate, mix_rate
+                );
+            }
+        }
+    }
+
+    let device_rate = stream_format.get_samplespersec();
+    let device_channels = stream_format.get_nchannels().max(1) as usize;
+    let block_align = stream_format.get_blockalign() as usize;
+    let bits_per_sample = stream_format.get_bitspersample() as u16;
+    let valid_bits = stream_format.get_validbitspersample() as u16;
     let effective_valid_bits = match valid_bits {
         0 => bits_per_sample,
         _ => valid_bits,
     }
     .clamp(1, 32);
-    let sample_type = mix.get_subformat().context("get WASAPI sample type")?;
+    let sample_type = stream_format
+        .get_subformat()
+        .context("get WASAPI stream sample type")?;
     let bytes_per_sample = block_align / device_channels;
 
     info!(
-        "[wasapi playout] open device id={} name={} mix: {}Hz {}ch block_align={} bits={} valid={} effective_valid={} type={:?}",
+        "[wasapi playout] open device id={} name={} mix: {}Hz {}ch block_align={} bits={} valid={} type={:?}; stream: {}Hz {}ch block_align={} bits={} valid={} effective_valid={} type={:?}",
         endpoint_id,
         friendly_name,
+        mix_rate,
+        mix_channels,
+        mix_block_align,
+        mix_bits_per_sample,
+        mix_valid_bits,
+        mix_sample_type,
         device_rate,
         device_channels,
         block_align,
@@ -197,7 +248,7 @@ fn run_playout_thread(
         buffer_duration_hns: 200_000,
     };
     audio_client
-        .initialize_client(&mix, &Direction::Render, &mode)
+        .initialize_client(&stream_format, &Direction::Render, &mode)
         .map_err(|error| {
             tracing::error!("[wasapi playout] initialize_client failed: {error:#}");
             error
@@ -221,8 +272,14 @@ fn run_playout_thread(
     let source_channels = channels.max(1) as usize;
     let mut consecutive_timeouts = 0u32;
     let mut source_mono = Vec::<f32>::new();
-    let mut source_resampled = Vec::<f32>::new();
+    let mut scratch_resampled = Vec::<f32>::new();
+    let mut render_mono = Vec::<f32>::new();
+    let mut bytes = Vec::<u8>::new();
+    let mut out_fifo = Vec::<f32>::new();
+    let mut out_off = 0usize;
+    let mut padded_out_frames_total = 0usize;
     let mut last_write_instant = std::time::Instant::now();
+    let mut last_stats_log = std::time::Instant::now();
 
     while !stop.load(Ordering::Relaxed) {
         match handle.wait_for_event(500) {
@@ -255,18 +312,47 @@ fn run_playout_thread(
 
         consecutive_timeouts = 0;
 
-        fill_source_mono(&mut cons, &mut source_mono, avail, source_channels);
-        source_resampled.clear();
-        resampler.process(&source_mono, &mut source_resampled);
+        let mut refill_loops = 0usize;
+        while output_fifo_len(&out_fifo, out_off) < avail {
+            let missing_out_frames = avail - output_fifo_len(&out_fifo, out_off);
+            let need_in =
+                needed_input_frames_for_output(sample_rate, device_rate, missing_out_frames, 10);
 
-        let mut bytes = vec![0u8; avail * block_align];
+            fill_source_mono(&mut cons, &mut source_mono, need_in, source_channels);
+            scratch_resampled.clear();
+            resampler.process(&source_mono, &mut scratch_resampled);
+            out_fifo.extend_from_slice(&scratch_resampled);
+
+            refill_loops += 1;
+            if refill_loops >= 16 {
+                break;
+            }
+        }
+
+        render_mono.clear();
+        let available = output_fifo_len(&out_fifo, out_off);
+        let to_copy = available.min(avail);
+        render_mono.extend_from_slice(&out_fifo[out_off..out_off + to_copy]);
+        out_off += to_copy;
+        if to_copy < avail {
+            let pad = avail - to_copy;
+            render_mono.resize(avail, 0.0);
+            padded_out_frames_total = padded_out_frames_total.saturating_add(pad);
+        }
+
+        if out_off > 8192 {
+            out_fifo.drain(..out_off);
+            out_off = 0;
+        }
+
+        bytes.resize(avail * block_align, 0);
         let flags = write_render_bytes(
             &mut bytes,
             avail,
             block_align,
             device_channels,
             sample_type,
-            &source_resampled,
+            &render_mono,
             effective_valid_bits,
         )?;
 
@@ -278,10 +364,36 @@ fn run_playout_thread(
             })
             .context("write WASAPI render buffer")?;
         last_write_instant = std::time::Instant::now();
+
+        if last_stats_log.elapsed() >= std::time::Duration::from_secs(5) {
+            debug!(
+                "WASAPI playout: device_rate={}, src_rate={}, padded_out_frames={}",
+                device_rate, sample_rate, padded_out_frames_total
+            );
+            last_stats_log = std::time::Instant::now();
+        }
     }
 
     let _ = audio_client.stop_stream();
     Ok(())
+}
+
+fn output_fifo_len(fifo: &[f32], out_off: usize) -> usize {
+    fifo.len().saturating_sub(out_off)
+}
+
+fn needed_input_frames_for_output(
+    src_rate: u32,
+    dst_rate: u32,
+    missing_out_frames: usize,
+    slack: usize,
+) -> usize {
+    if missing_out_frames == 0 {
+        return 0;
+    }
+
+    let ratio = src_rate as f64 / dst_rate as f64;
+    ((missing_out_frames as f64) * ratio).ceil() as usize + slack
 }
 
 fn fill_source_mono(
@@ -409,4 +521,22 @@ fn int_scale(valid_bits: u16) -> f32 {
 
 fn scale_to_i32(sample: f32, scale: f32) -> i32 {
     (sample.clamp(-1.0, 1.0) * scale).round() as i32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::needed_input_frames_for_output;
+
+    #[test]
+    fn needed_input_frames_covers_rate_ratio_with_slack() {
+        let src = 48_000;
+        let dst = 44_100;
+        let missing_out = 441usize;
+        let slack = 10usize;
+        let need_in = needed_input_frames_for_output(src, dst, missing_out, slack);
+        let min_needed = ((missing_out as f64) * (src as f64 / dst as f64)).ceil() as usize;
+
+        assert!(need_in >= min_needed);
+        assert!(need_in >= 480 + slack);
+    }
 }
