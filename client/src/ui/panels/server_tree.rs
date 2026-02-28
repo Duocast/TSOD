@@ -262,6 +262,41 @@ pub fn show_channel_dialogs(
             model.show_delete_channel_confirm = false;
         }
     }
+
+    if model.show_channel_info {
+        if let Some(target_id) = model.channel_info_target_id.clone() {
+            let target = model
+                .channels
+                .iter()
+                .find(|channel| channel.id == target_id)
+                .cloned();
+            if let Some(channel) = target {
+                let mut open = true;
+                egui::Window::new(format!("Channel Info — {}", channel.name))
+                    .open(&mut open)
+                    .collapsible(false)
+                    .resizable(false)
+                    .default_width(420.0)
+                    .show(ctx, |ui| {
+                        show_channel_info_details(ui, &channel);
+                        ui.add_space(8.0);
+                        if ui.button("Close").clicked() {
+                            model.show_channel_info = false;
+                            model.channel_info_target_id = None;
+                        }
+                    });
+                if !open {
+                    model.show_channel_info = false;
+                    model.channel_info_target_id = None;
+                }
+            } else {
+                model.show_channel_info = false;
+                model.channel_info_target_id = None;
+            }
+        } else {
+            model.show_channel_info = false;
+        }
+    }
 }
 
 fn show_channel(
@@ -362,6 +397,11 @@ fn show_channel(
             });
             ui.close();
         }
+        if ui.button("Channel info…").clicked() {
+            model.channel_info_target_id = Some(ch.id.clone());
+            model.show_channel_info = true;
+            ui.close();
+        }
         if ui.button("Edit Channel…").clicked() {
             model.rename_channel_target_id = Some(ch.id.clone());
             model.rename_channel_name = ch.name.clone();
@@ -396,6 +436,44 @@ fn show_channel(
                 show_channel(ui, child, model, tx_intent, all_channels);
             }
         });
+    }
+}
+
+fn show_channel_info_details(ui: &mut egui::Ui, ch: &crate::ui::model::ChannelEntry) {
+    let channel_kind = match ch.channel_type {
+        ChannelType::Text => "Text",
+        ChannelType::Voice => "Voice",
+        ChannelType::Category => "Category",
+    };
+
+    info_row(ui, "Name", &ch.name);
+    info_row(ui, "Type", channel_kind);
+
+    if ch.channel_type != ChannelType::Category {
+        let codec = codec_label_for_bitrate(ch.bitrate_bps);
+        info_row(ui, "Audio Codec", codec);
+        info_row(ui, "Quality", &format!("{} kbps", ch.bitrate_bps / 1000));
+        let max_people = if ch.user_limit == 0 {
+            "Unlimited".to_string()
+        } else {
+            ch.user_limit.to_string()
+        };
+        info_row(ui, "Max people", &max_people);
+    }
+}
+
+fn info_row(ui: &mut egui::Ui, label: &str, value: &str) {
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(format!("{label}:")).strong());
+        ui.label(value);
+    });
+}
+
+fn codec_label_for_bitrate(bitrate_bps: u32) -> &'static str {
+    if bitrate_bps >= 160_000 {
+        "Opus Music"
+    } else {
+        "Opus Voice"
     }
 }
 
