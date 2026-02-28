@@ -11,9 +11,13 @@ impl ComGuard {
             return Ok(Self { initialized: true });
         }
 
-        match wasapi::initialize_sta() {
-            Ok(_) => Ok(Self { initialized: true }),
-            Err(error) => Err(anyhow!("initialize COM for WASAPI failed: {error:?}")),
+        let sta_result = wasapi::initialize_sta();
+        if sta_result.is_ok() {
+            Ok(Self { initialized: true })
+        } else {
+            Err(anyhow!(
+                "initialize COM for WASAPI failed: {sta_result:?}"
+            ))
         }
     }
 }
@@ -34,7 +38,8 @@ pub fn enumerate_endpoints(direction: Direction) -> Result<Vec<(String, String)>
         .context("enumerate WASAPI endpoint collection")?;
 
     let mut out = Vec::new();
-    for device in collection {
+    for device in &collection {
+        let device = device.context("read endpoint device")?;
         let id = device.get_id().context("read endpoint id")?;
         let friendly = device
             .get_friendlyname()

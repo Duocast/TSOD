@@ -144,7 +144,7 @@ fn run_capture_thread(
     let handle = audio_client
         .set_get_eventhandle()
         .context("set WASAPI capture event handle")?;
-    let mut capture = audio_client
+    let capture = audio_client
         .get_audiocaptureclient()
         .context("get WASAPI capture client")?;
     audio_client
