@@ -168,10 +168,21 @@ mod linux {
 
     use tracing::info;
 
+    use crate::audio::resample::LinearResampler;
     use crate::ui::{
         model::{AudioBackend, AudioDeviceId, AudioDeviceInfo, AudioDirection},
         UiEvent,
     };
+
+    struct PipeWireCaptureState {
+        format: pw::spa::param::audio::AudioInfoRaw,
+        target_rate: u32,
+        target_channels: u16,
+        resampler: Option<LinearResampler>,
+        mono_in: Vec<f32>,
+        mono_out: Vec<f32>,
+        log_once: bool,
+    }
 
     enum LinuxCaptureBackend {
         PipeWire,
@@ -293,11 +304,60 @@ mod linux {
         let stream = pw::stream::StreamBox::new(&core, "tsod-capture", props)
             .context("create PipeWire capture stream")?;
 
-        let ch = channels;
+        let requested_format = pw::spa::param::audio::AudioFormat::S16LE;
         let listener = stream
-            .add_local_listener_with_user_data(())
+            .add_local_listener_with_user_data(PipeWireCaptureState {
+                format: pw::spa::param::audio::AudioInfoRaw::new(),
+                target_rate: sample_rate,
+                target_channels: channels,
+                resampler: None,
+                mono_in: Vec::new(),
+                mono_out: Vec::new(),
+                log_once: false,
+            })
+            .param_changed(move |_, state, id, param| {
+                if id != pw::spa::param::ParamType::Format.as_raw() {
+                    return;
+                }
+                let Some(param) = param else {
+                    return;
+                };
+                if state.format.parse(param).is_err() {
+                    tracing::warn!("[audio] pipewire capture: failed to parse negotiated format");
+                    return;
+                }
+
+                let negotiated_rate = state.format.rate();
+                let negotiated_channels = state.format.channels();
+                let negotiated_format = state.format.format();
+
+                if !state.log_once {
+                    info!(
+                        "[audio] pipewire capture negotiated: rate={} channels={} format={:?}; engine={}/mono",
+                        negotiated_rate,
+                        negotiated_channels,
+                        negotiated_format,
+                        state.target_rate
+                    );
+                    state.log_once = true;
+                }
+
+                if negotiated_format != requested_format {
+                    tracing::error!(
+                        "[audio] pipewire capture negotiated unsupported format {:?} (expected {:?}); capture will be muted",
+                        negotiated_format,
+                        requested_format
+                    );
+                }
+
+                state.resampler = if negotiated_rate != state.target_rate {
+                    Some(LinearResampler::new(negotiated_rate, state.target_rate))
+                } else {
+                    None
+                };
+            })
             .process({
-                move |stream: &pw::stream::Stream, _: &mut ()| {
+                move |stream: &pw::stream::Stream, state: &mut PipeWireCaptureState| {
                     let Some(mut buf) = stream.dequeue_buffer() else {
                         return;
                     };
@@ -311,19 +371,41 @@ mod linux {
                         return;
                     };
 
+                    let negotiated_format = state.format.format();
+                    if negotiated_format != requested_format {
+                        return;
+                    }
+
+                    let negotiated_channels = state.format.channels().max(1) as usize;
+
                     let samples = unsafe {
                         std::slice::from_raw_parts(raw.as_ptr() as *const i16, raw.len() / 2)
                     };
 
-                    if ch == 1 {
-                        for &s in samples {
-                            let _ = prod.try_push(s);
-                        }
+                    state.mono_in.clear();
+                    if negotiated_channels == 1 {
+                        state
+                            .mono_in
+                            .extend(samples.iter().map(|&s| s as f32 / i16::MAX as f32));
                     } else {
-                        for frame in samples.chunks(ch as usize) {
-                            if let Some(&s) = frame.first() {
-                                let _ = prod.try_push(s);
-                            }
+                        state.mono_in.reserve(samples.len() / negotiated_channels);
+                        for frame in samples.chunks_exact(negotiated_channels) {
+                            let sum: f32 = frame.iter().map(|&s| s as f32 / i16::MAX as f32).sum();
+                            state.mono_in.push(sum / negotiated_channels as f32);
+                        }
+                    }
+
+                    state.mono_out.clear();
+                    if let Some(resampler) = state.resampler.as_mut() {
+                        resampler.process(&state.mono_in, &mut state.mono_out);
+                    } else {
+                        state.mono_out.extend_from_slice(&state.mono_in);
+                    }
+
+                    for &s in &state.mono_out {
+                        let v = (s.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16;
+                        for _ in 0..state.target_channels {
+                            let _ = prod.try_push(v);
                         }
                     }
                 }

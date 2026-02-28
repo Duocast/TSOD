@@ -143,6 +143,7 @@ mod linux {
     use pipewire as pw;
     use pw::properties::properties;
     use ringbuf::{traits::Consumer, HeapCons};
+    use std::collections::VecDeque;
     use std::sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -153,6 +154,19 @@ mod linux {
         model::{AudioBackend, AudioDeviceId, AudioDeviceInfo, AudioDirection},
         UiEvent,
     };
+
+    struct PipeWirePlayoutState {
+        format: pw::spa::param::audio::AudioInfoRaw,
+        engine_rate: u32,
+        engine_channels: u16,
+        sink_rate: u32,
+        sink_channels: u32,
+        resampler: Option<LinearResampler>,
+        in_mono: Vec<f32>,
+        out_mono_tmp: Vec<f32>,
+        out_fifo: VecDeque<f32>,
+        log_once: bool,
+    }
 
     enum LinuxPlayoutBackend {
         PipeWire,
@@ -297,11 +311,71 @@ mod linux {
         let stream = pw::stream::StreamBox::new(&core, "tsod-playout", props)
             .context("create PipeWire playout stream")?;
 
-        let ch = channels;
+        let requested_format = pw::spa::param::audio::AudioFormat::S16LE;
         let listener = stream
-            .add_local_listener_with_user_data(())
+            .add_local_listener_with_user_data(PipeWirePlayoutState {
+                format: pw::spa::param::audio::AudioInfoRaw::new(),
+                engine_rate: sample_rate,
+                engine_channels: channels,
+                sink_rate: sample_rate,
+                sink_channels: channels as u32,
+                resampler: None,
+                in_mono: Vec::new(),
+                out_mono_tmp: Vec::new(),
+                out_fifo: VecDeque::new(),
+                log_once: false,
+            })
+            .param_changed(move |_, state, id, param| {
+                if id != pw::spa::param::ParamType::Format.as_raw() {
+                    return;
+                }
+                let Some(param) = param else {
+                    return;
+                };
+                if state.format.parse(param).is_err() {
+                    tracing::warn!("[audio] pipewire playout: failed to parse negotiated format");
+                    return;
+                }
+
+                let negotiated_rate = state.format.rate();
+                let negotiated_channels = state.format.channels().max(1);
+                let negotiated_format = state.format.format();
+
+                if !state.log_once {
+                    info!(
+                        "[audio] pipewire playout negotiated: rate={} channels={} format={:?}; engine={}/mono",
+                        negotiated_rate,
+                        negotiated_channels,
+                        negotiated_format,
+                        state.engine_rate
+                    );
+                    state.log_once = true;
+                }
+
+                if negotiated_format != requested_format {
+                    tracing::error!(
+                        "[audio] pipewire playout negotiated unsupported format {:?} (expected {:?}); playout will be silent",
+                        negotiated_format,
+                        requested_format
+                    );
+                }
+
+                let old_rate = state.sink_rate;
+                state.sink_rate = negotiated_rate;
+                state.sink_channels = negotiated_channels;
+                state.out_fifo.clear();
+                state.out_mono_tmp.clear();
+                if negotiated_rate != old_rate {
+                    state.in_mono.clear();
+                }
+                state.resampler = if negotiated_rate != state.engine_rate {
+                    Some(LinearResampler::new(state.engine_rate, negotiated_rate))
+                } else {
+                    None
+                };
+            })
             .process({
-                move |stream: &pw::stream::Stream, _: &mut ()| {
+                move |stream: &pw::stream::Stream, state: &mut PipeWirePlayoutState| {
                     let Some(mut buf) = stream.dequeue_buffer() else {
                         return;
                     };
@@ -315,20 +389,58 @@ mod linux {
                         return;
                     };
 
+                    if state.format.format() != requested_format {
+                        return;
+                    }
+
+                    let sink_channels = state.sink_channels.max(1) as usize;
+
                     let out = unsafe {
                         std::slice::from_raw_parts_mut(raw.as_mut_ptr() as *mut i16, raw.len() / 2)
                     };
 
-                    if ch == 1 {
-                        for o in out.iter_mut() {
-                            *o = cons.try_pop().unwrap_or(0);
-                        }
-                    } else {
-                        for frame in out.chunks_mut(ch as usize) {
-                            let sample = cons.try_pop().unwrap_or(0);
-                            for o in frame.iter_mut() {
-                                *o = sample;
+                    let frames_needed = out.len() / sink_channels;
+                    while state.out_fifo.len() < frames_needed {
+                        let remaining = frames_needed - state.out_fifo.len();
+                        let in_needed = ((remaining as u64 * state.engine_rate as u64)
+                            .div_ceil(state.sink_rate.max(1) as u64)
+                            + 2) as usize;
+
+                        state.in_mono.clear();
+                        state.in_mono.reserve(in_needed);
+                        let engine_channels = state.engine_channels.max(1) as usize;
+                        for _ in 0..in_needed {
+                            let sample = cons
+                                .try_pop()
+                                .map(|v| v as f32 / i16::MAX as f32)
+                                .unwrap_or(0.0);
+                            for _ in 1..engine_channels {
+                                let _ = cons.try_pop();
                             }
+                            state.in_mono.push(sample);
+                        }
+
+                        state.out_mono_tmp.clear();
+                        if let Some(resampler) = state.resampler.as_mut() {
+                            resampler.process(&state.in_mono, &mut state.out_mono_tmp);
+                        } else {
+                            state.out_mono_tmp.extend_from_slice(&state.in_mono);
+                        }
+
+                        if state.out_mono_tmp.is_empty() && in_needed == 0 {
+                            break;
+                        }
+                        state.out_fifo.extend(state.out_mono_tmp.iter().copied());
+                        if state.out_mono_tmp.is_empty() {
+                            break;
+                        }
+                    }
+
+                    for frame in out.chunks_mut(sink_channels) {
+                        let sample = state.out_fifo.pop_front().unwrap_or(0.0);
+                        let v = (sample.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16;
+                        for o in frame.iter_mut() {
+                            *o = v;
                         }
                     }
                 }
@@ -462,8 +574,14 @@ mod linux {
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "<unknown-id>".to_string());
             let selected_name = device_label(&dev).unwrap_or_else(|| "Unknown device".to_string());
-            info!(endpoint_id = %selected_id, friendly_name = %selected_name, "starting output stream");
             let stream_cfg = native_output_config(&dev)?;
+            info!(
+                endpoint_id = %selected_id,
+                friendly_name = %selected_name,
+                sample_rate = stream_cfg.sample_rate().0,
+                channels = stream_cfg.channels(),
+                "starting output stream"
+            );
             let unhealthy = Arc::new(AtomicBool::new(false));
             let unhealthy_cb = unhealthy.clone();
             let reported = Arc::new(AtomicBool::new(false));
@@ -702,35 +820,44 @@ mod linux {
         let mut resampler = LinearResampler::new(source_rate, target_rate);
         let mut source_mono = Vec::<f32>::new();
         let mut source_resampled = Vec::<f32>::new();
+        let mut out_fifo = VecDeque::<f32>::new();
 
         dev.build_output_stream(
             stream_cfg,
             move |data: &mut [T], _| {
                 let frames_needed = data.len() / target_channels;
-                if source_mono.len() < frames_needed {
-                    source_mono.resize(frames_needed, 0.0);
-                }
-                for sample in source_mono.iter_mut().take(frames_needed) {
-                    *sample = cons
-                        .try_pop()
-                        .map(|s| s as f32 / i16::MAX as f32)
-                        .unwrap_or(0.0);
-                    for _ in 1..source_channels {
-                        let _ = cons.try_pop();
+                while out_fifo.len() < frames_needed {
+                    let remaining = frames_needed - out_fifo.len();
+                    let in_needed = ((remaining as u64 * source_rate as u64)
+                        .div_ceil(target_rate.max(1) as u64)
+                        + 2) as usize;
+                    source_mono.clear();
+                    source_mono.reserve(in_needed);
+                    for _ in 0..in_needed {
+                        let sample = cons
+                            .try_pop()
+                            .map(|s| s as f32 / i16::MAX as f32)
+                            .unwrap_or(0.0);
+                        for _ in 1..source_channels {
+                            let _ = cons.try_pop();
+                        }
+                        source_mono.push(sample);
                     }
+
+                    source_resampled.clear();
+                    resampler.process(&source_mono, &mut source_resampled);
+                    if source_resampled.is_empty() {
+                        break;
+                    }
+                    out_fifo.extend(source_resampled.iter().copied());
                 }
 
-                source_resampled.clear();
-                resampler.process(&source_mono[..frames_needed], &mut source_resampled);
-
-                let mut idx = 0usize;
                 for frame in data.chunks_mut(target_channels) {
-                    let s = source_resampled.get(idx).copied().unwrap_or(0.0);
+                    let s = out_fifo.pop_front().unwrap_or(0.0);
                     let out = T::from_sample(s.clamp(-1.0, 1.0));
                     for ch in frame {
                         *ch = out;
                     }
-                    idx += 1;
                 }
             },
             move |err| {
