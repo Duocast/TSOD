@@ -89,6 +89,12 @@ pub trait ControlRepo: Send + Sync {
         server: ServerId,
         channel: ChannelId,
     ) -> ControlResult<i64>;
+    async fn list_member_channels_for_user(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        server: ServerId,
+        user: UserId,
+    ) -> ControlResult<Vec<ChannelId>>;
 
     async fn perm_list_roles(
         &self,
@@ -599,6 +605,31 @@ impl ControlRepo for PgControlRepo {
         .context("count members")?;
 
         Ok(n)
+    }
+
+    async fn list_member_channels_for_user(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        server: ServerId,
+        user: UserId,
+    ) -> ControlResult<Vec<ChannelId>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT channel_id
+            FROM members
+            WHERE server_id = $1 AND user_id = $2
+            "#,
+        )
+        .bind(server.0)
+        .bind(user.0)
+        .fetch_all(&mut **tx)
+        .await
+        .context("list member channels for user")?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| ChannelId(r.get::<Uuid, _>("channel_id")))
+            .collect())
     }
 
     // -------------------------
