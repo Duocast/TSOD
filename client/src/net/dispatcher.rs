@@ -71,6 +71,7 @@ pub struct AuthInfo {
 #[derive(Clone, Debug)]
 pub struct JoinChannelState {
     pub members: Vec<pb::ChannelMember>,
+    pub info: Option<pb::ChannelInfo>,
 }
 
 /// Commands into the dispatcher (outgoing requests).
@@ -240,6 +241,7 @@ impl ControlDispatcher {
                     .ok_or_else(|| anyhow!("join response missing channel state"))?;
                 Ok(JoinChannelState {
                     members: state.members,
+                    info: state.info,
                 })
             }
             _ => Err(anyhow!("expected JoinChannelResponse")),
