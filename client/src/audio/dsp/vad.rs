@@ -12,28 +12,54 @@ pub struct VadHysteresis {
     on_threshold: f32,
     off_threshold: f32,
     active: bool,
-    /// Number of consecutive frames below off_threshold before deactivating.
+    attack_frames: u32,
+    voiced_run_frames: u32,
+    /// Number of frames to hold active state after dropping below off_threshold.
     hangover_frames: u32,
     hangover_counter: u32,
 }
 
 impl VadHysteresis {
-    pub fn new(on_threshold: f32, off_threshold: f32, hangover_frames: u32) -> Self {
+    pub fn new(
+        on_threshold: f32,
+        off_threshold: f32,
+        attack_frames: u32,
+        hangover_frames: u32,
+    ) -> Self {
         Self {
             on_threshold,
             off_threshold,
             active: false,
+            attack_frames,
+            voiced_run_frames: 0,
             hangover_frames,
             hangover_counter: 0,
         }
     }
 
+    pub fn from_timing(
+        on_threshold: f32,
+        off_threshold: f32,
+        attack_ms: u32,
+        hangover_ms: u32,
+        frame_ms: u32,
+    ) -> Self {
+        let frame_ms = frame_ms.max(1);
+        let attack_frames = (attack_ms / frame_ms).max(1);
+        let hangover_frames = (hangover_ms / frame_ms).max(1);
+        Self::new(on_threshold, off_threshold, attack_frames, hangover_frames)
+    }
+
     /// Update with a new VAD probability. Returns whether voice is active.
     pub fn update(&mut self, probability: f32) -> bool {
         if probability >= self.on_threshold {
-            self.active = true;
+            self.voiced_run_frames = self.voiced_run_frames.saturating_add(1);
+            if self.voiced_run_frames >= self.attack_frames {
+                self.active = true;
+            }
             self.hangover_counter = 0;
         } else if probability < self.off_threshold {
+            self.voiced_run_frames = 0;
             if self.active {
                 self.hangover_counter += 1;
                 if self.hangover_counter >= self.hangover_frames {
@@ -43,6 +69,7 @@ impl VadHysteresis {
             }
         } else {
             // In the hysteresis band: maintain current state
+            self.voiced_run_frames = 0;
             self.hangover_counter = 0;
         }
 
