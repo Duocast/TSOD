@@ -50,6 +50,7 @@ static DEBUG_SEEN_AUTH_USER_IDS: OnceLock<StdMutex<HashSet<String>>> = OnceLock:
 #[derive(Clone)]
 struct AudioRuntimeSettings {
     output_auto_level: Arc<AtomicBool>,
+    mono_expansion: Arc<AtomicBool>,
     comfort_noise: Arc<AtomicBool>,
     comfort_noise_level: Arc<AtomicU32>,
     ducking_enabled: Arc<AtomicBool>,
@@ -64,6 +65,7 @@ impl AudioRuntimeSettings {
     fn from_app_settings(settings: &ui::model::AppSettings) -> Self {
         Self {
             output_auto_level: Arc::new(AtomicBool::new(settings.output_auto_level)),
+            mono_expansion: Arc::new(AtomicBool::new(settings.mono_expansion)),
             comfort_noise: Arc::new(AtomicBool::new(settings.comfort_noise)),
             comfort_noise_level: Arc::new(AtomicU32::new(f32_to_u32(settings.comfort_noise_level))),
             ducking_enabled: Arc::new(AtomicBool::new(settings.ducking_enabled)),
@@ -82,6 +84,8 @@ impl AudioRuntimeSettings {
     fn apply(&self, settings: &ui::model::AppSettings) {
         self.output_auto_level
             .store(settings.output_auto_level, Ordering::Relaxed);
+        self.mono_expansion
+            .store(settings.mono_expansion, Ordering::Relaxed);
         self.comfort_noise
             .store(settings.comfort_noise, Ordering::Relaxed);
         self.comfort_noise_level
@@ -157,7 +161,17 @@ fn apply_fec_encoder_settings(
     };
     encoder.set_inband_fec(enable_fec)?;
     encoder.set_packet_loss_perc(packet_loss)?;
+    info!(
+        "[audio] set fec={:?} strength={} encoder_inband_fec={} packet_loss_perc={}",
+        fec_mode, fec_strength, enable_fec, packet_loss
+    );
     Ok(())
+}
+
+fn persist_settings(tx_event: &Sender<UiEvent>, settings: &ui::model::AppSettings) {
+    if let Err(e) = settings_io::save_settings(settings) {
+        let _ = tx_event.send(UiEvent::AppendLog(format!("[settings] save failed: {e:#}")));
+    }
 }
 
 fn main() -> Result<()> {
@@ -465,13 +479,121 @@ async fn app_task(
                                     .send(UiEvent::AppendLog(format!("[audio] loopback: {new}")));
                             }
                             UiIntent::SetInputGain(gain) => {
+                                saved_settings.input_gain = gain;
                                 input_gain.store(f32_to_u32(gain), Ordering::Relaxed);
+                                persist_settings(&tx_event, &saved_settings);
                             }
                             UiIntent::SetEchoCancellation(enabled) => {
+                                saved_settings.echo_cancellation = enabled;
                                 if let Some(ref dsp) = capture_dsp {
                                     let mut d = dsp.lock().await;
                                     d.set_echo_cancellation(enabled);
                                 }
+                                persist_settings(&tx_event, &saved_settings);
+                            }
+                            UiIntent::SetNoiseSuppression(enabled) => {
+                                saved_settings.noise_suppression = enabled;
+                                if let Some(ref dsp) = capture_dsp {
+                                    let mut d = dsp.lock().await;
+                                    d.set_noise_suppression(enabled);
+                                }
+                                persist_settings(&tx_event, &saved_settings);
+                            }
+                            UiIntent::SetAgcEnabled(enabled) => {
+                                saved_settings.agc_enabled = enabled;
+                                if let Some(ref dsp) = capture_dsp {
+                                    let mut d = dsp.lock().await;
+                                    d.set_agc(enabled);
+                                }
+                                persist_settings(&tx_event, &saved_settings);
+                            }
+                            UiIntent::SetAgcTargetDb(target_db) => {
+                                saved_settings.agc_target_db = target_db;
+                                if let Some(ref dsp) = capture_dsp {
+                                    let mut d = dsp.lock().await;
+                                    d.set_agc_target(target_db);
+                                }
+                                persist_settings(&tx_event, &saved_settings);
+                            }
+                            UiIntent::SetTypingAttenuation(enabled) => {
+                                saved_settings.typing_attenuation = enabled;
+                                audio_runtime
+                                    .typing_attenuation
+                                    .store(enabled, Ordering::Relaxed);
+                                persist_settings(&tx_event, &saved_settings);
+                            }
+                            UiIntent::SetFecMode(mode) => {
+                                saved_settings.fec_mode = mode;
+                                audio_runtime.fec_mode.store(mode as u32, Ordering::Relaxed);
+                                let mut enc = encoder.lock().await;
+                                let _ = apply_fec_encoder_settings(&mut enc, &audio_runtime);
+                                persist_settings(&tx_event, &saved_settings);
+                            }
+                            UiIntent::SetFecStrength(strength) => {
+                                saved_settings.fec_strength = strength.min(100);
+                                audio_runtime
+                                    .fec_strength
+                                    .store(saved_settings.fec_strength as u32, Ordering::Relaxed);
+                                let mut enc = encoder.lock().await;
+                                let _ = apply_fec_encoder_settings(&mut enc, &audio_runtime);
+                                persist_settings(&tx_event, &saved_settings);
+                            }
+                            UiIntent::SetVadThreshold(threshold) => {
+                                saved_settings.vad_threshold = threshold;
+                                if let Some(ref dsp) = capture_dsp {
+                                    let mut d = dsp.lock().await;
+                                    d.set_vad_threshold(threshold);
+                                }
+                                persist_settings(&tx_event, &saved_settings);
+                            }
+                            UiIntent::SetOutputGain(gain) => {
+                                saved_settings.output_gain = gain;
+                                output_gain.store(f32_to_u32(gain), Ordering::Relaxed);
+                                persist_settings(&tx_event, &saved_settings);
+                            }
+                            UiIntent::SetOutputAutoLevel(enabled) => {
+                                saved_settings.output_auto_level = enabled;
+                                audio_runtime
+                                    .output_auto_level
+                                    .store(enabled, Ordering::Relaxed);
+                                persist_settings(&tx_event, &saved_settings);
+                            }
+                            UiIntent::SetMonoExpansion(enabled) => {
+                                saved_settings.mono_expansion = enabled;
+                                audio_runtime
+                                    .mono_expansion
+                                    .store(enabled, Ordering::Relaxed);
+                                persist_settings(&tx_event, &saved_settings);
+                            }
+                            UiIntent::SetComfortNoise(enabled) => {
+                                saved_settings.comfort_noise = enabled;
+                                audio_runtime
+                                    .comfort_noise
+                                    .store(enabled, Ordering::Relaxed);
+                                persist_settings(&tx_event, &saved_settings);
+                            }
+                            UiIntent::SetComfortNoiseLevel(level) => {
+                                saved_settings.comfort_noise_level = level.clamp(0.0, 0.1);
+                                audio_runtime.comfort_noise_level.store(
+                                    f32_to_u32(saved_settings.comfort_noise_level),
+                                    Ordering::Relaxed,
+                                );
+                                persist_settings(&tx_event, &saved_settings);
+                            }
+                            UiIntent::SetDuckingEnabled(enabled) => {
+                                saved_settings.ducking_enabled = enabled;
+                                audio_runtime
+                                    .ducking_enabled
+                                    .store(enabled, Ordering::Relaxed);
+                                persist_settings(&tx_event, &saved_settings);
+                            }
+                            UiIntent::SetDuckingAttenuationDb(db) => {
+                                saved_settings.ducking_attenuation_db = db.clamp(-40, 0);
+                                audio_runtime.ducking_attenuation_db.store(
+                                    f32_to_u32(saved_settings.ducking_attenuation_db as f32),
+                                    Ordering::Relaxed,
+                                );
+                                persist_settings(&tx_event, &saved_settings);
                             }
                             UiIntent::SetInputDevice(dev) => {
                                 {
@@ -516,7 +638,8 @@ async fn app_task(
                                 }
                             }
                             UiIntent::SaveSettings(ref settings) => {
-                                let _ = settings_io::save_settings(settings);
+                                saved_settings = (**settings).clone();
+                                persist_settings(&tx_event, &saved_settings);
                             }
                             UiIntent::ConnectToServer {
                                 host,
@@ -1807,46 +1930,144 @@ async fn connect_and_run_session(
                             ));
                         }
                         UiIntent::SetNoiseSuppression(enabled) => {
+                            saved_settings.noise_suppression = enabled;
                             if let Some(ref dsp) = capture_dsp {
                                 let mut d = dsp.lock().await;
                                 d.set_noise_suppression(enabled);
                             }
-                            let _ = tx_event.send(UiEvent::AppendLog(
-                                format!("[dsp] noise suppression: {enabled}"),
-                            ));
+                            info!("[audio] set noise_suppression={enabled}");
+                            persist_settings(tx_event, &saved_settings);
                         }
                         UiIntent::SetAgcEnabled(enabled) => {
+                            saved_settings.agc_enabled = enabled;
                             if let Some(ref dsp) = capture_dsp {
                                 let mut d = dsp.lock().await;
                                 d.set_agc(enabled);
                             }
-                            let _ = tx_event.send(UiEvent::AppendLog(
-                                format!("[dsp] AGC: {enabled}"),
-                            ));
+                            info!("[audio] set agc_enabled={enabled}");
+                            persist_settings(tx_event, &saved_settings);
+                        }
+                        UiIntent::SetAgcTargetDb(target_db) => {
+                            saved_settings.agc_target_db = target_db;
+                            if let Some(ref dsp) = capture_dsp {
+                                let mut d = dsp.lock().await;
+                                d.set_agc_target(target_db);
+                            }
+                            info!("[audio] set agc_target={target_db:.1} dBFS");
+                            persist_settings(tx_event, &saved_settings);
                         }
                         UiIntent::SetEchoCancellation(enabled) => {
+                            saved_settings.echo_cancellation = enabled;
                             if let Some(ref dsp) = capture_dsp {
                                 let mut d = dsp.lock().await;
                                 d.set_echo_cancellation(enabled);
                             }
-                            let _ = tx_event.send(UiEvent::AppendLog(
-                                format!("[dsp] echo cancellation: {enabled}"),
-                            ));
+                            info!("[audio] set echo_cancellation={enabled}");
+                            persist_settings(tx_event, &saved_settings);
+                        }
+                        UiIntent::SetTypingAttenuation(enabled) => {
+                            saved_settings.typing_attenuation = enabled;
+                            audio_runtime
+                                .typing_attenuation
+                                .store(enabled, Ordering::Relaxed);
+                            info!("[audio] set typing_attenuation={enabled}");
+                            persist_settings(tx_event, &saved_settings);
+                        }
+                        UiIntent::SetFecMode(mode) => {
+                            saved_settings.fec_mode = mode;
+                            audio_runtime.fec_mode.store(mode as u32, Ordering::Relaxed);
+                            let mut enc = encoder.lock().await;
+                            if let Err(e) = apply_fec_encoder_settings(&mut enc, &audio_runtime) {
+                                let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                    "[audio] failed to apply FEC mode: {e:#}"
+                                )));
+                            }
+                            persist_settings(tx_event, &saved_settings);
+                        }
+                        UiIntent::SetFecStrength(strength) => {
+                            saved_settings.fec_strength = strength.min(100);
+                            audio_runtime
+                                .fec_strength
+                                .store(saved_settings.fec_strength as u32, Ordering::Relaxed);
+                            let mut enc = encoder.lock().await;
+                            if let Err(e) = apply_fec_encoder_settings(&mut enc, &audio_runtime) {
+                                let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                    "[audio] failed to apply FEC strength: {e:#}"
+                                )));
+                            }
+                            persist_settings(tx_event, &saved_settings);
                         }
                         UiIntent::SetVadThreshold(threshold) => {
+                            saved_settings.vad_threshold = threshold;
                             if let Some(ref dsp) = capture_dsp {
                                 let mut d = dsp.lock().await;
                                 d.set_vad_threshold(threshold);
                             }
-                            let _ = tx_event.send(UiEvent::AppendLog(
-                                format!("[dsp] VAD threshold: {threshold:.2}"),
-                            ));
+                            info!("[audio] set vad_threshold={threshold:.2}");
+                            persist_settings(tx_event, &saved_settings);
                         }
                         UiIntent::SetInputGain(gain) => {
+                            saved_settings.input_gain = gain;
                             input_gain.store(f32_to_u32(gain), Ordering::Relaxed);
+                            info!("[audio] set input_gain={gain:.2}");
+                            persist_settings(tx_event, &saved_settings);
                         }
                         UiIntent::SetOutputGain(gain) => {
+                            saved_settings.output_gain = gain;
                             output_gain.store(f32_to_u32(gain), Ordering::Relaxed);
+                            info!("[audio] set output_gain={gain:.2}");
+                            persist_settings(tx_event, &saved_settings);
+                        }
+                        UiIntent::SetOutputAutoLevel(enabled) => {
+                            saved_settings.output_auto_level = enabled;
+                            audio_runtime.output_auto_level.store(enabled, Ordering::Relaxed);
+                            info!("[audio] set output_auto_level={enabled}");
+                            persist_settings(tx_event, &saved_settings);
+                        }
+                        UiIntent::SetMonoExpansion(enabled) => {
+                            saved_settings.mono_expansion = enabled;
+                            audio_runtime.mono_expansion.store(enabled, Ordering::Relaxed);
+                            info!("[audio] set mono_expansion={enabled}");
+                            persist_settings(tx_event, &saved_settings);
+                        }
+                        UiIntent::SetComfortNoise(enabled) => {
+                            saved_settings.comfort_noise = enabled;
+                            audio_runtime.comfort_noise.store(enabled, Ordering::Relaxed);
+                            info!("[audio] set comfort_noise={enabled}");
+                            persist_settings(tx_event, &saved_settings);
+                        }
+                        UiIntent::SetComfortNoiseLevel(level) => {
+                            saved_settings.comfort_noise_level = level.clamp(0.0, 0.1);
+                            audio_runtime.comfort_noise_level.store(
+                                f32_to_u32(saved_settings.comfort_noise_level),
+                                Ordering::Relaxed,
+                            );
+                            info!(
+                                "[audio] set comfort_noise_level={:.3}",
+                                saved_settings.comfort_noise_level
+                            );
+                            persist_settings(tx_event, &saved_settings);
+                        }
+                        UiIntent::SetDuckingEnabled(enabled) => {
+                            saved_settings.ducking_enabled = enabled;
+                            audio_runtime.ducking_enabled.store(enabled, Ordering::Relaxed);
+                            info!(
+                                "[audio] set ducking enabled={} attenuation_db={}",
+                                enabled, saved_settings.ducking_attenuation_db
+                            );
+                            persist_settings(tx_event, &saved_settings);
+                        }
+                        UiIntent::SetDuckingAttenuationDb(db) => {
+                            saved_settings.ducking_attenuation_db = db.clamp(-40, 0);
+                            audio_runtime.ducking_attenuation_db.store(
+                                f32_to_u32(saved_settings.ducking_attenuation_db as f32),
+                                Ordering::Relaxed,
+                            );
+                            info!(
+                                "[audio] set ducking enabled={} attenuation_db={}",
+                                saved_settings.ducking_enabled, saved_settings.ducking_attenuation_db
+                            );
+                            persist_settings(tx_event, &saved_settings);
                         }
                         UiIntent::SetUserOutputGain { user_id, gain } => {
                             if let Ok(mut per_user) = per_user_audio.write() {
@@ -1963,6 +2184,7 @@ async fn connect_and_run_session(
                             }
                         }
                         UiIntent::ApplySettings(ref settings) => {
+                            saved_settings = (**settings).clone();
                             // Apply all settings to the audio pipeline
                             if let Some(ref dsp) = capture_dsp {
                                 let mut d = dsp.lock().await;
@@ -1978,6 +2200,22 @@ async fn connect_and_run_session(
                                 *per_user = settings.per_user_audio.clone();
                             }
                             audio_runtime.apply(settings);
+                            info!(
+                                "[audio] apply settings ns={} agc={} agc_target={:.1} aec={} typing_attn={} fec={:?} fec_strength={} auto_level={} mono_expansion={} comfort_noise={} comfort_noise_level={:.3} ducking={} duck_db={}",
+                                settings.noise_suppression,
+                                settings.agc_enabled,
+                                settings.agc_target_db,
+                                settings.echo_cancellation,
+                                settings.typing_attenuation,
+                                settings.fec_mode,
+                                settings.fec_strength,
+                                settings.output_auto_level,
+                                settings.mono_expansion,
+                                settings.comfort_noise,
+                                settings.comfort_noise_level,
+                                settings.ducking_enabled,
+                                settings.ducking_attenuation_db
+                            );
                             {
                                 let mut enc = encoder.lock().await;
                                 if let Err(e) = apply_fec_encoder_settings(&mut enc, &audio_runtime) {
@@ -2788,13 +3026,6 @@ async fn voice_recv_loop(
     const STREAM_IDLE_DROP_MS: u64 = 10_000;
     const PLC_MAX_FRAMES: usize = 5;
     const JITTER_MISSING_WAIT_MS: u64 = 40;
-    let fec_mode = match audio_runtime.fec_mode.load(Ordering::Relaxed) {
-        0 => FecMode::Off,
-        2 => FecMode::On,
-        _ => FecMode::Auto,
-    };
-    let opus_use_inband_fec = fec_mode != FecMode::Off;
-
     let sample_rate = 48_000u32;
     let channels = 1usize;
     let frame_ms = 20u32;
@@ -2804,6 +3035,7 @@ async fn voice_recv_loop(
     let mut tick = tokio::time::interval(Duration::from_millis(frame_ms as u64));
     let mut mix_out = vec![0f32; frame_samples];
     let mut mixed_pcm = vec![0i16; frame_samples];
+    let mut last_logged_fec_mode = None::<FecMode>;
 
     loop {
         tokio::select! {
@@ -2856,6 +3088,16 @@ async fn voice_recv_loop(
                 let now_ms = unix_ms();
                 mix_out.fill(0.0);
                 let mut mixed_streams = 0usize;
+                let fec_mode = match audio_runtime.fec_mode.load(Ordering::Relaxed) {
+                    0 => FecMode::Off,
+                    2 => FecMode::On,
+                    _ => FecMode::Auto,
+                };
+                if last_logged_fec_mode != Some(fec_mode) {
+                    info!("[audio] set fec receiver_mode={fec_mode:?}");
+                    last_logged_fec_mode = Some(fec_mode);
+                }
+                let opus_use_inband_fec = fec_mode != FecMode::Off;
 
                 for stream in streams.values_mut() {
                     let mut frame_present = false;
@@ -2986,6 +3228,15 @@ async fn voice_recv_loop(
                         let x = *sample / 32768.0;
                         let soft = (x / (1.0 + x.abs())).clamp(-1.0, 1.0);
                         *dst = (soft * 32768.0) as i16;
+                    }
+                    if audio_runtime.mono_expansion.load(Ordering::Relaxed) {
+                        let mut prev = 0.0_f32;
+                        for s in mixed_pcm.iter_mut() {
+                            let dry = *s as f32;
+                            let widened = (dry + 0.2 * (dry - prev)).clamp(-32768.0, 32767.0);
+                            *s = widened as i16;
+                            prev = dry;
+                        }
                     }
                 }
 
