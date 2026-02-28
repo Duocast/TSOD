@@ -4,7 +4,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
-use tracing::{error, info};
+use tracing::{debug, error, info};
 use wasapi::{BufferFlags, Direction, SampleType, StreamMode};
 
 use crate::{
@@ -140,6 +140,7 @@ fn run_playout_thread(
     let bits_per_sample = mix.get_bitspersample() as u16;
     let valid_bits = mix.get_validbitspersample() as u16;
     let sample_type = mix.get_subformat().context("get WASAPI sample type")?;
+    let bytes_per_sample = block_align / device_channels;
 
     info!(
         "[wasapi playout] open device id={} name={} mix: {}Hz {}ch block_align={} bits={} valid={} type={:?}",
@@ -152,6 +153,16 @@ fn run_playout_thread(
         valid_bits,
         sample_type
     );
+
+    if bytes_per_sample == 3 || valid_bits == 24 {
+        debug!(
+            "[wasapi playout] 24-bit path active: bytes_per_sample={} valid_bits={} block_align={} channels={}",
+            bytes_per_sample,
+            valid_bits,
+            block_align,
+            device_channels
+        );
+    }
 
     let mode = StreamMode::EventsShared {
         autoconvert: false,
@@ -206,6 +217,7 @@ fn run_playout_thread(
         let flags = write_render_bytes(
             &mut bytes,
             avail,
+            block_align,
             device_channels,
             sample_type,
             &source_resampled,
@@ -248,6 +260,7 @@ fn fill_source_mono(
 fn write_render_bytes(
     dst: &mut [u8],
     frames: usize,
+    block_align: usize,
     channels: usize,
     sample_type: SampleType,
     mono: &[f32],
@@ -260,51 +273,93 @@ fn write_render_bytes(
         });
     }
 
+    if channels == 0 || block_align == 0 || block_align % channels != 0 {
+        return Err(anyhow!(
+            "invalid render frame layout: block_align={block_align} channels={channels}"
+        ));
+    }
+
+    let bytes_per_sample = block_align / channels;
+    let scale = int_scale(valid_bits);
+
     match sample_type {
         SampleType::Float => {
-            for (frame_idx, frame) in dst.chunks_exact_mut(channels * 4).take(frames).enumerate() {
+            if bytes_per_sample != 4 {
+                return Err(anyhow!(
+                    "unsupported WASAPI float bytes_per_sample={bytes_per_sample}"
+                ));
+            }
+
+            for (frame_idx, frame) in dst.chunks_exact_mut(block_align).take(frames).enumerate() {
                 let sample = mono.get(frame_idx).copied().unwrap_or(0.0).clamp(-1.0, 1.0);
                 let encoded = sample.to_le_bytes();
                 for ch in 0..channels {
-                    let base = ch * 4;
+                    let base = ch * bytes_per_sample;
                     frame[base..base + 4].copy_from_slice(&encoded);
                 }
             }
         }
-        SampleType::Int => {
-            if valid_bits <= 16 {
-                for (frame_idx, frame) in
-                    dst.chunks_exact_mut(channels * 2).take(frames).enumerate()
+        SampleType::Int => match bytes_per_sample {
+            2 => {
+                for (frame_idx, frame) in dst.chunks_exact_mut(block_align).take(frames).enumerate()
                 {
-                    let sample = (mono.get(frame_idx).copied().unwrap_or(0.0).clamp(-1.0, 1.0)
-                        * i16::MAX as f32)
-                        .round() as i16;
+                    let sample =
+                        scale_to_i32(mono.get(frame_idx).copied().unwrap_or(0.0), scale) as i16;
                     let encoded = sample.to_le_bytes();
                     for ch in 0..channels {
-                        let base = ch * 2;
+                        let base = ch * bytes_per_sample;
                         frame[base..base + 2].copy_from_slice(&encoded);
                     }
                 }
-            } else if valid_bits <= 32 {
-                for (frame_idx, frame) in
-                    dst.chunks_exact_mut(channels * 4).take(frames).enumerate()
+            }
+            3 => {
+                for (frame_idx, frame) in dst.chunks_exact_mut(block_align).take(frames).enumerate()
                 {
-                    let sample = (mono.get(frame_idx).copied().unwrap_or(0.0).clamp(-1.0, 1.0)
-                        * i32::MAX as f32)
-                        .round() as i32;
+                    let sample = scale_to_i32(mono.get(frame_idx).copied().unwrap_or(0.0), scale);
                     let encoded = sample.to_le_bytes();
                     for ch in 0..channels {
-                        let base = ch * 4;
+                        let base = ch * bytes_per_sample;
+                        frame[base] = encoded[0];
+                        frame[base + 1] = encoded[1];
+                        frame[base + 2] = encoded[2];
+                    }
+                }
+            }
+            4 => {
+                for (frame_idx, frame) in dst.chunks_exact_mut(block_align).take(frames).enumerate()
+                {
+                    let mut sample =
+                        scale_to_i32(mono.get(frame_idx).copied().unwrap_or(0.0), scale);
+                    if valid_bits > 0 && valid_bits < 32 {
+                        let shift = 32 - valid_bits;
+                        sample = (sample << shift) >> shift;
+                    }
+                    let encoded = sample.to_le_bytes();
+                    for ch in 0..channels {
+                        let base = ch * bytes_per_sample;
                         frame[base..base + 4].copy_from_slice(&encoded);
                     }
                 }
-            } else {
+            }
+            _ => {
                 return Err(anyhow!(
-                    "unsupported WASAPI integer valid bits: {valid_bits}"
+                    "unsupported WASAPI integer bytes_per_sample={bytes_per_sample} (valid_bits={valid_bits})"
                 ));
             }
-        }
+        },
     }
 
     Ok(BufferFlags::none())
+}
+
+fn int_scale(valid_bits: u16) -> f32 {
+    match valid_bits {
+        0 => 1.0,
+        1..=31 => ((1_i64 << (valid_bits - 1)) - 1) as f32,
+        _ => i32::MAX as f32,
+    }
+}
+
+fn scale_to_i32(sample: f32, scale: f32) -> i32 {
+    (sample.clamp(-1.0, 1.0) * scale).round() as i32
 }
