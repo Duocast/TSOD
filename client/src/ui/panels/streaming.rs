@@ -14,64 +14,51 @@ pub fn show(ui: &mut egui::Ui, model: &UiModel) {
     });
     ui.separator();
 
-    let streamers: Vec<_> = model
-        .current_members()
-        .iter()
-        .filter(|member| {
-            member.streaming || (model.sharing_active && member.user_id == model.user_id)
-        })
-        .collect();
-
-    let (headline, subtitle, accent) = match streamers.len() {
-        0 => (
-            "No active stream",
-            "Anyone in this channel can start streaming from the Share button.",
-            theme::text_muted(),
-        ),
-        1 => (
-            "Live stream",
-            "Watching a single presenter stream for everyone in this channel.",
-            theme::COLOR_ONLINE,
-        ),
-        _ => (
-            "Multiple streamers detected",
-            "Only one stream should be active per streaming channel.",
-            theme::COLOR_MENTION,
-        ),
-    };
-
+    let dbg = &model.stream_debug;
     ui.add_space(8.0);
     egui::Frame::group(ui.style())
         .fill(theme::bg_dark())
         .inner_margin(egui::Margin::same(16))
         .show(ui, |ui| {
             ui.set_min_height((ui.available_height() - 8.0).max(260.0));
-            ui.centered_and_justified(|ui| {
-                ui.vertical_centered(|ui| {
-                    ui.label(egui::RichText::new("🖥").size(48.0));
-                    ui.add_space(6.0);
-                    ui.label(
-                        egui::RichText::new(headline)
-                            .size(20.0)
-                            .strong()
-                            .color(accent),
-                    );
+            ui.vertical(|ui| {
+                let tags = if dbg.active_stream_tags.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    dbg.active_stream_tags
+                        .iter()
+                        .map(|t| t.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                ui.label(
+                    egui::RichText::new("Live stream activity")
+                        .strong()
+                        .size(20.0),
+                );
+                ui.add_space(6.0);
+                ui.label(format!("Active stream tags: {tags}"));
+                ui.label(format!(
+                    "Video datagrams/sec: {} | Completed frames/sec: {}",
+                    dbg.video_datagrams_per_sec, dbg.completed_frames_per_sec
+                ));
+                ui.label(format!(
+                    "Drops (no subscription): {} | Drops (channel full): {}",
+                    dbg.dropped_no_subscription, dbg.dropped_channel_full
+                ));
+                ui.label(format!(
+                    "Last frame: seq={} ts_ms={} size={} bytes",
+                    dbg.last_frame_seq, dbg.last_frame_ts_ms, dbg.last_frame_size_bytes
+                ));
+                ui.add_space(8.0);
 
-                    if let Some(streamer) = streamers.first() {
-                        ui.add_space(4.0);
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "Streaming now: {}",
-                                streamer.display_name
-                            ))
-                            .strong()
-                            .color(theme::text_color()),
-                        );
-                    }
-
-                    ui.add_space(4.0);
-                    ui.label(egui::RichText::new(subtitle).color(theme::text_muted()));
-                });
+                let available = ui.available_width().max(200.0);
+                let ratio = (dbg.completed_frames_per_sec.min(60) as f32) / 60.0;
+                ui.add(
+                    egui::ProgressBar::new(ratio)
+                        .desired_width(available)
+                        .text(format!("frame activity {:.0}%", ratio * 100.0)),
+                );
             });
         });
 }

@@ -735,11 +735,7 @@ impl eframe::App for VpApp {
                     ui.add_space(16.0);
                     ui.horizontal(|ui| {
                         let selected = self.model.selected_share_source.clone();
-                        let share_label = if self.model.sharing_active {
-                            "Update share"
-                        } else {
-                            "Start sharing"
-                        };
+                        let share_label = "Start sharing";
                         let start_btn = ui.add_enabled(
                             selected.is_some(),
                             egui::Button::new(share_label)
@@ -747,12 +743,16 @@ impl eframe::App for VpApp {
                                 .corner_radius(6.0),
                         );
                         if start_btn.clicked() {
-                            self.model.sharing_active = true;
-                            self.model.show_share_content_dialog = false;
+                            if let Some(source_id) = selected {
+                                let _ = self
+                                    .tx_intent
+                                    .send(UiIntent::StartScreenShare { source_id });
+                                self.model.show_share_content_dialog = false;
+                            }
                         }
 
                         if ui.button("Stop sharing").clicked() {
-                            self.model.sharing_active = false;
+                            let _ = self.tx_intent.send(UiIntent::StopScreenShare);
                         }
 
                         if ui.button("Cancel").clicked() {

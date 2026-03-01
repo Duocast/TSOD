@@ -239,6 +239,7 @@ pub enum UiEvent {
         user_id: String,
         level: f32,
     },
+    StreamDebugUpdate(StreamDebugView),
 
     // Telemetry
     TelemetryUpdate(TelemetryData),
@@ -434,6 +435,10 @@ pub enum UiIntent {
         muted: bool,
     },
     ToggleLoopback,
+    StartScreenShare {
+        source_id: String,
+    },
+    StopScreenShare,
 
     // Settings: Apply all (sent after settings are saved)
     ApplySettings(Box<AppSettings>),
@@ -462,6 +467,18 @@ pub enum UiIntent {
         cap: String,
         effect: String,
     },
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct StreamDebugView {
+    pub active_stream_tags: Vec<u64>,
+    pub video_datagrams_per_sec: u64,
+    pub completed_frames_per_sec: u64,
+    pub dropped_no_subscription: u64,
+    pub dropped_channel_full: u64,
+    pub last_frame_size_bytes: usize,
+    pub last_frame_seq: u32,
+    pub last_frame_ts_ms: u32,
 }
 
 // ── Persisted application settings ────────────────────────────────────
@@ -1191,6 +1208,7 @@ pub struct UiModel {
     pub share_sources: Vec<ShareSourceOption>,
     pub selected_share_source: Option<String>,
     pub sharing_active: bool,
+    pub stream_debug: StreamDebugView,
     pub avatar_path_draft: String,
     pub show_poke_dialog: bool,
     pub poke_target_user_id: String,
@@ -1492,6 +1510,7 @@ impl Default for UiModel {
             share_sources: enumerate_share_sources(),
             selected_share_source: None,
             sharing_active: false,
+            stream_debug: StreamDebugView::default(),
             avatar_path_draft: String::new(),
             show_poke_dialog: false,
             poke_target_user_id: String::new(),
@@ -1608,6 +1627,9 @@ impl UiModel {
                 }
             }
             UiEvent::SetStatus(s) => self.status_line = s,
+            UiEvent::StreamDebugUpdate(snapshot) => {
+                self.stream_debug = snapshot;
+            }
             UiEvent::SetAwayMessage(message) => {
                 self.away_message = message.clone();
                 for members in self.members.values_mut() {

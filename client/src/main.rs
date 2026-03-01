@@ -23,6 +23,8 @@ use config::Config;
 use crossbeam_channel::{bounded, Receiver, Sender};
 use identity::DeviceIdentity;
 use net::dispatcher::{ControlDispatcher, PushEvent};
+use net::video_datagram::VideoHeader;
+use net::video_transport::{VideoReceiver, VideoSender};
 use net::voice_datagram::{
     make_voice_datagram, outbound_payload_fits, VOICE_FORWARDED_HDR_LEN, VOICE_HDR_LEN,
     VOICE_VERSION,
@@ -37,7 +39,7 @@ use std::sync::{
 };
 #[cfg(debug_assertions)]
 use std::sync::{Mutex as StdMutex, OnceLock};
-use tokio::sync::{watch, Mutex, RwLock};
+use tokio::sync::{mpsc, watch, Mutex, RwLock};
 use tokio::time::{sleep, Duration, Instant};
 use tracing::{debug, info, warn, Level};
 use tracing_subscriber::EnvFilter;
@@ -122,6 +124,119 @@ struct VoiceTelemetryCounters {
     tx_oversized_payload_drops: AtomicU64,
     jitter_buffer_depth: AtomicU64,
     peak_stream_level_bits: AtomicU32,
+}
+
+#[derive(Default)]
+struct VideoRuntimeCounters {
+    video_datagrams: AtomicU64,
+    completed_frames: AtomicU64,
+    dropped_no_subscription: AtomicU64,
+    dropped_channel_full: AtomicU64,
+    last_frame_size_bytes: AtomicU64,
+    last_frame_seq: AtomicU32,
+    last_frame_ts_ms: AtomicU32,
+}
+
+#[derive(Clone)]
+struct SharedStreamState {
+    active_streams: Arc<RwLock<HashMap<u64, Arc<Mutex<VideoReceiver>>>>>,
+    counters: Arc<VideoRuntimeCounters>,
+}
+
+impl SharedStreamState {
+    fn new() -> Self {
+        Self {
+            active_streams: Arc::new(RwLock::new(HashMap::new())),
+            counters: Arc::new(VideoRuntimeCounters::default()),
+        }
+    }
+}
+
+fn is_video_datagram(datagram: &Bytes) -> bool {
+    datagram.len() >= 2
+        && datagram[0] == vp_voice::VIDEO_VERSION
+        && datagram[1] == vp_voice::DATAGRAM_KIND_VIDEO
+}
+
+async fn datagram_demux_loop(
+    conn: quinn::Connection,
+    voice_tx: mpsc::Sender<Bytes>,
+    video_tx: mpsc::Sender<Bytes>,
+    counters: Arc<VideoRuntimeCounters>,
+    voice_die_tx: watch::Sender<bool>,
+) {
+    loop {
+        let datagram = match conn.read_datagram().await {
+            Ok(d) => d,
+            Err(_) => {
+                let _ = voice_die_tx.send(true);
+                return;
+            }
+        };
+
+        let is_video = is_video_datagram(&datagram);
+        let target = if is_video { &video_tx } else { &voice_tx };
+        if let Err(_e) = target.try_send(datagram) {
+            if is_video {
+                counters
+                    .dropped_channel_full
+                    .fetch_add(1, Ordering::Relaxed);
+                warn!("[video] dropping datagram because video channel is full");
+            } else {
+                warn!("[voice] dropping datagram because voice channel is full");
+            }
+        }
+    }
+}
+
+async fn video_recv_loop(mut video_rx: mpsc::Receiver<Bytes>, state: SharedStreamState) {
+    while let Some(datagram) = video_rx.recv().await {
+        state
+            .counters
+            .video_datagrams
+            .fetch_add(1, Ordering::Relaxed);
+        let Some(hdr) = VideoHeader::parse(&datagram) else {
+            continue;
+        };
+
+        let receiver = {
+            let g = state.active_streams.read().await;
+            g.get(&hdr.stream_tag).cloned()
+        };
+
+        let Some(receiver) = receiver else {
+            state
+                .counters
+                .dropped_no_subscription
+                .fetch_add(1, Ordering::Relaxed);
+            debug!(
+                stream_tag = hdr.stream_tag,
+                "[video] drop datagram with no subscription"
+            );
+            continue;
+        };
+
+        let mut rx = receiver.lock().await;
+        if let Some(frame) = rx.receive(&datagram) {
+            let size = frame.fragments.iter().map(|f| f.len()).sum::<usize>();
+            state
+                .counters
+                .completed_frames
+                .fetch_add(1, Ordering::Relaxed);
+            state
+                .counters
+                .last_frame_size_bytes
+                .store(size as u64, Ordering::Relaxed);
+            state
+                .counters
+                .last_frame_seq
+                .store(frame.frame_seq, Ordering::Relaxed);
+            state
+                .counters
+                .last_frame_ts_ms
+                .store(frame.ts_ms, Ordering::Relaxed);
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -792,6 +907,8 @@ async fn app_task(
                                     )));
                                 }
                             }
+                            UiIntent::StartScreenShare { .. } => {}
+                            UiIntent::StopScreenShare => {}
                             UiIntent::SetAwayMessage { message } => {
                                 let _ = tx_event.send(UiEvent::SetAwayMessage(message.clone()));
                                 let text = if message.trim().is_empty() {
@@ -1316,6 +1433,8 @@ async fn connect_and_run_session(
         auth_info.user_id.clone()
     };
 
+    let stream_state = SharedStreamState::new();
+
     let _ = tx_event.send(UiEvent::SetAuthed(true));
     set_connection_stage(
         tx_event,
@@ -1346,6 +1465,7 @@ async fn connect_and_run_session(
         let local_user_id = local_user_id.clone();
         let active_voice_channel_route = active_voice_channel_route.clone();
         let server_deafened = server_deafened.clone();
+        let stream_state = stream_state.clone();
         tokio::spawn(async move {
             while let Some(ev) = push_rx.recv().await {
                 match ev {
@@ -1744,6 +1864,37 @@ async fn connect_and_run_session(
                         let _ =
                             tx_event.send(UiEvent::AppendLog(format!("[perm-push] {}", summary)));
                     }
+                    PushEvent::UnsubscribeStream { event, event_seq } => {
+                        maybe_note_event_gap(&tx_event, event_seq);
+                        if !should_apply_event_seq(&tx_event, &mut last_event_seq, event_seq) {
+                            continue;
+                        }
+                        {
+                            let mut streams = stream_state.active_streams.write().await;
+                            streams.remove(&event.stream_tag);
+                        }
+                        let _ = tx_event.send(UiEvent::AppendLog(format!(
+                            "[video] unsubscribed stream_tag={}",
+                            event.stream_tag
+                        )));
+                    }
+                    PushEvent::SubscribeStream { event, event_seq } => {
+                        maybe_note_event_gap(&tx_event, event_seq);
+                        if !should_apply_event_seq(&tx_event, &mut last_event_seq, event_seq) {
+                            continue;
+                        }
+                        {
+                            let mut streams = stream_state.active_streams.write().await;
+                            streams.insert(
+                                event.stream_tag,
+                                Arc::new(Mutex::new(VideoReceiver::new(8))),
+                            );
+                        }
+                        let _ = tx_event.send(UiEvent::AppendLog(format!(
+                            "[video] subscribed stream_tag={} codec={}",
+                            event.stream_tag, event.codec
+                        )));
+                    }
                     PushEvent::Unknown(_) => {}
                 }
             }
@@ -1809,8 +1960,22 @@ async fn connect_and_run_session(
         voice_die_tx.clone(),
     ));
 
-    let _voice_recv = tokio::spawn(voice_recv_loop(
+    // End-to-end screenshare flow:
+    // UI intent -> control StartScreenShareRequest -> stream_tag -> sender task ->
+    // datagrams -> demux loop -> VideoReceiver -> UI StreamDebugUpdate panel.
+    let (voice_rx_tx, voice_rx_rx) = mpsc::channel::<Bytes>(256);
+    let (video_rx_tx, video_rx_rx) = mpsc::channel::<Bytes>(512);
+
+    let _datagram_demux = tokio::spawn(datagram_demux_loop(
         conn.clone(),
+        voice_rx_tx,
+        video_rx_tx,
+        stream_state.counters.clone(),
+        voice_die_tx.clone(),
+    ));
+
+    let _voice_recv = tokio::spawn(voice_recv_loop(
+        voice_rx_rx,
         playout.clone(),
         capture_dsp.clone(),
         self_deafened.clone(),
@@ -1822,6 +1987,8 @@ async fn connect_and_run_session(
         voice_counters.clone(),
         voice_die_tx.clone(),
     ));
+
+    let _video_recv = tokio::spawn(video_recv_loop(video_rx_rx, stream_state.clone()));
 
     let disp_keepalive = dispatcher.clone();
     let ctl_keepalive = tokio::spawn(async move {
@@ -1836,11 +2003,31 @@ async fn connect_and_run_session(
 
     // Track the active channel (for SendChat and other channel-scoped operations)
     let mut active_channel: Option<String> = selected_after_sync;
+    let mut active_share_stop: Option<watch::Sender<bool>> = None;
+    let mut active_local_stream_id: Option<pb::StreamId> = None;
 
     tokio::pin!(ctl_keepalive);
     let mut audio_health_tick = tokio::time::interval(Duration::from_secs(1));
+    let mut stream_ui_tick = tokio::time::interval(Duration::from_secs(1));
     loop {
         tokio::select! {
+            _ = stream_ui_tick.tick() => {
+                let active_stream_tags = {
+                    let streams = stream_state.active_streams.read().await;
+                    streams.keys().copied().collect::<Vec<_>>()
+                };
+                let snapshot = ui::model::StreamDebugView {
+                    active_stream_tags,
+                    video_datagrams_per_sec: stream_state.counters.video_datagrams.swap(0, Ordering::Relaxed),
+                    completed_frames_per_sec: stream_state.counters.completed_frames.swap(0, Ordering::Relaxed),
+                    dropped_no_subscription: stream_state.counters.dropped_no_subscription.load(Ordering::Relaxed),
+                    dropped_channel_full: stream_state.counters.dropped_channel_full.load(Ordering::Relaxed),
+                    last_frame_size_bytes: stream_state.counters.last_frame_size_bytes.load(Ordering::Relaxed) as usize,
+                    last_frame_seq: stream_state.counters.last_frame_seq.load(Ordering::Relaxed),
+                    last_frame_ts_ms: stream_state.counters.last_frame_ts_ms.load(Ordering::Relaxed),
+                };
+                let _ = tx_event.send(UiEvent::StreamDebugUpdate(snapshot));
+            }
             _ = audio_health_tick.tick() => {
                 let capture_healthy = {
                     let cap = capture.read().await;
@@ -2316,6 +2503,71 @@ async fn connect_and_run_session(
                             let _ = tx_event.send(UiEvent::AppendLog(
                                 format!("[audio] loopback: {new}"),
                             ));
+                        }
+                        UiIntent::StartScreenShare { source_id } => {
+                            let _ = source_id;
+                            let req = pb::StartScreenShareRequest {
+                                channel_id: active_channel.as_ref().map(|id| pb::ChannelId { value: id.clone() }),
+                                codec: pb::video_caps::Codec::Vp8 as i32,
+                                layers: vec![],
+                                include_audio: false,
+                            };
+                            match dispatcher
+                                .send_request(pb::client_to_server::Payload::StartScreenShareRequest(req), Duration::from_secs(5))
+                                .await
+                            {
+                                Ok(Ok(resp)) => {
+                                    if let Some(pb::server_to_client::Payload::StartScreenShareResponse(r)) = resp.payload {
+                                        let stream_tag = r.primary_stream_tag;
+                                        active_local_stream_id = r.stream_id.clone();
+                                        let _ = tx_event.send(UiEvent::AppendLog(format!("[video] StartScreenShareRequest ok stream_tag={stream_tag}")));
+                                        let (share_stop_tx, mut share_stop_rx) = watch::channel(false);
+                                        active_share_stop = Some(share_stop_tx);
+                                        let conn_send = conn.clone();
+                                        tokio::spawn(async move {
+                                            let mut sender = VideoSender::new(stream_tag, 0, 16);
+                                            let mut frame_idx = 0u32;
+                                            let mut frame_tick = tokio::time::interval(Duration::from_millis(33));
+                                            loop {
+                                                tokio::select! {
+                                                    _ = share_stop_rx.changed() => {
+                                                        if *share_stop_rx.borrow() { break; }
+                                                    }
+                                                    _ = frame_tick.tick() => {
+                                                        let mut synthetic = vec![0u8; 4096];
+                                                        for (i, b) in synthetic.iter_mut().enumerate() {
+                                                            *b = ((i as u32 + frame_idx) % 255) as u8;
+                                                        }
+                                                        let ts_ms = unix_ms() as u32;
+                                                        let _ = sender.send_frame_async(ts_ms, frame_idx % 60 == 0, &synthetic, |dg| {
+                                                            let _ = conn_send.send_datagram(dg);
+                                                        }).await;
+                                                        frame_idx = frame_idx.wrapping_add(1);
+                                                    }
+                                                }
+                                            }
+                                        });
+                                    }
+                                }
+                                Ok(Err(e)) => {
+                                    let _ = tx_event.send(UiEvent::AppendLog(format!("[video] start share rejected: {e:#}")));
+                                }
+                                Err(e) => {
+                                    let _ = tx_event.send(UiEvent::AppendLog(format!("[video] start share failed: {e:#}")));
+                                }
+                            }
+                        }
+                        UiIntent::StopScreenShare => {
+                            if let Some(stop_tx) = active_share_stop.take() {
+                                let _ = stop_tx.send(true);
+                            }
+                            if let Some(stream_id) = active_local_stream_id.take() {
+                                let req = pb::StopScreenShareRequest { stream_id: Some(stream_id.clone()) };
+                                let _ = dispatcher
+                                    .send_request(pb::client_to_server::Payload::StopScreenShareRequest(req), Duration::from_secs(5))
+                                    .await;
+                                let _ = tx_event.send(UiEvent::AppendLog(format!("[video] StopScreenShareRequest stream_id={}", stream_id.value)));
+                            }
                         }
                         UiIntent::SetInputDevice(dev) => {
                             {
@@ -3288,7 +3540,7 @@ async fn voice_send_loop(
 }
 
 async fn voice_recv_loop(
-    conn: quinn::Connection,
+    mut voice_rx: mpsc::Receiver<Bytes>,
     playout: Arc<RwLock<Arc<audio::playout::Playout>>>,
     capture_dsp: Option<Arc<Mutex<audio::dsp::CaptureDsp>>>,
     self_deafened: Arc<AtomicBool>,
@@ -3316,10 +3568,10 @@ async fn voice_recv_loop(
 
     loop {
         tokio::select! {
-            datagram = conn.read_datagram() => {
-                let d = match datagram {
-                    Ok(d) => d,
-                    Err(_e) => {
+            maybe_d = voice_rx.recv() => {
+                let d = match maybe_d {
+                    Some(d) => d,
+                    None => {
                         let _ = voice_die_tx.send(true);
                         return;
                     }
@@ -3922,6 +4174,63 @@ mod tests {
             choose_initial_selected_channel(&snapshot, Some(requested)),
             Some(requested.to_string())
         );
+    }
+
+    #[test]
+    fn demux_predicate_routes_video_by_version_and_kind() {
+        let video = bytes::Bytes::from_static(&[
+            vp_voice::VIDEO_VERSION,
+            vp_voice::DATAGRAM_KIND_VIDEO,
+            1,
+            2,
+            3,
+        ]);
+        let voice = bytes::Bytes::from_static(&[
+            vp_voice::VOICE_VERSION,
+            vp_voice::DATAGRAM_KIND_VOICE,
+            1,
+            2,
+            3,
+        ]);
+        assert!(super::is_video_datagram(&video));
+        assert!(!super::is_video_datagram(&voice));
+    }
+
+    #[tokio::test]
+    async fn subscribe_stream_adds_state_and_routes_by_stream_tag() {
+        let state = super::SharedStreamState::new();
+        let stream_tag = 4242u64;
+        {
+            let mut streams = state.active_streams.write().await;
+            streams.insert(
+                stream_tag,
+                std::sync::Arc::new(tokio::sync::Mutex::new(
+                    crate::net::video_transport::VideoReceiver::new(4),
+                )),
+            );
+        }
+
+        let hdr = crate::net::video_datagram::VideoHeader {
+            stream_tag,
+            layer_id: 0,
+            flags: vp_voice::VIDEO_FLAG_END_OF_FRAME,
+            frame_seq: 7,
+            frag_idx: 0,
+            frag_total: 1,
+            ts_ms: 101,
+        };
+        let dg = crate::net::video_datagram::make_video_datagram(&hdr, b"abc");
+
+        let receiver = {
+            let g = state.active_streams.read().await;
+            g.get(&stream_tag).cloned()
+        }
+        .expect("receiver exists");
+
+        let mut rx = receiver.lock().await;
+        let frame = rx.receive(&dg).expect("frame routed to subscribed stream");
+        assert_eq!(frame.stream_tag, stream_tag);
+        assert_eq!(frame.frame_seq, 7);
     }
 
     #[test]
