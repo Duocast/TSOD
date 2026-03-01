@@ -2014,9 +2014,16 @@ async fn connect_and_run_session(
 
     // Track the active channel (for SendChat and other channel-scoped operations)
     let mut active_channel: Option<String> = selected_after_sync;
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ShareState {
+        Idle,
+        Starting,
+        Active,
+    }
+
     let mut active_share_stop: Option<watch::Sender<bool>> = None;
     let mut active_local_stream_id: Option<pb::StreamId> = None;
-    let mut start_share_in_flight = false;
+    let mut share_state = ShareState::Idle;
 
     tokio::pin!(ctl_keepalive);
     let mut audio_health_tick = tokio::time::interval(Duration::from_secs(1));
@@ -2524,11 +2531,13 @@ async fn connect_and_run_session(
                         }
                         UiIntent::StartScreenShare { source_id } => {
                             let _ = source_id;
-                            if start_share_in_flight || active_share_stop.is_some() {
-                                let _ = tx_event.send(UiEvent::AppendLog("[video] start share ignored (already in progress)".into()));
+                            if !matches!(share_state, ShareState::Idle) {
+                                let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                    "[video] start share ignored (state={share_state:?})"
+                                )));
                                 continue;
                             }
-                            start_share_in_flight = true;
+                            share_state = ShareState::Starting;
                             let preferred_codec = match saved_settings.screen_share_codec.as_str() {
                                 "AV1" => pb::video_caps::Codec::Av1,
                                 "VP8" => pb::video_caps::Codec::Vp8,
@@ -2545,7 +2554,6 @@ async fn connect_and_run_session(
                                 .await
                             {
                                 Ok(Ok(resp)) => {
-                                    start_share_in_flight = false;
                                     if let Some(pb::server_to_client::Payload::StartScreenShareResponse(r)) = resp.payload {
                                         let stream_tag = r.primary_stream_tag;
                                         active_local_stream_id = r.stream_id.clone();
@@ -2558,6 +2566,7 @@ async fn connect_and_run_session(
                                         let _ = tx_event.send(UiEvent::AppendLog(format!("[video] StartScreenShareRequest ok stream_tag={stream_tag}")));
                                         let (share_stop_tx, mut share_stop_rx) = watch::channel(false);
                                         active_share_stop = Some(share_stop_tx);
+                                        share_state = ShareState::Active;
                                         let conn_send = conn.clone();
                                         let video_counters = stream_state.counters.clone();
                                         tokio::spawn(async move {
@@ -2600,20 +2609,26 @@ async fn connect_and_run_session(
                                                 }
                                             }
                                         });
+                                    } else {
+                                        share_state = ShareState::Idle;
+                                        let _ = tx_event.send(UiEvent::AppendLog(
+                                            "[video] start share failed: missing StartScreenShareResponse payload"
+                                                .into(),
+                                        ));
                                     }
                                 }
                                 Ok(Err(e)) => {
-                                    start_share_in_flight = false;
+                                    share_state = ShareState::Idle;
                                     let _ = tx_event.send(UiEvent::AppendLog(format!("[video] start share rejected: {e:#}")));
                                 }
                                 Err(e) => {
-                                    start_share_in_flight = false;
+                                    share_state = ShareState::Idle;
                                     let _ = tx_event.send(UiEvent::AppendLog(format!("[video] start share failed: {e:#}")));
                                 }
                             }
                         }
                         UiIntent::StopScreenShare => {
-                            start_share_in_flight = false;
+                            share_state = ShareState::Idle;
                             if let Some(stop_tx) = active_share_stop.take() {
                                 let _ = stop_tx.send(true);
                             }
