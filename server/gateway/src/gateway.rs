@@ -19,6 +19,7 @@ use crate::{
 use vp_control::ids::{ChannelId, ServerId, UserId};
 use vp_control::model::{ChannelCreate, JoinChannel, SendMessage};
 use vp_control::{ControlError, ControlRepo, ControlService, PgControlRepo, RequestContext};
+use vp_media::stream_forwarder::StreamForwarder;
 use vp_media::voice_forwarder::VoiceForwarder;
 
 const CONTROL_STREAM_MAX_MSG: usize = 256 * 1024; // 256KB
@@ -33,6 +34,7 @@ pub struct Gateway {
     push: PushHub,
     membership: MembershipCache,
     voice: Arc<VoiceForwarder>,
+    video: Arc<StreamForwarder>,
     media: Arc<MediaService>,
 }
 
@@ -46,6 +48,7 @@ impl Gateway {
         push: PushHub,
         membership: MembershipCache,
         voice: Arc<VoiceForwarder>,
+        video: Arc<StreamForwarder>,
         media: Arc<MediaService>,
     ) -> Self {
         Self {
@@ -56,6 +59,7 @@ impl Gateway {
             push,
             membership,
             voice,
+            video,
             media,
         }
     }
@@ -148,23 +152,32 @@ impl Gateway {
 
         let mut current_channel: Option<ChannelId> = None;
         let voice_forwarder = self.voice.clone();
+        let video_forwarder = self.video.clone();
         defer! {
             let voice_forwarder = voice_forwarder.clone();
+            let video_forwarder = video_forwarder.clone();
             let loop_session_id = session_id.clone();
             tokio::spawn(async move {
                 voice_forwarder.unregister_session(user_id, &loop_session_id).await;
+                video_forwarder.unregister_session(user_id, &loop_session_id).await;
             });
             self.push.unregister(user_id, &session_id);
             self.sessions.unregister(user_id, &session_id);
         }
 
-        // Datagram recv loop (voice)
+        // Datagram recv loop: dispatch voice vs video by kind byte.
         let voice = self.voice.clone();
-        let user_for_voice = user_id;
-        let conn_voice = conn.clone();
+        let video = self.video.clone();
+        let user_for_dg = user_id;
+        let conn_dg = conn.clone();
         tokio::spawn(async move {
-            while let Ok(d) = conn_voice.read_datagram().await {
-                voice.handle_incoming(user_for_voice, d).await;
+            while let Ok(d) = conn_dg.read_datagram().await {
+                // Dispatch: byte[1] == 0x02 → video, otherwise → voice.
+                if d.len() >= 2 && d[1] == vp_voice::DATAGRAM_KIND_VIDEO {
+                    video.handle_incoming_datagram(user_for_dg, d).await;
+                } else {
+                    voice.handle_incoming(user_for_dg, d).await;
+                }
             }
         });
 
@@ -782,6 +795,73 @@ impl Gateway {
                                 editor_highest_role_position,
                                 editor_is_admin,
                             },
+                        )),
+                    };
+                    if let Err(e) = write_delimited(&mut send, &resp).await {
+                        warn!("control write failed: {:#}", e);
+                        break;
+                    }
+                }
+                Some(pb::client_to_server::Payload::StartScreenShareRequest(r)) => {
+                    let ch = parse_channel_id(r.channel_id.as_ref())?;
+
+                    // Generate a collision-resistant stream_tag from a random u64.
+                    let stream_tag = {
+                        let mut buf = [0u8; 8];
+                        ring::rand::SystemRandom::new()
+                            .fill(&mut buf)
+                            .map_err(|_| anyhow!("rng failed"))?;
+                        u64::from_le_bytes(buf)
+                    };
+
+                    // Register the stream with the video forwarder.
+                    self.video
+                        .register_stream(
+                            stream_tag,
+                            vp_media::stream_forwarder::StreamRegistration {
+                                sender_id: user_id,
+                                channel_id: ch,
+                            },
+                        )
+                        .await;
+
+                    let stream_id = format!("{:016x}", stream_tag);
+                    let resp = pb::ServerToClient {
+                        request_id: req_id,
+                        session_id: Some(pb::SessionId {
+                            value: session_id.clone(),
+                        }),
+                        sent_at: Some(now_ts()),
+                        error: None,
+                        event_seq: 0,
+                        payload: Some(pb::server_to_client::Payload::StartScreenShareResponse(
+                            pb::StartScreenShareResponse {
+                                stream_id: Some(pb::StreamId { value: stream_id }),
+                                accepted_layer_ids: r.layers.iter().map(|l| l.layer_id).collect(),
+                            },
+                        )),
+                    };
+                    if let Err(e) = write_delimited(&mut send, &resp).await {
+                        warn!("control write failed: {:#}", e);
+                        break;
+                    }
+                }
+                Some(pb::client_to_server::Payload::StopScreenShareRequest(r)) => {
+                    if let Some(sid) = r.stream_id.as_ref() {
+                        if let Ok(stream_tag) = u64::from_str_radix(&sid.value, 16) {
+                            self.video.unregister_stream(stream_tag).await;
+                        }
+                    }
+                    let resp = pb::ServerToClient {
+                        request_id: req_id,
+                        session_id: Some(pb::SessionId {
+                            value: session_id.clone(),
+                        }),
+                        sent_at: Some(now_ts()),
+                        error: None,
+                        event_seq: 0,
+                        payload: Some(pb::server_to_client::Payload::StopScreenShareResponse(
+                            pb::StopScreenShareResponse {},
                         )),
                     };
                     if let Err(e) = write_delimited(&mut send, &resp).await {

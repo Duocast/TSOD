@@ -3,6 +3,7 @@ pub mod control;
 pub mod gateway;
 pub mod http;
 pub mod labels;
+pub mod stream;
 pub mod voice;
 
 pub use config::MetricsConfig;
