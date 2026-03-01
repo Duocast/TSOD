@@ -9,6 +9,7 @@ use tracing::warn;
 use crate::proto::voiceplatform::v1 as pb;
 
 use vp_control::ids::{ChannelId, UserId};
+use vp_media::stream_forwarder::ViewerProvider;
 use vp_media::voice_forwarder::{DatagramTx, MembershipProvider, SessionRegistry};
 
 #[derive(Clone)]
@@ -269,6 +270,22 @@ impl MembershipProvider for MembershipCache {
             .get(&channel)
             .map(|e| e.max_talkers)
             .unwrap_or(4)
+    }
+}
+
+#[async_trait::async_trait]
+impl ViewerProvider for MembershipCache {
+    async fn list_viewers(&self, channel: ChannelId, exclude_sender: UserId) -> Vec<UserId> {
+        self.channels
+            .get(&channel)
+            .map(|e| {
+                e.members
+                    .iter()
+                    .copied()
+                    .filter(|u| *u != exclude_sender)
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 }
 

@@ -78,12 +78,20 @@ async fn main() -> Result<()> {
     let sessions = Sessions::new();
     let membership = MembershipCache::new();
 
-    // Media forwarder
+    // Voice forwarder
     let forwarder = Arc::new(vp_media::voice_forwarder::VoiceForwarder::new(
         vp_media::voice_forwarder::VoiceForwarderConfig::default(),
         Arc::new(sessions.clone()),
         Arc::new(membership.clone()),
         voice_metrics(),
+    ));
+
+    // Video/screenshare stream forwarder (SFU)
+    let stream_forwarder = Arc::new(vp_media::stream_forwarder::StreamForwarder::new(
+        vp_media::stream_forwarder::StreamForwarderConfig::default(),
+        Arc::new(sessions.clone()),
+        Arc::new(membership.clone()),
+        Arc::new(vp_media::stream_forwarder::NoopStreamMetrics),
     ));
 
     // Outbox dispatcher (push fanout)
@@ -171,6 +179,7 @@ async fn main() -> Result<()> {
         push,
         membership,
         forwarder,
+        stream_forwarder,
         media,
     );
 

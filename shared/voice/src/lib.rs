@@ -12,6 +12,45 @@ pub fn outbound_payload_fits(payload_len: usize) -> bool {
     payload_len <= MAX_OPUS_PAYLOAD_BYTES
 }
 
+// ── Datagram type dispatch ─────────────────────────────────────────────
+//
+// Byte 0: protocol version
+// Byte 1: datagram kind (voice=0x01, video/screenshare=0x02)
+
+pub const DATAGRAM_VERSION: u8 = 1;
+pub const DATAGRAM_KIND_VOICE: u8 = 0x01;
+pub const DATAGRAM_KIND_VIDEO: u8 = 0x02;
+
+/// Parse kind byte from a raw datagram. Returns None for unknown/short.
+#[inline]
+pub fn datagram_kind(buf: &[u8]) -> Option<u8> {
+    if buf.len() < 2 {
+        return None;
+    }
+    Some(buf[1])
+}
+
+// ── Video datagram header ──────────────────────────────────────────────
+//
+// Fixed 22-byte header (little-endian for multi-byte fields):
+//   0:  u8  version           (1)
+//   1:  u8  kind              (0x02)
+//   2:  u64 stream_tag        (collision-resistant stream id)
+//  10:  u8  layer_id          (simulcast/spatial layer)
+//  11:  u8  flags             (bit0=is_keyframe, bit1=is_recovery, bit2=end_of_frame)
+//  12:  u32 frame_seq         (monotonic frame sequence)
+//  16:  u16 frag_idx          (fragment index within frame)
+//  18:  u16 frag_total        (total fragments in frame)
+//  20:  u32 ts_ms             (sender timestamp; monotonic-ish)
+//  24:  ... payload bytes
+
+pub const VIDEO_HEADER_BYTES: usize = 24;
+pub const VIDEO_FLAG_KEYFRAME: u8 = 0x01;
+pub const VIDEO_FLAG_RECOVERY: u8 = 0x02;
+pub const VIDEO_FLAG_END_OF_FRAME: u8 = 0x04;
+pub const MAX_VIDEO_DATAGRAM_BYTES: usize = QUIC_MAX_DATAGRAM_BYTES;
+pub const MAX_VIDEO_PAYLOAD_BYTES: usize = MAX_VIDEO_DATAGRAM_BYTES - VIDEO_HEADER_BYTES;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -28,5 +67,19 @@ mod tests {
     fn outbound_payload_validation_rejects_oversized() {
         assert!(outbound_payload_fits(MAX_OPUS_PAYLOAD_BYTES));
         assert!(!outbound_payload_fits(MAX_OPUS_PAYLOAD_BYTES + 1));
+    }
+
+    #[test]
+    fn video_header_fits_within_datagram() {
+        assert!(VIDEO_HEADER_BYTES < MAX_VIDEO_DATAGRAM_BYTES);
+        assert!(MAX_VIDEO_PAYLOAD_BYTES > 0);
+    }
+
+    #[test]
+    fn datagram_kind_works() {
+        assert_eq!(datagram_kind(&[]), None);
+        assert_eq!(datagram_kind(&[1]), None);
+        assert_eq!(datagram_kind(&[1, DATAGRAM_KIND_VOICE]), Some(DATAGRAM_KIND_VOICE));
+        assert_eq!(datagram_kind(&[1, DATAGRAM_KIND_VIDEO]), Some(DATAGRAM_KIND_VIDEO));
     }
 }
