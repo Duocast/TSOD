@@ -448,6 +448,9 @@ pub enum UiIntent {
         position: u32,
         caps: Vec<(String, String)>,
     },
+    PermsDeleteRole {
+        role_id: String,
+    },
     PermsAssignRoles {
         user_id: String,
         role_ids: Vec<String>,
