@@ -160,7 +160,29 @@ fn common_download_directories() -> Vec<PathBuf> {
     dirs
 }
 
-fn enumerate_video_devices() -> Vec<String> {
+#[derive(Debug, Clone)]
+struct VideoDeviceInfo {
+    id: String,
+    label: String,
+    display_label: String,
+}
+
+fn disambiguate_video_labels(devices: &mut [VideoDeviceInfo]) {
+    let mut counts = std::collections::HashMap::<String, usize>::new();
+    for device in devices.iter() {
+        *counts.entry(device.label.clone()).or_insert(0) += 1;
+    }
+
+    for device in devices.iter_mut() {
+        if counts.get(&device.label).copied().unwrap_or_default() > 1 {
+            device.display_label = format!("{} — {}", device.label, device.id);
+        } else {
+            device.display_label = device.label.clone();
+        }
+    }
+}
+
+fn enumerate_video_devices() -> Vec<VideoDeviceInfo> {
     #[cfg(target_os = "linux")]
     {
         let mut devices = Vec::new();
@@ -168,12 +190,24 @@ fn enumerate_video_devices() -> Vec<String> {
             for entry in entries.flatten() {
                 if let Some(name) = entry.file_name().to_str() {
                     if name.starts_with("video") {
-                        devices.push(format!("/dev/{name}"));
+                        let dev_path = format!("/dev/{name}");
+                        let label_path = format!("/sys/class/video4linux/{name}/name");
+                        let label = std::fs::read_to_string(label_path)
+                            .ok()
+                            .map(|raw| raw.trim().to_string())
+                            .filter(|raw| !raw.is_empty())
+                            .unwrap_or_else(|| dev_path.clone());
+                        devices.push(VideoDeviceInfo {
+                            id: dev_path,
+                            label,
+                            display_label: String::new(),
+                        });
                     }
                 }
             }
         }
-        devices.sort();
+        devices.sort_by(|a, b| a.id.cmp(&b.id));
+        disambiguate_video_labels(&mut devices);
         devices
     }
     #[cfg(not(target_os = "linux"))]
@@ -1399,15 +1433,24 @@ fn page_video_call(ui: &mut egui::Ui, s: &mut AppSettings) -> bool {
 
     ui.horizontal(|ui: &mut egui::Ui| {
         ui.label("Video Device:");
+        let selected_label = if s.video_device == "(system default)" {
+            "Default (system)".to_string()
+        } else {
+            devices
+                .iter()
+                .find(|d| d.id == s.video_device)
+                .map(|d| d.display_label.clone())
+                .unwrap_or_else(|| format!("Missing device — {}", s.video_device))
+        };
         egui::ComboBox::from_id_salt("vid_device")
-            .selected_text(&s.video_device)
+            .selected_text(selected_label)
             .width(300.0)
             .show_ui(ui, |ui: &mut egui::Ui| {
                 if ui
                     .selectable_value(
                         &mut s.video_device,
                         "(system default)".to_string(),
-                        "(system default)",
+                        "Default (system)",
                     )
                     .changed()
                 {
@@ -1415,7 +1458,11 @@ fn page_video_call(ui: &mut egui::Ui, s: &mut AppSettings) -> bool {
                 }
                 for d in &devices {
                     if ui
-                        .selectable_value(&mut s.video_device, d.clone(), d)
+                        .selectable_value(
+                            &mut s.video_device,
+                            d.id.clone(),
+                            d.display_label.as_str(),
+                        )
                         .changed()
                     {
                         dirty = true;
