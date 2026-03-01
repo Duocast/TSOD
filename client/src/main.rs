@@ -2549,6 +2549,12 @@ async fn connect_and_run_session(
                                     if let Some(pb::server_to_client::Payload::StartScreenShareResponse(r)) = resp.payload {
                                         let stream_tag = r.primary_stream_tag;
                                         active_local_stream_id = r.stream_id.clone();
+                                        {
+                                            let mut streams = stream_state.active_streams.write().await;
+                                            streams
+                                                .entry(stream_tag)
+                                                .or_insert_with(|| Arc::new(Mutex::new(VideoReceiver::new(8))));
+                                        }
                                         let _ = tx_event.send(UiEvent::AppendLog(format!("[video] StartScreenShareRequest ok stream_tag={stream_tag}")));
                                         let (share_stop_tx, mut share_stop_rx) = watch::channel(false);
                                         active_share_stop = Some(share_stop_tx);
