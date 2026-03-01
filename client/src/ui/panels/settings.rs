@@ -1396,7 +1396,7 @@ fn page_screen_share(ui: &mut egui::Ui, s: &mut AppSettings) -> bool {
         }
 
         cols[0].label("Codec");
-        let codecs = ["VP8", "VP9", "AV1"];
+        let codecs = ["AV1", "VP9", "VP8"];
         egui::ComboBox::from_id_salt("ss_codec")
             .selected_text(&s.screen_share_codec)
             .width(120.0)

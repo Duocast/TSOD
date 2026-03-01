@@ -2527,9 +2527,14 @@ async fn connect_and_run_session(
                                 continue;
                             }
                             start_share_in_flight = true;
+                            let preferred_codec = match saved_settings.screen_share_codec.as_str() {
+                                "AV1" => pb::video_caps::Codec::Av1,
+                                "VP8" => pb::video_caps::Codec::Vp8,
+                                _ => pb::video_caps::Codec::Vp9,
+                            };
                             let req = pb::StartScreenShareRequest {
                                 channel_id: active_channel.as_ref().map(|id| pb::ChannelId { value: id.clone() }),
-                                codec: pb::video_caps::Codec::Vp9 as i32,
+                                codec: preferred_codec as i32,
                                 layers: vec![],
                                 include_audio: false,
                             };
