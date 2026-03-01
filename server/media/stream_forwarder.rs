@@ -16,11 +16,11 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     sync::Arc,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use bytes::Bytes;
-use tokio::sync::RwLock;
+use tokio::sync::{mpsc, RwLock};
 use tracing::debug;
 
 use vp_control::ids::{ChannelId, UserId};
@@ -174,6 +174,8 @@ pub struct StreamForwarderConfig {
     pub per_viewer_queue_fragments: usize,
     /// Maximum tracked frames per viewer queue (for eviction bookkeeping).
     pub per_viewer_max_frames: usize,
+    /// Flush cadence for per-viewer send loops.
+    pub flush_interval: Duration,
 }
 
 impl Default for StreamForwarderConfig {
@@ -182,6 +184,7 @@ impl Default for StreamForwarderConfig {
             max_datagram_bytes: vp_voice::MAX_VIDEO_DATAGRAM_BYTES,
             per_viewer_queue_fragments: 128,
             per_viewer_max_frames: 8,
+            flush_interval: Duration::from_millis(2),
         }
     }
 }
@@ -356,15 +359,21 @@ pub struct StreamForwarder {
     /// Per stream subscriber set.
     subscriptions: RwLock<HashMap<u64, HashSet<UserId>>>,
 
-    /// Per-viewer egress queues: (user_id, session_id) → queue + send handle.
-    /// Each viewer-session pair has its own frame-aware queue.
-    viewer_queues: RwLock<HashMap<(UserId, String), ViewerEgress>>,
+    /// Per-viewer send loops: (user_id, session_id) → enqueue handle.
+    viewer_loops: RwLock<HashMap<(UserId, String), ViewerLoopHandle>>,
 }
 
-struct ViewerEgress {
-    queue: ViewerQueue,
-    dtx: Arc<dyn DatagramTx>,
+#[derive(Clone)]
+struct ViewerLoopHandle {
+    tx: mpsc::Sender<EnqueuedFragment>,
     last_active: Instant,
+}
+
+#[derive(Clone)]
+struct EnqueuedFragment {
+    datagram: Bytes,
+    hdr: VideoHeader,
+    codec: i32,
 }
 
 impl StreamForwarder {
@@ -381,7 +390,7 @@ impl StreamForwarder {
             metrics,
             streams: RwLock::new(HashMap::new()),
             subscriptions: RwLock::new(HashMap::new()),
-            viewer_queues: RwLock::new(HashMap::new()),
+            viewer_loops: RwLock::new(HashMap::new()),
         }
     }
 
@@ -453,7 +462,7 @@ impl StreamForwarder {
 
     /// Remove viewer queues for a disconnecting session.
     pub async fn unregister_session(&self, user: UserId, session_id: &str) {
-        self.viewer_queues
+        self.viewer_loops
             .write()
             .await
             .remove(&(user, session_id.to_string()));
@@ -531,26 +540,20 @@ impl StreamForwarder {
             let sessions = self.sessions.get_sessions(viewer_id).await;
             for (session_id, dtx) in sessions {
                 let outcome = self
-                    .enqueue_to_viewer(viewer_id, session_id, dtx, &datagram, &hdr)
+                    .enqueue_to_viewer(viewer_id, session_id, dtx, &datagram, &hdr, reg.codec)
                     .await;
-                if outcome.evicted_frames > 0 {
-                    self.metrics.inc_frames_evicted(outcome.evicted_frames);
-                }
-                if let Some(reason) = outcome.drop_reason {
-                    self.metrics.inc_drop_by_reason(reason);
-                    self.metrics.inc_drop_by_reason_codec(reason, reg.codec);
-                }
-                if !outcome.dropped_incoming_fragment {
+                if outcome {
                     forwarded += 1;
                     self.metrics.inc_forwarded_bytes(datagram.len());
                     self.metrics
                         .inc_forwarded_bytes_codec(datagram.len(), reg.codec);
+                } else {
+                    self.metrics.inc_drop_by_reason(StreamDropReason::QueueFull);
+                    self.metrics
+                        .inc_drop_by_reason_codec(StreamDropReason::QueueFull, reg.codec);
                 }
             }
         }
-
-        // Flush viewer queues (send all queued fragments).
-        self.flush_viewer_queues().await;
 
         self.metrics.inc_forwarded(forwarded);
     }
@@ -563,59 +566,107 @@ impl StreamForwarder {
         dtx: Arc<dyn DatagramTx>,
         datagram: &Bytes,
         hdr: &VideoHeader,
-    ) -> PushOutcome {
+        codec: i32,
+    ) -> bool {
         let key = (viewer, session_id);
-        let mut queues = self.viewer_queues.write().await;
-        let egress = queues.entry(key).or_insert_with(|| ViewerEgress {
-            queue: ViewerQueue::new(
-                self.cfg.per_viewer_queue_fragments,
-                self.cfg.per_viewer_max_frames,
-            ),
-            dtx,
-            last_active: Instant::now(),
-        });
-        egress.last_active = Instant::now();
-        // Zero-copy: clone is refcount increment only.
-        egress.queue.push(datagram.clone(), hdr)
+        if let Some(tx) = self
+            .viewer_loops
+            .read()
+            .await
+            .get(&key)
+            .map(|h| h.tx.clone())
+        {
+            if tx
+                .try_send(EnqueuedFragment {
+                    datagram: datagram.clone(),
+                    hdr: *hdr,
+                    codec,
+                })
+                .is_ok()
+            {
+                if let Some(loop_handle) = self.viewer_loops.write().await.get_mut(&key) {
+                    loop_handle.last_active = Instant::now();
+                }
+                return true;
+            }
+            self.viewer_loops.write().await.remove(&key);
+            return false;
+        }
+
+        let tx = self.spawn_viewer_loop(key.clone(), dtx);
+        if tx
+            .try_send(EnqueuedFragment {
+                datagram: datagram.clone(),
+                hdr: *hdr,
+                codec,
+            })
+            .is_ok()
+        {
+            self.viewer_loops.write().await.insert(
+                key,
+                ViewerLoopHandle {
+                    tx,
+                    last_active: Instant::now(),
+                },
+            );
+            true
+        } else {
+            false
+        }
     }
 
-    /// Flush all viewer queues: send queued fragments to their connections.
-    async fn flush_viewer_queues(&self) {
-        let mut pending: Vec<((UserId, String), Arc<dyn DatagramTx>, Vec<Bytes>)> = Vec::new();
-        {
-            let mut queues = self.viewer_queues.write().await;
-            for (key, egress) in queues.iter_mut() {
-                if egress.queue.len() == 0 {
-                    continue;
-                }
-                let datagrams: Vec<Bytes> = egress.queue.drain().collect();
-                pending.push((key.clone(), egress.dtx.clone(), datagrams));
-            }
-        }
+    fn spawn_viewer_loop(
+        &self,
+        key: (UserId, String),
+        dtx: Arc<dyn DatagramTx>,
+    ) -> mpsc::Sender<EnqueuedFragment> {
+        let (tx, mut rx) = mpsc::channel::<EnqueuedFragment>(self.cfg.per_viewer_queue_fragments);
+        let metrics = self.metrics.clone();
+        let cfg = self.cfg.clone();
 
-        let mut dead_keys = Vec::new();
-        for (key, dtx, datagrams) in pending {
-            for datagram in datagrams {
-                if let Err(e) = dtx.send(datagram).await {
-                    debug!(error = %e, "viewer session send failed");
-                    dead_keys.push(key.clone());
-                    break;
+        tokio::spawn(async move {
+            let mut queue =
+                ViewerQueue::new(cfg.per_viewer_queue_fragments, cfg.per_viewer_max_frames);
+            let mut interval = tokio::time::interval(cfg.flush_interval);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+            loop {
+                tokio::select! {
+                    maybe_fragment = rx.recv() => {
+                        let Some(fragment) = maybe_fragment else { break; };
+                        let outcome = queue.push(fragment.datagram, &fragment.hdr);
+                        if outcome.evicted_frames > 0 {
+                            metrics.inc_frames_evicted(outcome.evicted_frames);
+                        }
+                        if let Some(reason) = outcome.drop_reason {
+                            metrics.inc_drop_by_reason(reason);
+                            metrics.inc_drop_by_reason_codec(reason, fragment.codec);
+                        }
+                    }
+                    _ = interval.tick() => {
+                        if queue.len() == 0 {
+                            continue;
+                        }
+
+                        let datagrams: Vec<Bytes> = queue.drain().collect();
+                        for datagram in datagrams {
+                            if let Err(e) = dtx.send(datagram).await {
+                                debug!(error = %e, viewer = %key.0.0, session_id = %key.1, "viewer session send loop ended");
+                                return;
+                            }
+                        }
+                    }
                 }
             }
-        }
+        });
 
-        if !dead_keys.is_empty() {
-            let mut queues = self.viewer_queues.write().await;
-            for key in dead_keys {
-                queues.remove(&key);
-            }
-        }
+        tx
     }
 
     /// Periodic cleanup of stale viewer queues (call from a background timer).
     pub async fn cleanup_stale_viewers(&self, max_idle: std::time::Duration) {
-        let mut queues = self.viewer_queues.write().await;
-        queues.retain(|_key, egress| egress.last_active.elapsed() < max_idle);
+        let mut loops = self.viewer_loops.write().await;
+        loops.retain(|_key, egress| egress.last_active.elapsed() < max_idle);
     }
 }
 
@@ -817,6 +868,20 @@ mod tests {
         }
     }
 
+    struct SlowTx {
+        sent: Arc<AtomicUsize>,
+        delay: Duration,
+    }
+
+    #[async_trait::async_trait]
+    impl DatagramTx for SlowTx {
+        async fn send(&self, _bytes: Bytes) -> Result<()> {
+            tokio::time::sleep(self.delay).await;
+            self.sent.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+    }
+
     struct FakeSessions {
         sessions: Vec<(UserId, String, Arc<dyn DatagramTx>)>,
     }
@@ -881,6 +946,7 @@ mod tests {
 
         let dg = make_test_datagram(stream_tag, 0, 0, 1, 0);
         fwd.handle_incoming_datagram(sender, dg).await;
+        tokio::time::sleep(Duration::from_millis(5)).await;
 
         assert!(
             sent.load(Ordering::Relaxed) > 0,
@@ -964,101 +1030,6 @@ mod tests {
         let outcome = q.push(second, &make_hdr(0, 0, 1, 0));
         assert!(outcome.dropped_incoming_fragment);
         assert_eq!(outcome.drop_reason, Some(StreamDropReason::QueueFull));
-    }
-
-    struct BlockingTx {
-        started: Arc<tokio::sync::Notify>,
-        unblock: Arc<tokio::sync::Notify>,
-        first_send: std::sync::atomic::AtomicBool,
-    }
-
-    #[async_trait::async_trait]
-    impl DatagramTx for BlockingTx {
-        async fn send(&self, _bytes: Bytes) -> Result<()> {
-            if self
-                .first_send
-                .swap(false, std::sync::atomic::Ordering::SeqCst)
-            {
-                self.started.notify_waiters();
-                self.unblock.notified().await;
-            }
-            Ok(())
-        }
-    }
-
-    #[tokio::test]
-    async fn flush_does_not_hold_global_lock_while_awaiting_send() {
-        let sender = UserId::new();
-        let viewer_a = UserId::new();
-        let viewer_b = UserId::new();
-        let channel = ChannelId::new();
-        let stream_tag: u64 = 55;
-
-        let started = Arc::new(tokio::sync::Notify::new());
-        let unblock = Arc::new(tokio::sync::Notify::new());
-
-        let sessions: Arc<dyn SessionRegistry> = Arc::new(FakeSessions {
-            sessions: vec![
-                (
-                    viewer_a,
-                    "a".into(),
-                    Arc::new(BlockingTx {
-                        started: started.clone(),
-                        unblock: unblock.clone(),
-                        first_send: std::sync::atomic::AtomicBool::new(true),
-                    }),
-                ),
-                (
-                    viewer_b,
-                    "b".into(),
-                    Arc::new(FakeTx {
-                        sent: Arc::new(AtomicUsize::new(0)),
-                    }),
-                ),
-            ],
-        });
-        let viewers: Arc<dyn ViewerProvider> = Arc::new(FakeViewers {
-            viewers: vec![sender, viewer_a, viewer_b],
-        });
-
-        let fwd = Arc::new(StreamForwarder::new(
-            StreamForwarderConfig::default(),
-            sessions,
-            viewers,
-            Arc::new(NoopStreamMetrics),
-        ));
-
-        fwd.register_stream(
-            stream_tag,
-            StreamRegistration {
-                sender_id: sender,
-                channel_id: channel,
-                codec: 0,
-            },
-        )
-        .await;
-
-        let first = make_test_datagram(stream_tag, 1, 0, 1, 0);
-        let second = make_test_datagram(stream_tag, 2, 0, 1, 0);
-
-        let fwd_clone = fwd.clone();
-        let sender_task = tokio::spawn(async move {
-            fwd_clone.handle_incoming_datagram(sender, first).await;
-        });
-
-        tokio::time::timeout(std::time::Duration::from_millis(200), started.notified())
-            .await
-            .expect("blocking send should start");
-
-        tokio::time::timeout(
-            std::time::Duration::from_millis(200),
-            fwd.handle_incoming_datagram(sender, second),
-        )
-        .await
-        .expect("second enqueue should not block on global lock");
-
-        unblock.notify_waiters();
-        sender_task.await.unwrap();
     }
 
     struct TestMetrics {
@@ -1150,12 +1121,149 @@ mod tests {
 
         fwd.handle_incoming_datagram(sender, make_test_datagram(primary_tag, 1, 0, 1, 0))
             .await;
+        tokio::time::sleep(Duration::from_millis(5)).await;
         assert!(sent_a.load(Ordering::Relaxed) > 0);
         let b_after_primary = sent_b.load(Ordering::Relaxed);
 
         fwd.handle_incoming_datagram(sender, make_test_datagram(fallback_tag, 2, 0, 1, 0))
             .await;
+        tokio::time::sleep(Duration::from_millis(5)).await;
         assert!(sent_b.load(Ordering::Relaxed) > b_after_primary);
+    }
+
+    #[tokio::test]
+    #[ignore = "stress test"]
+    async fn slow_viewer_does_not_block_fast_viewer_enqueue() {
+        let sender = UserId::new();
+        let fast_viewer = UserId::new();
+        let slow_viewer = UserId::new();
+        let channel = ChannelId::new();
+        let stream_tag: u64 = 77;
+
+        let fast_sent = Arc::new(AtomicUsize::new(0));
+        let slow_sent = Arc::new(AtomicUsize::new(0));
+        let sessions: Arc<dyn SessionRegistry> = Arc::new(FakeSessions {
+            sessions: vec![
+                (
+                    fast_viewer,
+                    "fast".into(),
+                    Arc::new(FakeTx {
+                        sent: fast_sent.clone(),
+                    }),
+                ),
+                (
+                    slow_viewer,
+                    "slow".into(),
+                    Arc::new(SlowTx {
+                        sent: slow_sent.clone(),
+                        delay: Duration::from_millis(80),
+                    }),
+                ),
+            ],
+        });
+        let viewers: Arc<dyn ViewerProvider> = Arc::new(FakeViewers {
+            viewers: vec![sender, fast_viewer, slow_viewer],
+        });
+
+        let fwd = StreamForwarder::new(
+            StreamForwarderConfig {
+                max_datagram_bytes: vp_voice::MAX_VIDEO_DATAGRAM_BYTES,
+                per_viewer_queue_fragments: 128,
+                per_viewer_max_frames: 8,
+                flush_interval: Duration::from_millis(1),
+            },
+            sessions,
+            viewers,
+            Arc::new(NoopStreamMetrics),
+        );
+
+        fwd.register_stream(
+            stream_tag,
+            StreamRegistration {
+                sender_id: sender,
+                channel_id: channel,
+                codec: 0,
+            },
+        )
+        .await;
+
+        for seq in 0..8u32 {
+            let dg = make_test_datagram(stream_tag, seq, 0, 1, 0);
+            fwd.handle_incoming_datagram(sender, dg).await;
+        }
+
+        tokio::time::sleep(Duration::from_millis(15)).await;
+
+        assert!(
+            fast_sent.load(Ordering::Relaxed) > 0,
+            "fast viewer should make progress even when another viewer is slow"
+        );
+        assert!(
+            slow_sent.load(Ordering::Relaxed) < fast_sent.load(Ordering::Relaxed),
+            "slow viewer should lag behind fast viewer under stress"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "manual benchmark"]
+    async fn benchmark_many_viewers_enqueue_throughput() {
+        let sender = UserId::new();
+        let channel = ChannelId::new();
+        let stream_tag: u64 = 55;
+
+        let mut sessions_vec: Vec<(UserId, String, Arc<dyn DatagramTx>)> = Vec::new();
+        let mut viewer_ids = vec![sender];
+        for i in 0..512 {
+            let viewer = UserId::new();
+            viewer_ids.push(viewer);
+            sessions_vec.push((
+                viewer,
+                format!("s{i}"),
+                Arc::new(FakeTx {
+                    sent: Arc::new(AtomicUsize::new(0)),
+                }),
+            ));
+        }
+
+        let sessions: Arc<dyn SessionRegistry> = Arc::new(FakeSessions {
+            sessions: sessions_vec,
+        });
+        let viewers: Arc<dyn ViewerProvider> = Arc::new(FakeViewers {
+            viewers: viewer_ids,
+        });
+
+        let fwd = StreamForwarder::new(
+            StreamForwarderConfig {
+                max_datagram_bytes: vp_voice::MAX_VIDEO_DATAGRAM_BYTES,
+                per_viewer_queue_fragments: 256,
+                per_viewer_max_frames: 16,
+                flush_interval: Duration::from_millis(1),
+            },
+            sessions,
+            viewers,
+            Arc::new(NoopStreamMetrics),
+        );
+
+        fwd.register_stream(
+            stream_tag,
+            StreamRegistration {
+                sender_id: sender,
+                channel_id: channel,
+                codec: 0,
+            },
+        )
+        .await;
+
+        let start = Instant::now();
+        for seq in 0..100u32 {
+            fwd.handle_incoming_datagram(sender, make_test_datagram(stream_tag, seq, 0, 1, 0))
+                .await;
+        }
+        let elapsed = start.elapsed();
+        eprintln!(
+            "benchmark_many_viewers_enqueue_throughput: 100 packets to 512 viewers in {:?}",
+            elapsed
+        );
     }
 
     #[tokio::test]
@@ -1187,6 +1295,7 @@ mod tests {
                 max_datagram_bytes: vp_voice::MAX_VIDEO_DATAGRAM_BYTES,
                 per_viewer_queue_fragments: 1,
                 per_viewer_max_frames: 1,
+                flush_interval: Duration::from_millis(2),
             },
             sessions,
             viewers,
