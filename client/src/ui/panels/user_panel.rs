@@ -242,6 +242,19 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                 });
                 let share_btn = share_btn.inner;
                 if share_btn.clicked() {
+                    model.share_sources = crate::ui::model::enumerate_share_sources();
+                    if model
+                        .selected_share_source
+                        .as_ref()
+                        .is_some_and(|selected| {
+                            !model
+                                .share_sources
+                                .iter()
+                                .any(|source| &source.id == selected)
+                        })
+                    {
+                        model.selected_share_source = None;
+                    }
                     model.show_share_content_dialog = true;
                 }
                 share_btn.on_hover_text(if in_voice_channel {
