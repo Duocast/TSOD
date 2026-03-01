@@ -726,7 +726,7 @@ fn now_ts() -> pb::Timestamp {
 }
 
 fn default_media_capabilities() -> pb::ClientMediaCapabilities {
-    let supports_av1 = cfg!(feature = "video-av1");
+    let supports_av1 = true;
     let supports_vp9 = cfg!(feature = "video-vp9")
         || cfg!(feature = "video-call")
         || cfg!(feature = "screen-share");
@@ -786,11 +786,30 @@ fn default_caps(alpn: &str) -> pb::ClientCaps {
             max_bitrate_bps: 64_000,
             max_simultaneous_decodes: 8,
         }),
-        screen_video: None,
+        screen_video: Some(pb::VideoCaps {
+            codecs: vec![
+                pb::video_caps::Codec::Av1 as i32,
+                pb::video_caps::Codec::Vp9 as i32,
+                pb::video_caps::Codec::Vp8 as i32,
+            ],
+            max_width: 1920,
+            max_height: 1080,
+            max_fps: 60,
+            max_bitrate_bps: 8_000_000,
+            hw_encode_available: false,
+        }),
         caps_hash: Some(pb::CapabilityHash {
             sha256: alpn.as_bytes().to_vec(),
         }),
-        screen_share: None,
+        screen_share: Some(pb::ScreenShareCaps {
+            codec: pb::video_caps::Codec::Av1 as i32,
+            max_width: 1920,
+            max_height: 1080,
+            max_fps: 60,
+            max_bitrate_bps: 8_000_000,
+            max_simulcast_layers: 1,
+            supports_system_audio: false,
+        }),
         camera_video: None,
     }
 }

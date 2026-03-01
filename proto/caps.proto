@@ -55,6 +55,7 @@ message VideoCaps {
     LEGACY_RESERVED_CODEC_1 = 1;
     VP9 = 2;
     AV1 = 3;
+    VP8 = 4;
   }
 
   repeated Codec codecs = 1;
