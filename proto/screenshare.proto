@@ -17,6 +17,30 @@ message StreamId {
   string value = 1;
 }
 
+enum VideoCodec {
+  VIDEO_CODEC_UNSPECIFIED = 0;
+  AV1 = 1;
+  VP9 = 2;
+  VP8 = 3;
+}
+
+message ClientMediaCapabilities {
+  repeated VideoCodec decode = 1;
+  repeated VideoCodec encode = 2;
+  bool hw_encode_av1 = 10;
+  bool hw_encode_vp9 = 11;
+  bool hw_encode_vp8 = 12;
+  bool hw_decode_av1 = 20;
+  bool hw_decode_vp9 = 21;
+  bool hw_decode_vp8 = 22;
+}
+
+message CapabilitiesUpdate {
+  ClientMediaCapabilities caps = 1;
+}
+
+message CapabilitiesUpdateAck {}
+
 // Simulcast layer configuration
 message SimulcastLayer {
   uint32 layer_id = 1;
@@ -44,6 +68,11 @@ message StartScreenShareResponse {
 
   // Server-selected layers to actually send
   repeated uint32 accepted_layer_ids = 2;
+
+  uint64 primary_stream_tag = 3;
+  VideoCodec primary_codec = 4;
+  optional uint64 fallback_stream_tag = 5;
+  optional VideoCodec fallback_codec = 6;
 }
 
 message StopScreenShareRequest {
@@ -69,6 +98,19 @@ message RequestKeyframeRequest {
 }
 
 message RequestKeyframeResponse {}
+
+message RequestRecovery {
+  uint64 stream_tag = 1;
+}
+
+message SubscribeStream {
+  uint64 stream_tag = 1;
+  VideoCodec codec = 2;
+}
+
+message UnsubscribeStream {
+  uint64 stream_tag = 1;
+}
 
 // ── Events ─────────────────────────────────────────────────────────────
 

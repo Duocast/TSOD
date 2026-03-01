@@ -72,13 +72,22 @@ impl StreamMetrics for GatewayStreamMetrics {
     fn inc_drop_by_reason(&self, reason: StreamDropReason) {
         self.inner.drop_reason(reason.as_label());
     }
+    fn inc_drop_by_reason_codec(&self, reason: StreamDropReason, codec: i32) {
+        self.inner.drop_reason_codec(reason.as_label(), codec);
+    }
     fn inc_forwarded(&self, fanout: usize) {
         self.inner.forwarded(fanout);
     }
     fn inc_forwarded_bytes(&self, n: usize) {
         self.inner.forwarded_bytes(n);
     }
+    fn inc_forwarded_bytes_codec(&self, n: usize, codec: i32) {
+        self.inner.forwarded_bytes_codec(n, codec);
+    }
     fn inc_frames_evicted(&self, count: usize) {
         self.inner.frames_evicted(count);
+    }
+    fn inc_recovery_requests(&self) {
+        self.inner.recovery_requests();
     }
 }

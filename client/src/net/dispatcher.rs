@@ -209,11 +209,21 @@ impl ControlDispatcher {
             .unwrap_or_default();
 
         match resp.payload {
-            Some(pb::server_to_client::Payload::AuthResponse(a)) => Ok(AuthInfo {
-                user_id: a.user_id.map(|u| u.value).unwrap_or_default(),
-                session_id,
-                server_id: a.server_id.map(|sid| sid.value).unwrap_or_default(),
-            }),
+            Some(pb::server_to_client::Payload::AuthResponse(a)) => {
+                let _ = self
+                    .send_request(
+                        pb::client_to_server::Payload::CapabilitiesUpdate(pb::CapabilitiesUpdate {
+                            caps: Some(default_media_capabilities()),
+                        }),
+                        Duration::from_secs(2),
+                    )
+                    .await;
+                Ok(AuthInfo {
+                    user_id: a.user_id.map(|u| u.value).unwrap_or_default(),
+                    session_id,
+                    server_id: a.server_id.map(|sid| sid.value).unwrap_or_default(),
+                })
+            }
             _ => Err(anyhow!("expected AuthResponse")),
         }
     }
@@ -694,6 +704,36 @@ fn now_ts() -> pb::Timestamp {
         .unwrap_or_default()
         .as_millis() as i64;
     pb::Timestamp { unix_millis: ms }
+}
+
+fn default_media_capabilities() -> pb::ClientMediaCapabilities {
+    let supports_av1 = cfg!(feature = "video-av1");
+    let supports_vp9 = cfg!(feature = "video-vp9")
+        || cfg!(feature = "video-call")
+        || cfg!(feature = "screen-share");
+    let supports_vp8 = true;
+
+    let mut decode = Vec::new();
+    if supports_av1 {
+        decode.push(pb::VideoCodec::Av1 as i32);
+    }
+    if supports_vp9 {
+        decode.push(pb::VideoCodec::Vp9 as i32);
+    }
+    if supports_vp8 {
+        decode.push(pb::VideoCodec::Vp8 as i32);
+    }
+
+    pb::ClientMediaCapabilities {
+        decode: decode.clone(),
+        encode: decode,
+        hw_encode_av1: false,
+        hw_encode_vp9: false,
+        hw_encode_vp8: false,
+        hw_decode_av1: false,
+        hw_decode_vp9: false,
+        hw_decode_vp8: false,
+    }
 }
 
 fn default_caps(alpn: &str) -> pb::ClientCaps {

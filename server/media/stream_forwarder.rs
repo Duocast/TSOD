@@ -14,7 +14,7 @@
 //! - **Allocation-free steady state**: Queue structures are pre-sized, no per-packet alloc.
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     sync::Arc,
     time::Instant,
 };
@@ -103,6 +103,7 @@ impl VideoHeader {
 pub struct StreamRegistration {
     pub sender_id: UserId,
     pub channel_id: ChannelId,
+    pub codec: i32,
 }
 
 /// Metrics hook for stream forwarding (optional).
@@ -131,9 +132,12 @@ pub trait StreamMetrics: Send + Sync {
     fn inc_drop_invalid(&self);
     fn inc_drop_unauthorized(&self);
     fn inc_drop_by_reason(&self, reason: StreamDropReason);
+    fn inc_drop_by_reason_codec(&self, reason: StreamDropReason, codec: i32);
     fn inc_forwarded(&self, fanout: usize);
     fn inc_forwarded_bytes(&self, n: usize);
+    fn inc_forwarded_bytes_codec(&self, n: usize, codec: i32);
     fn inc_frames_evicted(&self, count: usize);
+    fn inc_recovery_requests(&self);
 }
 
 /// No-op metrics default.
@@ -144,9 +148,12 @@ impl StreamMetrics for NoopStreamMetrics {
     fn inc_drop_invalid(&self) {}
     fn inc_drop_unauthorized(&self) {}
     fn inc_drop_by_reason(&self, _reason: StreamDropReason) {}
+    fn inc_drop_by_reason_codec(&self, _reason: StreamDropReason, _codec: i32) {}
     fn inc_forwarded(&self, _fanout: usize) {}
     fn inc_forwarded_bytes(&self, _n: usize) {}
+    fn inc_forwarded_bytes_codec(&self, _n: usize, _codec: i32) {}
     fn inc_frames_evicted(&self, _count: usize) {}
+    fn inc_recovery_requests(&self) {}
 }
 
 /// Provider for listing viewers who should receive a stream.
@@ -346,6 +353,8 @@ pub struct StreamForwarder {
 
     /// Registered streams: stream_tag → registration.
     streams: RwLock<HashMap<u64, StreamRegistration>>,
+    /// Per stream subscriber set.
+    subscriptions: RwLock<HashMap<u64, HashSet<UserId>>>,
 
     /// Per-viewer egress queues: (user_id, session_id) → queue + send handle.
     /// Each viewer-session pair has its own frame-aware queue.
@@ -371,6 +380,7 @@ impl StreamForwarder {
             viewers,
             metrics,
             streams: RwLock::new(HashMap::new()),
+            subscriptions: RwLock::new(HashMap::new()),
             viewer_queues: RwLock::new(HashMap::new()),
         }
     }
@@ -383,10 +393,62 @@ impl StreamForwarder {
         self.streams.write().await.insert(stream_tag, reg);
     }
 
+    pub async fn set_stream_subscribers(
+        &self,
+        stream_tag: u64,
+        viewers: impl IntoIterator<Item = UserId>,
+    ) {
+        self.subscriptions
+            .write()
+            .await
+            .insert(stream_tag, viewers.into_iter().collect());
+    }
+
+    pub async fn subscribe_viewer(&self, viewer: UserId, stream_tag: u64) {
+        self.subscriptions
+            .write()
+            .await
+            .entry(stream_tag)
+            .or_default()
+            .insert(viewer);
+    }
+
+    pub async fn unsubscribe_viewer(&self, viewer: UserId, stream_tag: u64) {
+        if let Some(set) = self.subscriptions.write().await.get_mut(&stream_tag) {
+            set.remove(&viewer);
+        }
+    }
+
+    pub async fn sender_for_stream(&self, stream_tag: u64) -> Option<UserId> {
+        self.streams
+            .read()
+            .await
+            .get(&stream_tag)
+            .map(|s| s.sender_id)
+    }
+
+    pub async fn codec_for_stream(&self, stream_tag: u64) -> Option<i32> {
+        self.streams.read().await.get(&stream_tag).map(|s| s.codec)
+    }
+
+    pub async fn subscribers_for_stream(&self, stream_tag: u64) -> Vec<UserId> {
+        self.subscriptions
+            .read()
+            .await
+            .get(&stream_tag)
+            .map(|s| s.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
+    pub fn note_recovery_request(&self) {
+        self.metrics.inc_recovery_requests();
+    }
+
     /// Unregister a stream (called when ScreenShareStopped / CallEnded).
     pub async fn unregister_stream(&self, stream_tag: u64) {
         debug!(stream_tag, "stream unregistered");
         self.streams.write().await.remove(&stream_tag);
+        self.subscriptions.write().await.remove(&stream_tag);
     }
 
     /// Remove viewer queues for a disconnecting session.
@@ -425,10 +487,10 @@ impl StreamForwarder {
         };
 
         // Authorize: check stream_tag is registered and sender matches.
-        let channel = {
+        let reg = {
             let streams = self.streams.read().await;
             match streams.get(&hdr.stream_tag) {
-                Some(reg) if reg.sender_id == sender => reg.channel_id,
+                Some(reg) if reg.sender_id == sender => reg.clone(),
                 Some(_) => {
                     self.metrics.inc_drop_unauthorized();
                     self.metrics
@@ -443,9 +505,21 @@ impl StreamForwarder {
                 }
             }
         };
+        let channel = reg.channel_id;
 
-        // Get viewers for this channel (excluding sender).
-        let viewer_ids = self.viewers.list_viewers(channel, sender).await;
+        // Get viewers for this stream via subscription table.
+        let viewer_ids = {
+            let maybe = self
+                .subscriptions
+                .read()
+                .await
+                .get(&hdr.stream_tag)
+                .map(|s| s.iter().copied().collect::<Vec<_>>());
+            match maybe {
+                Some(v) => v,
+                None => self.viewers.list_viewers(channel, sender).await,
+            }
+        };
         if viewer_ids.is_empty() {
             return;
         }
@@ -464,10 +538,13 @@ impl StreamForwarder {
                 }
                 if let Some(reason) = outcome.drop_reason {
                     self.metrics.inc_drop_by_reason(reason);
+                    self.metrics.inc_drop_by_reason_codec(reason, reg.codec);
                 }
                 if !outcome.dropped_incoming_fragment {
                     forwarded += 1;
                     self.metrics.inc_forwarded_bytes(datagram.len());
+                    self.metrics
+                        .inc_forwarded_bytes_codec(datagram.len(), reg.codec);
                 }
             }
         }
@@ -797,6 +874,7 @@ mod tests {
             StreamRegistration {
                 sender_id: sender,
                 channel_id: channel,
+                codec: 0,
             },
         )
         .await;
@@ -850,6 +928,7 @@ mod tests {
             StreamRegistration {
                 sender_id: real_sender,
                 channel_id: channel,
+                codec: 0,
             },
         )
         .await;
@@ -954,6 +1033,7 @@ mod tests {
             StreamRegistration {
                 sender_id: sender,
                 channel_id: channel,
+                codec: 0,
             },
         )
         .await;
@@ -995,13 +1075,87 @@ mod tests {
         fn inc_drop_by_reason(&self, _reason: StreamDropReason) {
             self.drops.fetch_add(1, Ordering::Relaxed);
         }
+        fn inc_drop_by_reason_codec(&self, _reason: StreamDropReason, _codec: i32) {}
         fn inc_forwarded(&self, _fanout: usize) {}
         fn inc_forwarded_bytes(&self, n: usize) {
             self.forwarded_bytes.fetch_add(n, Ordering::Relaxed);
         }
+        fn inc_forwarded_bytes_codec(&self, _n: usize, _codec: i32) {}
         fn inc_frames_evicted(&self, count: usize) {
             self.evicted.fetch_add(count, Ordering::Relaxed);
         }
+        fn inc_recovery_requests(&self) {}
+    }
+
+    #[tokio::test]
+    async fn subscription_routing_isolated_per_stream_tag() {
+        let sender = UserId::new();
+        let viewer_a = UserId::new();
+        let viewer_b = UserId::new();
+        let channel = ChannelId::new();
+
+        let sent_a = Arc::new(AtomicUsize::new(0));
+        let sent_b = Arc::new(AtomicUsize::new(0));
+        let sessions: Arc<dyn SessionRegistry> = Arc::new(FakeSessions {
+            sessions: vec![
+                (
+                    viewer_a,
+                    "a".into(),
+                    Arc::new(FakeTx {
+                        sent: sent_a.clone(),
+                    }),
+                ),
+                (
+                    viewer_b,
+                    "b".into(),
+                    Arc::new(FakeTx {
+                        sent: sent_b.clone(),
+                    }),
+                ),
+            ],
+        });
+        let viewers: Arc<dyn ViewerProvider> = Arc::new(FakeViewers {
+            viewers: vec![sender, viewer_a, viewer_b],
+        });
+
+        let fwd = StreamForwarder::new(
+            StreamForwarderConfig::default(),
+            sessions,
+            viewers,
+            Arc::new(NoopStreamMetrics),
+        );
+        let primary_tag = 1001u64;
+        let fallback_tag = 1002u64;
+
+        fwd.register_stream(
+            primary_tag,
+            StreamRegistration {
+                sender_id: sender,
+                channel_id: channel,
+                codec: 1,
+            },
+        )
+        .await;
+        fwd.register_stream(
+            fallback_tag,
+            StreamRegistration {
+                sender_id: sender,
+                channel_id: channel,
+                codec: 3,
+            },
+        )
+        .await;
+        fwd.set_stream_subscribers(primary_tag, [viewer_a]).await;
+        fwd.set_stream_subscribers(fallback_tag, [viewer_b]).await;
+
+        fwd.handle_incoming_datagram(sender, make_test_datagram(primary_tag, 1, 0, 1, 0))
+            .await;
+        assert!(sent_a.load(Ordering::Relaxed) > 0);
+        let b_after_primary = sent_b.load(Ordering::Relaxed);
+
+        fwd.handle_incoming_datagram(sender, make_test_datagram(fallback_tag, 2, 0, 1, 0))
+            .await;
+        assert!(sent_b.load(Ordering::Relaxed) > b_after_primary);
     }
 
     #[tokio::test]
@@ -1044,6 +1198,7 @@ mod tests {
             StreamRegistration {
                 sender_id: sender,
                 channel_id: channel,
+                codec: 0,
             },
         )
         .await;

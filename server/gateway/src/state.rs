@@ -1,4 +1,7 @@
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use anyhow::Result;
 use bytes::Bytes;
@@ -136,6 +139,7 @@ struct ChannelRuntime {
 pub struct MembershipCache {
     users: Arc<DashMap<UserId, UserPresence>>,
     channels: Arc<DashMap<ChannelId, ChannelRuntime>>,
+    media_caps: Arc<DashMap<UserId, pb::ClientMediaCapabilities>>,
 }
 
 impl MembershipCache {
@@ -143,6 +147,7 @@ impl MembershipCache {
         Self {
             users: Arc::new(DashMap::new()),
             channels: Arc::new(DashMap::new()),
+            media_caps: Arc::new(DashMap::new()),
         }
     }
 
@@ -174,6 +179,7 @@ impl MembershipCache {
 
     pub fn remove_user(&self, user: UserId) {
         self.users.remove(&user);
+        self.media_caps.remove(&user);
     }
 
     pub fn add_channel_member(&self, channel: ChannelId, user: UserId) {
@@ -188,6 +194,51 @@ impl MembershipCache {
         if let Some(mut runtime) = self.channels.get_mut(&channel) {
             runtime.members.retain(|member| *member != user);
         }
+    }
+
+    pub fn set_media_capabilities(&self, user: UserId, caps: pb::ClientMediaCapabilities) {
+        self.media_caps.insert(user, caps);
+    }
+
+    pub fn media_capabilities(&self, user: UserId) -> Option<pb::ClientMediaCapabilities> {
+        self.media_caps.get(&user).map(|v| v.clone())
+    }
+
+    pub fn viewer_decode_codecs(&self, user: UserId) -> Vec<pb::VideoCodec> {
+        self.media_capabilities(user)
+            .map(|caps| {
+                caps.decode
+                    .into_iter()
+                    .filter_map(|c| pb::VideoCodec::try_from(c).ok())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn streamer_encode_codecs(&self, user: UserId) -> Vec<pb::VideoCodec> {
+        self.media_capabilities(user)
+            .map(|caps| {
+                caps.encode
+                    .into_iter()
+                    .filter_map(|c| pb::VideoCodec::try_from(c).ok())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn channel_member_capabilities(
+        &self,
+        channel: ChannelId,
+    ) -> HashMap<UserId, pb::ClientMediaCapabilities> {
+        let members = self
+            .channels
+            .get(&channel)
+            .map(|entry| entry.members.clone())
+            .unwrap_or_default();
+        members
+            .into_iter()
+            .filter_map(|uid| self.media_capabilities(uid).map(|caps| (uid, caps)))
+            .collect()
     }
 
     pub fn update_voice_state(
@@ -360,6 +411,33 @@ mod tests {
         sessions.unregister(user, "s2");
         assert!(sessions.get_sessions(user).await.is_empty());
     }
+
+    #[test]
+    fn membership_cache_tracks_media_caps() {
+        let membership = MembershipCache::new();
+        let user = UserId(uuid::Uuid::new_v4());
+        membership.set_media_capabilities(
+            user,
+            pb::ClientMediaCapabilities {
+                decode: vec![pb::VideoCodec::Av1 as i32, pb::VideoCodec::Vp8 as i32],
+                encode: vec![pb::VideoCodec::Vp9 as i32],
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            membership.viewer_decode_codecs(user),
+            vec![pb::VideoCodec::Av1, pb::VideoCodec::Vp8]
+        );
+        assert_eq!(
+            membership.streamer_encode_codecs(user),
+            vec![pb::VideoCodec::Vp9]
+        );
+
+        membership.remove_user(user);
+        assert!(membership.media_capabilities(user).is_none());
+    }
+
     #[test]
     fn membership_cache_updates_channel_members() {
         let membership = MembershipCache::new();

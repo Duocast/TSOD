@@ -1,10 +1,13 @@
 use anyhow::{anyhow, Context, Result};
 use ring::rand::SecureRandom;
 use scopeguard::defer;
-use std::sync::Arc;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 use tokio::{
     sync::mpsc,
-    time::{timeout, Duration},
+    time::{timeout, Duration, Instant},
 };
 use tracing::{debug, info, warn};
 
@@ -151,6 +154,7 @@ impl Gateway {
         );
 
         let mut current_channel: Option<ChannelId> = None;
+        let mut recovery_forwarded_at: HashMap<u64, Instant> = HashMap::new();
         let voice_forwarder = self.voice.clone();
         let video_forwarder = self.video.clone();
         defer! {
@@ -805,32 +809,62 @@ impl Gateway {
                 Some(pb::client_to_server::Payload::StartScreenShareRequest(r)) => {
                     let ch = parse_channel_id(r.channel_id.as_ref())?;
 
-                    // Generate a collision-resistant stream_tag from a random u64.
-                    let stream_tag = {
-                        let mut buf = [0u8; 8];
-                        ring::rand::SystemRandom::new()
-                            .fill(&mut buf)
-                            .map_err(|_| anyhow!("rng failed"))?;
-                        u64::from_le_bytes(buf)
-                    };
+                    let streamer_caps = self.membership.streamer_encode_codecs(user_id);
+                    let mut viewer_caps = HashMap::new();
+                    for viewer in self.membership.members_of(ch).unwrap_or_default().into_iter().filter(|v| *v != user_id) {
+                        viewer_caps.insert(viewer, self.membership.viewer_decode_codecs(viewer));
+                    }
+                    let plan = negotiate_codecs(&streamer_caps, &viewer_caps)?;
 
-                    // Register the stream with the video forwarder.
+                    let primary_tag = random_stream_tag()?;
                     self.video
                         .register_stream(
-                            stream_tag,
+                            primary_tag,
                             vp_media::stream_forwarder::StreamRegistration {
                                 sender_id: user_id,
                                 channel_id: ch,
+                                codec: plan.primary as i32,
                             },
                         )
                         .await;
+                    self.video
+                        .set_stream_subscribers(primary_tag, plan.primary_viewers.iter().copied())
+                        .await;
 
-                    let stream_id = format!("{:016x}", stream_tag);
+                    for viewer in &plan.primary_viewers {
+                        self.push.send_to(*viewer, pb::ServerToClient {
+                            request_id: None,
+                            session_id: None,
+                            sent_at: Some(now_ts()),
+                            error: None,
+                            event_seq: 0,
+                            payload: Some(pb::server_to_client::Payload::SubscribeStream(pb::SubscribeStream { stream_tag: primary_tag, codec: plan.primary as i32 })),
+                        }).await;
+                    }
+
+                    let fallback_tag = if let Some(fallback_codec) = plan.fallback {
+                        let tag = random_stream_tag()?;
+                        self.video.register_stream(tag, vp_media::stream_forwarder::StreamRegistration { sender_id: user_id, channel_id: ch, codec: fallback_codec as i32 }).await;
+                        self.video.set_stream_subscribers(tag, plan.remaining_viewers.iter().copied()).await;
+                        for viewer in &plan.remaining_viewers {
+                            self.push.send_to(*viewer, pb::ServerToClient {
+                                request_id: None,
+                                session_id: None,
+                                sent_at: Some(now_ts()),
+                                error: None,
+                                event_seq: 0,
+                                payload: Some(pb::server_to_client::Payload::SubscribeStream(pb::SubscribeStream { stream_tag: tag, codec: fallback_codec as i32 })),
+                            }).await;
+                        }
+                        Some((tag, fallback_codec))
+                    } else {
+                        None
+                    };
+
+                    let stream_id = format!("{:016x}", primary_tag);
                     let resp = pb::ServerToClient {
                         request_id: req_id,
-                        session_id: Some(pb::SessionId {
-                            value: session_id.clone(),
-                        }),
+                        session_id: Some(pb::SessionId { value: session_id.clone() }),
                         sent_at: Some(now_ts()),
                         error: None,
                         event_seq: 0,
@@ -838,6 +872,10 @@ impl Gateway {
                             pb::StartScreenShareResponse {
                                 stream_id: Some(pb::StreamId { value: stream_id }),
                                 accepted_layer_ids: r.layers.iter().map(|l| l.layer_id).collect(),
+                                primary_stream_tag: primary_tag,
+                                primary_codec: plan.primary as i32,
+                                fallback_stream_tag: fallback_tag.as_ref().map(|v| v.0),
+                                fallback_codec: fallback_tag.as_ref().map(|v| v.1 as i32),
                             },
                         )),
                     };
@@ -849,6 +887,16 @@ impl Gateway {
                 Some(pb::client_to_server::Payload::StopScreenShareRequest(r)) => {
                     if let Some(sid) = r.stream_id.as_ref() {
                         if let Ok(stream_tag) = u64::from_str_radix(&sid.value, 16) {
+                            for viewer in self.video.subscribers_for_stream(stream_tag).await {
+                                self.push.send_to(viewer, pb::ServerToClient {
+                                    request_id: None,
+                                    session_id: None,
+                                    sent_at: Some(now_ts()),
+                                    error: None,
+                                    event_seq: 0,
+                                    payload: Some(pb::server_to_client::Payload::UnsubscribeStream(pb::UnsubscribeStream { stream_tag })),
+                                }).await;
+                            }
                             self.video.unregister_stream(stream_tag).await;
                         }
                     }
@@ -867,6 +915,44 @@ impl Gateway {
                     if let Err(e) = write_delimited(&mut send, &resp).await {
                         warn!("control write failed: {:#}", e);
                         break;
+                    }
+                }
+                Some(pb::client_to_server::Payload::CapabilitiesUpdate(r)) => {
+                    if let Some(caps) = r.caps {
+                        self.membership.set_media_capabilities(user_id, caps);
+                    }
+                    let resp = pb::ServerToClient {
+                        request_id: req_id,
+                        session_id: Some(pb::SessionId { value: session_id.clone() }),
+                        sent_at: Some(now_ts()),
+                        error: None,
+                        event_seq: 0,
+                        payload: Some(pb::server_to_client::Payload::CapabilitiesUpdateAck(pb::CapabilitiesUpdateAck {})),
+                    };
+                    if let Err(e) = write_delimited(&mut send, &resp).await {
+                        warn!("control write failed: {:#}", e);
+                        break;
+                    }
+                }
+                Some(pb::client_to_server::Payload::RequestRecovery(r)) => {
+                    let now = Instant::now();
+                    let should_forward = recovery_forwarded_at
+                        .get(&r.stream_tag)
+                        .map(|t| now.duration_since(*t) >= Duration::from_millis(500))
+                        .unwrap_or(true);
+                    if should_forward {
+                        recovery_forwarded_at.insert(r.stream_tag, now);
+                        self.video.note_recovery_request();
+                        if let Some(sender_uid) = self.video.sender_for_stream(r.stream_tag).await {
+                            self.push.send_to(sender_uid, pb::ServerToClient {
+                                request_id: None,
+                                session_id: None,
+                                sent_at: Some(now_ts()),
+                                error: None,
+                                event_seq: 0,
+                                payload: Some(pb::server_to_client::Payload::RequestRecovery(pb::RequestRecovery { stream_tag: r.stream_tag })),
+                            }).await;
+                        }
                     }
                 }
                 _ => {
@@ -1143,6 +1229,93 @@ fn normalize_preferred_display_name(value: &str) -> Option<String> {
     Some(trimmed.chars().take(64).collect())
 }
 
+fn random_stream_tag() -> Result<u64> {
+    let mut buf = [0u8; 8];
+    ring::rand::SystemRandom::new()
+        .fill(&mut buf)
+        .map_err(|_| anyhow!("rng failed"))?;
+    Ok(u64::from_le_bytes(buf))
+}
+
+#[derive(Clone)]
+struct CodecPlan {
+    primary: pb::VideoCodec,
+    primary_viewers: Vec<UserId>,
+    fallback: Option<pb::VideoCodec>,
+    remaining_viewers: Vec<UserId>,
+}
+
+fn codec_rank() -> [pb::VideoCodec; 3] {
+    [
+        pb::VideoCodec::Av1,
+        pb::VideoCodec::Vp9,
+        pb::VideoCodec::Vp8,
+    ]
+}
+
+fn negotiate_codecs(
+    streamer: &[pb::VideoCodec],
+    viewers: &HashMap<UserId, Vec<pb::VideoCodec>>,
+) -> Result<CodecPlan> {
+    let sset: HashSet<i32> = streamer.iter().map(|c| *c as i32).collect();
+    let mut support: HashMap<UserId, HashSet<i32>> = HashMap::new();
+    for (uid, di) in viewers {
+        let set: HashSet<i32> = di
+            .iter()
+            .map(|c| *c as i32)
+            .filter(|c| sset.contains(c))
+            .collect();
+        support.insert(*uid, set);
+    }
+    let primary = codec_rank()
+        .into_iter()
+        .find(|c| support.values().any(|set| set.contains(&(*c as i32))))
+        .ok_or_else(|| anyhow!("viewer unsupported"))?;
+
+    let mut primary_viewers = Vec::new();
+    let mut remaining = Vec::new();
+    for (uid, set) in &support {
+        if set.contains(&(primary as i32)) {
+            primary_viewers.push(*uid);
+        } else {
+            remaining.push(*uid);
+        }
+    }
+
+    let fallback = if remaining.is_empty() {
+        None
+    } else {
+        codec_rank()
+            .into_iter()
+            .find(|c| {
+                remaining.iter().all(|uid| {
+                    support
+                        .get(uid)
+                        .map(|s| s.contains(&(*c as i32)))
+                        .unwrap_or(false)
+                })
+            })
+            .or_else(|| {
+                if sset.contains(&(pb::VideoCodec::Vp8 as i32)) {
+                    Some(pb::VideoCodec::Vp8)
+                } else {
+                    None
+                }
+            })
+    };
+
+    if !remaining.is_empty() && fallback.is_none() {
+        return Err(anyhow!("viewer unsupported"));
+    }
+
+    Ok(CodecPlan {
+        primary,
+        primary_viewers,
+        fallback,
+        remaining_viewers: remaining,
+    })
+}
+
 fn parse_user_id(u: Option<&pb::UserId>) -> Result<UserId> {
     let u = u.ok_or(ControlError::InvalidArgument("user_id missing"))?;
     Ok(UserId(uuid::Uuid::parse_str(&u.value).map_err(|_| {
@@ -1205,8 +1378,11 @@ fn is_video_datagram(d: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{error_from_anyhow, is_video_datagram, normalize_preferred_display_name};
+    use super::{
+        error_from_anyhow, is_video_datagram, negotiate_codecs, normalize_preferred_display_name,
+    };
     use crate::proto::voiceplatform::v1 as pb;
+    use std::collections::HashMap;
     use vp_control::ControlError;
 
     #[test]
@@ -1224,6 +1400,33 @@ mod tests {
 
         let video = [vp_voice::VIDEO_VERSION, vp_voice::DATAGRAM_KIND_VIDEO, 0, 0];
         assert!(is_video_datagram(&video));
+    }
+
+    #[test]
+    fn negotiate_codecs_primary_and_fallback() {
+        let streamer = vec![
+            pb::VideoCodec::Av1,
+            pb::VideoCodec::Vp9,
+            pb::VideoCodec::Vp8,
+        ];
+        let a = vp_control::ids::UserId::new();
+        let b = vp_control::ids::UserId::new();
+        let viewers = HashMap::from([
+            (a, vec![pb::VideoCodec::Av1, pb::VideoCodec::Vp9]),
+            (b, vec![pb::VideoCodec::Vp8]),
+        ]);
+
+        let plan = negotiate_codecs(&streamer, &viewers).expect("plan");
+        assert_eq!(plan.primary, pb::VideoCodec::Av1);
+        assert_eq!(plan.fallback, Some(pb::VideoCodec::Vp8));
+    }
+
+    #[test]
+    fn negotiate_codecs_rejects_unsupported() {
+        let streamer = vec![pb::VideoCodec::Av1];
+        let a = vp_control::ids::UserId::new();
+        let viewers = HashMap::from([(a, vec![pb::VideoCodec::Vp8])]);
+        assert!(negotiate_codecs(&streamer, &viewers).is_err());
     }
 
     #[test]
