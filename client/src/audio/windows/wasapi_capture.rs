@@ -17,6 +17,13 @@ use crate::ui::{
 
 use super::wasapi_common::{default_endpoint_id, enumerate_endpoints, open_device, ComGuard};
 
+const STALL_AFTER: Duration = Duration::from_secs(5);
+
+fn stalled(last_frame: Instant, now: Instant) -> Option<Duration> {
+    let stalled_for = now.saturating_duration_since(last_frame);
+    (stalled_for >= STALL_AFTER).then_some(stalled_for)
+}
+
 pub struct WasapiCapture {
     thread: Option<std::thread::JoinHandle<()>>,
     stop: Arc<AtomicBool>,
@@ -210,6 +217,7 @@ fn run_capture_thread(
     let mut resampler = LinearResampler::new(device_rate, sample_rate);
     let target_channels = channels.max(1) as usize;
     let mut consecutive_timeouts = 0u32;
+    let mut consecutive_empty_wakeups = 0u32;
     let mut read_buf = Vec::<u8>::new();
     let mut mono = Vec::<f32>::new();
     let mut resampled = Vec::<f32>::new();
@@ -217,11 +225,85 @@ fn run_capture_thread(
 
     while !stop.load(Ordering::Relaxed) {
         match handle.wait_for_event(500) {
-            Ok(()) => {}
+            Ok(()) => {
+                let mut produced_any_frames = false;
+
+                loop {
+                    let next_packet = capture
+                        .get_next_packet_size()
+                        .context("query capture packet size")?;
+                    let Some(packet_frames) = next_packet else {
+                        break;
+                    };
+                    if packet_frames == 0 {
+                        break;
+                    }
+
+                    let packet_bytes = packet_frames as usize * block_align;
+                    if read_buf.len() < packet_bytes {
+                        read_buf.resize(packet_bytes, 0);
+                    }
+
+                    let (frames, info) = capture
+                        .read_from_device(&mut read_buf[..packet_bytes])
+                        .map_err(|error| {
+                            tracing::error!("[wasapi capture] read_from_device failed: {error:#}");
+                            error
+                        })
+                        .context("read WASAPI capture packet")?;
+
+                    if frames > 0 {
+                        produced_any_frames = true;
+                        last_frame_instant = Instant::now();
+                    }
+
+                    mono.clear();
+                    if info.flags.silent {
+                        mono.resize(frames as usize, 0.0);
+                    } else {
+                        decode_interleaved_to_mono(
+                            &mut mono,
+                            &read_buf,
+                            frames as usize,
+                            block_align,
+                            device_channels,
+                            sample_type,
+                            effective_valid_bits,
+                        );
+                    }
+
+                    resampled.clear();
+                    resampler.process(&mono, &mut resampled);
+                    for &sample in &resampled {
+                        let v = (sample.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16;
+                        for _ in 0..target_channels {
+                            let _ = prod.try_push(v);
+                        }
+                    }
+                }
+
+                if produced_any_frames {
+                    consecutive_empty_wakeups = 0;
+                    consecutive_timeouts = 0;
+                } else {
+                    consecutive_empty_wakeups = consecutive_empty_wakeups.saturating_add(1);
+                    if consecutive_empty_wakeups == 200 {
+                        tracing::warn!(
+                            "[wasapi capture] capture event fired repeatedly without frames"
+                        );
+                    }
+                    if let Some(stalled_for) = stalled(last_frame_instant, Instant::now()) {
+                        return Err(anyhow!(
+                            "WASAPI capture stalled: event fired but no frames for {}ms",
+                            stalled_for.as_millis()
+                        ));
+                    }
+                }
+                continue;
+            }
             Err(wasapi::WasapiError::EventTimeout) => {
                 consecutive_timeouts = consecutive_timeouts.saturating_add(1);
-                let stalled_for = last_frame_instant.elapsed();
-                if stalled_for >= Duration::from_secs(5) {
+                if let Some(stalled_for) = stalled(last_frame_instant, Instant::now()) {
                     return Err(anyhow!(
                         "WASAPI capture stalled: no frames for {}ms",
                         stalled_for.as_millis()
@@ -235,61 +317,6 @@ fn run_capture_thread(
             Err(error) => {
                 tracing::error!("[wasapi capture] wait_for_event failed: {error:#}");
                 return Err(error).context("wait for WASAPI capture event");
-            }
-        }
-
-        loop {
-            let next_packet = capture
-                .get_next_packet_size()
-                .context("query capture packet size")?;
-            let Some(packet_frames) = next_packet else {
-                break;
-            };
-            if packet_frames == 0 {
-                break;
-            }
-
-            consecutive_timeouts = 0;
-
-            let packet_bytes = packet_frames as usize * block_align;
-            if read_buf.len() < packet_bytes {
-                read_buf.resize(packet_bytes, 0);
-            }
-
-            let (frames, info) = capture
-                .read_from_device(&mut read_buf[..packet_bytes])
-                .map_err(|error| {
-                    tracing::error!("[wasapi capture] read_from_device failed: {error:#}");
-                    error
-                })
-                .context("read WASAPI capture packet")?;
-
-            if frames > 0 {
-                last_frame_instant = Instant::now();
-            }
-
-            mono.clear();
-            if info.flags.silent {
-                mono.resize(frames as usize, 0.0);
-            } else {
-                decode_interleaved_to_mono(
-                    &mut mono,
-                    &read_buf,
-                    frames as usize,
-                    block_align,
-                    device_channels,
-                    sample_type,
-                    effective_valid_bits,
-                );
-            }
-
-            resampled.clear();
-            resampler.process(&mono, &mut resampled);
-            for &sample in &resampled {
-                let v = (sample.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16;
-                for _ in 0..target_channels {
-                    let _ = prod.try_push(v);
-                }
             }
         }
     }
@@ -418,5 +445,26 @@ fn int_scale(valid_bits: u16) -> f32 {
         0 => 1.0,
         1..=31 => ((1_i64 << (valid_bits - 1)) - 1) as f32,
         _ => i32::MAX as f32,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{stalled, STALL_AFTER};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn stalled_returns_none_before_threshold() {
+        let start = Instant::now();
+        let now = start + Duration::from_secs(4);
+        assert!(stalled(start, now).is_none());
+    }
+
+    #[test]
+    fn stalled_returns_some_after_threshold() {
+        let start = Instant::now();
+        let now = start + Duration::from_secs(6);
+        let stalled_for = stalled(start, now).expect("expected stall");
+        assert!(stalled_for >= STALL_AFTER);
     }
 }
