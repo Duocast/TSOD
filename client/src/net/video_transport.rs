@@ -23,6 +23,38 @@ pub enum VideoSendError {
     FrameTooLarge,
 }
 
+pub enum VideoStreamProfile {
+    P1080p60,
+    P1440p60,
+}
+
+#[derive(Clone, Copy)]
+pub struct VideoTransportConfig {
+    pub max_frags_per_frame: u16,
+    pub max_in_flight_frames: usize,
+    pub target_bps: u64,
+    pub initial_burst_packets: usize,
+}
+
+impl VideoStreamProfile {
+    pub fn transport_config(self) -> VideoTransportConfig {
+        match self {
+            VideoStreamProfile::P1080p60 => VideoTransportConfig {
+                max_frags_per_frame: 512,
+                max_in_flight_frames: 3,
+                target_bps: 8_000_000,
+                initial_burst_packets: 2,
+            },
+            VideoStreamProfile::P1440p60 => VideoTransportConfig {
+                max_frags_per_frame: 1024,
+                max_in_flight_frames: 4,
+                target_bps: 14_000_000,
+                initial_burst_packets: 2,
+            },
+        }
+    }
+}
+
 // ── VideoSender: allocation-free packetizer ───────────────────────────
 
 /// Pre-allocated buffer pool for video datagram construction.
@@ -78,7 +110,7 @@ pub struct VideoSender {
     frame_seq: u32,
     pool: BufferPool,
     max_frame_bytes: usize,
-    max_frags_per_frame: usize,
+    max_frags_per_frame: u16,
     pacer: Pacer,
     force_recovery_next_frame: bool,
     last_recovery_request_at: Option<Instant>,
@@ -88,18 +120,22 @@ impl VideoSender {
     /// Create a new sender for a given stream.
     ///
     /// `max_fragments_per_frame`: pre-size the buffer pool (e.g., 64 for large frames).
-    pub fn new(stream_tag: u64, layer_id: u8, max_fragments_per_frame: usize) -> Self {
+    pub fn new(stream_tag: u64, layer_id: u8, profile: VideoStreamProfile) -> Self {
+        let config = profile.transport_config();
         Self {
             stream_tag,
             layer_id,
             frame_seq: 0,
-            pool: BufferPool::new(VIDEO_HDR_LEN + MAX_VIDEO_PAYLOAD, max_fragments_per_frame),
-            max_frame_bytes: vp_voice::MAX_FRAGS_PER_FRAME as usize * MAX_VIDEO_PAYLOAD,
-            max_frags_per_frame: vp_voice::MAX_FRAGS_PER_FRAME as usize,
+            pool: BufferPool::new(
+                VIDEO_HDR_LEN + MAX_VIDEO_PAYLOAD,
+                config.max_frags_per_frame as usize,
+            ),
+            max_frame_bytes: config.max_frags_per_frame as usize * MAX_VIDEO_PAYLOAD,
+            max_frags_per_frame: config.max_frags_per_frame,
             pacer: Pacer::new(
                 PacingPolicy {
-                    target_bps: 8_000_000,
-                    max_burst_packets: 3,
+                    target_bps: config.target_bps,
+                    max_burst_packets: config.initial_burst_packets,
                 },
                 vp_voice::MAX_VIDEO_DATAGRAM_BYTES,
             ),
@@ -175,7 +211,7 @@ impl VideoSender {
             (encoded_frame.len() + max_payload - 1) / max_payload
         };
 
-        if frag_total > self.max_frags_per_frame {
+        if frag_total > self.max_frags_per_frame as usize {
             self.on_frame_too_large();
             return Err(VideoSendError::FrameTooLarge);
         }
@@ -255,7 +291,7 @@ impl VideoSender {
             (encoded_frame.len() + max_payload - 1) / max_payload
         };
 
-        if frag_total > self.max_frags_per_frame {
+        if frag_total > self.max_frags_per_frame as usize {
             self.on_frame_too_large();
             return Err(VideoSendError::FrameTooLarge);
         }
@@ -389,7 +425,7 @@ struct ReassemblyKey {
 struct FrameSlot {
     key: ReassemblyKey,
     frag_total: u16,
-    received_mask: u64, // Bitmask of received fragment indices (supports up to 64 fragments).
+    received_mask: Vec<u64>,
     received_count: u16,
     /// Pre-allocated fragment storage. Indices correspond to frag_idx.
     /// Uses `Option<Bytes>` but the Vec is pre-allocated and reused.
@@ -399,13 +435,21 @@ struct FrameSlot {
 }
 
 impl FrameSlot {
+    #[inline]
+    fn bit_index(frag_idx: u16) -> (usize, u64) {
+        let idx = frag_idx as usize;
+        let word = idx / 64;
+        let bit = 1u64 << (idx % 64);
+        (word, bit)
+    }
+
     fn new(key: ReassemblyKey, frag_total: u16, is_keyframe: bool, ts_ms: u32) -> Self {
         let mut fragments = Vec::with_capacity(frag_total as usize);
         fragments.resize(frag_total as usize, None);
         Self {
             key,
             frag_total,
-            received_mask: 0,
+            received_mask: vec![0; (frag_total as usize).div_ceil(64)],
             received_count: 0,
             fragments,
             is_keyframe,
@@ -418,11 +462,11 @@ impl FrameSlot {
         if frag_idx >= self.frag_total || frag_idx >= vp_voice::MAX_FRAGS_PER_FRAME {
             return false;
         }
-        let bit = 1u64 << frag_idx;
-        if self.received_mask & bit != 0 {
+        let (word, bit) = Self::bit_index(frag_idx);
+        if self.received_mask[word] & bit != 0 {
             return false; // Duplicate.
         }
-        self.received_mask |= bit;
+        self.received_mask[word] |= bit;
         self.received_count += 1;
         self.fragments[frag_idx as usize] = Some(payload);
         self.received_count == self.frag_total
@@ -437,7 +481,9 @@ impl FrameSlot {
     fn reset(&mut self, key: ReassemblyKey, frag_total: u16, is_keyframe: bool, ts_ms: u32) {
         self.key = key;
         self.frag_total = frag_total;
-        self.received_mask = 0;
+        let needed_words = (frag_total as usize).div_ceil(64);
+        self.received_mask.clear();
+        self.received_mask.resize(needed_words, 0);
         self.received_count = 0;
         self.is_keyframe = is_keyframe;
         self.ts_ms = ts_ms;
@@ -478,16 +524,18 @@ pub struct VideoReceiver {
     slots: VecDeque<FrameSlot>,
     free_slots: Vec<FrameSlot>,
     max_slots: usize,
+    max_frags_per_frame: u16,
     #[cfg(test)]
     slot_allocations: usize,
 }
 
 impl VideoReceiver {
-    pub fn new(max_in_flight_frames: usize) -> Self {
+    pub fn new(max_in_flight_frames: usize, max_frags_per_frame: u16) -> Self {
         Self {
             slots: VecDeque::with_capacity(max_in_flight_frames),
             free_slots: Vec::with_capacity(max_in_flight_frames),
             max_slots: max_in_flight_frames,
+            max_frags_per_frame,
             #[cfg(test)]
             slot_allocations: 0,
         }
@@ -498,6 +546,9 @@ impl VideoReceiver {
     /// Returns `Some(ReassembledFrame)` if this fragment completed a frame.
     pub fn receive(&mut self, datagram: &Bytes) -> Option<ReassembledFrame> {
         let hdr = VideoHeader::parse(datagram)?;
+        if hdr.frag_total > self.max_frags_per_frame {
+            return None;
+        }
         let payload = datagram.slice(VIDEO_HDR_LEN..);
 
         let key = ReassemblyKey {
@@ -651,7 +702,7 @@ mod tests {
 
     #[test]
     fn sender_fragments_small_frame() {
-        let mut sender = VideoSender::new(42, 0, 4);
+        let mut sender = VideoSender::new(42, 0, VideoStreamProfile::P1080p60);
         let frame = b"small frame data";
         let mut datagrams = Vec::new();
 
@@ -671,7 +722,7 @@ mod tests {
 
     #[test]
     fn sender_fragments_large_frame() {
-        let mut sender = VideoSender::new(1, 0, 8);
+        let mut sender = VideoSender::new(1, 0, VideoStreamProfile::P1080p60);
         // Create a frame larger than MAX_VIDEO_PAYLOAD.
         let frame = vec![0xABu8; MAX_VIDEO_PAYLOAD * 3 + 100];
         let mut datagrams = Vec::new();
@@ -696,7 +747,7 @@ mod tests {
 
     #[test]
     fn sender_increments_frame_seq() {
-        let mut sender = VideoSender::new(1, 0, 4);
+        let mut sender = VideoSender::new(1, 0, VideoStreamProfile::P1080p60);
         let mut seqs = Vec::new();
 
         for _ in 0..5 {
@@ -715,7 +766,7 @@ mod tests {
 
     #[test]
     fn receiver_reassembles_single_fragment_frame() {
-        let mut rx = VideoReceiver::new(4);
+        let mut rx = VideoReceiver::new(4, vp_voice::MAX_FRAGS_PER_FRAME);
         let dg = make_frag(1, 0, 0, 1, vp_voice::VIDEO_FLAG_END_OF_FRAME, b"hello");
 
         let frame = rx.receive(&dg).expect("should complete");
@@ -726,7 +777,7 @@ mod tests {
 
     #[test]
     fn receiver_reassembles_multi_fragment_frame() {
-        let mut rx = VideoReceiver::new(4);
+        let mut rx = VideoReceiver::new(4, vp_voice::MAX_FRAGS_PER_FRAME);
         let dg0 = make_frag(1, 0, 0, 3, 0, b"aa");
         let dg1 = make_frag(1, 0, 1, 3, 0, b"bb");
         let dg2 = make_frag(1, 0, 2, 3, vp_voice::VIDEO_FLAG_END_OF_FRAME, b"cc");
@@ -742,7 +793,7 @@ mod tests {
 
     #[test]
     fn receiver_handles_out_of_order_fragments() {
-        let mut rx = VideoReceiver::new(4);
+        let mut rx = VideoReceiver::new(4, vp_voice::MAX_FRAGS_PER_FRAME);
         let dg2 = make_frag(1, 0, 2, 3, vp_voice::VIDEO_FLAG_END_OF_FRAME, b"cc");
         let dg0 = make_frag(1, 0, 0, 3, 0, b"aa");
         let dg1 = make_frag(1, 0, 1, 3, 0, b"bb");
@@ -759,7 +810,7 @@ mod tests {
 
     #[test]
     fn receiver_evicts_oldest_when_full() {
-        let mut rx = VideoReceiver::new(2);
+        let mut rx = VideoReceiver::new(2, vp_voice::MAX_FRAGS_PER_FRAME);
 
         // Start two frames.
         let dg_f0 = make_frag(1, 0, 0, 3, 0, b"f0");
@@ -782,7 +833,7 @@ mod tests {
 
     #[test]
     fn receiver_ignores_duplicate_fragments() {
-        let mut rx = VideoReceiver::new(4);
+        let mut rx = VideoReceiver::new(4, vp_voice::MAX_FRAGS_PER_FRAME);
         let dg = make_frag(1, 0, 0, 2, 0, b"data");
 
         assert!(rx.receive(&dg).is_none());
@@ -797,8 +848,8 @@ mod tests {
 
     #[test]
     fn sender_receiver_roundtrip() {
-        let mut sender = VideoSender::new(42, 0, 8);
-        let mut receiver = VideoReceiver::new(4);
+        let mut sender = VideoSender::new(42, 0, VideoStreamProfile::P1080p60);
+        let mut receiver = VideoReceiver::new(4, vp_voice::MAX_FRAGS_PER_FRAME);
 
         let original = b"This is a test frame for the roundtrip".to_vec();
         let mut completed = None;
@@ -824,7 +875,7 @@ mod tests {
 
     #[test]
     fn sender_rejects_too_many_fragments() {
-        let mut sender = VideoSender::new(1, 0, 4);
+        let mut sender = VideoSender::new(1, 0, VideoStreamProfile::P1080p60);
         let frame = vec![0u8; MAX_VIDEO_PAYLOAD * (vp_voice::MAX_FRAGS_PER_FRAME as usize + 1)];
         let err = sender.send_frame(0, false, &frame, |_dg| {}).unwrap_err();
         assert_eq!(err, VideoSendError::FrameTooLarge);
@@ -832,7 +883,7 @@ mod tests {
 
     #[test]
     fn oversized_frame_returns_frame_too_large() {
-        let mut sender = VideoSender::new(1, 0, 4);
+        let mut sender = VideoSender::new(1, 0, VideoStreamProfile::P1080p60);
         let frame = vec![0u8; MAX_VIDEO_PAYLOAD * vp_voice::MAX_FRAGS_PER_FRAME as usize + 1];
         let err = sender.send_frame(0, false, &frame, |_dg| {}).unwrap_err();
         assert_eq!(err, VideoSendError::FrameTooLarge);
@@ -840,7 +891,7 @@ mod tests {
 
     #[test]
     fn frame_at_boundary_fragments_to_max_frags() {
-        let mut sender = VideoSender::new(1, 0, 4);
+        let mut sender = VideoSender::new(1, 0, VideoStreamProfile::P1080p60);
         let frame = vec![7u8; MAX_VIDEO_PAYLOAD * vp_voice::MAX_FRAGS_PER_FRAME as usize];
         let mut count = 0usize;
         sender
@@ -866,7 +917,7 @@ mod tests {
 
     #[tokio::test]
     async fn sender_async_keyframe_is_paced_and_spaced() {
-        let mut sender = VideoSender::new(1, 0, 8);
+        let mut sender = VideoSender::new(1, 0, VideoStreamProfile::P1080p60);
         sender.set_pacing_policy(8_000, 1);
 
         let mut emitted_at = Vec::new();
@@ -888,7 +939,7 @@ mod tests {
 
     #[tokio::test]
     async fn sender_async_rejects_too_many_fragments() {
-        let mut sender = VideoSender::new(1, 0, 4);
+        let mut sender = VideoSender::new(1, 0, VideoStreamProfile::P1080p60);
         let frame = vec![0u8; MAX_VIDEO_PAYLOAD * (vp_voice::MAX_FRAGS_PER_FRAME as usize + 1)];
         let err = sender
             .send_frame_async(0, false, &frame, |_dg| {})
@@ -899,7 +950,7 @@ mod tests {
 
     #[test]
     fn recovery_rate_limit_works() {
-        let mut sender = VideoSender::new(1, 0, 4);
+        let mut sender = VideoSender::new(1, 0, VideoStreamProfile::P1080p60);
         let now = Instant::now();
         assert!(sender.request_recovery(now, Duration::from_millis(500)));
         assert!(
@@ -910,8 +961,9 @@ mod tests {
         );
     }
 
+    #[test]
     fn receiver_payload_is_zero_copy_slice() {
-        let mut rx = VideoReceiver::new(4);
+        let mut rx = VideoReceiver::new(4, vp_voice::MAX_FRAGS_PER_FRAME);
         let payload = b"hello-zero-copy";
         let dg = make_frag(1, 10, 0, 1, vp_voice::VIDEO_FLAG_END_OF_FRAME, payload);
         let frame = rx.receive(&dg).expect("frame");
@@ -922,7 +974,7 @@ mod tests {
 
     #[test]
     fn receiver_reuses_slots_via_freelist() {
-        let mut rx = VideoReceiver::new(2);
+        let mut rx = VideoReceiver::new(2, vp_voice::MAX_FRAGS_PER_FRAME);
         for seq in 0..8u32 {
             let dg = make_frag(1, seq, 0, 1, vp_voice::VIDEO_FLAG_END_OF_FRAME, b"x");
             let _ = rx.receive(&dg).expect("complete frame");

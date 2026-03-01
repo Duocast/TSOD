@@ -577,6 +577,7 @@ pub struct AppSettings {
     pub screen_share_fps: u32,
     pub screen_share_max_bitrate_kbps: u32,
     pub screen_share_codec: String,
+    pub screen_share_profile: String,
     pub screen_share_capture_audio: bool,
 
     // ─── Video Call (modern) ───
@@ -667,6 +668,7 @@ impl Default for AppSettings {
             screen_share_fps: 30,
             screen_share_max_bitrate_kbps: 3000,
             screen_share_codec: "AV1".into(),
+            screen_share_profile: "1080p60".into(),
             screen_share_capture_audio: true,
 
             // Video Call
