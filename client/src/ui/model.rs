@@ -948,6 +948,148 @@ pub struct ShareSourceOption {
     pub kind: ShareSourceKind,
 }
 
+fn fallback_share_sources() -> Vec<ShareSourceOption> {
+    vec![ShareSourceOption {
+        id: "screen-1".into(),
+        title: "Screen 1".into(),
+        subtitle: "Primary display".into(),
+        kind: ShareSourceKind::Screen,
+    }]
+}
+
+#[cfg(target_os = "windows")]
+pub fn enumerate_share_sources() -> Vec<ShareSourceOption> {
+    use std::cmp::Ordering;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use windows::core::PWSTR;
+    use windows::Win32::Foundation::{BOOL, HWND, LPARAM, RECT};
+    use windows::Win32::Graphics::Gdi::{
+        EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFOEXW,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetWindowTextLengthW, GetWindowTextW, IsWindowVisible,
+    };
+
+    unsafe extern "system" fn enum_windows_callback(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let windows = &mut *(lparam.0 as *mut Vec<(String, String)>);
+        if !unsafe { IsWindowVisible(hwnd) }.as_bool() {
+            return BOOL(1);
+        }
+
+        let title_len = unsafe { GetWindowTextLengthW(hwnd) };
+        if title_len <= 0 {
+            return BOOL(1);
+        }
+
+        let mut title_buf = vec![0u16; title_len as usize + 1];
+        let copied = unsafe {
+            GetWindowTextW(
+                hwnd,
+                PWSTR(title_buf.as_mut_ptr()),
+                i32::try_from(title_buf.len()).unwrap_or(i32::MAX),
+            )
+        };
+        if copied <= 0 {
+            return BOOL(1);
+        }
+
+        let title = String::from_utf16_lossy(&title_buf[..copied as usize])
+            .trim()
+            .to_string();
+        if title.is_empty() {
+            return BOOL(1);
+        }
+
+        windows.push((format!("window-hwnd-{}", hwnd.0), title));
+        BOOL(1)
+    }
+
+    unsafe extern "system" fn enum_monitors_callback(
+        monitor: HMONITOR,
+        _hdc: HDC,
+        _rect: *mut RECT,
+        lparam: LPARAM,
+    ) -> BOOL {
+        let screens = &mut *(lparam.0 as *mut Vec<ShareSourceOption>);
+        let mut info = MONITORINFOEXW::default();
+        info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
+
+        if unsafe { GetMonitorInfoW(monitor, &mut info.monitorInfo as *mut _ as *mut _) }.as_bool()
+        {
+            let name_len = info
+                .szDevice
+                .iter()
+                .position(|&ch| ch == 0)
+                .unwrap_or(info.szDevice.len());
+            let monitor_name = String::from_utf16_lossy(&info.szDevice[..name_len]);
+            let id = SCREEN_COUNTER.fetch_add(1, AtomicOrdering::Relaxed) + 1;
+            screens.push(ShareSourceOption {
+                id: format!("screen-{id}"),
+                title: format!("Screen {id}"),
+                subtitle: monitor_name,
+                kind: ShareSourceKind::Screen,
+            });
+        }
+
+        BOOL(1)
+    }
+
+    static SCREEN_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    SCREEN_COUNTER.store(0, AtomicOrdering::Relaxed);
+
+    let mut screens: Vec<ShareSourceOption> = Vec::new();
+    let mut windows_found: Vec<(String, String)> = Vec::new();
+
+    let _ = unsafe {
+        EnumDisplayMonitors(
+            Some(HDC(0)),
+            None,
+            Some(enum_monitors_callback),
+            LPARAM(&mut screens as *mut _ as isize),
+        )
+    };
+
+    let _ = unsafe {
+        EnumWindows(
+            Some(enum_windows_callback),
+            LPARAM(&mut windows_found as *mut _ as isize),
+        )
+    };
+
+    windows_found.sort_by(|a, b| {
+        if a.1.eq_ignore_ascii_case(&b.1) {
+            a.0.cmp(&b.0)
+        } else if a.1.to_ascii_lowercase() < b.1.to_ascii_lowercase() {
+            Ordering::Less
+        } else {
+            Ordering::Greater
+        }
+    });
+
+    let mut sources = screens;
+    sources.extend(
+        windows_found
+            .into_iter()
+            .map(|(id, title)| ShareSourceOption {
+                id,
+                title,
+                subtitle: "Application window".into(),
+                kind: ShareSourceKind::Window,
+            }),
+    );
+
+    if sources.is_empty() {
+        fallback_share_sources()
+    } else {
+        sources
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn enumerate_share_sources() -> Vec<ShareSourceOption> {
+    fallback_share_sources()
+}
+
 // ── Main UI model ──────────────────────────────────────────────────────
 
 pub struct UiModel {
@@ -1352,38 +1494,7 @@ impl Default for UiModel {
             show_share_content_dialog: false,
             share_include_audio: true,
             share_presenter_mode: 0,
-            share_sources: vec![
-                ShareSourceOption {
-                    id: "screen-1".into(),
-                    title: "Screen 1".into(),
-                    subtitle: "Primary display".into(),
-                    kind: ShareSourceKind::Screen,
-                },
-                ShareSourceOption {
-                    id: "screen-2".into(),
-                    title: "Screen 2".into(),
-                    subtitle: "Secondary display".into(),
-                    kind: ShareSourceKind::Screen,
-                },
-                ShareSourceOption {
-                    id: "window-chat".into(),
-                    title: "TSOD - Chat".into(),
-                    subtitle: "tsod.exe".into(),
-                    kind: ShareSourceKind::Window,
-                },
-                ShareSourceOption {
-                    id: "window-browser".into(),
-                    title: "Firefox".into(),
-                    subtitle: "github.com".into(),
-                    kind: ShareSourceKind::Window,
-                },
-                ShareSourceOption {
-                    id: "window-editor".into(),
-                    title: "Code Editor".into(),
-                    subtitle: "main.rs".into(),
-                    kind: ShareSourceKind::Window,
-                },
-            ],
+            share_sources: enumerate_share_sources(),
             selected_share_source: None,
             sharing_active: false,
             avatar_path_draft: String::new(),
