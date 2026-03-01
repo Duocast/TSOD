@@ -1237,7 +1237,7 @@ fn random_stream_tag() -> Result<u64> {
     Ok(u64::from_le_bytes(buf))
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct CodecPlan {
     primary: pb::VideoCodec,
     primary_viewers: Vec<UserId>,
@@ -1257,7 +1257,36 @@ fn negotiate_codecs(
     streamer: &[pb::VideoCodec],
     viewers: &HashMap<UserId, Vec<pb::VideoCodec>>,
 ) -> Result<CodecPlan> {
-    let sset: HashSet<i32> = streamer.iter().map(|c| *c as i32).collect();
+    let mut effective_streamer = streamer.to_vec();
+    if effective_streamer.is_empty() {
+        warn!("streamer missing codec capabilities; defaulting to VP8 encode support");
+        effective_streamer.push(pb::VideoCodec::Vp8);
+    }
+
+    let sset: HashSet<i32> = effective_streamer.iter().map(|c| *c as i32).collect();
+
+    if viewers.is_empty() {
+        let primary = codec_rank()
+            .into_iter()
+            .find(|c| sset.contains(&(*c as i32)))
+            .ok_or(ControlError::FailedPrecondition(
+                "streamer missing codec capabilities",
+            ))?;
+        let fallback =
+            if primary != pb::VideoCodec::Vp8 && sset.contains(&(pb::VideoCodec::Vp8 as i32)) {
+                Some(pb::VideoCodec::Vp8)
+            } else {
+                None
+            };
+
+        return Ok(CodecPlan {
+            primary,
+            primary_viewers: Vec::new(),
+            fallback,
+            remaining_viewers: Vec::new(),
+        });
+    }
+
     let mut support: HashMap<UserId, HashSet<i32>> = HashMap::new();
     for (uid, di) in viewers {
         let set: HashSet<i32> = di
@@ -1270,7 +1299,7 @@ fn negotiate_codecs(
     let primary = codec_rank()
         .into_iter()
         .find(|c| support.values().any(|set| set.contains(&(*c as i32))))
-        .ok_or_else(|| anyhow!("viewer unsupported"))?;
+        .ok_or(ControlError::FailedPrecondition("viewer unsupported"))?;
 
     let mut primary_viewers = Vec::new();
     let mut remaining = Vec::new();
@@ -1305,7 +1334,7 @@ fn negotiate_codecs(
     };
 
     if !remaining.is_empty() && fallback.is_none() {
-        return Err(anyhow!("viewer unsupported"));
+        return Err(ControlError::FailedPrecondition("viewer unsupported").into());
     }
 
     Ok(CodecPlan {
@@ -1426,7 +1455,36 @@ mod tests {
         let streamer = vec![pb::VideoCodec::Av1];
         let a = vp_control::ids::UserId::new();
         let viewers = HashMap::from([(a, vec![pb::VideoCodec::Vp8])]);
-        assert!(negotiate_codecs(&streamer, &viewers).is_err());
+        let err = negotiate_codecs(&streamer, &viewers).expect_err("should fail");
+        let control = err
+            .downcast_ref::<ControlError>()
+            .expect("should return control error");
+        match control {
+            ControlError::FailedPrecondition(msg) => assert_eq!(*msg, "viewer unsupported"),
+            other => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn negotiate_codecs_accepts_no_viewers() {
+        let streamer = vec![pb::VideoCodec::Vp9, pb::VideoCodec::Vp8];
+        let viewers = HashMap::new();
+
+        let plan = negotiate_codecs(&streamer, &viewers).expect("plan");
+        assert_eq!(plan.primary, pb::VideoCodec::Vp9);
+        assert!(plan.primary_viewers.is_empty());
+        assert!(plan.remaining_viewers.is_empty());
+        assert_eq!(plan.fallback, Some(pb::VideoCodec::Vp8));
+    }
+
+    #[test]
+    fn negotiate_codecs_defaults_streamer_caps_when_missing() {
+        let streamer = vec![];
+        let viewers = HashMap::new();
+
+        let plan = negotiate_codecs(&streamer, &viewers).expect("plan");
+        assert_eq!(plan.primary, pb::VideoCodec::Vp8);
+        assert_eq!(plan.fallback, None);
     }
 
     #[test]
