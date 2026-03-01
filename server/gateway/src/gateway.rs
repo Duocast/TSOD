@@ -147,7 +147,13 @@ impl Gateway {
         );
 
         let mut current_channel: Option<ChannelId> = None;
+        let voice_forwarder = self.voice.clone();
         defer! {
+            let voice_forwarder = voice_forwarder.clone();
+            let loop_session_id = session_id.clone();
+            tokio::spawn(async move {
+                voice_forwarder.unregister_session(user_id, &loop_session_id).await;
+            });
             self.push.unregister(user_id, &session_id);
             self.sessions.unregister(user_id, &session_id);
         }
