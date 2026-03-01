@@ -1355,18 +1355,21 @@ fn page_screen_share(ui: &mut egui::Ui, s: &mut AppSettings) -> bool {
                 s.screen_share_fps = 15;
                 s.screen_share_max_bitrate_kbps = 1800;
                 s.screen_share_codec = "VP9".into();
+                s.screen_share_profile = "1080p60".into();
                 dirty = true;
             }
             if ui.button("⚖ Balanced").clicked() {
                 s.screen_share_fps = 30;
                 s.screen_share_max_bitrate_kbps = 3000;
                 s.screen_share_codec = "VP9".into();
+                s.screen_share_profile = "1080p60".into();
                 dirty = true;
             }
             if ui.button("🎮 Motion").clicked() {
                 s.screen_share_fps = 60;
                 s.screen_share_max_bitrate_kbps = 6000;
                 s.screen_share_codec = "AV1".into();
+                s.screen_share_profile = "1440p60".into();
                 dirty = true;
             }
         });
@@ -1395,6 +1398,21 @@ fn page_screen_share(ui: &mut egui::Ui, s: &mut AppSettings) -> bool {
             dirty = true;
         }
 
+        cols[0].label("Stream Profile");
+        let profiles = ["1080p60", "1440p60"];
+        egui::ComboBox::from_id_salt("ss_profile")
+            .selected_text(&s.screen_share_profile)
+            .width(120.0)
+            .show_ui(&mut cols[1], |ui: &mut egui::Ui| {
+                for p in &profiles {
+                    if ui
+                        .selectable_value(&mut s.screen_share_profile, p.to_string(), *p)
+                        .changed()
+                    {
+                        dirty = true;
+                    }
+                }
+            });
         cols[0].label("Codec");
         let codecs = ["AV1", "VP9", "VP8"];
         egui::ComboBox::from_id_salt("ss_codec")

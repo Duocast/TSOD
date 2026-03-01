@@ -22,7 +22,7 @@ pub const VIDEO_VERSION: u8 = 2;
 pub const DATAGRAM_VERSION: u8 = VOICE_VERSION;
 pub const DATAGRAM_KIND_VOICE: u8 = 0x01;
 pub const DATAGRAM_KIND_VIDEO: u8 = 0x02;
-pub const MAX_FRAGS_PER_FRAME: u16 = 64;
+pub const MAX_FRAGS_PER_FRAME: u16 = 1024;
 
 /// Parse kind byte from a raw datagram. Returns None for unknown/short.
 #[inline]

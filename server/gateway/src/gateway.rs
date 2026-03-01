@@ -815,6 +815,12 @@ impl Gateway {
                         viewer_caps.insert(viewer, self.membership.viewer_decode_codecs(viewer));
                     }
                     let plan = negotiate_codecs(&streamer_caps, &viewer_caps)?;
+                    let streamer_media_caps = self.membership.media_capabilities(user_id);
+                    let mut viewer_media_caps = self.membership.channel_member_capabilities(ch);
+                    viewer_media_caps.remove(&user_id);
+                    let requested_1440p60 = r.layers.iter().any(|l| l.width >= 2560 || l.height >= 1440);
+                    let allow_1440p60 = requested_1440p60
+                        && allows_1440p60(plan.primary, streamer_media_caps.as_ref(), &viewer_media_caps);
 
                     let primary_tag = random_stream_tag()?;
                     self.video
@@ -875,7 +881,12 @@ impl Gateway {
                         payload: Some(pb::server_to_client::Payload::StartScreenShareResponse(
                             pb::StartScreenShareResponse {
                                 stream_id: Some(pb::StreamId { value: stream_id }),
-                                accepted_layer_ids: r.layers.iter().map(|l| l.layer_id).collect(),
+                                accepted_layer_ids: r
+                                    .layers
+                                    .iter()
+                                    .filter(|layer| allow_1440p60 || (layer.width <= 1920 && layer.height <= 1080))
+                                    .map(|l| l.layer_id)
+                                    .collect(),
                                 primary_stream_tag: primary_tag,
                                 primary_codec: plan.primary as i32,
                                 fallback_stream_tag: fallback_tag.as_ref().map(|v| v.0),
@@ -1257,6 +1268,40 @@ fn codec_rank() -> [pb::VideoCodec; 3] {
     ]
 }
 
+fn codec_hw_encode(caps: &pb::ClientMediaCapabilities, codec: pb::VideoCodec) -> bool {
+    match codec {
+        pb::VideoCodec::Av1 => caps.hw_encode_av1,
+        pb::VideoCodec::Vp9 => caps.hw_encode_vp9,
+        pb::VideoCodec::Vp8 => caps.hw_encode_vp8,
+        _ => false,
+    }
+}
+
+fn codec_hw_decode(caps: &pb::ClientMediaCapabilities, codec: pb::VideoCodec) -> bool {
+    match codec {
+        pb::VideoCodec::Av1 => caps.hw_decode_av1,
+        pb::VideoCodec::Vp9 => caps.hw_decode_vp9,
+        pb::VideoCodec::Vp8 => caps.hw_decode_vp8,
+        _ => false,
+    }
+}
+
+fn allows_1440p60(
+    codec: pb::VideoCodec,
+    streamer_caps: Option<&pb::ClientMediaCapabilities>,
+    viewer_caps: &HashMap<UserId, pb::ClientMediaCapabilities>,
+) -> bool {
+    let Some(streamer_caps) = streamer_caps else {
+        return false;
+    };
+    if !codec_hw_encode(streamer_caps, codec) {
+        return false;
+    }
+    viewer_caps
+        .values()
+        .all(|caps| codec_hw_decode(caps, codec))
+}
+
 fn negotiate_codecs(
     streamer: &[pb::VideoCodec],
     viewers: &HashMap<UserId, Vec<pb::VideoCodec>>,
@@ -1412,7 +1457,8 @@ fn is_video_datagram(d: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        error_from_anyhow, is_video_datagram, negotiate_codecs, normalize_preferred_display_name,
+        allows_1440p60, error_from_anyhow, is_video_datagram, negotiate_codecs,
+        normalize_preferred_display_name,
     };
     use crate::proto::voiceplatform::v1 as pb;
     use std::collections::HashMap;
@@ -1491,6 +1537,50 @@ mod tests {
         assert_eq!(plan.fallback, None);
     }
 
+    #[test]
+    fn allows_1440_requires_hw_encode_and_decode() {
+        let streamer = pb::ClientMediaCapabilities {
+            decode: vec![pb::VideoCodec::Av1 as i32],
+            encode: vec![pb::VideoCodec::Av1 as i32],
+            hw_encode_av1: true,
+            hw_encode_vp9: false,
+            hw_encode_vp8: false,
+            hw_decode_av1: false,
+            hw_decode_vp9: false,
+            hw_decode_vp8: false,
+        };
+        let viewer = pb::ClientMediaCapabilities {
+            decode: vec![pb::VideoCodec::Av1 as i32],
+            encode: vec![],
+            hw_encode_av1: false,
+            hw_encode_vp9: false,
+            hw_encode_vp8: false,
+            hw_decode_av1: true,
+            hw_decode_vp9: false,
+            hw_decode_vp8: false,
+        };
+        let uid = vp_control::ids::UserId::new();
+        let viewers = HashMap::from([(uid, viewer.clone())]);
+        assert!(allows_1440p60(
+            pb::VideoCodec::Av1,
+            Some(&streamer),
+            &viewers
+        ));
+
+        let mut bad_viewers = viewers.clone();
+        bad_viewers.insert(
+            uid,
+            pb::ClientMediaCapabilities {
+                hw_decode_av1: false,
+                ..viewer
+            },
+        );
+        assert!(!allows_1440p60(
+            pb::VideoCodec::Av1,
+            Some(&streamer),
+            &bad_viewers
+        ));
+    }
     #[test]
     fn preferred_display_name_is_trimmed_and_limited() {
         assert_eq!(normalize_preferred_display_name("   "), None);

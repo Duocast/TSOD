@@ -24,7 +24,7 @@ use crossbeam_channel::{bounded, Receiver, Sender};
 use identity::DeviceIdentity;
 use net::dispatcher::{ControlDispatcher, PushEvent};
 use net::video_datagram::VideoHeader;
-use net::video_transport::{VideoReceiver, VideoSender};
+use net::video_transport::{VideoReceiver, VideoSender, VideoStreamProfile};
 use net::voice_datagram::{
     make_voice_datagram, outbound_payload_fits, VOICE_FORWARDED_HDR_LEN, VOICE_HDR_LEN,
     VOICE_VERSION,
@@ -1898,7 +1898,10 @@ async fn connect_and_run_session(
                             let mut streams = stream_state.active_streams.write().await;
                             streams.insert(
                                 event.stream_tag,
-                                Arc::new(Mutex::new(VideoReceiver::new(8))),
+                                Arc::new(Mutex::new(VideoReceiver::new(
+                                    4,
+                                    vp_voice::MAX_FRAGS_PER_FRAME,
+                                ))),
                             );
                         }
                         let _ = tx_event.send(UiEvent::AppendLog(format!(
@@ -2543,10 +2546,27 @@ async fn connect_and_run_session(
                                 "VP8" => pb::video_caps::Codec::Vp8,
                                 _ => pb::video_caps::Codec::Vp9,
                             };
+                            let (profile_layer, sender_profile) = if saved_settings.screen_share_profile == "1440p60" {
+                                (pb::SimulcastLayer {
+                                    layer_id: 2,
+                                    width: 2560,
+                                    height: 1440,
+                                    max_fps: 60,
+                                    max_bitrate_bps: 16_000_000,
+                                }, VideoStreamProfile::P1440p60)
+                            } else {
+                                (pb::SimulcastLayer {
+                                    layer_id: 1,
+                                    width: 1920,
+                                    height: 1080,
+                                    max_fps: 60,
+                                    max_bitrate_bps: 8_000_000,
+                                }, VideoStreamProfile::P1080p60)
+                            };
                             let req = pb::StartScreenShareRequest {
                                 channel_id: active_channel.as_ref().map(|id| pb::ChannelId { value: id.clone() }),
                                 codec: preferred_codec as i32,
-                                layers: vec![],
+                                layers: vec![profile_layer],
                                 include_audio: false,
                             };
                             match dispatcher
@@ -2561,7 +2581,7 @@ async fn connect_and_run_session(
                                             let mut streams = stream_state.active_streams.write().await;
                                             streams
                                                 .entry(stream_tag)
-                                                .or_insert_with(|| Arc::new(Mutex::new(VideoReceiver::new(8))));
+                                                .or_insert_with(|| Arc::new(Mutex::new(VideoReceiver::new(4, vp_voice::MAX_FRAGS_PER_FRAME))));
                                         }
                                         let _ = tx_event.send(UiEvent::AppendLog(format!("[video] StartScreenShareRequest ok stream_tag={stream_tag}")));
                                         let (share_stop_tx, mut share_stop_rx) = watch::channel(false);
@@ -2570,7 +2590,7 @@ async fn connect_and_run_session(
                                         let conn_send = conn.clone();
                                         let video_counters = stream_state.counters.clone();
                                         tokio::spawn(async move {
-                                            let mut sender = VideoSender::new(stream_tag, 0, 16);
+                                            let mut sender = VideoSender::new(stream_tag, 0, sender_profile);
                                             const WIDTH: u16 = 160;
                                             const HEIGHT: u16 = 90;
                                             const STRIDE_BYTES: u32 = WIDTH as u32 * 4;
@@ -4276,7 +4296,10 @@ mod tests {
             streams.insert(
                 stream_tag,
                 std::sync::Arc::new(tokio::sync::Mutex::new(
-                    crate::net::video_transport::VideoReceiver::new(4),
+                    crate::net::video_transport::VideoReceiver::new(
+                        4,
+                        vp_voice::MAX_FRAGS_PER_FRAME,
+                    ),
                 )),
             );
         }
