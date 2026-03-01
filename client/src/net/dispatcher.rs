@@ -58,6 +58,14 @@ pub enum PushEvent {
         event: pb::PushEvent,
         event_seq: u64,
     },
+    SubscribeStream {
+        event: pb::SubscribeStream,
+        event_seq: u64,
+    },
+    UnsubscribeStream {
+        event: pb::UnsubscribeStream,
+        event_seq: u64,
+    },
     Unknown(pb::ServerToClient),
 }
 
@@ -691,6 +699,16 @@ fn classify_push(msg: pb::ServerToClient) -> PushEvent {
         }
         Some(pb::server_to_client::Payload::PermissionsPushEvent(event)) => {
             PushEvent::Permissions {
+                event,
+                event_seq: msg.event_seq,
+            }
+        }
+        Some(pb::server_to_client::Payload::SubscribeStream(event)) => PushEvent::SubscribeStream {
+            event,
+            event_seq: msg.event_seq,
+        },
+        Some(pb::server_to_client::Payload::UnsubscribeStream(event)) => {
+            PushEvent::UnsubscribeStream {
                 event,
                 event_seq: msg.event_seq,
             }
