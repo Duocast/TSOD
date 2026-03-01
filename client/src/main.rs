@@ -2788,6 +2788,23 @@ async fn connect_and_run_session(
                                 }
                             }
                         }
+                        UiIntent::PermsDeleteRole { role_id } => {
+                            let req = pb::PermDeleteRoleRequest {
+                                server_id: None,
+                                role_id,
+                            };
+                            if let Err(e) = dispatcher
+                                .send_request(
+                                    pb::client_to_server::Payload::PermDeleteRole(req),
+                                    Duration::from_secs(5),
+                                )
+                                .await
+                            {
+                                let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                    "[perm] delete role failed: {e:#}"
+                                )));
+                            }
+                        }
                         UiIntent::PermsAssignRoles { user_id, role_ids } => {
                             let req = pb::PermAssignRolesRequest {
                                 server_id: None,

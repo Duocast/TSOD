@@ -103,11 +103,19 @@ fn show_roles_tab(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiI
                 });
             }
             ui.small_button("Clone");
-            let protected = model
-                .permissions_roles
-                .get(model.permissions_selected_role)
-                .is_some_and(|r| r.protected);
-            ui.add_enabled(!protected, egui::Button::new("Delete"));
+            let selected_role = model.permissions_roles.get(model.permissions_selected_role);
+            let protected = selected_role.is_some_and(|r| r.protected);
+            let has_role_id = selected_role.is_some_and(|r| !r.role_id.trim().is_empty());
+            if ui
+                .add_enabled(!protected && has_role_id, egui::Button::new("Delete"))
+                .clicked()
+            {
+                if let Some(role) = selected_role {
+                    let _ = tx_intent.send(UiIntent::PermsDeleteRole {
+                        role_id: role.role_id.clone(),
+                    });
+                }
+            }
         });
         left.separator();
 
