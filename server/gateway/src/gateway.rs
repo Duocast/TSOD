@@ -827,11 +827,15 @@ impl Gateway {
                             },
                         )
                         .await;
+                    let mut primary_viewers = plan.primary_viewers.clone();
+                    if !primary_viewers.contains(&user_id) {
+                        primary_viewers.push(user_id);
+                    }
                     self.video
-                        .set_stream_subscribers(primary_tag, plan.primary_viewers.iter().copied())
+                        .set_stream_subscribers(primary_tag, primary_viewers.iter().copied())
                         .await;
 
-                    for viewer in &plan.primary_viewers {
+                    for viewer in &primary_viewers {
                         self.push.send_to(*viewer, pb::ServerToClient {
                             request_id: None,
                             session_id: None,

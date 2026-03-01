@@ -743,15 +743,21 @@ impl eframe::App for VpApp {
                                 .corner_radius(6.0),
                         );
                         if start_btn.clicked() {
-                            if let Some(source_id) = selected {
-                                let _ = self
-                                    .tx_intent
-                                    .send(UiIntent::StartScreenShare { source_id });
-                                self.model.show_share_content_dialog = false;
+                            if self.model.can_start_screen_share() {
+                                if let Some(source_id) = selected {
+                                    self.model.start_share_in_flight = true;
+                                    self.model.sharing_active = true;
+                                    let _ = self
+                                        .tx_intent
+                                        .send(UiIntent::StartScreenShare { source_id });
+                                    self.model.show_share_content_dialog = false;
+                                }
                             }
                         }
 
                         if ui.button("Stop sharing").clicked() {
+                            self.model.start_share_in_flight = false;
+                            self.model.sharing_active = false;
                             let _ = self.tx_intent.send(UiIntent::StopScreenShare);
                         }
 

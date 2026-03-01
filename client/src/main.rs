@@ -141,6 +141,7 @@ struct VideoRuntimeCounters {
 struct SharedStreamState {
     active_streams: Arc<RwLock<HashMap<u64, Arc<Mutex<VideoReceiver>>>>>,
     counters: Arc<VideoRuntimeCounters>,
+    latest_frame: Arc<std::sync::RwLock<Option<ui::model::StreamFrameView>>>,
 }
 
 impl SharedStreamState {
@@ -148,6 +149,7 @@ impl SharedStreamState {
         Self {
             active_streams: Arc::new(RwLock::new(HashMap::new())),
             counters: Arc::new(VideoRuntimeCounters::default()),
+            latest_frame: Arc::new(std::sync::RwLock::new(None)),
         }
     }
 }
@@ -218,7 +220,7 @@ async fn video_recv_loop(mut video_rx: mpsc::Receiver<Bytes>, state: SharedStrea
 
         let mut rx = receiver.lock().await;
         if let Some(frame) = rx.receive(&datagram) {
-            let size = frame.fragments.iter().map(|f| f.len()).sum::<usize>();
+            let size = frame.payload.len();
             state
                 .counters
                 .completed_frames
@@ -235,6 +237,14 @@ async fn video_recv_loop(mut video_rx: mpsc::Receiver<Bytes>, state: SharedStrea
                 .counters
                 .last_frame_ts_ms
                 .store(frame.ts_ms, Ordering::Relaxed);
+            if let Ok(mut latest) = state.latest_frame.write() {
+                *latest = Some(ui::model::StreamFrameView {
+                    stream_tag: frame.stream_tag,
+                    frame_seq: frame.frame_seq,
+                    ts_ms: frame.ts_ms,
+                    payload: frame.payload.to_vec(),
+                });
+            }
         }
     }
 }
@@ -2005,6 +2015,7 @@ async fn connect_and_run_session(
     let mut active_channel: Option<String> = selected_after_sync;
     let mut active_share_stop: Option<watch::Sender<bool>> = None;
     let mut active_local_stream_id: Option<pb::StreamId> = None;
+    let mut start_share_in_flight = false;
 
     tokio::pin!(ctl_keepalive);
     let mut audio_health_tick = tokio::time::interval(Duration::from_secs(1));
@@ -2012,6 +2023,11 @@ async fn connect_and_run_session(
     loop {
         tokio::select! {
             _ = stream_ui_tick.tick() => {
+                if let Ok(frame) = stream_state.latest_frame.read() {
+                    if let Some(frame) = frame.clone() {
+                        let _ = tx_event.send(UiEvent::StreamFrame(frame));
+                    }
+                }
                 let active_stream_tags = {
                     let streams = stream_state.active_streams.read().await;
                     streams.keys().copied().collect::<Vec<_>>()
@@ -2506,6 +2522,11 @@ async fn connect_and_run_session(
                         }
                         UiIntent::StartScreenShare { source_id } => {
                             let _ = source_id;
+                            if start_share_in_flight || active_share_stop.is_some() {
+                                let _ = tx_event.send(UiEvent::AppendLog("[video] start share ignored (already in progress)".into()));
+                                continue;
+                            }
+                            start_share_in_flight = true;
                             let req = pb::StartScreenShareRequest {
                                 channel_id: active_channel.as_ref().map(|id| pb::ChannelId { value: id.clone() }),
                                 codec: pb::video_caps::Codec::Vp9 as i32,
@@ -2517,6 +2538,7 @@ async fn connect_and_run_session(
                                 .await
                             {
                                 Ok(Ok(resp)) => {
+                                    start_share_in_flight = false;
                                     if let Some(pb::server_to_client::Payload::StartScreenShareResponse(r)) = resp.payload {
                                         let stream_tag = r.primary_stream_tag;
                                         active_local_stream_id = r.stream_id.clone();
@@ -2526,7 +2548,15 @@ async fn connect_and_run_session(
                                         let conn_send = conn.clone();
                                         tokio::spawn(async move {
                                             let mut sender = VideoSender::new(stream_tag, 0, 16);
+                                            const WIDTH: u16 = 640;
+                                            const HEIGHT: u16 = 360;
+                                            const STRIDE_BYTES: u32 = WIDTH as u32 * 4;
                                             let mut frame_idx = 0u32;
+                                            let mut rgba = vec![0u8; WIDTH as usize * HEIGHT as usize * 4];
+                                            let mut synthetic = vec![0u8; 8 + rgba.len()];
+                                            synthetic[0..2].copy_from_slice(&WIDTH.to_le_bytes());
+                                            synthetic[2..4].copy_from_slice(&HEIGHT.to_le_bytes());
+                                            synthetic[4..8].copy_from_slice(&STRIDE_BYTES.to_le_bytes());
                                             let mut frame_tick = tokio::time::interval(Duration::from_millis(33));
                                             loop {
                                                 tokio::select! {
@@ -2534,10 +2564,16 @@ async fn connect_and_run_session(
                                                         if *share_stop_rx.borrow() { break; }
                                                     }
                                                     _ = frame_tick.tick() => {
-                                                        let mut synthetic = vec![0u8; 4096];
-                                                        for (i, b) in synthetic.iter_mut().enumerate() {
-                                                            *b = ((i as u32 + frame_idx) % 255) as u8;
+                                                        for y in 0..HEIGHT as usize {
+                                                            for x in 0..WIDTH as usize {
+                                                                let idx = (y * WIDTH as usize + x) * 4;
+                                                                rgba[idx] = ((x as u32 + frame_idx) & 0xff) as u8;
+                                                                rgba[idx + 1] = ((y as u32 + frame_idx * 2) & 0xff) as u8;
+                                                                rgba[idx + 2] = (frame_idx & 0xff) as u8;
+                                                                rgba[idx + 3] = 255;
+                                                            }
                                                         }
+                                                        synthetic[8..].copy_from_slice(&rgba);
                                                         let ts_ms = unix_ms() as u32;
                                                         let _ = sender.send_frame_async(ts_ms, frame_idx % 60 == 0, &synthetic, |dg| {
                                                             let _ = conn_send.send_datagram(dg);
@@ -2550,14 +2586,17 @@ async fn connect_and_run_session(
                                     }
                                 }
                                 Ok(Err(e)) => {
+                                    start_share_in_flight = false;
                                     let _ = tx_event.send(UiEvent::AppendLog(format!("[video] start share rejected: {e:#}")));
                                 }
                                 Err(e) => {
+                                    start_share_in_flight = false;
                                     let _ = tx_event.send(UiEvent::AppendLog(format!("[video] start share failed: {e:#}")));
                                 }
                             }
                         }
                         UiIntent::StopScreenShare => {
+                            start_share_in_flight = false;
                             if let Some(stop_tx) = active_share_stop.take() {
                                 let _ = stop_tx.send(true);
                             }
