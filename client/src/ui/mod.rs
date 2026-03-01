@@ -705,71 +705,29 @@ impl eframe::App for VpApp {
                     .default_open(true)
                     .show(ui, |ui| {
                         ui.add_space(6.0);
-
-                        let selected_window_label = self
-                            .model
-                            .selected_share_source
-                            .as_ref()
-                            .and_then(|selected| {
-                                window_options
-                                    .iter()
-                                    .find(|source| &source.id == selected)
-                                    .map(|source| source.title.clone())
-                            })
-                            .unwrap_or_else(|| "Select a window".to_string());
-
-                        egui::ComboBox::from_id_salt("share-window-combo")
-                            .width((ui.available_width() - 12.0).max(240.0))
-                            .selected_text(selected_window_label)
-                            .show_ui(ui, |ui| {
-                                for source in &window_options {
-                                    ui.selectable_value(
-                                        &mut self.model.selected_share_source,
-                                        Some(source.id.clone()),
-                                        &source.title,
-                                    )
-                                    .on_hover_text(&source.subtitle);
-                                }
-                            });
-
-                        ui.add_space(8.0);
                         egui::Frame::new()
                             .fill(theme::bg_light())
                             .corner_radius(6.0)
                             .inner_margin(egui::Margin::same(8))
                             .show(ui, |ui| {
-                                egui::ScrollArea::vertical()
+                                egui::ScrollArea::both()
                                     .auto_shrink([false, false])
-                                    .max_height(240.0)
+                                    .max_height(220.0)
                                     .show(ui, |ui| {
-                                        let columns = if ui.available_width() > 900.0 {
-                                            3
-                                        } else if ui.available_width() > 560.0 {
-                                            2
-                                        } else {
-                                            1
-                                        };
-
-                                        egui::Grid::new("share-window-grid")
-                                            .num_columns(columns)
-                                            .spacing(egui::vec2(8.0, 8.0))
-                                            .striped(false)
-                                            .show(ui, |ui| {
-                                                for (idx, source) in
-                                                    window_options.iter().enumerate()
-                                                {
-                                                    let _ = share_source_card(
-                                                        ui,
-                                                        &source.id,
-                                                        &source.title,
-                                                        &source.subtitle,
-                                                        &mut self.model.selected_share_source,
-                                                    );
-                                                    if (idx + 1) % columns == 0 {
-                                                        ui.end_row();
-                                                    }
-                                                }
-                                            });
+                                        ui.set_min_width(ui.available_width().max(560.0));
+                                        ui.horizontal_wrapped(|ui| {
+                                            for source in &window_options {
+                                                ui.add_space(4.0);
+                                                let _ = share_source_card(
+                                                    ui,
+                                                    &source.id,
+                                                    &source.title,
+                                                    &source.subtitle,
+                                                    &mut self.model.selected_share_source,
+                                                );
+                                                ui.add_space(4.0);
+                                            }
+                                        });
                                     });
                             });
                     });
