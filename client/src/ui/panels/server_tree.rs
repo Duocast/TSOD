@@ -107,7 +107,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
     });
 }
 
-const CHANNEL_TYPE_LABELS: &[&str] = &["Voice", "Text"];
+const CHANNEL_TYPE_LABELS: &[&str] = &["Voice", "Text", "Streaming"];
 const CODEC_LABELS: &[&str] = &["Opus Voice", "Opus Music"];
 
 pub fn show_create_channel_dialog(
@@ -438,6 +438,7 @@ fn show_channel_info_details(ui: &mut egui::Ui, ch: &crate::ui::model::ChannelEn
     let channel_kind = match ch.channel_type {
         ChannelType::Text => "Text",
         ChannelType::Voice => "Voice",
+        ChannelType::Streaming => "Streaming",
         ChannelType::Category => "Category",
     };
 
@@ -477,7 +478,6 @@ fn codec_label(opus_profile: i32, bitrate_bps: u32) -> &'static str {
         }
     }
 }
-
 
 fn show_create_tab_standard(ui: &mut egui::Ui, model: &mut UiModel) {
     // Channel name
