@@ -1335,7 +1335,7 @@ fn page_screen_share(ui: &mut egui::Ui, s: &mut AppSettings) -> bool {
 
     hint(
         ui,
-        "Uses QUIC DATAGRAM for low-latency delivery with simulcast layers and adaptive bitrate.",
+        "Screen share settings for frame rate, bitrate, codec selection, and optional system audio capture.",
     );
 
     ui.add_space(4.0);
@@ -1354,13 +1354,13 @@ fn page_screen_share(ui: &mut egui::Ui, s: &mut AppSettings) -> bool {
             if ui.button("📝 Presentation").clicked() {
                 s.screen_share_fps = 15;
                 s.screen_share_max_bitrate_kbps = 1800;
-                s.screen_share_codec = "H264".into();
+                s.screen_share_codec = "VP9".into();
                 dirty = true;
             }
             if ui.button("⚖ Balanced").clicked() {
                 s.screen_share_fps = 30;
                 s.screen_share_max_bitrate_kbps = 3000;
-                s.screen_share_codec = "H264".into();
+                s.screen_share_codec = "VP9".into();
                 dirty = true;
             }
             if ui.button("🎮 Motion").clicked() {
@@ -1396,7 +1396,7 @@ fn page_screen_share(ui: &mut egui::Ui, s: &mut AppSettings) -> bool {
         }
 
         cols[0].label("Codec");
-        let codecs = ["H264", "VP9", "AV1"];
+        let codecs = ["VP9", "AV1"];
         egui::ComboBox::from_id_salt("ss_codec")
             .selected_text(&s.screen_share_codec)
             .width(120.0)
@@ -1441,37 +1441,6 @@ fn page_screen_share(ui: &mut egui::Ui, s: &mut AppSettings) -> bool {
     {
         dirty = true;
     }
-
-    section(ui, "Simulcast & Adaptive Bitrate");
-
-    hint(
-        ui,
-        "TSOD transmits multiple resolution layers simultaneously. Receivers automatically \
-              select the best layer based on available bandwidth.",
-    );
-
-    ui.add_space(4.0);
-    ui.label(
-        egui::RichText::new("Layers:")
-            .small()
-            .strong()
-            .color(theme::text_color()),
-    );
-    ui.label(
-        egui::RichText::new("  High: Full resolution at configured bitrate")
-            .small()
-            .color(theme::text_dim()),
-    );
-    ui.label(
-        egui::RichText::new("  Medium: 1/2 resolution at 1/2 bitrate")
-            .small()
-            .color(theme::text_dim()),
-    );
-    ui.label(
-        egui::RichText::new("  Low: 1/4 resolution at 1/4 bitrate (thumbnail)")
-            .small()
-            .color(theme::text_dim()),
-    );
 
     ui.add_space(4.0);
     hint(

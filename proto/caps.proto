@@ -52,7 +52,7 @@ message AudioCaps {
 message VideoCaps {
   enum Codec {
     VCODEC_UNSPECIFIED = 0;
-    H264 = 1;
+    LEGACY_RESERVED_CODEC_1 = 1;
     VP9 = 2;
     AV1 = 3;
   }
