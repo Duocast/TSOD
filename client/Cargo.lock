@@ -4822,6 +4822,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "vp-route-hash",
+ "vp-voice",
  "wasapi",
  "windows 0.62.2",
 ]
@@ -4832,6 +4833,10 @@ version = "0.1.0"
 dependencies = [
  "uuid",
 ]
+
+[[package]]
+name = "vp-voice"
+version = "0.1.0"
 
 [[package]]
 name = "walkdir"

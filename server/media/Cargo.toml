@@ -11,3 +11,4 @@ tokio = { version = "1.49", features = ["rt-multi-thread", "macros", "time", "sy
 tracing = "0.1.44"
 
 vp-control = { path = "../control" }
+vp-voice = { path = "../../shared/voice" }

@@ -1,4 +1,4 @@
-use std::{collections::HashSet, path::PathBuf, sync::Arc};
+use std::{collections::HashSet, path::PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use sha2::{Digest, Sha256};
@@ -9,7 +9,7 @@ use tokio::{
 };
 use tracing::warn;
 use uuid::Uuid;
-use vp_control::ids::{ChannelId, ServerId, UserId};
+use vp_control::ids::{ServerId, UserId};
 
 use crate::{
     frame::{read_delimited, write_delimited},

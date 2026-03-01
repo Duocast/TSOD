@@ -2953,6 +2953,7 @@ dependencies = [
  "vp-media",
  "vp-metrics",
  "vp-route-hash",
+ "vp-voice",
 ]
 
 [[package]]
@@ -2965,6 +2966,7 @@ dependencies = [
  "tokio",
  "tracing",
  "vp-control",
+ "vp-voice",
 ]
 
 [[package]]
@@ -2988,6 +2990,10 @@ version = "0.1.0"
 dependencies = [
  "uuid",
 ]
+
+[[package]]
+name = "vp-voice"
+version = "0.1.0"
 
 [[package]]
 name = "walkdir"

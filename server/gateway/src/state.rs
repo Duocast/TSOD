@@ -47,12 +47,6 @@ impl PushHub {
         self.send_to(user, msg).await;
     }
 
-    pub async fn broadcast(&self, users: &[UserId], msg: &pb::ServerToClient) {
-        for u in users {
-            self.send_to(*u, msg.clone()).await;
-        }
-    }
-
     pub fn connected_users(&self) -> Vec<UserId> {
         let mut seen = HashSet::new();
         self.inner
@@ -93,7 +87,7 @@ impl DatagramTx for QuinnDatagramTx {
 
 #[derive(Clone)]
 pub struct SessionMap {
-    inner: Arc<DashMap<UserId, Arc<dyn DatagramTx>>>,
+    inner: Arc<DashMap<(UserId, String), Arc<dyn DatagramTx>>>,
 }
 
 impl SessionMap {
@@ -103,19 +97,23 @@ impl SessionMap {
         }
     }
 
-    pub fn register(&self, user: UserId, tx: Arc<dyn DatagramTx>) {
-        self.inner.insert(user, tx);
+    pub fn register(&self, user: UserId, session_id: &str, tx: Arc<dyn DatagramTx>) {
+        self.inner.insert((user, session_id.to_string()), tx);
     }
 
-    pub fn unregister(&self, user: UserId) {
-        self.inner.remove(&user);
+    pub fn unregister(&self, user: UserId, session_id: &str) {
+        self.inner.remove(&(user, session_id.to_string()));
     }
 }
 
 #[async_trait::async_trait]
 impl SessionRegistry for SessionMap {
-    async fn get_datagram_tx(&self, user: UserId) -> Option<Arc<dyn DatagramTx>> {
-        self.inner.get(&user).map(|e| e.value().clone())
+    async fn get_datagram_txs(&self, user: UserId) -> Vec<Arc<dyn DatagramTx>> {
+        self.inner
+            .iter()
+            .filter(|entry| entry.key().0 == user)
+            .map(|entry| entry.value().clone())
+            .collect()
     }
 }
 
@@ -276,11 +274,14 @@ impl MembershipProvider for MembershipCache {
 
 #[cfg(test)]
 mod tests {
-    use super::{MembershipCache, PushHub};
+    use super::{DatagramTx, MembershipCache, PushHub, SessionMap};
     use crate::proto::voiceplatform::v1 as pb;
+    use anyhow::Result;
+    use bytes::Bytes;
+    use std::sync::Arc;
     use tokio::sync::mpsc;
-    use tracing::warn;
     use vp_control::ids::{ChannelId, UserId};
+    use vp_media::voice_forwarder::SessionRegistry;
 
     #[tokio::test]
     async fn pushhub_sends_to_all_sessions_for_same_user() {
@@ -310,6 +311,38 @@ mod tests {
         hub.unregister(user, "s2");
     }
 
+    struct TestDatagramTx;
+
+    #[async_trait::async_trait]
+    impl DatagramTx for TestDatagramTx {
+        async fn send(&self, _bytes: Bytes) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn session_map_tracks_multiple_sessions_per_user() {
+        let sessions = SessionMap::new();
+        let user = UserId(uuid::Uuid::new_v4());
+
+        let tx1: Arc<dyn DatagramTx> = Arc::new(TestDatagramTx);
+        let tx2: Arc<dyn DatagramTx> = Arc::new(TestDatagramTx);
+        sessions.register(user, "s1", tx1.clone());
+        sessions.register(user, "s2", tx2.clone());
+
+        let found = sessions.get_datagram_txs(user).await;
+        assert_eq!(found.len(), 2);
+        assert!(found.iter().any(|tx| Arc::ptr_eq(tx, &tx1)));
+        assert!(found.iter().any(|tx| Arc::ptr_eq(tx, &tx2)));
+
+        sessions.unregister(user, "s1");
+        let found = sessions.get_datagram_txs(user).await;
+        assert_eq!(found.len(), 1);
+        assert!(Arc::ptr_eq(&found[0], &tx2));
+
+        sessions.unregister(user, "s2");
+        assert!(sessions.get_datagram_txs(user).await.is_empty());
+    }
     #[test]
     fn membership_cache_updates_channel_members() {
         let membership = MembershipCache::new();

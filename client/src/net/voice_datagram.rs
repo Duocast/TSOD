@@ -1,8 +1,12 @@
 use bytes::{BufMut, Bytes, BytesMut};
 
 pub const VOICE_VERSION: u8 = 1;
-pub const VOICE_HDR_LEN: usize = 20;
-pub const VOICE_FORWARDED_HDR_LEN: usize = 52;
+pub const VOICE_HDR_LEN: usize = vp_voice::CLIENT_VOICE_HEADER_BYTES;
+pub const VOICE_FORWARDED_HDR_LEN: usize = vp_voice::FORWARDED_VOICE_HEADER_BYTES;
+
+pub fn outbound_payload_fits(payload_len: usize) -> bool {
+    vp_voice::outbound_payload_fits(payload_len)
+}
 
 pub fn make_voice_datagram(
     channel_route_hash: u32,
@@ -23,4 +27,15 @@ pub fn make_voice_datagram(
     b.put_u32(ts_ms);
     b.extend_from_slice(payload);
     b.freeze()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::outbound_payload_fits;
+
+    #[test]
+    fn oversized_payloads_are_rejected() {
+        assert!(outbound_payload_fits(vp_voice::MAX_OPUS_PAYLOAD_BYTES));
+        assert!(!outbound_payload_fits(vp_voice::MAX_OPUS_PAYLOAD_BYTES + 1));
+    }
 }

@@ -22,8 +22,8 @@ use sqlx::postgres::PgPoolOptions;
 use std::{net::SocketAddr, sync::Arc};
 use tracing::{info, Level};
 use tracing_subscriber::EnvFilter;
-use vp_media::voice_forwarder::QUIC_MAX_DATAGRAM_BYTES;
 use vp_metrics::{MetricsConfig, MetricsServer};
+use vp_voice::QUIC_MAX_DATAGRAM_BYTES;
 
 use crate::auth::DeviceAuthProvider;
 use crate::metrics_adapter::voice_metrics;
@@ -155,23 +155,13 @@ async fn main() -> Result<()> {
     )
     .await?;
 
-    let auth_provider: Arc<dyn auth::AuthProvider> = if cfg.dev_mode {
-        Arc::new(DeviceAuthProvider::new(
-            pool.clone(),
-            server_id.0,
-            bootstrap_owner_user_id,
-            cfg.owner_bootstrap_policy,
-            cfg.dev_repair_orphan_user_roles,
-        ))
-    } else {
-        Arc::new(DeviceAuthProvider::new(
-            pool.clone(),
-            server_id.0,
-            bootstrap_owner_user_id,
-            cfg.owner_bootstrap_policy,
-            cfg.dev_repair_orphan_user_roles,
-        ))
-    };
+    let auth_provider: Arc<dyn auth::AuthProvider> = Arc::new(DeviceAuthProvider::new(
+        pool.clone(),
+        server_id.0,
+        bootstrap_owner_user_id,
+        cfg.owner_bootstrap_policy,
+        cfg.dev_repair_orphan_user_roles,
+    ));
 
     let gw = Gateway::new(
         auth_provider,

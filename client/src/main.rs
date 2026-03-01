@@ -24,7 +24,8 @@ use crossbeam_channel::{bounded, Receiver, Sender};
 use identity::DeviceIdentity;
 use net::dispatcher::{ControlDispatcher, PushEvent};
 use net::voice_datagram::{
-    make_voice_datagram, VOICE_FORWARDED_HDR_LEN, VOICE_HDR_LEN, VOICE_VERSION,
+    make_voice_datagram, outbound_payload_fits, VOICE_FORWARDED_HDR_LEN, VOICE_HDR_LEN,
+    VOICE_VERSION,
 };
 use proto::voiceplatform::v1 as pb;
 use std::collections::HashMap;
@@ -118,6 +119,7 @@ struct VoiceTelemetryCounters {
     late_packets: AtomicU64,
     lost_packets: AtomicU64,
     concealment_frames: AtomicU64,
+    tx_oversized_payload_drops: AtomicU64,
     jitter_buffer_depth: AtomicU64,
     peak_stream_level_bits: AtomicU32,
 }
@@ -1753,9 +1755,14 @@ async fn connect_and_run_session(
             .map(vp_route_hash::channel_route_hash)
             .unwrap_or(0);
         active_voice_channel_route.store(route, Ordering::Relaxed);
-        if let Some(info) = snapshot.channels.iter().filter_map(|ch| ch.info.as_ref()).find(|info| {
-            info.channel_id.as_ref().map(|id| id.value.as_str()) == Some(channel_id.as_str())
-        }) {
+        if let Some(info) = snapshot
+            .channels
+            .iter()
+            .filter_map(|ch| ch.info.as_ref())
+            .find(|info| {
+                info.channel_id.as_ref().map(|id| id.value.as_str()) == Some(channel_id.as_str())
+            })
+        {
             if let Ok(mut mode) = active_channel_audio_mode.write() {
                 *mode = ChannelAudioMode {
                     opus_profile: info.opus_profile,
@@ -3226,6 +3233,21 @@ async fn voice_send_loop(
             Err(_) => continue,
         };
 
+        if !outbound_payload_fits(n) {
+            voice_counters
+                .tx_oversized_payload_drops
+                .fetch_add(1, Ordering::Relaxed);
+            if last_oversize_warn.elapsed() >= Duration::from_secs(5) {
+                last_oversize_warn = Instant::now();
+                let _ = tx_event.send(UiEvent::AppendLog(format!(
+                    "[voice] dropping oversized opus payload: {} > {} bytes",
+                    n,
+                    vp_voice::MAX_OPUS_PAYLOAD_BYTES
+                )));
+            }
+            continue;
+        }
+
         let d = make_voice_datagram(
             active_voice_channel_route.load(Ordering::Relaxed),
             ssrc,
@@ -3236,6 +3258,8 @@ async fn voice_send_loop(
         );
         seq = seq.wrapping_add(1);
         stream_ts_ms = stream_ts_ms.wrapping_add(frame_ms);
+
+        debug_assert!(d.len() <= vp_voice::MAX_INBOUND_VOICE_DATAGRAM_BYTES);
 
         voice_counters.tx_packets.fetch_add(1, Ordering::Relaxed);
         voice_counters

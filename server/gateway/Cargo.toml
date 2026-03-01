@@ -37,6 +37,7 @@ vp-control = { path = "../control" }
 vp-media = { path = "../media" }
 vp-metrics = { path = "../metrics" }
 vp-route-hash = { path = "../../shared/route-hash" }
+vp-voice = { path = "../../shared/voice" }
 
 [build-dependencies]
 prost-build = "0.14.3"

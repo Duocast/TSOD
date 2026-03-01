@@ -36,18 +36,10 @@ use std::{
 use anyhow::{anyhow, Result};
 use bytes::{BufMut, Bytes, BytesMut};
 use tokio::sync::{mpsc, RwLock};
-use tracing::debug;
+use tracing::{debug, warn};
 
 /// ---- Project-facing types ----
 use vp_control::ids::{ChannelId, UserId};
-
-/// Absolute QUIC DATAGRAM size negotiated by both client and server transports.
-pub const QUIC_MAX_DATAGRAM_BYTES: usize = 1200;
-/// Bytes added when server forwards a client packet (sender UUID + channel UUID).
-pub const FORWARDER_ADDED_HEADER_BYTES: usize = 32;
-/// Maximum inbound client packet size that still fits after forwarder metadata is stamped.
-pub const MAX_INBOUND_VOICE_DATAGRAM_BYTES: usize =
-    QUIC_MAX_DATAGRAM_BYTES - FORWARDER_ADDED_HEADER_BYTES;
 
 /// Sender/receiver datagram output handle. This should send a datagram to a QUIC Connection.
 #[async_trait::async_trait]
@@ -58,7 +50,7 @@ pub trait DatagramTx: Send + Sync {
 /// Maps active users to their datagram sender handle (session registry).
 #[async_trait::async_trait]
 pub trait SessionRegistry: Send + Sync {
-    async fn get_datagram_tx(&self, user: UserId) -> Option<Arc<dyn DatagramTx>>;
+    async fn get_datagram_txs(&self, user: UserId) -> Vec<Arc<dyn DatagramTx>>;
 }
 
 /// Authoritative membership & moderation state (backed by your control plane).
@@ -131,8 +123,8 @@ pub struct VoiceForwarderConfig {
 impl Default for VoiceForwarderConfig {
     fn default() -> Self {
         Self {
-            max_datagram_bytes: MAX_INBOUND_VOICE_DATAGRAM_BYTES,
-            min_datagram_bytes: 20,
+            max_datagram_bytes: vp_voice::MAX_INBOUND_VOICE_DATAGRAM_BYTES,
+            min_datagram_bytes: vp_voice::CLIENT_VOICE_HEADER_BYTES,
             sender_pps_limit: 200,        // plenty for 5–20ms frames
             sender_bps_limit: 512 * 1024, // 512kbps per sender max
             per_receiver_queue: 256,
@@ -150,7 +142,7 @@ pub struct VoiceForwarder {
     metrics: Arc<dyn VoiceMetrics>,
 
     /// Receiver send loops keyed by user id.
-    send_loops: RwLock<HashMap<UserId, mpsc::Sender<Bytes>>>,
+    send_loops: RwLock<HashMap<(UserId, usize), mpsc::Sender<Bytes>>>,
 
     /// Talker state per channel.
     talkers: RwLock<HashMap<ChannelId, TalkerSet>>,
@@ -231,66 +223,94 @@ impl VoiceForwarder {
 
         // Talker gating: limit concurrent talkers per channel
         let vad_ok = !self.cfg.vad_required_for_talker || parsed.vad;
-        if vad_ok {
-            if !self.allow_talker(channel, sender).await {
-                self.metrics.inc_drop_talker_limit();
-                return;
-            }
+        if vad_ok && !self.allow_talker(channel, sender).await {
+            self.metrics.inc_drop_talker_limit();
+            return;
         }
 
-        // Fanout: list channel members and forward to everyone except sender
+        // Fanout: list channel members and forward to everyone except sender.
         let members = self.membership.list_members(channel).await;
+        let outbound = stamp_sender_metadata(&parsed, sender, channel, &datagram);
         let mut forwarded = 0usize;
+        let mut send_failures = 0usize;
 
         for uid in members {
             if uid == sender || self.membership.is_deafened(channel, uid).await {
                 continue;
             }
 
-            let outbound = stamp_sender_metadata(&parsed, sender, channel, &datagram);
-            if self.enqueue_to_receiver(uid, outbound).await {
-                forwarded += 1;
-            } else {
+            let (ok, failures) = self.enqueue_to_receiver(uid, outbound.clone()).await;
+            forwarded += ok;
+            send_failures += failures;
+            for _ in 0..failures {
                 self.metrics.inc_drop_send_queue_full();
             }
+        }
+
+        if send_failures > 0 {
+            log_forward_failures(send_failures);
         }
 
         self.metrics.inc_forwarded(forwarded);
     }
 
-    /// Ensure a per-receiver send loop exists and enqueue datagram.
-    async fn enqueue_to_receiver(&self, receiver: UserId, datagram: Bytes) -> bool {
-        // Fast path: sender exists
-        if let Some(tx) = self.send_loops.read().await.get(&receiver).cloned() {
+    /// Ensure per-session send loops exist and enqueue datagram to all active sessions.
+    /// Returns (success_count, failure_count).
+    async fn enqueue_to_receiver(&self, receiver: UserId, datagram: Bytes) -> (usize, usize) {
+        let mut ok = 0usize;
+        let mut failures = 0usize;
+
+        for dtx in self.sessions.get_datagram_txs(receiver).await {
+            let session_key = Arc::as_ptr(&dtx) as *const () as usize;
+            if self
+                .enqueue_to_receiver_session(receiver, session_key, dtx, datagram.clone())
+                .await
+            {
+                ok += 1;
+            } else {
+                failures += 1;
+            }
+        }
+
+        (ok, failures)
+    }
+
+    async fn enqueue_to_receiver_session(
+        &self,
+        receiver: UserId,
+        session_key: usize,
+        dtx: Arc<dyn DatagramTx>,
+        datagram: Bytes,
+    ) -> bool {
+        let key = (receiver, session_key);
+        if let Some(tx) = self.send_loops.read().await.get(&key).cloned() {
             match tx.try_send(datagram) {
                 Ok(()) => return true,
                 Err(mpsc::error::TrySendError::Full(_)) => return false,
                 Err(mpsc::error::TrySendError::Closed(datagram)) => {
-                    self.send_loops.write().await.remove(&receiver);
-                    return self.enqueue_slow_path(receiver, datagram).await;
+                    self.send_loops.write().await.remove(&key);
+                    return self.enqueue_slow_path(key, dtx, datagram).await;
                 }
             }
         }
 
-        self.enqueue_slow_path(receiver, datagram).await
+        self.enqueue_slow_path(key, dtx, datagram).await
     }
 
-    async fn enqueue_slow_path(&self, receiver: UserId, datagram: Bytes) -> bool {
-        // Slow path: create send loop if session exists
-        let Some(dtx) = self.sessions.get_datagram_tx(receiver).await else {
-            return false;
-        };
-
+    async fn enqueue_slow_path(
+        &self,
+        key: (UserId, usize),
+        dtx: Arc<dyn DatagramTx>,
+        datagram: Bytes,
+    ) -> bool {
         let (tx, mut rx) = mpsc::channel::<Bytes>(self.cfg.per_receiver_queue);
 
-        // Insert before spawn to avoid races
-        self.send_loops.write().await.insert(receiver, tx.clone());
+        self.send_loops.write().await.insert(key, tx.clone());
 
         tokio::spawn(async move {
-            // Simple forward loop: if send fails, exit (session likely gone).
             while let Some(pkt) = rx.recv().await {
                 if let Err(e) = dtx.send(pkt).await {
-                    debug!("receiver send loop ended: {}", e);
+                    debug!(error = %e, "receiver session send loop ended");
                     break;
                 }
             }
@@ -302,7 +322,9 @@ impl VoiceForwarder {
     /// Token bucket-ish per sender (pps + bps).
     async fn allow_rate(&self, sender: UserId, bytes: u32, ts_ms: u32) -> bool {
         let mut map = self.rate.write().await;
-        let st = map.entry(sender).or_insert_with(RateState::new);
+        let st = map.entry(sender).or_insert_with(|| {
+            RateState::new(self.cfg.sender_pps_limit, self.cfg.sender_bps_limit)
+        });
 
         if !st.check_monotonic_ts(ts_ms) {
             return false;
@@ -343,8 +365,8 @@ impl VoiceForwarder {
     }
 }
 
-const CLIENT_HEADER_LEN: usize = 20;
-const FORWARDED_HEADER_LEN: usize = 52;
+const CLIENT_HEADER_LEN: usize = vp_voice::CLIENT_VOICE_HEADER_BYTES;
+const FORWARDED_HEADER_LEN: usize = vp_voice::FORWARDED_VOICE_HEADER_BYTES;
 
 fn stamp_sender_metadata(
     parsed: &VoicePacket,
@@ -382,7 +404,7 @@ struct VoicePacket {
 
 impl VoicePacket {
     fn parse(b: &Bytes) -> Result<Self> {
-        if b.len() < 20 {
+        if b.len() < vp_voice::CLIENT_VOICE_HEADER_BYTES {
             return Err(anyhow!("short"));
         }
         let version = b[0];
@@ -391,7 +413,7 @@ impl VoicePacket {
         }
         let flags = b[1];
         let header_len = u16::from_be_bytes([b[2], b[3]]);
-        if header_len != 20 {
+        if header_len as usize != vp_voice::CLIENT_VOICE_HEADER_BYTES {
             return Err(anyhow!("bad header len"));
         }
 
@@ -423,11 +445,11 @@ struct RateState {
 }
 
 impl RateState {
-    fn new() -> Self {
+    fn new(pps_limit: u32, bps_limit: u32) -> Self {
         Self {
             last: Instant::now(),
-            tokens_pkts: 0,
-            tokens_bytes: 0,
+            tokens_pkts: pps_limit,
+            tokens_bytes: bps_limit,
             last_ts_ms: None,
         }
     }
@@ -436,6 +458,7 @@ impl RateState {
         let now = Instant::now();
         let elapsed = now.duration_since(self.last);
         if elapsed < Duration::from_millis(10) {
+            self.last = now;
             return;
         }
 
@@ -518,6 +541,31 @@ impl TalkerSet {
     }
 }
 
+fn log_forward_failures(failure_count: usize) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static LAST_LOG_MS: AtomicU64 = AtomicU64::new(0);
+    static SUPPRESSED: AtomicU64 = AtomicU64::new(0);
+
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let last = LAST_LOG_MS.load(Ordering::Relaxed);
+
+    if now_ms.saturating_sub(last) >= 5_000 {
+        let suppressed = SUPPRESSED.swap(0, Ordering::Relaxed);
+        LAST_LOG_MS.store(now_ms, Ordering::Relaxed);
+        warn!(
+            failure_count,
+            suppressed, "voice forwarding failed for some receiver sessions"
+        );
+    } else {
+        SUPPRESSED.fetch_add(failure_count as u64, Ordering::Relaxed);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::RateState;
@@ -525,12 +573,19 @@ mod tests {
 
     #[test]
     fn refill_uses_configured_limits() {
-        let mut state = RateState::new();
+        let mut state = RateState::new(50, 1000);
         state.last = Instant::now() - Duration::from_secs(1);
 
         state.refill(50, 1000);
 
         assert_eq!(state.tokens_pkts, 50);
         assert_eq!(state.tokens_bytes, 1000);
+    }
+
+    #[test]
+    fn first_packet_is_not_rate_limited_cold_start() {
+        let state = RateState::new(200, 512 * 1024);
+        assert!(state.tokens_pkts >= 1);
+        assert!(state.tokens_bytes >= 120);
     }
 }
