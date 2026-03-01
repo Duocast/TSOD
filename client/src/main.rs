@@ -489,9 +489,11 @@ async fn app_task(
     let self_deafened = Arc::new(AtomicBool::new(false));
     let server_deafened = Arc::new(AtomicBool::new(false));
 
-    // Shared gain values (stored as u32 bits of f32, default 1.0)
+    // Shared gain values (stored as u32 bits of f32)
     let input_gain = Arc::new(std::sync::atomic::AtomicU32::new(f32_to_u32(1.0)));
     let output_gain = Arc::new(std::sync::atomic::AtomicU32::new(f32_to_u32(1.0)));
+    input_gain.store(f32_to_u32(saved_settings.input_gain), Ordering::Relaxed);
+    output_gain.store(f32_to_u32(saved_settings.output_gain), Ordering::Relaxed);
     let per_user_audio = Arc::new(std::sync::RwLock::new(
         saved_settings.per_user_audio.clone(),
     ));
