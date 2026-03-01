@@ -453,8 +453,19 @@ pub struct ReassembledFrame {
     pub frame_seq: u32,
     pub ts_ms: u32,
     pub is_keyframe: bool,
+    /// Concatenated payload for direct decode/render paths.
+    pub payload: Bytes,
     /// Fragment payloads in order. Caller concatenates for decoding.
     pub fragments: Vec<Bytes>,
+}
+
+fn flatten_fragments(fragments: &[Bytes]) -> Bytes {
+    let total = fragments.iter().map(Bytes::len).sum::<usize>();
+    let mut out = BytesMut::with_capacity(total);
+    for fragment in fragments {
+        out.extend_from_slice(fragment);
+    }
+    out.freeze()
 }
 
 /// Bounded video frame reassembly cache.
@@ -503,13 +514,16 @@ impl VideoReceiver {
                 let complete = self.slots[idx].insert(hdr.frag_idx, payload);
                 if complete {
                     let mut slot = self.slots.remove(idx).unwrap();
-                    let fragments = slot.take_fragments().into_iter().flatten().collect();
+                    let fragments: Vec<Bytes> =
+                        slot.take_fragments().into_iter().flatten().collect();
+                    let payload = flatten_fragments(&fragments);
                     let frame = ReassembledFrame {
                         stream_tag: key.stream_tag,
                         layer_id: key.layer_id,
                         frame_seq: key.frame_seq,
                         ts_ms: slot.ts_ms,
                         is_keyframe: slot.is_keyframe,
+                        payload,
                         fragments,
                     };
                     slot.reset(key, hdr.frag_total, hdr.is_keyframe(), hdr.ts_ms);
@@ -543,13 +557,16 @@ impl VideoReceiver {
                 };
                 let complete = slot.insert(hdr.frag_idx, payload);
                 if complete {
-                    let fragments = slot.take_fragments().into_iter().flatten().collect();
+                    let fragments: Vec<Bytes> =
+                        slot.take_fragments().into_iter().flatten().collect();
+                    let payload = flatten_fragments(&fragments);
                     let frame = ReassembledFrame {
                         stream_tag: key.stream_tag,
                         layer_id: key.layer_id,
                         frame_seq: key.frame_seq,
                         ts_ms: slot.ts_ms,
                         is_keyframe: slot.is_keyframe,
+                        payload,
                         fragments,
                     };
                     slot.reset(key, hdr.frag_total, hdr.is_keyframe(), hdr.ts_ms);

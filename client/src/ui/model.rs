@@ -240,6 +240,7 @@ pub enum UiEvent {
         level: f32,
     },
     StreamDebugUpdate(StreamDebugView),
+    StreamFrame(StreamFrameView),
 
     // Telemetry
     TelemetryUpdate(TelemetryData),
@@ -479,6 +480,14 @@ pub struct StreamDebugView {
     pub last_frame_size_bytes: usize,
     pub last_frame_seq: u32,
     pub last_frame_ts_ms: u32,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct StreamFrameView {
+    pub stream_tag: u64,
+    pub frame_seq: u32,
+    pub ts_ms: u32,
+    pub payload: Vec<u8>,
 }
 
 // ── Persisted application settings ────────────────────────────────────
@@ -1208,7 +1217,9 @@ pub struct UiModel {
     pub share_sources: Vec<ShareSourceOption>,
     pub selected_share_source: Option<String>,
     pub sharing_active: bool,
+    pub start_share_in_flight: bool,
     pub stream_debug: StreamDebugView,
+    pub latest_stream_frame: Option<StreamFrameView>,
     pub avatar_path_draft: String,
     pub show_poke_dialog: bool,
     pub poke_target_user_id: String,
@@ -1510,7 +1521,9 @@ impl Default for UiModel {
             share_sources: enumerate_share_sources(),
             selected_share_source: None,
             sharing_active: false,
+            start_share_in_flight: false,
             stream_debug: StreamDebugView::default(),
+            latest_stream_frame: None,
             avatar_path_draft: String::new(),
             show_poke_dialog: false,
             poke_target_user_id: String::new(),
@@ -1579,6 +1592,10 @@ impl UiModel {
         }
     }
 
+    pub fn can_start_screen_share(&self) -> bool {
+        !self.start_share_in_flight && !self.sharing_active
+    }
+
     pub fn apply_event(&mut self, ev: UiEvent) {
         match ev {
             UiEvent::SetConnected(c) => {
@@ -1629,6 +1646,9 @@ impl UiModel {
             UiEvent::SetStatus(s) => self.status_line = s,
             UiEvent::StreamDebugUpdate(snapshot) => {
                 self.stream_debug = snapshot;
+            }
+            UiEvent::StreamFrame(frame) => {
+                self.latest_stream_frame = Some(frame);
             }
             UiEvent::SetAwayMessage(message) => {
                 self.away_message = message.clone();
@@ -2143,6 +2163,17 @@ impl UiModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn can_start_screen_share_is_debounced() {
+        let mut model = UiModel::default();
+        assert!(model.can_start_screen_share());
+        model.start_share_in_flight = true;
+        assert!(!model.can_start_screen_share());
+        model.start_share_in_flight = false;
+        model.sharing_active = true;
+        assert!(!model.can_start_screen_share());
+    }
 
     #[test]
     fn sync_settings_updates_nick_and_connection_nickname() {
