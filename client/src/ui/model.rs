@@ -934,6 +934,20 @@ pub struct UserProfileData {
     pub badges: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShareSourceKind {
+    Screen,
+    Window,
+}
+
+#[derive(Debug, Clone)]
+pub struct ShareSourceOption {
+    pub id: String,
+    pub title: String,
+    pub subtitle: String,
+    pub kind: ShareSourceKind,
+}
+
 // ── Main UI model ──────────────────────────────────────────────────────
 
 pub struct UiModel {
@@ -1034,6 +1048,12 @@ pub struct UiModel {
     pub show_user_popup: bool,
     pub show_away_message_dialog: bool,
     pub show_set_avatar_dialog: bool,
+    pub show_share_content_dialog: bool,
+    pub share_include_audio: bool,
+    pub share_presenter_mode: usize,
+    pub share_sources: Vec<ShareSourceOption>,
+    pub selected_share_source: Option<String>,
+    pub sharing_active: bool,
     pub avatar_path_draft: String,
     pub show_poke_dialog: bool,
     pub poke_target_user_id: String,
@@ -1329,6 +1349,43 @@ impl Default for UiModel {
             show_user_popup: false,
             show_away_message_dialog: false,
             show_set_avatar_dialog: false,
+            show_share_content_dialog: false,
+            share_include_audio: true,
+            share_presenter_mode: 0,
+            share_sources: vec![
+                ShareSourceOption {
+                    id: "screen-1".into(),
+                    title: "Screen 1".into(),
+                    subtitle: "Primary display".into(),
+                    kind: ShareSourceKind::Screen,
+                },
+                ShareSourceOption {
+                    id: "screen-2".into(),
+                    title: "Screen 2".into(),
+                    subtitle: "Secondary display".into(),
+                    kind: ShareSourceKind::Screen,
+                },
+                ShareSourceOption {
+                    id: "window-chat".into(),
+                    title: "TSOD - Chat".into(),
+                    subtitle: "tsod.exe".into(),
+                    kind: ShareSourceKind::Window,
+                },
+                ShareSourceOption {
+                    id: "window-browser".into(),
+                    title: "Firefox".into(),
+                    subtitle: "github.com".into(),
+                    kind: ShareSourceKind::Window,
+                },
+                ShareSourceOption {
+                    id: "window-editor".into(),
+                    title: "Code Editor".into(),
+                    subtitle: "main.rs".into(),
+                    kind: ShareSourceKind::Window,
+                },
+            ],
+            selected_share_source: None,
+            sharing_active: false,
             avatar_path_draft: String::new(),
             show_poke_dialog: false,
             poke_target_user_id: String::new(),
