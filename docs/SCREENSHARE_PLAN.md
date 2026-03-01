@@ -11,7 +11,7 @@ TSOD already has the ideal foundation for cutting-edge screenshare: **QUIC datag
 | **Transport** | WebRTC (DTLS/SRTP over UDP) | QUIC datagrams (0-RTT, built-in congestion control, multiplexed with voice) |
 | **Latency** | ~100-200ms typical | Target **30-80ms** glass-to-glass via hardware encode + QUIC datagrams + zero-copy decode |
 | **Capture** | Browser `getDisplayMedia()` limited to ~30fps | Native OS capture APIs: PipeWire DMA-BUF (Linux), DXGI Desktop Duplication (Windows), ScreenCaptureKit (macOS) — 60fps+ with GPU-resident frames |
-| **Encoding** | VP8/VP9 via browser WebRTC stack | Hardware-accelerated H.264/H.265 (NVENC, VAAPI, VideoToolbox) with AV1 optional; tuned for screen content |
+| **Encoding** | VP8/VP9 via browser WebRTC stack | Hardware-accelerated VP9/AV1 (where available) tuned for screen content |
 | **Quality** | Locked behind Nitro paywall at higher res | Full quality by default — simulcast lets viewers pick layer |
 | **Client** | Electron/browser overhead | Native Rust — direct GPU texture upload, no JS event loop |
 | **System Audio** | OS-dependent, inconsistent | First-class loopback capture via PipeWire/WASAPI/CoreAudio |
@@ -50,13 +50,13 @@ TSOD already has the ideal foundation for cutting-edge screenshare: **QUIC datag
 
 ### 2. Video Encoding
 
-**Primary: Hardware-accelerated H.264 with screen-content tuning**
+**Primary: Hardware-accelerated VP9 with screen-content tuning**
 
-Why H.264 first (not AV1):
+Why VP9 first (not AV1, for this plan):
 - Universal hardware encode support (NVENC, VAAPI, VideoToolbox, QSV, AMF)
 - Universal hardware decode support on all viewers
 - Lowest encode latency (~2-5ms for a frame on hardware)
-- Screen content tools in H.264 High profile (palette mode, IBC)
+- Prioritizes broad decode compatibility and predictable latency for screen content
 - AV1 hardware encode is still spotty (only RTX 40-series+, Intel Arc+)
 
 Encoding configuration for ultra-low latency:
@@ -81,7 +81,7 @@ Intra refresh:  Rolling intra (gradual IDR recovery without full keyframe spike)
 | Windows (Intel) | QSV via MFT | `windows` crate Media Foundation bindings |
 | Windows (AMD) | AMF | `amf` FFI bindings |
 | macOS | VideoToolbox | `videotoolbox-rs` or `objc2` FFI |
-| Fallback (any) | Software x264 | `openh264` crate (BSD) or `x264` FFI |
+| Fallback (any) | Software libvpx | `libvpx` FFI |
 
 **Future: AV1 tier**
 - Add as optional codec behind `av1` feature flag
@@ -103,7 +103,7 @@ Byte layout:
 **Fragmentation strategy:**
 - QUIC datagram MTU is configured at 1200 bytes (matching `QUIC_MAX_DATAGRAM_BYTES`)
 - After the 24-byte header + 32-byte forwarder stamp = **1144 bytes** of payload per datagram
-- A 1080p H.264 frame at medium motion ≈ 15-60KB → fragments into 13-53 datagrams
+- A 1080p VP9 frame at medium motion ≈ 15-60KB → fragments into 13-53 datagrams
 - A 1080p keyframe ≈ 80-200KB → fragments into 70-175 datagrams
 - Fragment reassembly uses `frame_seq` + `fragment_idx` + `fragment_total`
 - `end_of_frame` flag (0x02) triggers decode once all fragments received
@@ -150,7 +150,7 @@ Key behaviors:
 **Decoding pipeline:**
 - Hardware decode via the same platform APIs (VAAPI, DXGI, VideoToolbox)
 - Decoded frames are GPU textures — upload directly to egui as `TextureHandle`
-- Software fallback: `openh264` crate for H.264 decode
+- Software fallback: `libvpx` for VP9 decode
 
 **Frame reassembly buffer:**
 ```rust
@@ -216,7 +216,7 @@ Three tiers matching the proto's `SimulcastLayer`:
    - `CapturedFrame`: raw BGRA/NV12 pixels + timestamp + resolution
 
 2. **Encoder module** (`client/src/screen/encode.rs`)
-   - Start with software `openh264` encoder (works everywhere, no GPU deps)
+   - Start with software `libvpx` encoder (works everywhere, no GPU deps)
    - Trait: `VideoEncoder { fn encode(frame) -> EncodedFrame }`
    - Configure for screen content: low latency, CBR, no B-frames
    - Single layer only (layer_id=2, full quality)
@@ -234,7 +234,7 @@ Three tiers matching the proto's `SimulcastLayer`:
 
 5. **Frame assembler + decoder** (`client/src/screen/decode.rs`)
    - Reassemble fragments into complete frames
-   - Decode with `openh264` (software)
+   - Decode with `libvpx` (software)
    - Output: raw YUV frame
 
 6. **Viewer rendering** (`client/src/screen/render.rs` + `client/src/ui/panels/screenshare.rs`)
@@ -332,14 +332,14 @@ client/src/screen/
 │   └── x11.rs          # X11 fallback (XShm)
 ├── encode/
 │   ├── mod.rs          # VideoEncoder trait + EncodedFrame type
-│   ├── openh264.rs     # Software H.264 (cross-platform fallback)
+│   ├── libvpx.rs      # Software VP9 (cross-platform fallback)
 │   ├── vaapi.rs        # Linux VAAPI hardware encoder
 │   ├── nvenc.rs        # NVIDIA NVENC hardware encoder
 │   ├── vtbox.rs        # macOS VideoToolbox hardware encoder
 │   └── mft.rs          # Windows Media Foundation hardware encoder
 ├── decode/
 │   ├── mod.rs          # VideoDecoder trait
-│   ├── openh264.rs     # Software H.264 decode
+│   ├── libvpx.rs      # Software VP9 decode
 │   ├── vaapi.rs        # VAAPI hardware decode
 │   ├── nvenc.rs        # NVDEC hardware decode
 │   └── vtbox.rs        # VideoToolbox hardware decode
@@ -385,7 +385,7 @@ client/src/ui/panels/
 ashpd = "0.10"                    # Linux XDG portal (PipeWire screencast)
 
 # Video encoding/decoding (software fallback)
-openh264 = "0.6"                  # BSD-licensed H.264 codec
+libvpx = "*"                    # VP9 software codec bindings
 
 # Hardware encode (behind per-platform features)
 # vaapi, nvenc, vtbox bindings as needed
@@ -411,7 +411,7 @@ dcv-color-primitives = "0.7"      # Fast SIMD YUV↔RGB conversion (from AWS)
 **Already exists (ready to use):**
 - `screenshare.proto` — full datagram header spec, control RPCs, events
 - `control.proto` — fields 150-153 wired for screen share RPCs
-- `caps.proto` — `ScreenShareCaps`, `VideoCaps` with H264/VP9/AV1 codec enum
+- `caps.proto` — `ScreenShareCaps`, `VideoCaps` with VP9/AV1 codec enum
 - `VoiceForwarder` — pattern to replicate for `StreamForwarder`
 - `voice_datagram.rs` — pattern to replicate for screen datagram construction
 - `JitterBuffer` — reference for video frame buffering

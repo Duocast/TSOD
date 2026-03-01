@@ -639,7 +639,7 @@ impl Default for AppSettings {
             // Screen Share
             screen_share_fps: 30,
             screen_share_max_bitrate_kbps: 3000,
-            screen_share_codec: "H264".into(),
+            screen_share_codec: "VP9".into(),
             screen_share_capture_audio: true,
 
             // Video Call
