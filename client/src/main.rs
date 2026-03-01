@@ -857,6 +857,7 @@ fn should_apply_event_seq(
 fn pb_channel_type_to_ui(channel_type: i32) -> ui::model::ChannelType {
     match pb::ChannelType::try_from(channel_type).ok() {
         Some(pb::ChannelType::Text) => ui::model::ChannelType::Text,
+        Some(pb::ChannelType::Streaming) => ui::model::ChannelType::Streaming,
         Some(pb::ChannelType::Category) => ui::model::ChannelType::Category,
         _ => ui::model::ChannelType::Voice,
     }

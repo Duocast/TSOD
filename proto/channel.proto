@@ -12,6 +12,7 @@ enum ChannelType {
   TEXT = 1;
   VOICE = 2;
   CATEGORY = 3;      // grouping container, not joinable
+  STREAMING = 4;
 }
 
 enum OpusProfile {

@@ -838,7 +838,14 @@ impl eframe::App for VpApp {
                 ui.add_space(4.0);
             }
 
-            panels::chat::show(ui, &mut self.model, &self.tx_intent);
+            match self.model.current_channel_type() {
+                Some(model::ChannelType::Streaming) => {
+                    panels::streaming::show(ui, &self.model);
+                }
+                _ => {
+                    panels::chat::show(ui, &mut self.model, &self.tx_intent);
+                }
+            };
         });
 
         // Handle keyboard shortcuts

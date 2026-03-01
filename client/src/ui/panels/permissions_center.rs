@@ -312,6 +312,7 @@ fn show_channel_tree(ui: &mut egui::Ui, model: &mut UiModel) {
                 crate::ui::model::ChannelType::Category => format!("📁 {}", channel.name),
                 crate::ui::model::ChannelType::Voice => format!("🔊 {}", channel.name),
                 crate::ui::model::ChannelType::Text => format!("# {}", channel.name),
+                crate::ui::model::ChannelType::Streaming => format!("📺 {}", channel.name),
             };
             if ui.selectable_label(selected, label).clicked() {
                 model.permissions_selected_channel_id = Some(channel.id.clone());

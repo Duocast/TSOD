@@ -323,6 +323,7 @@ impl ControlDispatcher {
     ) -> Result<String> {
         let ch_type = match channel_type {
             1 => pb::ChannelType::Text as i32,
+            2 => pb::ChannelType::Streaming as i32,
             _ => pb::ChannelType::Voice as i32,
         };
         let opus_profile = match codec {

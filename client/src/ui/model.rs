@@ -856,6 +856,7 @@ pub struct ChannelEntry {
 pub enum ChannelType {
     Text,
     Voice,
+    Streaming,
     Category,
 }
 
@@ -2080,6 +2081,15 @@ impl UiModel {
             .get(user_id)
             .map(|s| s.muted)
             .unwrap_or(false)
+    }
+
+    pub fn current_channel_type(&self) -> Option<ChannelType> {
+        self.selected_channel.as_ref().and_then(|selected| {
+            self.channels
+                .iter()
+                .find(|channel| &channel.id == selected)
+                .map(|channel| channel.channel_type)
+        })
     }
 
     /// Get messages for the currently selected channel.
