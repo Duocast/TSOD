@@ -9,6 +9,8 @@ dsp = []
 aec = ["dsp", "dep:sonora-aec3"]
 screen-share = []
 video-call = []
+video-av1 = []
+video-vp9 = []
 e2ee = []
 
 [dependencies]
