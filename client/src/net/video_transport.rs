@@ -11,7 +11,10 @@
 //! - Eviction policy: drop oldest incomplete frames when new frames arrive.
 
 use bytes::{Bytes, BytesMut};
-use std::collections::VecDeque;
+use std::{
+    collections::VecDeque,
+    time::{Duration, Instant},
+};
 
 use super::video_datagram::{self, VideoHeader, MAX_VIDEO_PAYLOAD, VIDEO_HDR_LEN};
 
@@ -74,6 +77,10 @@ pub struct VideoSender {
     layer_id: u8,
     frame_seq: u32,
     pool: BufferPool,
+    max_frame_bytes: usize,
+    pacer: Pacer,
+    force_recovery_next_frame: bool,
+    last_recovery_request_at: Option<Instant>,
 }
 
 impl VideoSender {
@@ -86,7 +93,32 @@ impl VideoSender {
             layer_id,
             frame_seq: 0,
             pool: BufferPool::new(VIDEO_HDR_LEN + MAX_VIDEO_PAYLOAD, max_fragments_per_frame),
+            max_frame_bytes: vp_voice::MAX_FRAGS_PER_FRAME as usize * MAX_VIDEO_PAYLOAD,
+            pacer: Pacer::new(
+                8_000_000,
+                vp_voice::MAX_VIDEO_DATAGRAM_BYTES,
+                vp_voice::MAX_VIDEO_DATAGRAM_BYTES * 3,
+            ),
+            force_recovery_next_frame: false,
+            last_recovery_request_at: None,
         }
+    }
+
+    pub fn request_recovery(&mut self, now: Instant, min_interval: Duration) -> bool {
+        if self
+            .last_recovery_request_at
+            .map(|prev| now.duration_since(prev) < min_interval)
+            .unwrap_or(false)
+        {
+            return false;
+        }
+        self.last_recovery_request_at = Some(now);
+        self.force_recovery_next_frame = true;
+        true
+    }
+
+    pub fn mark_next_frame_recovery(&mut self) {
+        self.force_recovery_next_frame = true;
     }
 
     /// Fragment an encoded frame into datagrams, calling `emit` for each fragment.
@@ -107,6 +139,11 @@ impl VideoSender {
     where
         F: FnMut(Bytes),
     {
+        if encoded_frame.len() > self.max_frame_bytes {
+            self.mark_next_frame_recovery();
+            return Err(VideoSendError::FrameTooLarge);
+        }
+
         let frame_seq = self.frame_seq;
         self.frame_seq = self.frame_seq.wrapping_add(1);
 
@@ -126,6 +163,10 @@ impl VideoSender {
         let mut flags = 0u8;
         if is_keyframe {
             flags |= vp_voice::VIDEO_FLAG_KEYFRAME;
+        }
+        if self.force_recovery_next_frame {
+            flags |= vp_voice::VIDEO_FLAG_RECOVERY;
+            self.force_recovery_next_frame = false;
         }
 
         for (i, chunk) in encoded_frame.chunks(max_payload).enumerate().chain(
@@ -153,6 +194,7 @@ impl VideoSender {
                 ts_ms,
             };
 
+            self.pacer.acquire((VIDEO_HDR_LEN + chunk.len()) as u64);
             let mut buf = self.pool.get();
             let datagram = video_datagram::write_video_datagram_into(&mut buf, &hdr, chunk);
             // Return the BytesMut shell to the pool (its backing storage was split off).
@@ -161,6 +203,53 @@ impl VideoSender {
         }
 
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+struct Pacer {
+    target_bps: u64,
+    burst_bytes: u64,
+    tokens: f64,
+    last_refill: Instant,
+}
+
+impl Pacer {
+    fn new(target_bps: u64, _mtu_bytes: usize, burst_bytes: usize) -> Self {
+        Self {
+            target_bps,
+            burst_bytes: burst_bytes as u64,
+            tokens: burst_bytes as f64,
+            last_refill: Instant::now(),
+        }
+    }
+
+    fn refill(&mut self, now: Instant) {
+        let elapsed = now
+            .saturating_duration_since(self.last_refill)
+            .as_secs_f64();
+        self.last_refill = now;
+        let add = elapsed * (self.target_bps as f64 / 8.0);
+        self.tokens = (self.tokens + add).min(self.burst_bytes as f64);
+    }
+
+    fn required_delay(&mut self, bytes: u64, now: Instant) -> Duration {
+        self.refill(now);
+        if self.tokens >= bytes as f64 {
+            self.tokens -= bytes as f64;
+            Duration::ZERO
+        } else {
+            let deficit = bytes as f64 - self.tokens;
+            self.tokens = 0.0;
+            Duration::from_secs_f64(deficit / (self.target_bps as f64 / 8.0))
+        }
+    }
+
+    fn acquire(&mut self, bytes: u64) {
+        let delay = self.required_delay(bytes, Instant::now());
+        if !delay.is_zero() {
+            std::thread::sleep(delay);
+        }
     }
 }
 
@@ -603,6 +692,46 @@ mod tests {
     }
 
     #[test]
+    fn oversized_frame_returns_frame_too_large() {
+        let mut sender = VideoSender::new(1, 0, 4);
+        let frame = vec![0u8; MAX_VIDEO_PAYLOAD * vp_voice::MAX_FRAGS_PER_FRAME as usize + 1];
+        let err = sender.send_frame(0, false, &frame, |_dg| {}).unwrap_err();
+        assert_eq!(err, VideoSendError::FrameTooLarge);
+    }
+
+    #[test]
+    fn frame_at_boundary_fragments_to_max_frags() {
+        let mut sender = VideoSender::new(1, 0, 4);
+        let frame = vec![7u8; MAX_VIDEO_PAYLOAD * vp_voice::MAX_FRAGS_PER_FRAME as usize];
+        let mut count = 0usize;
+        sender
+            .send_frame(0, false, &frame, |_dg| count += 1)
+            .unwrap();
+        assert_eq!(count, vp_voice::MAX_FRAGS_PER_FRAME as usize);
+    }
+
+    #[test]
+    fn pacer_delays_when_burst_exceeded() {
+        let mut pacer = Pacer::new(8_000, 1200, 1200);
+        let now = Instant::now();
+        assert_eq!(pacer.required_delay(1200, now), Duration::ZERO);
+        let delay = pacer.required_delay(1200, now);
+        assert!(delay >= Duration::from_millis(1000));
+    }
+
+    #[test]
+    fn recovery_rate_limit_works() {
+        let mut sender = VideoSender::new(1, 0, 4);
+        let now = Instant::now();
+        assert!(sender.request_recovery(now, Duration::from_millis(500)));
+        assert!(
+            !sender.request_recovery(now + Duration::from_millis(100), Duration::from_millis(500))
+        );
+        assert!(
+            sender.request_recovery(now + Duration::from_millis(600), Duration::from_millis(500))
+        );
+    }
+
     fn receiver_payload_is_zero_copy_slice() {
         let mut rx = VideoReceiver::new(4);
         let payload = b"hello-zero-copy";

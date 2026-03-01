@@ -1,3 +1,12 @@
+fn codec_label(codec: i32) -> &'static str {
+    match codec {
+        1 => "av1",
+        2 => "vp9",
+        3 => "vp8",
+        _ => "unknown",
+    }
+}
+
 use metrics::{counter, histogram};
 
 use crate::labels::LabelPolicy;
@@ -39,6 +48,15 @@ impl StreamMetricsImpl {
     }
 
     #[inline]
+    pub fn forwarded_bytes_codec(&self, n: usize, codec: i32) {
+        counter!(
+            format!("{}_stream_forwarded_bytes_total", self.ns),
+            "codec" => codec_label(codec)
+        )
+        .increment(n as u64);
+    }
+
+    #[inline]
     pub fn drop_reason(&self, reason: &'static str) {
         counter!(
             format!("{}_stream_drops_total", self.ns),
@@ -48,7 +66,22 @@ impl StreamMetricsImpl {
     }
 
     #[inline]
+    pub fn drop_reason_codec(&self, reason: &'static str, codec: i32) {
+        counter!(
+            format!("{}_stream_drops_total", self.ns),
+            "reason" => reason,
+            "codec" => codec_label(codec)
+        )
+        .increment(1);
+    }
+
+    #[inline]
     pub fn frames_evicted(&self, count: usize) {
         counter!(format!("{}_stream_frames_evicted_total", self.ns)).increment(count as u64);
+    }
+
+    #[inline]
+    pub fn recovery_requests(&self) {
+        counter!(format!("{}_stream_recovery_requests_total", self.ns)).increment(1);
     }
 }

@@ -111,6 +111,8 @@ message ClientToServer {
     StopScreenShareRequest stop_screen_share_request = 151;
     SelectScreenShareLayerRequest select_screen_share_layer_request = 152;
     RequestKeyframeRequest request_keyframe_request = 153;
+    CapabilitiesUpdate capabilities_update = 154;
+    RequestRecovery request_recovery = 155;
 
     // Video calling
     StartCallRequest start_call_request = 160;
@@ -248,6 +250,10 @@ message ServerToClient {
     StopScreenShareResponse stop_screen_share_response = 151;
     SelectScreenShareLayerResponse select_screen_share_layer_response = 152;
     RequestKeyframeResponse request_keyframe_response = 153;
+    CapabilitiesUpdateAck capabilities_update_ack = 154;
+    SubscribeStream subscribe_stream = 155;
+    UnsubscribeStream unsubscribe_stream = 156;
+    RequestRecovery request_recovery = 157;
 
     // Video call responses
     StartCallResponse start_call_response = 160;
