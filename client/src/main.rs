@@ -2508,7 +2508,7 @@ async fn connect_and_run_session(
                             let _ = source_id;
                             let req = pb::StartScreenShareRequest {
                                 channel_id: active_channel.as_ref().map(|id| pb::ChannelId { value: id.clone() }),
-                                codec: pb::video_caps::Codec::Vp8 as i32,
+                                codec: pb::video_caps::Codec::Vp9 as i32,
                                 layers: vec![],
                                 include_audio: false,
                             };
