@@ -17,7 +17,9 @@ pub fn show(ui: &mut egui::Ui, model: &UiModel) {
     let streamers: Vec<_> = model
         .current_members()
         .iter()
-        .filter(|member| member.streaming)
+        .filter(|member| {
+            member.streaming || (model.sharing_active && member.user_id == model.user_id)
+        })
         .collect();
 
     let (headline, subtitle, accent) = match streamers.len() {
