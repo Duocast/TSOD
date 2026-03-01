@@ -37,6 +37,7 @@ pub struct Gateway {
 }
 
 impl Gateway {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         auth: Arc<dyn AuthProvider>,
         alpn: String,
@@ -130,32 +131,8 @@ impl Gateway {
             "authenticated"
         );
 
-        let snapshot = self
-            .build_initial_snapshot(server_id, user_id, &identity.display_name)
-            .await?;
-        debug!(
-            session_id = %session_id,
-            server_id = %server_id.0,
-            user_id = %user_id.0,
-            channel_count = snapshot.channels.len(),
-            member_scope_count = snapshot.channel_members.len(),
-            "sending post-auth authoritative snapshot"
-        );
-        let snapshot_push = pb::ServerToClient {
-            request_id: None,
-            session_id: Some(pb::SessionId {
-                value: session_id.clone(),
-            }),
-            sent_at: Some(now_ts()),
-            error: None,
-            event_seq: unix_ms_u64(),
-            payload: Some(pb::server_to_client::Payload::InitialStateSnapshot(
-                snapshot,
-            )),
-        };
-        write_delimited(&mut send, &snapshot_push)
-            .await
-            .context("write InitialStateSnapshot push")?;
+        // Client must explicitly request an authoritative snapshot via
+        // GetInitialStateSnapshotRequest after auth.
 
         // Control stream writes are performed inline in this task.
 
@@ -163,13 +140,16 @@ impl Gateway {
         self.push.register(user_id, &session_id, push_tx);
 
         // Register push + datagram
-        self.sessions
-            .register(user_id, Arc::new(QuinnDatagramTx::new(conn.clone())));
+        self.sessions.register(
+            user_id,
+            &session_id,
+            Arc::new(QuinnDatagramTx::new(conn.clone())),
+        );
 
         let mut current_channel: Option<ChannelId> = None;
         defer! {
             self.push.unregister(user_id, &session_id);
-            self.sessions.unregister(user_id);
+            self.sessions.unregister(user_id, &session_id);
         }
 
         // Datagram recv loop (voice)
@@ -177,13 +157,8 @@ impl Gateway {
         let user_for_voice = user_id;
         let conn_voice = conn.clone();
         tokio::spawn(async move {
-            loop {
-                match conn_voice.read_datagram().await {
-                    Ok(d) => {
-                        voice.handle_incoming(user_for_voice, d).await;
-                    }
-                    Err(_) => break,
-                }
+            while let Ok(d) = conn_voice.read_datagram().await {
+                voice.handle_incoming(user_for_voice, d).await;
             }
         });
 
@@ -196,18 +171,13 @@ impl Gateway {
         let media = self.media.clone();
         let conn_media = conn.clone();
         tokio::spawn(async move {
-            loop {
-                match conn_media.accept_bi().await {
-                    Ok((send_s, recv_s)) => {
-                        let media = media.clone();
-                        tokio::spawn(async move {
-                            if let Err(e) = media.handle_stream(send_s, recv_s, user_id).await {
-                                warn!("media stream failed: {:#}", e);
-                            }
-                        });
+            while let Ok((send_s, recv_s)) = conn_media.accept_bi().await {
+                let media = media.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = media.handle_stream(send_s, recv_s, user_id).await {
+                        warn!("media stream failed: {:#}", e);
                     }
-                    Err(_) => break,
-                }
+                });
             }
         });
 
@@ -253,7 +223,7 @@ impl Gateway {
                 continue;
             }
 
-                let req_id = msg.request_id.clone();
+                let req_id = msg.request_id;
 
             let request_result: Result<()> = {
             match msg.payload {

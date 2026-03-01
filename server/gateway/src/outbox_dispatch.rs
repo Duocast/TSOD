@@ -792,7 +792,6 @@ fn json_attachments_to_pb(v: Value) -> Vec<pb::AttachmentRef> {
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_string(),
-                ..Default::default()
             });
         }
     }
