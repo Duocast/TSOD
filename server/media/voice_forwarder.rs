@@ -50,7 +50,7 @@ pub trait DatagramTx: Send + Sync {
 /// Maps active users to their datagram sender handle (session registry).
 #[async_trait::async_trait]
 pub trait SessionRegistry: Send + Sync {
-    async fn get_datagram_txs(&self, user: UserId) -> Vec<Arc<dyn DatagramTx>>;
+    async fn get_sessions(&self, user: UserId) -> Vec<(String, Arc<dyn DatagramTx>)>;
 }
 
 /// Authoritative membership & moderation state (backed by your control plane).
@@ -141,14 +141,14 @@ pub struct VoiceForwarder {
     membership: Arc<dyn MembershipProvider>,
     metrics: Arc<dyn VoiceMetrics>,
 
-    /// Receiver send loops keyed by user id.
-    send_loops: RwLock<HashMap<(UserId, usize), mpsc::Sender<Bytes>>>,
+    /// Receiver send loops keyed by user+session id.
+    send_loops: RwLock<HashMap<(UserId, String), mpsc::Sender<Bytes>>>,
 
     /// Talker state per channel.
     talkers: RwLock<HashMap<ChannelId, TalkerSet>>,
 
-    /// Per-sender rate limit state.
-    rate: RwLock<HashMap<UserId, RateState>>,
+    /// Per-sender/stream rate limit state.
+    rate: RwLock<HashMap<(UserId, u32), RateState>>,
 }
 
 impl VoiceForwarder {
@@ -193,7 +193,7 @@ impl VoiceForwarder {
 
         // Per-sender rate limiting
         if !self
-            .allow_rate(sender, datagram.len() as u32, parsed.ts_ms)
+            .allow_rate(sender, parsed.ssrc, datagram.len() as u32, parsed.ts_ms)
             .await
         {
             self.metrics.inc_drop_rate_limited();
@@ -260,10 +260,9 @@ impl VoiceForwarder {
         let mut ok = 0usize;
         let mut failures = 0usize;
 
-        for dtx in self.sessions.get_datagram_txs(receiver).await {
-            let session_key = Arc::as_ptr(&dtx) as *const () as usize;
+        for (session_id, dtx) in self.sessions.get_sessions(receiver).await {
             if self
-                .enqueue_to_receiver_session(receiver, session_key, dtx, datagram.clone())
+                .enqueue_to_receiver_session(receiver, session_id, dtx, datagram.clone())
                 .await
             {
                 ok += 1;
@@ -278,11 +277,11 @@ impl VoiceForwarder {
     async fn enqueue_to_receiver_session(
         &self,
         receiver: UserId,
-        session_key: usize,
+        session_id: String,
         dtx: Arc<dyn DatagramTx>,
         datagram: Bytes,
     ) -> bool {
-        let key = (receiver, session_key);
+        let key = (receiver, session_id);
         if let Some(tx) = self.send_loops.read().await.get(&key).cloned() {
             match tx.try_send(datagram) {
                 Ok(()) => return true,
@@ -299,7 +298,7 @@ impl VoiceForwarder {
 
     async fn enqueue_slow_path(
         &self,
-        key: (UserId, usize),
+        key: (UserId, String),
         dtx: Arc<dyn DatagramTx>,
         datagram: Bytes,
     ) -> bool {
@@ -319,18 +318,37 @@ impl VoiceForwarder {
         tx.try_send(datagram).is_ok()
     }
 
+    pub async fn unregister_session(&self, user: UserId, session_id: &str) {
+        self.send_loops
+            .write()
+            .await
+            .remove(&(user, session_id.to_string()));
+    }
+
     /// Token bucket-ish per sender (pps + bps).
-    async fn allow_rate(&self, sender: UserId, bytes: u32, ts_ms: u32) -> bool {
+    async fn allow_rate(&self, sender: UserId, ssrc: u32, bytes: u32, ts_ms: u32) -> bool {
+        self.allow_rate_at(sender, ssrc, bytes, ts_ms, Instant::now())
+            .await
+    }
+
+    async fn allow_rate_at(
+        &self,
+        sender: UserId,
+        ssrc: u32,
+        bytes: u32,
+        ts_ms: u32,
+        now: Instant,
+    ) -> bool {
         let mut map = self.rate.write().await;
-        let st = map.entry(sender).or_insert_with(|| {
+        let st = map.entry((sender, ssrc)).or_insert_with(|| {
             RateState::new(self.cfg.sender_pps_limit, self.cfg.sender_bps_limit)
         });
 
-        if !st.check_monotonic_ts(ts_ms) {
+        if !st.check_monotonic_ts(ts_ms, now) {
             return false;
         }
 
-        st.refill(self.cfg.sender_pps_limit, self.cfg.sender_bps_limit);
+        st.refill(self.cfg.sender_pps_limit, self.cfg.sender_bps_limit, now);
 
         if st.tokens_pkts == 0 || st.tokens_bytes < bytes {
             return false;
@@ -364,6 +382,9 @@ impl VoiceForwarder {
         true
     }
 }
+
+const REFILL_QUANTUM: Duration = Duration::from_millis(10);
+const STREAM_IDLE_RESET: Duration = Duration::from_secs(10);
 
 const CLIENT_HEADER_LEN: usize = vp_voice::CLIENT_VOICE_HEADER_BYTES;
 const FORWARDED_HEADER_LEN: usize = vp_voice::FORWARDED_VOICE_HEADER_BYTES;
@@ -442,6 +463,7 @@ struct RateState {
 
     // For optional monotonic timestamp checks.
     last_ts_ms: Option<u32>,
+    last_seen: Instant,
 }
 
 impl RateState {
@@ -451,14 +473,13 @@ impl RateState {
             tokens_pkts: pps_limit,
             tokens_bytes: bps_limit,
             last_ts_ms: None,
+            last_seen: Instant::now(),
         }
     }
 
-    fn refill(&mut self, pps_limit: u32, bps_limit: u32) {
-        let now = Instant::now();
+    fn refill(&mut self, pps_limit: u32, bps_limit: u32, now: Instant) {
         let elapsed = now.duration_since(self.last);
-        if elapsed < Duration::from_millis(10) {
-            self.last = now;
+        if elapsed < REFILL_QUANTUM {
             return;
         }
 
@@ -473,7 +494,10 @@ impl RateState {
         self.last = now;
     }
 
-    fn check_monotonic_ts(&mut self, ts: u32) -> bool {
+    fn check_monotonic_ts(&mut self, ts: u32, now: Instant) -> bool {
+        if now.duration_since(self.last_seen) > STREAM_IDLE_RESET {
+            self.last_ts_ms = None;
+        }
         if let Some(prev) = self.last_ts_ms {
             // Allow wrap; reject huge backwards jumps.
             let diff = ts.wrapping_sub(prev);
@@ -482,6 +506,7 @@ impl RateState {
             }
         }
         self.last_ts_ms = Some(ts);
+        self.last_seen = now;
         true
     }
 }
@@ -568,18 +593,46 @@ fn log_forward_failures(failure_count: usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::RateState;
+    use super::{
+        DatagramTx, MembershipProvider, NoopMetrics, RateState, SessionRegistry, VoiceForwarder,
+        VoiceForwarderConfig, STREAM_IDLE_RESET,
+    };
+    use anyhow::Result;
+    use bytes::Bytes;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
     use std::time::{Duration, Instant};
+    use tokio::sync::Notify;
+    use vp_control::ids::{ChannelId, UserId};
 
     #[test]
     fn refill_uses_configured_limits() {
         let mut state = RateState::new(50, 1000);
-        state.last = Instant::now() - Duration::from_secs(1);
+        let now = Instant::now();
+        state.last = now - Duration::from_secs(1);
 
-        state.refill(50, 1000);
+        state.refill(50, 1000, now);
 
         assert_eq!(state.tokens_pkts, 50);
         assert_eq!(state.tokens_bytes, 1000);
+    }
+
+    #[test]
+    fn refill_accumulates_under_sub_quantum_pacing() {
+        let mut state = RateState::new(100, 1000);
+        let start = Instant::now();
+        state.tokens_pkts = 0;
+        state.tokens_bytes = 0;
+        state.last = start;
+
+        state.refill(100, 1000, start + Duration::from_millis(5));
+        assert_eq!(state.tokens_pkts, 0);
+
+        state.refill(100, 1000, start + Duration::from_millis(10));
+        assert!(state.tokens_pkts > 0);
+        assert!(state.tokens_bytes > 0);
     }
 
     #[test]
@@ -587,5 +640,138 @@ mod tests {
         let state = RateState::new(200, 512 * 1024);
         assert!(state.tokens_pkts >= 1);
         assert!(state.tokens_bytes >= 120);
+    }
+
+    #[test]
+    fn new_ssrc_resets_monotonic() {
+        let mut st1 = RateState::new(200, 1024);
+        let now = Instant::now();
+        assert!(st1.check_monotonic_ts(1000, now));
+
+        let mut st2 = RateState::new(200, 1024);
+        assert!(st2.check_monotonic_ts(0, now));
+    }
+
+    #[tokio::test]
+    async fn allow_rate_accepts_new_ssrc_with_low_timestamp() {
+        let fwd = VoiceForwarder::new(
+            VoiceForwarderConfig::default(),
+            Arc::new(TestSessionRegistry),
+            Arc::new(TestMembership),
+            Arc::new(NoopMetrics),
+        );
+        let user = UserId::new();
+        let now = Instant::now();
+
+        assert!(fwd.allow_rate_at(user, 111, 1, 1000, now).await);
+        assert!(
+            fwd.allow_rate_at(user, 222, 1, 0, now + Duration::from_millis(1))
+                .await
+        );
+    }
+    #[test]
+    fn idle_reset_clears_monotonic() {
+        let mut st = RateState::new(200, 1024);
+        let now = Instant::now();
+        assert!(st.check_monotonic_ts(50_000, now));
+        assert!(!st.check_monotonic_ts(0, now + Duration::from_secs(1)));
+
+        assert!(st.check_monotonic_ts(0, now + STREAM_IDLE_RESET + Duration::from_millis(1)));
+    }
+
+    struct TestSessionRegistry;
+
+    #[async_trait::async_trait]
+    impl SessionRegistry for TestSessionRegistry {
+        async fn get_sessions(&self, _user: UserId) -> Vec<(String, Arc<dyn DatagramTx>)> {
+            Vec::new()
+        }
+    }
+
+    struct TestMembership;
+
+    #[async_trait::async_trait]
+    impl MembershipProvider for TestMembership {
+        async fn resolve_channel_for_sender(
+            &self,
+            _sender: UserId,
+            _route_key: u32,
+        ) -> Option<ChannelId> {
+            None
+        }
+
+        async fn list_members(&self, _channel: ChannelId) -> Vec<UserId> {
+            Vec::new()
+        }
+
+        async fn is_muted(&self, _channel: ChannelId, _sender: UserId) -> bool {
+            false
+        }
+
+        async fn is_deafened(&self, _channel: ChannelId, _user: UserId) -> bool {
+            false
+        }
+
+        async fn max_talkers(&self, _channel: ChannelId) -> usize {
+            1
+        }
+    }
+
+    struct FakeDatagramTx {
+        closed: Arc<AtomicBool>,
+        exited: Arc<Notify>,
+    }
+
+    impl Drop for FakeDatagramTx {
+        fn drop(&mut self) {
+            self.closed.store(true, Ordering::SeqCst);
+            self.exited.notify_waiters();
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl DatagramTx for FakeDatagramTx {
+        async fn send(&self, _bytes: Bytes) -> Result<()> {
+            if self.closed.load(Ordering::SeqCst) {
+                anyhow::bail!("closed");
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn unregister_session_removes_send_loop() {
+        let fwd = VoiceForwarder::new(
+            VoiceForwarderConfig::default(),
+            Arc::new(TestSessionRegistry),
+            Arc::new(TestMembership),
+            Arc::new(NoopMetrics),
+        );
+        let user = UserId::new();
+        let session_id = "s1".to_string();
+        let key = (user, session_id.clone());
+
+        let closed = Arc::new(AtomicBool::new(false));
+        let exited = Arc::new(Notify::new());
+        let dtx: Arc<dyn DatagramTx> = Arc::new(FakeDatagramTx {
+            closed: closed.clone(),
+            exited: exited.clone(),
+        });
+
+        assert!(
+            fwd.enqueue_to_receiver_session(
+                user,
+                session_id.clone(),
+                dtx,
+                Bytes::from_static(b"x")
+            )
+            .await
+        );
+        assert!(fwd.send_loops.read().await.contains_key(&key));
+
+        fwd.unregister_session(user, &session_id).await;
+        assert!(!fwd.send_loops.read().await.contains_key(&key));
+
+        let _ = tokio::time::timeout(Duration::from_secs(1), exited.notified()).await;
     }
 }

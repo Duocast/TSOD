@@ -108,11 +108,11 @@ impl SessionMap {
 
 #[async_trait::async_trait]
 impl SessionRegistry for SessionMap {
-    async fn get_datagram_txs(&self, user: UserId) -> Vec<Arc<dyn DatagramTx>> {
+    async fn get_sessions(&self, user: UserId) -> Vec<(String, Arc<dyn DatagramTx>)> {
         self.inner
             .iter()
             .filter(|entry| entry.key().0 == user)
-            .map(|entry| entry.value().clone())
+            .map(|entry| (entry.key().1.clone(), entry.value().clone()))
             .collect()
     }
 }
@@ -330,18 +330,18 @@ mod tests {
         sessions.register(user, "s1", tx1.clone());
         sessions.register(user, "s2", tx2.clone());
 
-        let found = sessions.get_datagram_txs(user).await;
+        let found = sessions.get_sessions(user).await;
         assert_eq!(found.len(), 2);
-        assert!(found.iter().any(|tx| Arc::ptr_eq(tx, &tx1)));
-        assert!(found.iter().any(|tx| Arc::ptr_eq(tx, &tx2)));
+        assert!(found.iter().any(|(_, tx)| Arc::ptr_eq(tx, &tx1)));
+        assert!(found.iter().any(|(_, tx)| Arc::ptr_eq(tx, &tx2)));
 
         sessions.unregister(user, "s1");
-        let found = sessions.get_datagram_txs(user).await;
+        let found = sessions.get_sessions(user).await;
         assert_eq!(found.len(), 1);
-        assert!(Arc::ptr_eq(&found[0], &tx2));
+        assert!(Arc::ptr_eq(&found[0].1, &tx2));
 
         sessions.unregister(user, "s2");
-        assert!(sessions.get_datagram_txs(user).await.is_empty());
+        assert!(sessions.get_sessions(user).await.is_empty());
     }
     #[test]
     fn membership_cache_updates_channel_members() {
