@@ -213,6 +213,46 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                 } else {
                     "Join a voice channel to use deafen"
                 });
+
+                ui.add_space(2.0);
+
+                let share_fill = if model.sharing_active {
+                    theme::COLOR_ONLINE.linear_multiply(0.25)
+                } else {
+                    theme::bg_light()
+                };
+                let share_text_color = if model.sharing_active {
+                    theme::COLOR_ONLINE
+                } else {
+                    theme::text_color()
+                };
+
+                let share_btn = ui.add_enabled_ui(in_voice_channel, |ui| {
+                    ui.add_sized(
+                        btn_size,
+                        egui::Button::new(
+                            egui::RichText::new("🖥")
+                                .size(12.0)
+                                .color(share_text_color)
+                                .strong(),
+                        )
+                        .fill(share_fill)
+                        .corner_radius(4.0),
+                    )
+                });
+                let share_btn = share_btn.inner;
+                if share_btn.clicked() {
+                    model.show_share_content_dialog = true;
+                }
+                share_btn.on_hover_text(if in_voice_channel {
+                    if model.sharing_active {
+                        "Change shared content"
+                    } else {
+                        "Share screen or window"
+                    }
+                } else {
+                    "Join a voice channel to share"
+                });
             });
 
             // VAD level bar (when voice is active)

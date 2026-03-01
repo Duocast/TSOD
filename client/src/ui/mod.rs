@@ -23,6 +23,54 @@ pub use model::{ConnectionStage, UiEvent, UiIntent, UiModel};
 use crossbeam_channel::{Receiver, Sender};
 use eframe::egui;
 
+fn share_source_card(
+    ui: &mut egui::Ui,
+    source_id: &str,
+    title: &str,
+    subtitle: &str,
+    selected_share_source: &mut Option<String>,
+) -> bool {
+    let is_selected = selected_share_source.as_deref() == Some(source_id);
+    let stroke = if is_selected {
+        egui::Stroke::new(1.5, theme::COLOR_ONLINE)
+    } else {
+        egui::Stroke::new(1.0, theme::bg_medium())
+    };
+    let fill = if is_selected {
+        theme::bg_light()
+    } else {
+        theme::bg_dark()
+    };
+
+    let frame = egui::Frame::new()
+        .fill(fill)
+        .corner_radius(8.0)
+        .stroke(stroke)
+        .inner_margin(10.0);
+    let response = frame
+        .show(ui, |ui| {
+            ui.set_min_size(egui::vec2(180.0, 90.0));
+            ui.vertical(|ui| {
+                ui.label(egui::RichText::new(title).strong().size(13.0));
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(subtitle)
+                        .size(11.0)
+                        .color(theme::text_muted()),
+                );
+            });
+        })
+        .response
+        .interact(egui::Sense::click());
+
+    if response.clicked() {
+        *selected_share_source = Some(source_id.to_string());
+        true
+    } else {
+        false
+    }
+}
+
 /// The main application struct that implements `eframe::App`.
 pub struct VpApp {
     model: UiModel,
@@ -564,6 +612,141 @@ impl eframe::App for VpApp {
                 });
             if !open {
                 self.model.show_set_avatar_dialog = false;
+            }
+        }
+
+        if self.model.show_share_content_dialog {
+            let mut open = true;
+            egui::Window::new("Share content")
+                .open(&mut open)
+                .default_width(760.0)
+                .min_width(680.0)
+                .resizable(false)
+                .collapsible(false)
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.heading("Share content");
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.toggle_value(&mut self.model.share_include_audio, "Include sound");
+                        });
+                    });
+
+                    ui.add_space(12.0);
+                    ui.label(egui::RichText::new("Presenter mode").strong().size(16.0));
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        const MODES: [(&str, &str); 4] = [
+                            ("🖵", "Content only"),
+                            ("🧍", "Standout"),
+                            ("🧩", "Side-by-side"),
+                            ("👤", "Reporter"),
+                        ];
+
+                        for (idx, (icon, label)) in MODES.iter().enumerate() {
+                            let selected = self.model.share_presenter_mode == idx;
+                            let mut button =
+                                egui::Button::new(egui::RichText::new(*icon).size(14.0).strong())
+                                    .min_size(egui::vec2(40.0, 40.0))
+                                    .corner_radius(6.0);
+                            if selected {
+                                button = button
+                                    .fill(theme::bg_light())
+                                    .stroke(egui::Stroke::new(1.5, theme::COLOR_ONLINE));
+                            }
+                            let response = ui.add(button);
+                            if response.clicked() {
+                                self.model.share_presenter_mode = idx;
+                            }
+                            response.on_hover_text(*label);
+                        }
+                    });
+
+                    ui.add_space(12.0);
+                    ui.separator();
+                    ui.add_space(8.0);
+
+                    let screen_options: Vec<_> = self
+                        .model
+                        .share_sources
+                        .iter()
+                        .filter(|s| s.kind == model::ShareSourceKind::Screen)
+                        .cloned()
+                        .collect();
+                    let window_options: Vec<_> = self
+                        .model
+                        .share_sources
+                        .iter()
+                        .filter(|s| s.kind == model::ShareSourceKind::Window)
+                        .cloned()
+                        .collect();
+
+                    ui.label(egui::RichText::new("Screen").strong().size(16.0));
+                    ui.add_space(6.0);
+                    ui.horizontal_wrapped(|ui| {
+                        for source in &screen_options {
+                            ui.add_space(4.0);
+                            let _ = share_source_card(
+                                ui,
+                                &source.id,
+                                &source.title,
+                                &source.subtitle,
+                                &mut self.model.selected_share_source,
+                            );
+                            ui.add_space(4.0);
+                        }
+                    });
+
+                    ui.add_space(14.0);
+                    ui.label(
+                        egui::RichText::new(format!("Window ({})", window_options.len()))
+                            .strong()
+                            .size(16.0),
+                    );
+                    ui.add_space(6.0);
+                    ui.horizontal_wrapped(|ui| {
+                        for source in &window_options {
+                            ui.add_space(4.0);
+                            let _ = share_source_card(
+                                ui,
+                                &source.id,
+                                &source.title,
+                                &source.subtitle,
+                                &mut self.model.selected_share_source,
+                            );
+                            ui.add_space(4.0);
+                        }
+                    });
+
+                    ui.add_space(16.0);
+                    ui.horizontal(|ui| {
+                        let selected = self.model.selected_share_source.clone();
+                        let share_label = if self.model.sharing_active {
+                            "Update share"
+                        } else {
+                            "Start sharing"
+                        };
+                        let start_btn = ui.add_enabled(
+                            selected.is_some(),
+                            egui::Button::new(share_label)
+                                .fill(theme::COLOR_ONLINE.linear_multiply(0.2))
+                                .corner_radius(6.0),
+                        );
+                        if start_btn.clicked() {
+                            self.model.sharing_active = true;
+                            self.model.show_share_content_dialog = false;
+                        }
+
+                        if ui.button("Stop sharing").clicked() {
+                            self.model.sharing_active = false;
+                        }
+
+                        if ui.button("Cancel").clicked() {
+                            self.model.show_share_content_dialog = false;
+                        }
+                    });
+                });
+            if !open {
+                self.model.show_share_content_dialog = false;
             }
         }
 
