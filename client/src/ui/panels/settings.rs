@@ -1340,34 +1340,67 @@ fn page_screen_share(ui: &mut egui::Ui, s: &mut AppSettings) -> bool {
 
     ui.add_space(4.0);
 
-    ui.horizontal(|ui: &mut egui::Ui| {
-        ui.label("Frame Rate:");
-        let prev = s.screen_share_fps;
-        ui.add(egui::Slider::new(&mut s.screen_share_fps, 5..=60).suffix(" fps"));
-        if s.screen_share_fps != prev {
-            dirty = true;
-        }
+    ui.group(|ui: &mut egui::Ui| {
+        ui.set_width(ui.available_width());
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new("Quick Profiles")
+                .small()
+                .strong()
+                .color(theme::text_color()),
+        );
+        ui.add_space(2.0);
+        ui.horizontal_wrapped(|ui: &mut egui::Ui| {
+            if ui.button("📝 Presentation").clicked() {
+                s.screen_share_fps = 15;
+                s.screen_share_max_bitrate_kbps = 1800;
+                s.screen_share_codec = "H264".into();
+                dirty = true;
+            }
+            if ui.button("⚖ Balanced").clicked() {
+                s.screen_share_fps = 30;
+                s.screen_share_max_bitrate_kbps = 3000;
+                s.screen_share_codec = "H264".into();
+                dirty = true;
+            }
+            if ui.button("🎮 Motion").clicked() {
+                s.screen_share_fps = 60;
+                s.screen_share_max_bitrate_kbps = 6000;
+                s.screen_share_codec = "AV1".into();
+                dirty = true;
+            }
+        });
+        hint(
+            ui,
+            "Profiles are starting points. Tune sliders below for your network and content.",
+        );
+        ui.add_space(2.0);
     });
 
-    ui.horizontal(|ui: &mut egui::Ui| {
-        ui.label("Max Bitrate:");
-        let prev = s.screen_share_max_bitrate_kbps;
-        ui.add(
+    ui.add_space(6.0);
+    ui.columns(2, |cols| {
+        cols[0].label("Frame Rate");
+        let prev_fps = s.screen_share_fps;
+        cols[1].add(egui::Slider::new(&mut s.screen_share_fps, 5..=60).suffix(" fps"));
+        if s.screen_share_fps != prev_fps {
+            dirty = true;
+        }
+
+        cols[0].label("Max Bitrate");
+        let prev_bitrate = s.screen_share_max_bitrate_kbps;
+        cols[1].add(
             egui::Slider::new(&mut s.screen_share_max_bitrate_kbps, 500..=10000).suffix(" kbps"),
         );
-        if s.screen_share_max_bitrate_kbps != prev {
+        if s.screen_share_max_bitrate_kbps != prev_bitrate {
             dirty = true;
         }
-    });
-    hint(ui, "Higher bitrate = better quality. Adaptive bitrate reduces quality if network is constrained.");
 
-    ui.horizontal(|ui: &mut egui::Ui| {
-        ui.label("Codec:");
+        cols[0].label("Codec");
         let codecs = ["H264", "VP9", "AV1"];
         egui::ComboBox::from_id_salt("ss_codec")
             .selected_text(&s.screen_share_codec)
             .width(120.0)
-            .show_ui(ui, |ui: &mut egui::Ui| {
+            .show_ui(&mut cols[1], |ui: &mut egui::Ui| {
                 for c in &codecs {
                     if ui
                         .selectable_value(&mut s.screen_share_codec, c.to_string(), *c)
@@ -1379,10 +1412,30 @@ fn page_screen_share(ui: &mut egui::Ui, s: &mut AppSettings) -> bool {
             });
     });
 
+    ui.add_space(4.0);
+    let quality_tier = if s.screen_share_max_bitrate_kbps < 2000 {
+        "Data Saver"
+    } else if s.screen_share_max_bitrate_kbps < 4500 {
+        "Balanced"
+    } else {
+        "High Fidelity"
+    };
+    let latency_label = if s.screen_share_fps >= 45 {
+        "Lower perceived latency"
+    } else {
+        "Lower CPU / battery usage"
+    };
+    ui.label(
+        egui::RichText::new(format!("Current profile: {quality_tier} • {latency_label}"))
+            .small()
+            .color(theme::text_dim()),
+    );
+    hint(ui, "Higher bitrate = better quality. Adaptive bitrate reduces quality if network is constrained.");
+
     if ui
         .checkbox(
             &mut s.screen_share_capture_audio,
-            "Capture system audio with screen share",
+            "Include system audio in the stream",
         )
         .changed()
     {
@@ -1418,6 +1471,12 @@ fn page_screen_share(ui: &mut egui::Ui, s: &mut AppSettings) -> bool {
         egui::RichText::new("  Low: 1/4 resolution at 1/4 bitrate (thumbnail)")
             .small()
             .color(theme::text_dim()),
+    );
+
+    ui.add_space(4.0);
+    hint(
+        ui,
+        "Tip: For slide decks or docs, use ~15 fps and prioritize bitrate. For demos with movement, use 30-60 fps.",
     );
 
     dirty
