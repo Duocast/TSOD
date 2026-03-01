@@ -961,8 +961,8 @@ fn fallback_share_sources() -> Vec<ShareSourceOption> {
 pub fn enumerate_share_sources() -> Vec<ShareSourceOption> {
     use std::cmp::Ordering;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
-    use windows::core::PWSTR;
-    use windows::Win32::Foundation::{BOOL, HWND, LPARAM, RECT};
+    use windows::core::BOOL;
+    use windows::Win32::Foundation::{HWND, LPARAM, RECT};
     use windows::Win32::Graphics::Gdi::{
         EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFOEXW,
     };
@@ -982,13 +982,7 @@ pub fn enumerate_share_sources() -> Vec<ShareSourceOption> {
         }
 
         let mut title_buf = vec![0u16; title_len as usize + 1];
-        let copied = unsafe {
-            GetWindowTextW(
-                hwnd,
-                PWSTR(title_buf.as_mut_ptr()),
-                i32::try_from(title_buf.len()).unwrap_or(i32::MAX),
-            )
-        };
+        let copied = unsafe { GetWindowTextW(hwnd, &mut title_buf) };
         if copied <= 0 {
             return BOOL(1);
         }
@@ -1000,7 +994,7 @@ pub fn enumerate_share_sources() -> Vec<ShareSourceOption> {
             return BOOL(1);
         }
 
-        windows.push((format!("window-hwnd-{}", hwnd.0), title));
+        windows.push((format!("window-hwnd-{}", hwnd.0 as isize), title));
         BOOL(1)
     }
 
@@ -1042,7 +1036,7 @@ pub fn enumerate_share_sources() -> Vec<ShareSourceOption> {
 
     let _ = unsafe {
         EnumDisplayMonitors(
-            Some(HDC(0)),
+            None,
             None,
             Some(enum_monitors_callback),
             LPARAM(&mut screens as *mut _ as isize),
