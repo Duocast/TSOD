@@ -697,24 +697,39 @@ impl eframe::App for VpApp {
                     });
 
                     ui.add_space(14.0);
-                    ui.label(
+                    egui::CollapsingHeader::new(
                         egui::RichText::new(format!("Window ({})", window_options.len()))
                             .strong()
                             .size(16.0),
-                    );
-                    ui.add_space(6.0);
-                    ui.horizontal_wrapped(|ui| {
-                        for source in &window_options {
-                            ui.add_space(4.0);
-                            let _ = share_source_card(
-                                ui,
-                                &source.id,
-                                &source.title,
-                                &source.subtitle,
-                                &mut self.model.selected_share_source,
-                            );
-                            ui.add_space(4.0);
-                        }
+                    )
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        ui.add_space(6.0);
+                        egui::Frame::new()
+                            .fill(theme::bg_light())
+                            .corner_radius(6.0)
+                            .inner_margin(egui::Margin::same(8))
+                            .show(ui, |ui| {
+                                egui::ScrollArea::both()
+                                    .auto_shrink([false, false])
+                                    .max_height(220.0)
+                                    .show(ui, |ui| {
+                                        ui.set_min_width(ui.available_width().max(560.0));
+                                        ui.horizontal_wrapped(|ui| {
+                                            for source in &window_options {
+                                                ui.add_space(4.0);
+                                                let _ = share_source_card(
+                                                    ui,
+                                                    &source.id,
+                                                    &source.title,
+                                                    &source.subtitle,
+                                                    &mut self.model.selected_share_source,
+                                                );
+                                                ui.add_space(4.0);
+                                            }
+                                        });
+                                    });
+                            });
                     });
 
                     ui.add_space(16.0);
