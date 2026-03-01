@@ -49,7 +49,7 @@ impl VideoHeader {
         if buf.len() < VIDEO_HDR_LEN {
             return None;
         }
-        if buf[0] != vp_voice::DATAGRAM_VERSION {
+        if buf[0] != vp_voice::VIDEO_VERSION {
             return None;
         }
         if buf[1] != vp_voice::DATAGRAM_KIND_VIDEO {
@@ -65,7 +65,7 @@ impl VideoHeader {
         let frag_total = u16::from_le_bytes([buf[18], buf[19]]);
         let ts_ms = u32::from_le_bytes([buf[20], buf[21], buf[22], buf[23]]);
 
-        if frag_total == 0 || frag_idx >= frag_total {
+        if frag_total == 0 || frag_total > vp_voice::MAX_FRAGS_PER_FRAME || frag_idx >= frag_total {
             return None;
         }
 
@@ -106,13 +106,33 @@ pub struct StreamRegistration {
 }
 
 /// Metrics hook for stream forwarding (optional).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StreamDropReason {
+    QueueFull,
+    EvictedOldestFrame,
+    Malformed,
+    Unauthorized,
+}
+
+impl StreamDropReason {
+    pub fn as_label(self) -> &'static str {
+        match self {
+            Self::QueueFull => "queue_full",
+            Self::EvictedOldestFrame => "evicted_oldest_frame",
+            Self::Malformed => "malformed",
+            Self::Unauthorized => "unauthorized",
+        }
+    }
+}
+
 pub trait StreamMetrics: Send + Sync {
     fn inc_rx_packets(&self);
     fn inc_rx_bytes(&self, n: usize);
     fn inc_drop_invalid(&self);
     fn inc_drop_unauthorized(&self);
-    fn inc_drop_queue_full(&self, frames_evicted: usize);
+    fn inc_drop_by_reason(&self, reason: StreamDropReason);
     fn inc_forwarded(&self, fanout: usize);
+    fn inc_forwarded_bytes(&self, n: usize);
     fn inc_frames_evicted(&self, count: usize);
 }
 
@@ -123,8 +143,9 @@ impl StreamMetrics for NoopStreamMetrics {
     fn inc_rx_bytes(&self, _n: usize) {}
     fn inc_drop_invalid(&self) {}
     fn inc_drop_unauthorized(&self) {}
-    fn inc_drop_queue_full(&self, _frames_evicted: usize) {}
+    fn inc_drop_by_reason(&self, _reason: StreamDropReason) {}
     fn inc_forwarded(&self, _fanout: usize) {}
+    fn inc_forwarded_bytes(&self, _n: usize) {}
     fn inc_frames_evicted(&self, _count: usize) {}
 }
 
@@ -177,6 +198,13 @@ struct FrameInfo {
     fragment_count: u16,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct PushOutcome {
+    evicted_frames: usize,
+    dropped_incoming_fragment: bool,
+    drop_reason: Option<StreamDropReason>,
+}
+
 /// Frame-aware bounded queue for a single viewer.
 ///
 /// Invariants:
@@ -201,9 +229,9 @@ impl ViewerQueue {
         }
     }
 
-    /// Push a fragment. Returns the number of frames evicted to make room.
-    fn push(&mut self, datagram: Bytes, hdr: &VideoHeader) -> usize {
-        let mut evicted_frames = 0;
+    /// Push a fragment and report queue pressure behavior.
+    fn push(&mut self, datagram: Bytes, hdr: &VideoHeader) -> PushOutcome {
+        let mut outcome = PushOutcome::default();
 
         // Update or insert frame tracking.
         self.update_frame_tracking(hdr);
@@ -213,12 +241,14 @@ impl ViewerQueue {
             if !self.evict_one_frame(hdr.frame_seq) {
                 break;
             }
-            evicted_frames += 1;
+            outcome.evicted_frames += 1;
         }
 
         // If still over capacity after eviction, drop this fragment.
         if self.fragments.len() >= self.capacity {
-            return evicted_frames;
+            outcome.dropped_incoming_fragment = true;
+            outcome.drop_reason = Some(StreamDropReason::QueueFull);
+            return outcome;
         }
 
         self.fragments.push_back(QueuedFragment {
@@ -227,7 +257,10 @@ impl ViewerQueue {
             is_priority: hdr.is_priority(),
         });
 
-        evicted_frames
+        if outcome.evicted_frames > 0 {
+            outcome.drop_reason = Some(StreamDropReason::EvictedOldestFrame);
+        }
+        outcome
     }
 
     /// Update frame tracking for an incoming fragment.
@@ -377,6 +410,7 @@ impl StreamForwarder {
         // Validate datagram size.
         if datagram.len() < VIDEO_HDR_LEN || datagram.len() > self.cfg.max_datagram_bytes {
             self.metrics.inc_drop_invalid();
+            self.metrics.inc_drop_by_reason(StreamDropReason::Malformed);
             return;
         }
 
@@ -385,6 +419,7 @@ impl StreamForwarder {
             Some(h) => h,
             None => {
                 self.metrics.inc_drop_invalid();
+                self.metrics.inc_drop_by_reason(StreamDropReason::Malformed);
                 return;
             }
         };
@@ -396,10 +431,14 @@ impl StreamForwarder {
                 Some(reg) if reg.sender_id == sender => reg.channel_id,
                 Some(_) => {
                     self.metrics.inc_drop_unauthorized();
+                    self.metrics
+                        .inc_drop_by_reason(StreamDropReason::Unauthorized);
                     return;
                 }
                 None => {
                     self.metrics.inc_drop_unauthorized();
+                    self.metrics
+                        .inc_drop_by_reason(StreamDropReason::Unauthorized);
                     return;
                 }
             }
@@ -417,13 +456,19 @@ impl StreamForwarder {
         for viewer_id in viewer_ids {
             let sessions = self.sessions.get_sessions(viewer_id).await;
             for (session_id, dtx) in sessions {
-                let evicted = self
+                let outcome = self
                     .enqueue_to_viewer(viewer_id, session_id, dtx, &datagram, &hdr)
                     .await;
-                if evicted > 0 {
-                    self.metrics.inc_frames_evicted(evicted);
+                if outcome.evicted_frames > 0 {
+                    self.metrics.inc_frames_evicted(outcome.evicted_frames);
                 }
-                forwarded += 1;
+                if let Some(reason) = outcome.drop_reason {
+                    self.metrics.inc_drop_by_reason(reason);
+                }
+                if !outcome.dropped_incoming_fragment {
+                    forwarded += 1;
+                    self.metrics.inc_forwarded_bytes(datagram.len());
+                }
             }
         }
 
@@ -434,7 +479,6 @@ impl StreamForwarder {
     }
 
     /// Enqueue a datagram to a specific viewer session's frame-aware queue.
-    /// Returns number of frames evicted.
     async fn enqueue_to_viewer(
         &self,
         viewer: UserId,
@@ -442,7 +486,7 @@ impl StreamForwarder {
         dtx: Arc<dyn DatagramTx>,
         datagram: &Bytes,
         hdr: &VideoHeader,
-    ) -> usize {
+    ) -> PushOutcome {
         let key = (viewer, session_id);
         let mut queues = self.viewer_queues.write().await;
         let egress = queues.entry(key).or_insert_with(|| ViewerEgress {
@@ -460,15 +504,21 @@ impl StreamForwarder {
 
     /// Flush all viewer queues: send queued fragments to their connections.
     async fn flush_viewer_queues(&self) {
-        let mut queues = self.viewer_queues.write().await;
-        let mut dead_keys = Vec::new();
-
-        for (key, egress) in queues.iter_mut() {
-            if egress.queue.len() == 0 {
-                continue;
+        let mut pending: Vec<((UserId, String), Arc<dyn DatagramTx>, Vec<Bytes>)> = Vec::new();
+        {
+            let mut queues = self.viewer_queues.write().await;
+            for (key, egress) in queues.iter_mut() {
+                if egress.queue.len() == 0 {
+                    continue;
+                }
+                let datagrams: Vec<Bytes> = egress.queue.drain().collect();
+                pending.push((key.clone(), egress.dtx.clone(), datagrams));
             }
-            let dtx = egress.dtx.clone();
-            for datagram in egress.queue.drain() {
+        }
+
+        let mut dead_keys = Vec::new();
+        for (key, dtx, datagrams) in pending {
+            for datagram in datagrams {
                 if let Err(e) = dtx.send(datagram).await {
                     debug!(error = %e, "viewer session send failed");
                     dead_keys.push(key.clone());
@@ -477,8 +527,11 @@ impl StreamForwarder {
             }
         }
 
-        for key in dead_keys {
-            queues.remove(&key);
+        if !dead_keys.is_empty() {
+            let mut queues = self.viewer_queues.write().await;
+            for key in dead_keys {
+                queues.remove(&key);
+            }
         }
     }
 
@@ -504,7 +557,7 @@ mod tests {
         flags: u8,
     ) -> Bytes {
         let mut buf = BytesMut::with_capacity(VIDEO_HDR_LEN + 10);
-        buf.put_u8(vp_voice::DATAGRAM_VERSION);
+        buf.put_u8(vp_voice::VIDEO_VERSION);
         buf.put_u8(vp_voice::DATAGRAM_KIND_VIDEO);
         buf.put_u64_le(stream_tag);
         buf.put_u8(0); // layer_id
@@ -550,7 +603,7 @@ mod tests {
     #[test]
     fn parse_rejects_wrong_kind() {
         let mut buf = [0u8; VIDEO_HDR_LEN];
-        buf[0] = vp_voice::DATAGRAM_VERSION;
+        buf[0] = vp_voice::VIDEO_VERSION;
         buf[1] = 0xFF;
         assert!(VideoHeader::parse(&buf).is_none());
     }
@@ -558,7 +611,7 @@ mod tests {
     #[test]
     fn parse_rejects_zero_frag_total() {
         let mut buf = BytesMut::with_capacity(VIDEO_HDR_LEN);
-        buf.put_u8(vp_voice::DATAGRAM_VERSION);
+        buf.put_u8(vp_voice::VIDEO_VERSION);
         buf.put_u8(vp_voice::DATAGRAM_KIND_VIDEO);
         buf.put_u64_le(1);
         buf.put_u8(0);
@@ -597,23 +650,30 @@ mod tests {
 
         // Frame 1: 2 fragments (priority = keyframe).
         let dg1 = make_test_datagram(1, 1, 0, 2, vp_voice::VIDEO_FLAG_KEYFRAME);
-        q.push(dg1.clone(), &make_hdr(1, 0, 2, vp_voice::VIDEO_FLAG_KEYFRAME));
-        q.push(dg1.clone(), &make_hdr(1, 1, 2, vp_voice::VIDEO_FLAG_KEYFRAME));
+        q.push(
+            dg1.clone(),
+            &make_hdr(1, 0, 2, vp_voice::VIDEO_FLAG_KEYFRAME),
+        );
+        q.push(
+            dg1.clone(),
+            &make_hdr(1, 1, 2, vp_voice::VIDEO_FLAG_KEYFRAME),
+        );
 
         assert_eq!(q.len(), 4);
 
         // Frame 2: new non-priority frame. Should evict frame 0 (oldest non-priority).
         let dg2 = make_test_datagram(1, 2, 0, 1, 0);
-        let evicted = q.push(dg2, &make_hdr(2, 0, 1, 0));
-        assert!(evicted >= 1, "should have evicted at least one frame");
+        let outcome = q.push(dg2, &make_hdr(2, 0, 1, 0));
+        assert!(
+            outcome.evicted_frames >= 1,
+            "should have evicted at least one frame"
+        );
 
         // Frame 0 should be gone, frame 1 (priority) should remain.
         let remaining: Vec<_> = q.drain().collect();
         let remaining_seqs: Vec<u32> = remaining
             .iter()
-            .map(|b| {
-                u32::from_le_bytes([b[12], b[13], b[14], b[15]])
-            })
+            .map(|b| u32::from_le_bytes([b[12], b[13], b[14], b[15]]))
             .collect();
         assert!(
             !remaining_seqs.contains(&0),
@@ -640,8 +700,8 @@ mod tests {
 
         // Frame 2: triggers eviction. Only priority frames exist → evict oldest.
         let dg2 = make_test_datagram(1, 2, 0, 1, vp_voice::VIDEO_FLAG_KEYFRAME);
-        let evicted = q.push(dg2, &make_hdr(2, 0, 1, vp_voice::VIDEO_FLAG_KEYFRAME));
-        assert!(evicted >= 1);
+        let outcome = q.push(dg2, &make_hdr(2, 0, 1, vp_voice::VIDEO_FLAG_KEYFRAME));
+        assert!(outcome.evicted_frames >= 1);
 
         let remaining: Vec<_> = q.drain().collect();
         // Should keep frame 1 and frame 2 (newest), evict frame 0 (oldest).
@@ -657,11 +717,8 @@ mod tests {
         q.push(dg.clone(), &make_hdr(1, 0, 1, 0));
 
         // Queue is full (2 fragments). Next push evicts.
-        let evicted = q.push(
-            make_test_datagram(1, 2, 0, 1, 0),
-            &make_hdr(2, 0, 1, 0),
-        );
-        assert!(evicted >= 1);
+        let outcome = q.push(make_test_datagram(1, 2, 0, 1, 0), &make_hdr(2, 0, 1, 0));
+        assert!(outcome.evicted_frames >= 1 || outcome.dropped_incoming_fragment);
         // We should still have at most 2 fragments.
         assert!(q.len() <= 2);
     }
@@ -705,7 +762,11 @@ mod tests {
     #[async_trait::async_trait]
     impl ViewerProvider for FakeViewers {
         async fn list_viewers(&self, _ch: ChannelId, exclude: UserId) -> Vec<UserId> {
-            self.viewers.iter().copied().filter(|u| *u != exclude).collect()
+            self.viewers
+                .iter()
+                .copied()
+                .filter(|u| *u != exclude)
+                .collect()
         }
     }
 
@@ -731,16 +792,22 @@ mod tests {
             Arc::new(NoopStreamMetrics),
         );
 
-        fwd.register_stream(stream_tag, StreamRegistration {
-            sender_id: sender,
-            channel_id: channel,
-        })
+        fwd.register_stream(
+            stream_tag,
+            StreamRegistration {
+                sender_id: sender,
+                channel_id: channel,
+            },
+        )
         .await;
 
         let dg = make_test_datagram(stream_tag, 0, 0, 1, 0);
         fwd.handle_incoming_datagram(sender, dg).await;
 
-        assert!(sent.load(Ordering::Relaxed) > 0, "viewer should have received datagram");
+        assert!(
+            sent.load(Ordering::Relaxed) > 0,
+            "viewer should have received datagram"
+        );
     }
 
     #[tokio::test]
@@ -778,15 +845,217 @@ mod tests {
             Arc::new(NoopStreamMetrics),
         );
 
-        fwd.register_stream(42, StreamRegistration {
-            sender_id: real_sender,
-            channel_id: channel,
-        })
+        fwd.register_stream(
+            42,
+            StreamRegistration {
+                sender_id: real_sender,
+                channel_id: channel,
+            },
+        )
         .await;
 
         // Imposter sends on real_sender's stream → should be rejected.
         let dg = make_test_datagram(42, 0, 0, 1, 0);
         fwd.handle_incoming_datagram(imposter, dg).await;
         // No panic = success.
+    }
+
+    #[test]
+    fn parse_rejects_frag_total_above_cap() {
+        let mut buf = BytesMut::with_capacity(VIDEO_HDR_LEN + 8);
+        buf.put_u8(vp_voice::VIDEO_VERSION);
+        buf.put_u8(vp_voice::DATAGRAM_KIND_VIDEO);
+        buf.put_u64_le(7);
+        buf.put_u8(0);
+        buf.put_u8(0);
+        buf.put_u32_le(1);
+        buf.put_u16_le(0);
+        buf.put_u16_le(vp_voice::MAX_FRAGS_PER_FRAME + 1);
+        buf.put_u32_le(10);
+        buf.extend_from_slice(b"x");
+        assert!(VideoHeader::parse(&buf.freeze()).is_none());
+    }
+
+    #[test]
+    fn queue_reports_queue_full_drop_reason() {
+        let mut q = ViewerQueue::new(1, 1);
+        let current = make_test_datagram(1, 0, 0, 1, 0);
+        let _ = q.push(current, &make_hdr(0, 0, 1, 0));
+        let second = make_test_datagram(1, 0, 0, 1, 0);
+        let outcome = q.push(second, &make_hdr(0, 0, 1, 0));
+        assert!(outcome.dropped_incoming_fragment);
+        assert_eq!(outcome.drop_reason, Some(StreamDropReason::QueueFull));
+    }
+
+    struct BlockingTx {
+        started: Arc<tokio::sync::Notify>,
+        unblock: Arc<tokio::sync::Notify>,
+        first_send: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl DatagramTx for BlockingTx {
+        async fn send(&self, _bytes: Bytes) -> Result<()> {
+            if self
+                .first_send
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                self.started.notify_waiters();
+                self.unblock.notified().await;
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn flush_does_not_hold_global_lock_while_awaiting_send() {
+        let sender = UserId::new();
+        let viewer_a = UserId::new();
+        let viewer_b = UserId::new();
+        let channel = ChannelId::new();
+        let stream_tag: u64 = 55;
+
+        let started = Arc::new(tokio::sync::Notify::new());
+        let unblock = Arc::new(tokio::sync::Notify::new());
+
+        let sessions: Arc<dyn SessionRegistry> = Arc::new(FakeSessions {
+            sessions: vec![
+                (
+                    viewer_a,
+                    "a".into(),
+                    Arc::new(BlockingTx {
+                        started: started.clone(),
+                        unblock: unblock.clone(),
+                        first_send: std::sync::atomic::AtomicBool::new(true),
+                    }),
+                ),
+                (
+                    viewer_b,
+                    "b".into(),
+                    Arc::new(FakeTx {
+                        sent: Arc::new(AtomicUsize::new(0)),
+                    }),
+                ),
+            ],
+        });
+        let viewers: Arc<dyn ViewerProvider> = Arc::new(FakeViewers {
+            viewers: vec![sender, viewer_a, viewer_b],
+        });
+
+        let fwd = Arc::new(StreamForwarder::new(
+            StreamForwarderConfig::default(),
+            sessions,
+            viewers,
+            Arc::new(NoopStreamMetrics),
+        ));
+
+        fwd.register_stream(
+            stream_tag,
+            StreamRegistration {
+                sender_id: sender,
+                channel_id: channel,
+            },
+        )
+        .await;
+
+        let first = make_test_datagram(stream_tag, 1, 0, 1, 0);
+        let second = make_test_datagram(stream_tag, 2, 0, 1, 0);
+
+        let fwd_clone = fwd.clone();
+        let sender_task = tokio::spawn(async move {
+            fwd_clone.handle_incoming_datagram(sender, first).await;
+        });
+
+        tokio::time::timeout(std::time::Duration::from_millis(200), started.notified())
+            .await
+            .expect("blocking send should start");
+
+        tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            fwd.handle_incoming_datagram(sender, second),
+        )
+        .await
+        .expect("second enqueue should not block on global lock");
+
+        unblock.notify_waiters();
+        sender_task.await.unwrap();
+    }
+
+    struct TestMetrics {
+        drops: Arc<AtomicUsize>,
+        evicted: Arc<AtomicUsize>,
+        forwarded_bytes: Arc<AtomicUsize>,
+    }
+
+    impl StreamMetrics for TestMetrics {
+        fn inc_rx_packets(&self) {}
+        fn inc_rx_bytes(&self, _n: usize) {}
+        fn inc_drop_invalid(&self) {}
+        fn inc_drop_unauthorized(&self) {}
+        fn inc_drop_by_reason(&self, _reason: StreamDropReason) {
+            self.drops.fetch_add(1, Ordering::Relaxed);
+        }
+        fn inc_forwarded(&self, _fanout: usize) {}
+        fn inc_forwarded_bytes(&self, n: usize) {
+            self.forwarded_bytes.fetch_add(n, Ordering::Relaxed);
+        }
+        fn inc_frames_evicted(&self, count: usize) {
+            self.evicted.fetch_add(count, Ordering::Relaxed);
+        }
+    }
+
+    #[tokio::test]
+    async fn metrics_increment_on_queue_pressure() {
+        let sender = UserId::new();
+        let viewer = UserId::new();
+        let channel = ChannelId::new();
+        let stream_tag: u64 = 999;
+
+        let sent = Arc::new(AtomicUsize::new(0));
+        let sessions: Arc<dyn SessionRegistry> = Arc::new(FakeSessions {
+            sessions: vec![(viewer, "v1".into(), Arc::new(FakeTx { sent }))],
+        });
+        let viewers: Arc<dyn ViewerProvider> = Arc::new(FakeViewers {
+            viewers: vec![sender, viewer],
+        });
+
+        let drops = Arc::new(AtomicUsize::new(0));
+        let evicted = Arc::new(AtomicUsize::new(0));
+        let forwarded_bytes = Arc::new(AtomicUsize::new(0));
+        let metrics: Arc<dyn StreamMetrics> = Arc::new(TestMetrics {
+            drops: drops.clone(),
+            evicted: evicted.clone(),
+            forwarded_bytes: forwarded_bytes.clone(),
+        });
+
+        let fwd = StreamForwarder::new(
+            StreamForwarderConfig {
+                max_datagram_bytes: vp_voice::MAX_VIDEO_DATAGRAM_BYTES,
+                per_viewer_queue_fragments: 1,
+                per_viewer_max_frames: 1,
+            },
+            sessions,
+            viewers,
+            metrics,
+        );
+
+        fwd.register_stream(
+            stream_tag,
+            StreamRegistration {
+                sender_id: sender,
+                channel_id: channel,
+            },
+        )
+        .await;
+
+        fwd.handle_incoming_datagram(sender, Bytes::from_static(b"bad"))
+            .await;
+
+        let a = make_test_datagram(stream_tag, 1, 0, 1, 0);
+        fwd.handle_incoming_datagram(sender, a).await;
+
+        assert!(drops.load(Ordering::Relaxed) >= 1);
+        assert!(forwarded_bytes.load(Ordering::Relaxed) > 0);
+        assert!(evicted.load(Ordering::Relaxed) <= 1);
     }
 }

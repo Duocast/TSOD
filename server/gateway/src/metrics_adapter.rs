@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
-use vp_media::voice_forwarder::VoiceMetrics;
-use vp_metrics::{labels::LabelPolicy, voice::VoiceMetricsImpl};
+use vp_media::{
+    stream_forwarder::{StreamDropReason, StreamMetrics},
+    voice_forwarder::VoiceMetrics,
+};
+use vp_metrics::{labels::LabelPolicy, stream::StreamMetricsImpl, voice::VoiceMetricsImpl};
 
 pub fn voice_metrics() -> Arc<dyn VoiceMetrics> {
     Arc::new(GatewayVoiceMetrics {
@@ -40,5 +43,42 @@ impl VoiceMetrics for GatewayVoiceMetrics {
     }
     fn inc_forwarded(&self, fanout: usize) {
         self.inner.forwarded(fanout);
+    }
+}
+
+pub fn stream_metrics() -> Arc<dyn StreamMetrics> {
+    Arc::new(GatewayStreamMetrics {
+        inner: StreamMetricsImpl::new("vp", LabelPolicy::default()),
+    })
+}
+
+struct GatewayStreamMetrics {
+    inner: StreamMetricsImpl,
+}
+
+impl StreamMetrics for GatewayStreamMetrics {
+    fn inc_rx_packets(&self) {
+        self.inner.rx_packet();
+    }
+    fn inc_rx_bytes(&self, n: usize) {
+        self.inner.rx_bytes(n);
+    }
+    fn inc_drop_invalid(&self) {
+        self.inner.drop_reason("invalid");
+    }
+    fn inc_drop_unauthorized(&self) {
+        self.inner.drop_reason("unauthorized");
+    }
+    fn inc_drop_by_reason(&self, reason: StreamDropReason) {
+        self.inner.drop_reason(reason.as_label());
+    }
+    fn inc_forwarded(&self, fanout: usize) {
+        self.inner.forwarded(fanout);
+    }
+    fn inc_forwarded_bytes(&self, n: usize) {
+        self.inner.forwarded_bytes(n);
+    }
+    fn inc_frames_evicted(&self, count: usize) {
+        self.inner.frames_evicted(count);
     }
 }

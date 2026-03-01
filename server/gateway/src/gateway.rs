@@ -173,7 +173,7 @@ impl Gateway {
         tokio::spawn(async move {
             while let Ok(d) = conn_dg.read_datagram().await {
                 // Dispatch: byte[1] == 0x02 → video, otherwise → voice.
-                if d.len() >= 2 && d[1] == vp_voice::DATAGRAM_KIND_VIDEO {
+                if is_video_datagram(&d) {
                     video.handle_incoming_datagram(user_for_dg, d).await;
                 } else {
                     voice.handle_incoming(user_for_dg, d).await;
@@ -1199,9 +1199,13 @@ fn unix_ms_u64() -> u64 {
         .as_millis() as u64
 }
 
+fn is_video_datagram(d: &[u8]) -> bool {
+    d.len() >= 2 && d[0] == vp_voice::VIDEO_VERSION && d[1] == vp_voice::DATAGRAM_KIND_VIDEO
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{error_from_anyhow, normalize_preferred_display_name};
+    use super::{error_from_anyhow, is_video_datagram, normalize_preferred_display_name};
     use crate::proto::voiceplatform::v1 as pb;
     use vp_control::ControlError;
 
@@ -1210,6 +1214,16 @@ mod tests {
         let err = anyhow::Error::new(ControlError::PermissionDenied("denied"));
         let mapped = error_from_anyhow(&err);
         assert_eq!(mapped.code, pb::error::Code::PermissionDenied as i32);
+    }
+
+    #[test]
+    fn voice_flags_0x02_is_not_video_datagram() {
+        // Voice packets use byte[1] as flags; 0x02 (e.g., FEC) must not route as video.
+        let voice_like = [vp_voice::VOICE_VERSION, 0x02, 0, 0];
+        assert!(!is_video_datagram(&voice_like));
+
+        let video = [vp_voice::VIDEO_VERSION, vp_voice::DATAGRAM_KIND_VIDEO, 0, 0];
+        assert!(is_video_datagram(&video));
     }
 
     #[test]
