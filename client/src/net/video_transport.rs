@@ -78,6 +78,7 @@ pub struct VideoSender {
     frame_seq: u32,
     pool: BufferPool,
     max_frame_bytes: usize,
+    max_frags_per_frame: usize,
     pacer: Pacer,
     force_recovery_next_frame: bool,
     last_recovery_request_at: Option<Instant>,
@@ -94,10 +95,13 @@ impl VideoSender {
             frame_seq: 0,
             pool: BufferPool::new(VIDEO_HDR_LEN + MAX_VIDEO_PAYLOAD, max_fragments_per_frame),
             max_frame_bytes: vp_voice::MAX_FRAGS_PER_FRAME as usize * MAX_VIDEO_PAYLOAD,
+            max_frags_per_frame: vp_voice::MAX_FRAGS_PER_FRAME as usize,
             pacer: Pacer::new(
-                8_000_000,
+                PacingPolicy {
+                    target_bps: 8_000_000,
+                    max_burst_packets: 3,
+                },
                 vp_voice::MAX_VIDEO_DATAGRAM_BYTES,
-                vp_voice::MAX_VIDEO_DATAGRAM_BYTES * 3,
             ),
             force_recovery_next_frame: false,
             last_recovery_request_at: None,
@@ -121,6 +125,23 @@ impl VideoSender {
         self.force_recovery_next_frame = true;
     }
 
+    /// Set per-stream sender pacing.
+    pub fn set_pacing_policy(&mut self, target_bps: u64, max_burst_packets: usize) {
+        self.pacer.set_policy(
+            PacingPolicy {
+                target_bps,
+                max_burst_packets,
+            },
+            vp_voice::MAX_VIDEO_DATAGRAM_BYTES,
+        );
+    }
+
+    #[inline]
+    fn on_frame_too_large(&mut self) {
+        // Hook point for adaptive downshift behavior (e.g. fps / scale reduction).
+        self.mark_next_frame_recovery();
+    }
+
     /// Fragment an encoded frame into datagrams, calling `emit` for each fragment.
     ///
     /// Steady-state: no allocations if pool has enough buffers.
@@ -140,7 +161,7 @@ impl VideoSender {
         F: FnMut(Bytes),
     {
         if encoded_frame.len() > self.max_frame_bytes {
-            self.mark_next_frame_recovery();
+            self.on_frame_too_large();
             return Err(VideoSendError::FrameTooLarge);
         }
 
@@ -154,7 +175,8 @@ impl VideoSender {
             (encoded_frame.len() + max_payload - 1) / max_payload
         };
 
-        if frag_total > vp_voice::MAX_FRAGS_PER_FRAME as usize {
+        if frag_total > self.max_frags_per_frame {
+            self.on_frame_too_large();
             return Err(VideoSendError::FrameTooLarge);
         }
 
@@ -204,24 +226,117 @@ impl VideoSender {
 
         Ok(())
     }
+
+    /// Async variant of [`send_frame`] for tokio tasks.
+    ///
+    /// Uses `tokio::time::sleep` for pacing so runtime worker threads are never blocked.
+    pub async fn send_frame_async<F>(
+        &mut self,
+        ts_ms: u32,
+        is_keyframe: bool,
+        encoded_frame: &[u8],
+        mut emit: F,
+    ) -> Result<(), VideoSendError>
+    where
+        F: FnMut(Bytes),
+    {
+        if encoded_frame.len() > self.max_frame_bytes {
+            self.on_frame_too_large();
+            return Err(VideoSendError::FrameTooLarge);
+        }
+
+        let frame_seq = self.frame_seq;
+        self.frame_seq = self.frame_seq.wrapping_add(1);
+
+        let max_payload = MAX_VIDEO_PAYLOAD;
+        let frag_total = if encoded_frame.is_empty() {
+            1
+        } else {
+            (encoded_frame.len() + max_payload - 1) / max_payload
+        };
+
+        if frag_total > self.max_frags_per_frame {
+            self.on_frame_too_large();
+            return Err(VideoSendError::FrameTooLarge);
+        }
+
+        let frag_total = frag_total as u16;
+
+        let mut flags = 0u8;
+        if is_keyframe {
+            flags |= vp_voice::VIDEO_FLAG_KEYFRAME;
+        }
+        if self.force_recovery_next_frame {
+            flags |= vp_voice::VIDEO_FLAG_RECOVERY;
+            self.force_recovery_next_frame = false;
+        }
+
+        for (i, chunk) in encoded_frame.chunks(max_payload).enumerate().chain(
+            if encoded_frame.is_empty() {
+                Some((0, &[][..]))
+            } else {
+                None
+            }
+            .into_iter(),
+        ) {
+            let frag_idx = i as u16;
+            let mut frag_flags = flags;
+            if frag_idx + 1 == frag_total {
+                frag_flags |= vp_voice::VIDEO_FLAG_END_OF_FRAME;
+            }
+
+            let hdr = VideoHeader {
+                stream_tag: self.stream_tag,
+                layer_id: self.layer_id,
+                flags: frag_flags,
+                frame_seq,
+                frag_idx,
+                frag_total,
+                ts_ms,
+            };
+
+            self.pacer
+                .acquire_async((VIDEO_HDR_LEN + chunk.len()) as u64)
+                .await;
+            let mut buf = self.pool.get();
+            let datagram = video_datagram::write_video_datagram_into(&mut buf, &hdr, chunk);
+            self.pool.put(buf);
+            emit(datagram);
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PacingPolicy {
+    target_bps: u64,
+    max_burst_packets: usize,
 }
 
 #[derive(Debug, Clone)]
 struct Pacer {
-    target_bps: u64,
+    policy: PacingPolicy,
     burst_bytes: u64,
     tokens: f64,
     last_refill: Instant,
 }
 
 impl Pacer {
-    fn new(target_bps: u64, _mtu_bytes: usize, burst_bytes: usize) -> Self {
+    fn new(policy: PacingPolicy, mtu_bytes: usize) -> Self {
+        let burst_bytes = (policy.max_burst_packets * mtu_bytes) as u64;
         Self {
-            target_bps,
-            burst_bytes: burst_bytes as u64,
+            policy,
+            burst_bytes,
             tokens: burst_bytes as f64,
             last_refill: Instant::now(),
         }
+    }
+
+    fn set_policy(&mut self, policy: PacingPolicy, mtu_bytes: usize) {
+        self.policy = policy;
+        self.burst_bytes = (policy.max_burst_packets * mtu_bytes) as u64;
+        self.tokens = self.tokens.min(self.burst_bytes as f64);
     }
 
     fn refill(&mut self, now: Instant) {
@@ -229,7 +344,7 @@ impl Pacer {
             .saturating_duration_since(self.last_refill)
             .as_secs_f64();
         self.last_refill = now;
-        let add = elapsed * (self.target_bps as f64 / 8.0);
+        let add = elapsed * (self.policy.target_bps as f64 / 8.0);
         self.tokens = (self.tokens + add).min(self.burst_bytes as f64);
     }
 
@@ -241,7 +356,7 @@ impl Pacer {
         } else {
             let deficit = bytes as f64 - self.tokens;
             self.tokens = 0.0;
-            Duration::from_secs_f64(deficit / (self.target_bps as f64 / 8.0))
+            Duration::from_secs_f64(deficit / (self.policy.target_bps as f64 / 8.0))
         }
     }
 
@@ -249,6 +364,13 @@ impl Pacer {
         let delay = self.required_delay(bytes, Instant::now());
         if !delay.is_zero() {
             std::thread::sleep(delay);
+        }
+    }
+
+    async fn acquire_async(&mut self, bytes: u64) {
+        let delay = self.required_delay(bytes, Instant::now());
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
         }
     }
 }
@@ -712,11 +834,50 @@ mod tests {
 
     #[test]
     fn pacer_delays_when_burst_exceeded() {
-        let mut pacer = Pacer::new(8_000, 1200, 1200);
+        let mut pacer = Pacer::new(
+            PacingPolicy {
+                target_bps: 8_000,
+                max_burst_packets: 1,
+            },
+            1200,
+        );
         let now = Instant::now();
         assert_eq!(pacer.required_delay(1200, now), Duration::ZERO);
         let delay = pacer.required_delay(1200, now);
         assert!(delay >= Duration::from_millis(1000));
+    }
+
+    #[tokio::test]
+    async fn sender_async_keyframe_is_paced_and_spaced() {
+        let mut sender = VideoSender::new(1, 0, 8);
+        sender.set_pacing_policy(8_000, 1);
+
+        let mut emitted_at = Vec::new();
+        let frame = vec![0x11u8; MAX_VIDEO_PAYLOAD * 3];
+        sender
+            .send_frame_async(0, true, &frame, |_dg| emitted_at.push(Instant::now()))
+            .await
+            .unwrap();
+
+        assert_eq!(emitted_at.len(), 3);
+        let spacing1 = emitted_at[1].duration_since(emitted_at[0]);
+        let spacing2 = emitted_at[2].duration_since(emitted_at[1]);
+
+        // At 8kbps and ~1200B payload, each packet should be delayed by ~1s.
+        // Keep threshold relaxed for scheduler jitter; we only need bounded spacing.
+        assert!(spacing1 >= Duration::from_millis(500));
+        assert!(spacing2 >= Duration::from_millis(500));
+    }
+
+    #[tokio::test]
+    async fn sender_async_rejects_too_many_fragments() {
+        let mut sender = VideoSender::new(1, 0, 4);
+        let frame = vec![0u8; MAX_VIDEO_PAYLOAD * (vp_voice::MAX_FRAGS_PER_FRAME as usize + 1)];
+        let err = sender
+            .send_frame_async(0, false, &frame, |_dg| {})
+            .await
+            .unwrap_err();
+        assert_eq!(err, VideoSendError::FrameTooLarge);
     }
 
     #[test]
