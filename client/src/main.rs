@@ -132,6 +132,7 @@ struct VideoRuntimeCounters {
     completed_frames: AtomicU64,
     dropped_no_subscription: AtomicU64,
     dropped_channel_full: AtomicU64,
+    sender_frame_errors: AtomicU64,
     last_frame_size_bytes: AtomicU64,
     last_frame_seq: AtomicU32,
     last_frame_ts_ms: AtomicU32,
@@ -2038,6 +2039,7 @@ async fn connect_and_run_session(
                     completed_frames_per_sec: stream_state.counters.completed_frames.swap(0, Ordering::Relaxed),
                     dropped_no_subscription: stream_state.counters.dropped_no_subscription.load(Ordering::Relaxed),
                     dropped_channel_full: stream_state.counters.dropped_channel_full.load(Ordering::Relaxed),
+                    sender_frame_errors: stream_state.counters.sender_frame_errors.load(Ordering::Relaxed),
                     last_frame_size_bytes: stream_state.counters.last_frame_size_bytes.load(Ordering::Relaxed) as usize,
                     last_frame_seq: stream_state.counters.last_frame_seq.load(Ordering::Relaxed),
                     last_frame_ts_ms: stream_state.counters.last_frame_ts_ms.load(Ordering::Relaxed),
@@ -2551,10 +2553,11 @@ async fn connect_and_run_session(
                                         let (share_stop_tx, mut share_stop_rx) = watch::channel(false);
                                         active_share_stop = Some(share_stop_tx);
                                         let conn_send = conn.clone();
+                                        let video_counters = stream_state.counters.clone();
                                         tokio::spawn(async move {
                                             let mut sender = VideoSender::new(stream_tag, 0, 16);
-                                            const WIDTH: u16 = 640;
-                                            const HEIGHT: u16 = 360;
+                                            const WIDTH: u16 = 160;
+                                            const HEIGHT: u16 = 90;
                                             const STRIDE_BYTES: u32 = WIDTH as u32 * 4;
                                             let mut frame_idx = 0u32;
                                             let mut rgba = vec![0u8; WIDTH as usize * HEIGHT as usize * 4];
@@ -2580,9 +2583,12 @@ async fn connect_and_run_session(
                                                         }
                                                         synthetic[8..].copy_from_slice(&rgba);
                                                         let ts_ms = unix_ms() as u32;
-                                                        let _ = sender.send_frame_async(ts_ms, frame_idx % 60 == 0, &synthetic, |dg| {
+                                                        if let Err(e) = sender.send_frame_async(ts_ms, frame_idx % 60 == 0, &synthetic, |dg| {
                                                             let _ = conn_send.send_datagram(dg);
-                                                        }).await;
+                                                        }).await {
+                                                            video_counters.sender_frame_errors.fetch_add(1, Ordering::Relaxed);
+                                                            warn!(error=?e, frame_size=synthetic.len(), "[video] send_frame failed");
+                                                        }
                                                         frame_idx = frame_idx.wrapping_add(1);
                                                     }
                                                 }

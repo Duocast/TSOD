@@ -60,8 +60,8 @@ pub fn show(ui: &mut egui::Ui, model: &UiModel) {
                     dbg.video_datagrams_per_sec, dbg.completed_frames_per_sec
                 ));
                 ui.label(format!(
-                    "Drops (no subscription): {} | Drops (channel full): {}",
-                    dbg.dropped_no_subscription, dbg.dropped_channel_full
+                    "Drops (no subscription): {} | Drops (channel full): {} | Sender frame errors: {}",
+                    dbg.dropped_no_subscription, dbg.dropped_channel_full, dbg.sender_frame_errors
                 ));
                 ui.label(format!(
                     "Last frame: seq={} ts_ms={} size={} bytes",

@@ -477,6 +477,7 @@ pub struct StreamDebugView {
     pub completed_frames_per_sec: u64,
     pub dropped_no_subscription: u64,
     pub dropped_channel_full: u64,
+    pub sender_frame_errors: u64,
     pub last_frame_size_bytes: usize,
     pub last_frame_seq: u32,
     pub last_frame_ts_ms: u32,
