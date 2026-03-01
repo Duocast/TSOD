@@ -3104,6 +3104,7 @@ async fn voice_send_loop(
     let mut vad_report_counter = 0u32;
     let mut stream_ts_ms = 0u32;
     let mut last_local_speaking = false;
+    let mut last_oversize_warn = Instant::now();
     let mut vad_hysteresis =
         audio::dsp::vad::VadHysteresis::from_timing(0.6, 0.45, 60, 300, frame_ms);
 
