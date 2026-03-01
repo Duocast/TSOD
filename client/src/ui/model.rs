@@ -1000,7 +1000,7 @@ pub fn enumerate_share_sources() -> Vec<ShareSourceOption> {
             return BOOL(1);
         }
 
-        windows.push((format!("window-hwnd-{}", hwnd.0), title));
+        windows.push((format!("window-hwnd-{}", hwnd.0 as isize), title));
         BOOL(1)
     }
 
@@ -1042,7 +1042,7 @@ pub fn enumerate_share_sources() -> Vec<ShareSourceOption> {
 
     let _ = unsafe {
         EnumDisplayMonitors(
-            Some(HDC(0)),
+            None,
             None,
             Some(enum_monitors_callback),
             LPARAM(&mut screens as *mut _ as isize),
