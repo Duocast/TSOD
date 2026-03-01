@@ -13,9 +13,12 @@
 use bytes::{Bytes, BytesMut};
 use std::collections::VecDeque;
 
-use super::video_datagram::{
-    self, VideoHeader, VIDEO_HDR_LEN, MAX_VIDEO_PAYLOAD,
-};
+use super::video_datagram::{self, VideoHeader, MAX_VIDEO_PAYLOAD, VIDEO_HDR_LEN};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VideoSendError {
+    FrameTooLarge,
+}
 
 // ── VideoSender: allocation-free packetizer ───────────────────────────
 
@@ -82,10 +85,7 @@ impl VideoSender {
             stream_tag,
             layer_id,
             frame_seq: 0,
-            pool: BufferPool::new(
-                VIDEO_HDR_LEN + MAX_VIDEO_PAYLOAD,
-                max_fragments_per_frame,
-            ),
+            pool: BufferPool::new(VIDEO_HDR_LEN + MAX_VIDEO_PAYLOAD, max_fragments_per_frame),
         }
     }
 
@@ -103,7 +103,8 @@ impl VideoSender {
         is_keyframe: bool,
         encoded_frame: &[u8],
         mut emit: F,
-    ) where
+    ) -> Result<(), VideoSendError>
+    where
         F: FnMut(Bytes),
     {
         let frame_seq = self.frame_seq;
@@ -113,8 +114,14 @@ impl VideoSender {
         let frag_total = if encoded_frame.is_empty() {
             1
         } else {
-            ((encoded_frame.len() + max_payload - 1) / max_payload) as u16
+            (encoded_frame.len() + max_payload - 1) / max_payload
         };
+
+        if frag_total > vp_voice::MAX_FRAGS_PER_FRAME as usize {
+            return Err(VideoSendError::FrameTooLarge);
+        }
+
+        let frag_total = frag_total as u16;
 
         let mut flags = 0u8;
         if is_keyframe {
@@ -152,6 +159,8 @@ impl VideoSender {
             self.pool.put(buf);
             emit(datagram);
         }
+
+        Ok(())
     }
 }
 
@@ -195,7 +204,7 @@ impl FrameSlot {
 
     /// Insert a fragment. Returns true if the frame is now complete.
     fn insert(&mut self, frag_idx: u16, payload: Bytes) -> bool {
-        if frag_idx >= self.frag_total || frag_idx >= 64 {
+        if frag_idx >= self.frag_total || frag_idx >= vp_voice::MAX_FRAGS_PER_FRAME {
             return false;
         }
         let bit = 1u64 << frag_idx;
@@ -245,14 +254,20 @@ pub struct ReassembledFrame {
 /// - Fragments are stored as `Bytes` (zero-copy slices of incoming datagrams).
 pub struct VideoReceiver {
     slots: VecDeque<FrameSlot>,
+    free_slots: Vec<FrameSlot>,
     max_slots: usize,
+    #[cfg(test)]
+    slot_allocations: usize,
 }
 
 impl VideoReceiver {
     pub fn new(max_in_flight_frames: usize) -> Self {
         Self {
             slots: VecDeque::with_capacity(max_in_flight_frames),
+            free_slots: Vec::with_capacity(max_in_flight_frames),
             max_slots: max_in_flight_frames,
+            #[cfg(test)]
+            slot_allocations: 0,
         }
     }
 
@@ -261,7 +276,7 @@ impl VideoReceiver {
     /// Returns `Some(ReassembledFrame)` if this fragment completed a frame.
     pub fn receive(&mut self, datagram: &Bytes) -> Option<ReassembledFrame> {
         let hdr = VideoHeader::parse(datagram)?;
-        let payload = Bytes::copy_from_slice(video_datagram::video_payload(datagram));
+        let payload = datagram.slice(VIDEO_HDR_LEN..);
 
         let key = ReassemblyKey {
             stream_tag: hdr.stream_tag,
@@ -277,48 +292,58 @@ impl VideoReceiver {
                 let complete = self.slots[idx].insert(hdr.frag_idx, payload);
                 if complete {
                     let mut slot = self.slots.remove(idx).unwrap();
-                    let fragments = slot
-                        .take_fragments()
-                        .into_iter()
-                        .flatten()
-                        .collect();
-                    return Some(ReassembledFrame {
+                    let fragments = slot.take_fragments().into_iter().flatten().collect();
+                    let frame = ReassembledFrame {
                         stream_tag: key.stream_tag,
                         layer_id: key.layer_id,
                         frame_seq: key.frame_seq,
                         ts_ms: slot.ts_ms,
                         is_keyframe: slot.is_keyframe,
                         fragments,
-                    });
+                    };
+                    slot.reset(key, hdr.frag_total, hdr.is_keyframe(), hdr.ts_ms);
+                    self.free_slots.push(slot);
+                    return Some(frame);
                 }
                 None
             }
             None => {
                 // New frame. Evict oldest if full.
                 if self.slots.len() >= self.max_slots {
-                    self.slots.pop_front(); // Evict oldest incomplete frame.
+                    if let Some(mut evicted) = self.slots.pop_front() {
+                        evicted.reset(
+                            evicted.key,
+                            evicted.frag_total,
+                            evicted.is_keyframe,
+                            evicted.ts_ms,
+                        );
+                        self.free_slots.push(evicted);
+                    }
                 }
-                let mut slot = FrameSlot::new(
-                    key,
-                    hdr.frag_total,
-                    hdr.is_keyframe(),
-                    hdr.ts_ms,
-                );
+                let mut slot = if let Some(mut reused) = self.free_slots.pop() {
+                    reused.reset(key, hdr.frag_total, hdr.is_keyframe(), hdr.ts_ms);
+                    reused
+                } else {
+                    #[cfg(test)]
+                    {
+                        self.slot_allocations += 1;
+                    }
+                    FrameSlot::new(key, hdr.frag_total, hdr.is_keyframe(), hdr.ts_ms)
+                };
                 let complete = slot.insert(hdr.frag_idx, payload);
                 if complete {
-                    let fragments = slot
-                        .take_fragments()
-                        .into_iter()
-                        .flatten()
-                        .collect();
-                    return Some(ReassembledFrame {
+                    let fragments = slot.take_fragments().into_iter().flatten().collect();
+                    let frame = ReassembledFrame {
                         stream_tag: key.stream_tag,
                         layer_id: key.layer_id,
                         frame_seq: key.frame_seq,
                         ts_ms: slot.ts_ms,
                         is_keyframe: slot.is_keyframe,
                         fragments,
-                    });
+                    };
+                    slot.reset(key, hdr.frag_total, hdr.is_keyframe(), hdr.ts_ms);
+                    self.free_slots.push(slot);
+                    return Some(frame);
                 }
                 self.slots.push_back(slot);
                 None
@@ -329,6 +354,16 @@ impl VideoReceiver {
     /// Number of in-flight frames currently being reassembled.
     pub fn in_flight(&self) -> usize {
         self.slots.len()
+    }
+
+    #[cfg(test)]
+    fn free_slot_count(&self) -> usize {
+        self.free_slots.len()
+    }
+
+    #[cfg(test)]
+    fn slot_allocations(&self) -> usize {
+        self.slot_allocations
     }
 }
 
@@ -392,7 +427,9 @@ mod tests {
         let frame = b"small frame data";
         let mut datagrams = Vec::new();
 
-        sender.send_frame(100, false, frame, |dg| datagrams.push(dg));
+        sender
+            .send_frame(100, false, frame, |dg| datagrams.push(dg))
+            .unwrap();
 
         assert_eq!(datagrams.len(), 1);
         let hdr = VideoHeader::parse(&datagrams[0]).unwrap();
@@ -411,7 +448,9 @@ mod tests {
         let frame = vec![0xABu8; MAX_VIDEO_PAYLOAD * 3 + 100];
         let mut datagrams = Vec::new();
 
-        sender.send_frame(200, true, &frame, |dg| datagrams.push(dg));
+        sender
+            .send_frame(200, true, &frame, |dg| datagrams.push(dg))
+            .unwrap();
 
         assert_eq!(datagrams.len(), 4);
         for (i, dg) in datagrams.iter().enumerate() {
@@ -433,10 +472,12 @@ mod tests {
         let mut seqs = Vec::new();
 
         for _ in 0..5 {
-            sender.send_frame(0, false, b"x", |dg| {
-                let hdr = VideoHeader::parse(&dg).unwrap();
-                seqs.push(hdr.frame_seq);
-            });
+            sender
+                .send_frame(0, false, b"x", |dg| {
+                    let hdr = VideoHeader::parse(&dg).unwrap();
+                    seqs.push(hdr.frame_seq);
+                })
+                .unwrap();
         }
 
         assert_eq!(seqs, vec![0, 1, 2, 3, 4]);
@@ -534,16 +575,52 @@ mod tests {
         let original = b"This is a test frame for the roundtrip".to_vec();
         let mut completed = None;
 
-        sender.send_frame(500, true, &original, |dg| {
-            if let Some(frame) = receiver.receive(&dg) {
-                completed = Some(frame);
-            }
-        });
+        sender
+            .send_frame(500, true, &original, |dg| {
+                if let Some(frame) = receiver.receive(&dg) {
+                    completed = Some(frame);
+                }
+            })
+            .unwrap();
 
         let frame = completed.expect("should have reassembled");
         assert_eq!(frame.stream_tag, 42);
         assert!(frame.is_keyframe);
-        let reassembled: Vec<u8> = frame.fragments.iter().flat_map(|b| b.iter().copied()).collect();
+        let reassembled: Vec<u8> = frame
+            .fragments
+            .iter()
+            .flat_map(|b| b.iter().copied())
+            .collect();
         assert_eq!(reassembled, original);
+    }
+
+    #[test]
+    fn sender_rejects_too_many_fragments() {
+        let mut sender = VideoSender::new(1, 0, 4);
+        let frame = vec![0u8; MAX_VIDEO_PAYLOAD * (vp_voice::MAX_FRAGS_PER_FRAME as usize + 1)];
+        let err = sender.send_frame(0, false, &frame, |_dg| {}).unwrap_err();
+        assert_eq!(err, VideoSendError::FrameTooLarge);
+    }
+
+    #[test]
+    fn receiver_payload_is_zero_copy_slice() {
+        let mut rx = VideoReceiver::new(4);
+        let payload = b"hello-zero-copy";
+        let dg = make_frag(1, 10, 0, 1, vp_voice::VIDEO_FLAG_END_OF_FRAME, payload);
+        let frame = rx.receive(&dg).expect("frame");
+        let frag = &frame.fragments[0];
+        assert_eq!(&frag[..], payload);
+        assert_eq!(frag.as_ptr(), unsafe { dg.as_ptr().add(VIDEO_HDR_LEN) });
+    }
+
+    #[test]
+    fn receiver_reuses_slots_via_freelist() {
+        let mut rx = VideoReceiver::new(2);
+        for seq in 0..8u32 {
+            let dg = make_frag(1, seq, 0, 1, vp_voice::VIDEO_FLAG_END_OF_FRAME, b"x");
+            let _ = rx.receive(&dg).expect("complete frame");
+        }
+        assert!(rx.free_slot_count() > 0);
+        assert_eq!(rx.slot_allocations(), 1);
     }
 }

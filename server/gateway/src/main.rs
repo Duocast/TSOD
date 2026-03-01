@@ -26,7 +26,7 @@ use vp_metrics::{MetricsConfig, MetricsServer};
 use vp_voice::QUIC_MAX_DATAGRAM_BYTES;
 
 use crate::auth::DeviceAuthProvider;
-use crate::metrics_adapter::voice_metrics;
+use crate::metrics_adapter::{stream_metrics, voice_metrics};
 use crate::outbox_dispatch::{run_outbox_dispatcher, OutboxDispatcherConfig};
 use crate::state::{MembershipCache, PushHub, Sessions};
 
@@ -91,7 +91,7 @@ async fn main() -> Result<()> {
         vp_media::stream_forwarder::StreamForwarderConfig::default(),
         Arc::new(sessions.clone()),
         Arc::new(membership.clone()),
-        Arc::new(vp_media::stream_forwarder::NoopStreamMetrics),
+        stream_metrics(),
     ));
 
     // Outbox dispatcher (push fanout)

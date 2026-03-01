@@ -17,9 +17,12 @@ pub fn outbound_payload_fits(payload_len: usize) -> bool {
 // Byte 0: protocol version
 // Byte 1: datagram kind (voice=0x01, video/screenshare=0x02)
 
-pub const DATAGRAM_VERSION: u8 = 1;
+pub const VOICE_VERSION: u8 = 1;
+pub const VIDEO_VERSION: u8 = 2;
+pub const DATAGRAM_VERSION: u8 = VOICE_VERSION;
 pub const DATAGRAM_KIND_VOICE: u8 = 0x01;
 pub const DATAGRAM_KIND_VIDEO: u8 = 0x02;
+pub const MAX_FRAGS_PER_FRAME: u16 = 64;
 
 /// Parse kind byte from a raw datagram. Returns None for unknown/short.
 #[inline]
@@ -79,7 +82,13 @@ mod tests {
     fn datagram_kind_works() {
         assert_eq!(datagram_kind(&[]), None);
         assert_eq!(datagram_kind(&[1]), None);
-        assert_eq!(datagram_kind(&[1, DATAGRAM_KIND_VOICE]), Some(DATAGRAM_KIND_VOICE));
-        assert_eq!(datagram_kind(&[1, DATAGRAM_KIND_VIDEO]), Some(DATAGRAM_KIND_VIDEO));
+        assert_eq!(
+            datagram_kind(&[1, DATAGRAM_KIND_VOICE]),
+            Some(DATAGRAM_KIND_VOICE)
+        );
+        assert_eq!(
+            datagram_kind(&[1, DATAGRAM_KIND_VIDEO]),
+            Some(DATAGRAM_KIND_VIDEO)
+        );
     }
 }

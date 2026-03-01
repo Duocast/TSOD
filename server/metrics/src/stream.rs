@@ -34,6 +34,11 @@ impl StreamMetricsImpl {
     }
 
     #[inline]
+    pub fn forwarded_bytes(&self, n: usize) {
+        counter!(format!("{}_stream_forwarded_bytes_total", self.ns)).increment(n as u64);
+    }
+
+    #[inline]
     pub fn drop_reason(&self, reason: &'static str) {
         counter!(
             format!("{}_stream_drops_total", self.ns),

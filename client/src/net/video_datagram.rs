@@ -56,7 +56,7 @@ impl VideoHeader {
         if buf.len() < VIDEO_HDR_LEN {
             return None;
         }
-        if buf[0] != vp_voice::DATAGRAM_VERSION {
+        if buf[0] != vp_voice::VIDEO_VERSION {
             return None;
         }
         if buf[1] != vp_voice::DATAGRAM_KIND_VIDEO {
@@ -73,7 +73,7 @@ impl VideoHeader {
         let ts_ms = u32::from_le_bytes([buf[20], buf[21], buf[22], buf[23]]);
 
         // Basic validation: frag_total must be >= 1, frag_idx < frag_total.
-        if frag_total == 0 || frag_idx >= frag_total {
+        if frag_total == 0 || frag_total > vp_voice::MAX_FRAGS_PER_FRAME || frag_idx >= frag_total {
             return None;
         }
 
@@ -103,7 +103,7 @@ pub fn make_video_datagram(hdr: &VideoHeader, payload: &[u8]) -> Bytes {
 /// Write the video header into a pre-allocated `BytesMut` (allocation-free).
 #[inline]
 pub fn write_header_into(buf: &mut BytesMut, hdr: &VideoHeader) {
-    buf.put_u8(vp_voice::DATAGRAM_VERSION);
+    buf.put_u8(vp_voice::VIDEO_VERSION);
     buf.put_u8(vp_voice::DATAGRAM_KIND_VIDEO);
     buf.put_u64_le(hdr.stream_tag);
     buf.put_u8(hdr.layer_id);
@@ -175,7 +175,7 @@ mod tests {
     #[test]
     fn reject_bad_kind() {
         let mut buf = [0u8; VIDEO_HDR_LEN];
-        buf[0] = vp_voice::DATAGRAM_VERSION;
+        buf[0] = vp_voice::VIDEO_VERSION;
         buf[1] = 0xFF;
         assert!(VideoHeader::parse(&buf).is_none());
     }
@@ -196,9 +196,25 @@ mod tests {
     }
 
     #[test]
+    fn reject_frag_total_above_cap() {
+        let mut buf = BytesMut::with_capacity(VIDEO_HDR_LEN);
+        buf.put_u8(vp_voice::VIDEO_VERSION);
+        buf.put_u8(vp_voice::DATAGRAM_KIND_VIDEO);
+        buf.put_u64_le(1);
+        buf.put_u8(0);
+        buf.put_u8(0);
+        buf.put_u32_le(1);
+        buf.put_u16_le(0);
+        buf.put_u16_le(vp_voice::MAX_FRAGS_PER_FRAME + 1);
+        buf.put_u32_le(100);
+
+        assert!(VideoHeader::parse(&buf.freeze()).is_none());
+    }
+
+    #[test]
     fn reject_zero_frag_total() {
         let mut buf = BytesMut::with_capacity(VIDEO_HDR_LEN);
-        buf.put_u8(vp_voice::DATAGRAM_VERSION);
+        buf.put_u8(vp_voice::VIDEO_VERSION);
         buf.put_u8(vp_voice::DATAGRAM_KIND_VIDEO);
         buf.put_u64_le(1);
         buf.put_u8(0);
