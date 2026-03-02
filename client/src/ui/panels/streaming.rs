@@ -142,10 +142,10 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel) {
             });
 
             if model.show_stream_stats {
-                let stats_w = (video_rect.width() * 0.36).clamp(240.0, 360.0);
+                let stats_w = (video_rect.width() * 0.44).clamp(260.0, 430.0);
                 let stats_rect = egui::Rect::from_min_size(
                     egui::pos2(video_rect.right() - stats_w - 8.0, video_rect.top() + 8.0),
-                    egui::vec2(stats_w, (video_rect.height() * 0.6).clamp(150.0, 280.0)),
+                    egui::vec2(stats_w, (video_rect.height() * 0.7).max(170.0)),
                 );
                 painter.rect_filled(stats_rect, 6.0, egui::Color32::from_black_alpha(212));
                 painter.rect_stroke(
@@ -174,93 +174,55 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel) {
                 };
 
                 ui.allocate_new_ui(
-                    egui::UiBuilder::new().max_rect(stats_rect.shrink(6.0)),
+                    egui::UiBuilder::new().max_rect(stats_rect.shrink(10.0)),
                     |ui| {
-                        ui.style_mut().spacing.item_spacing = egui::vec2(4.0, 2.0);
                         ui.label(
-                            egui::RichText::new("Stats")
+                            egui::RichText::new("Stats for nerds")
                                 .color(theme::text_color())
                                 .strong(),
                         );
-                        ui.add_space(2.0);
-
-                        egui::Grid::new("stream_stats_grid")
-                            .num_columns(2)
-                            .spacing(egui::vec2(8.0, 2.0))
-                            .striped(true)
-                            .show(ui, |ui| {
-                                ui.label("Codecs");
-                                ui.label(format!("{} / {}", dbg.codec_video, dbg.codec_audio));
-                                ui.end_row();
-
-                                ui.label("Connection speed");
-                                ui.label(format!("{} Kbps", dbg.connection_speed_kbps));
-                                ui.end_row();
-
-                                ui.label("Network activity");
-                                ui.label(human_bytes(dbg.network_activity_bytes));
-                                ui.end_row();
-
-                                ui.label("Buffer health");
-                                ui.label(format!("{:.2} s", dbg.buffer_health_seconds));
-                                ui.end_row();
-
-                                ui.label("Current / optimal res");
-                                ui.label(format!("{} / {}", cur_res, dbg.optimal_resolution));
-                                ui.end_row();
-
-                                ui.label("Viewport / Frames");
-                                ui.label(format!(
-                                    "{} / {} of {} dropped",
-                                    viewport_text, dbg.dropped_frames, dbg.total_frames
-                                ));
-                                ui.end_row();
-
-                                ui.label("Video rx/tx dgrams");
-                                ui.label(format!(
-                                    "{} / {}",
-                                    dbg.video_datagrams_per_sec, dbg.video_tx_datagrams_per_sec
-                                ));
-                                ui.end_row();
-
-                                ui.label("Tx blocked/sec");
-                                ui.label(dbg.video_tx_blocked_per_sec.to_string());
-                                ui.end_row();
-
-                                ui.label("Tx drops q/deadline");
-                                ui.label(format!(
-                                    "{}/{}",
-                                    dbg.video_tx_drop_queue_full, dbg.video_tx_drop_deadline
-                                ));
-                                ui.end_row();
-
-                                ui.label("Too-large voice/video");
-                                ui.label(format!(
-                                    "{}/{}",
-                                    dbg.voice_tx_drop_too_large, dbg.video_tx_drop_too_large
-                                ));
-                                ui.end_row();
-
-                                ui.label("Drops no-sub/channel");
-                                ui.label(format!(
-                                    "{}/{}",
-                                    dbg.dropped_no_subscription, dbg.dropped_channel_full
-                                ));
-                                ui.end_row();
-
-                                ui.label("Sender frame errors");
-                                ui.label(dbg.sender_frame_errors.to_string());
-                                ui.end_row();
-
-                                ui.label("Last frame");
-                                ui.label(format!(
-                                    "seq={} ts={} size={}B",
-                                    dbg.last_frame_seq,
-                                    dbg.last_frame_ts_ms,
-                                    dbg.last_frame_size_bytes
-                                ));
-                                ui.end_row();
-                            });
+                        ui.separator();
+                        ui.label(format!("Codecs: {} / {}", dbg.codec_video, dbg.codec_audio));
+                        ui.label(format!(
+                            "Connection speed: {} Kbps",
+                            dbg.connection_speed_kbps
+                        ));
+                        ui.label(format!(
+                            "Network activity: {}",
+                            human_bytes(dbg.network_activity_bytes)
+                        ));
+                        ui.label(format!("Buffer health: {:.2} s", dbg.buffer_health_seconds));
+                        ui.label(format!(
+                            "Current / optimal res: {} / {}",
+                            cur_res, dbg.optimal_resolution
+                        ));
+                        ui.label(format!(
+                            "Viewport / Frames: {} / {} dropped of {}",
+                            viewport_text, dbg.dropped_frames, dbg.total_frames
+                        ));
+                        ui.separator();
+                        ui.label(format!(
+                            "Video rx/tx dgrams: {} / {}",
+                            dbg.video_datagrams_per_sec, dbg.video_tx_datagrams_per_sec
+                        ));
+                        ui.label(format!("Tx blocked/sec: {}", dbg.video_tx_blocked_per_sec));
+                        ui.label(format!(
+                            "Tx drops (video q/deadline): {}/{}",
+                            dbg.video_tx_drop_queue_full, dbg.video_tx_drop_deadline
+                        ));
+                        ui.label(format!(
+                            "Tx drops too-large (voice/video): {}/{}",
+                            dbg.voice_tx_drop_too_large, dbg.video_tx_drop_too_large
+                        ));
+                        ui.label(format!(
+                            "Drops (no sub/channel full): {}/{}",
+                            dbg.dropped_no_subscription, dbg.dropped_channel_full
+                        ));
+                        ui.label(format!("Sender frame errors: {}", dbg.sender_frame_errors));
+                        ui.label(format!(
+                            "Last frame: seq={} ts_ms={} size={} B",
+                            dbg.last_frame_seq, dbg.last_frame_ts_ms, dbg.last_frame_size_bytes
+                        ));
                     },
                 );
             }
