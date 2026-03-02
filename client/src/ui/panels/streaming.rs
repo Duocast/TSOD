@@ -68,6 +68,10 @@ pub fn show(ui: &mut egui::Ui, model: &UiModel) {
                     dbg.video_tx_drop_queue_full, dbg.video_tx_drop_deadline, dbg.voice_tx_drop_queue_full
                 ));
                 ui.label(format!(
+                    "tx drops TooLarge voice/video: {}/{}",
+                    dbg.voice_tx_drop_too_large, dbg.video_tx_drop_too_large
+                ));
+                ui.label(format!(
                     "Drops (no subscription): {} | Drops (channel full): {} | Sender frame errors: {}",
                     dbg.dropped_no_subscription, dbg.dropped_channel_full, dbg.sender_frame_errors
                 ));

@@ -73,6 +73,8 @@ pub struct EgressStats {
     pub drop_queue_full_voice: AtomicU64,
     pub drop_queue_full_video: AtomicU64,
     pub drop_deadline_video: AtomicU64,
+    pub drop_too_large_voice: AtomicU64,
+    pub drop_too_large_video: AtomicU64,
     pub fatal_errors: AtomicU64,
 }
 
@@ -214,6 +216,7 @@ pub struct EgressScheduler {
     state: Mutex<QueueState>,
     notify: Notify,
     stats: Arc<EgressStats>,
+    voice_burst: Mutex<u32>,
 }
 
 impl EgressScheduler {
@@ -227,6 +230,7 @@ impl EgressScheduler {
             }),
             notify: Notify::new(),
             stats: Arc::new(EgressStats::default()),
+            voice_burst: Mutex::new(0),
             cfg,
         })
     }
@@ -284,14 +288,24 @@ impl EgressScheduler {
     }
 
     fn next_item(&self) -> Option<EgressItem> {
+        const VOICE_BURST: u32 = 6;
         let mut state = self.state.lock().expect("egress queue poisoned");
+        let mut voice_burst = self
+            .voice_burst
+            .lock()
+            .expect("egress voice burst poisoned");
         let expired = state.video.drop_expired(Instant::now());
         if expired > 0 {
             self.stats
                 .drop_deadline_video
                 .fetch_add(expired as u64, Ordering::Relaxed);
         }
-        if let Some(bytes) = state.voice.pop_front() {
+        if !state.voice.is_empty() && *voice_burst < VOICE_BURST {
+            let bytes = state
+                .voice
+                .pop_front()
+                .expect("voice queue unexpectedly empty");
+            *voice_burst += 1;
             return Some(EgressItem {
                 kind: DatagramKind::Voice,
                 stream_tag: None,
@@ -301,7 +315,25 @@ impl EgressScheduler {
                 is_keyframe: false,
             });
         }
-        state.video.pop_next_fragment(Instant::now())
+        if let Some(video_item) = state.video.pop_next_fragment(Instant::now()) {
+            *voice_burst = 0;
+            return Some(video_item);
+        }
+        if let Some(bytes) = state.voice.pop_front() {
+            if *voice_burst >= VOICE_BURST {
+                *voice_burst = 0;
+            }
+            *voice_burst += 1;
+            return Some(EgressItem {
+                kind: DatagramKind::Voice,
+                stream_tag: None,
+                frame_seq: None,
+                deadline: None,
+                bytes,
+                is_keyframe: false,
+            });
+        }
+        None
     }
 
     async fn egress_loop(self: Arc<Self>) {
@@ -345,12 +377,23 @@ impl EgressScheduler {
             let sent = match self.conn.send_datagram(item.bytes.clone()) {
                 Ok(()) => true,
                 Err(quinn::SendDatagramError::TooLarge) => {
-                    self.stats
-                        .drop_queue_full_video
-                        .fetch_add(1, Ordering::Relaxed);
-                    let _ = self
-                        .ui_log_tx
-                        .send("[egress] drop: datagram too large".to_string());
+                    match item.kind {
+                        DatagramKind::Voice => self
+                            .stats
+                            .drop_too_large_voice
+                            .fetch_add(1, Ordering::Relaxed),
+                        DatagramKind::Video => self
+                            .stats
+                            .drop_too_large_video
+                            .fetch_add(1, Ordering::Relaxed),
+                        DatagramKind::Control => {}
+                    };
+                    let _ = self.ui_log_tx.send(format!(
+                        "[egress] drop TooLarge kind={:?} len={} mtu={}",
+                        item.kind,
+                        item.bytes.len(),
+                        self.cfg.mtu_bytes
+                    ));
                     continue;
                 }
                 Err(quinn::SendDatagramError::UnsupportedByPeer) => {
