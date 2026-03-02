@@ -246,8 +246,17 @@ impl Gateway {
                 if last_log.elapsed() >= Duration::from_secs(1) {
                     let c = video_rx_count.swap(0, Ordering::Relaxed);
                     let b = video_rx_bytes.swap(0, Ordering::Relaxed);
+                    let video_drops = video_queue_full_drops.swap(0, Ordering::Relaxed);
                     if c > 0 {
-                        info!("[video] server rx datagrams/sec={} bytes/sec={}", c, b);
+                        info!(
+                            "[video] server rx datagrams/sec={} bytes/sec={} queue_full_drops/sec={}",
+                            c, b, video_drops
+                        );
+                    } else if video_drops > 0 {
+                        info!(
+                            "[video] server rx datagrams/sec=0 bytes/sec=0 queue_full_drops/sec={}",
+                            video_drops
+                        );
                     }
                     let drops = oversized_drops.swap(0, Ordering::Relaxed);
                     if drops > 0 {

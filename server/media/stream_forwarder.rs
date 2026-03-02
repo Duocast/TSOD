@@ -364,6 +364,10 @@ pub struct StreamForwarder {
     viewer_loops: RwLock<HashMap<(UserId, String), ViewerLoopHandle>>,
     forwarded_fragments: AtomicU64,
     dropped_queue_full: AtomicU64,
+    dropped_malformed: AtomicU64,
+    dropped_unauthorized: AtomicU64,
+    dropped_viewer_ids_empty: AtomicU64,
+    dropped_sessions_empty_for_viewer: AtomicU64,
 }
 
 #[derive(Clone)]
@@ -396,6 +400,10 @@ impl StreamForwarder {
             viewer_loops: RwLock::new(HashMap::new()),
             forwarded_fragments: AtomicU64::new(0),
             dropped_queue_full: AtomicU64::new(0),
+            dropped_malformed: AtomicU64::new(0),
+            dropped_unauthorized: AtomicU64::new(0),
+            dropped_viewer_ids_empty: AtomicU64::new(0),
+            dropped_sessions_empty_for_viewer: AtomicU64::new(0),
         }
     }
 
@@ -487,6 +495,8 @@ impl StreamForwarder {
         if datagram.len() < VIDEO_HDR_LEN || datagram.len() > self.cfg.max_datagram_bytes {
             self.metrics.inc_drop_invalid();
             self.metrics.inc_drop_by_reason(StreamDropReason::Malformed);
+            self.dropped_malformed.fetch_add(1, Ordering::Relaxed);
+            self.maybe_log_forwarding_rates();
             return;
         }
 
@@ -496,6 +506,8 @@ impl StreamForwarder {
             None => {
                 self.metrics.inc_drop_invalid();
                 self.metrics.inc_drop_by_reason(StreamDropReason::Malformed);
+                self.dropped_malformed.fetch_add(1, Ordering::Relaxed);
+                self.maybe_log_forwarding_rates();
                 return;
             }
         };
@@ -509,12 +521,21 @@ impl StreamForwarder {
                     self.metrics.inc_drop_unauthorized();
                     self.metrics
                         .inc_drop_by_reason(StreamDropReason::Unauthorized);
+                    self.dropped_unauthorized.fetch_add(1, Ordering::Relaxed);
+                    self.maybe_log_forwarding_rates();
                     return;
                 }
                 None => {
+                    debug!(
+                        sender = %sender.0,
+                        stream_tag = hdr.stream_tag,
+                        "dropping video datagram: stream_tag not registered"
+                    );
                     self.metrics.inc_drop_unauthorized();
                     self.metrics
                         .inc_drop_by_reason(StreamDropReason::Unauthorized);
+                    self.dropped_unauthorized.fetch_add(1, Ordering::Relaxed);
+                    self.maybe_log_forwarding_rates();
                     return;
                 }
             }
@@ -535,6 +556,15 @@ impl StreamForwarder {
             }
         };
         if viewer_ids.is_empty() {
+            debug!(
+                sender = %sender.0,
+                stream_tag = hdr.stream_tag,
+                channel_id = %channel.0,
+                "dropping video datagram: no viewer ids"
+            );
+            self.dropped_viewer_ids_empty
+                .fetch_add(1, Ordering::Relaxed);
+            self.maybe_log_forwarding_rates();
             return;
         }
 
@@ -543,6 +573,10 @@ impl StreamForwarder {
 
         for viewer_id in viewer_ids {
             let sessions = self.sessions.get_sessions(viewer_id).await;
+            if sessions.is_empty() {
+                self.dropped_sessions_empty_for_viewer
+                    .fetch_add(1, Ordering::Relaxed);
+            }
             for (session_id, dtx) in sessions {
                 let outcome = self
                     .enqueue_to_viewer(viewer_id, session_id, dtx, &datagram, &hdr, reg.codec)
@@ -586,11 +620,21 @@ impl StreamForwarder {
 
         let forwarded = self.forwarded_fragments.swap(0, Ordering::AcqRel);
         let dropped = self.dropped_queue_full.swap(0, Ordering::AcqRel);
+        let malformed = self.dropped_malformed.swap(0, Ordering::AcqRel);
+        let unauthorized = self.dropped_unauthorized.swap(0, Ordering::AcqRel);
+        let viewer_ids_empty = self.dropped_viewer_ids_empty.swap(0, Ordering::AcqRel);
+        let sessions_empty_for_viewer = self
+            .dropped_sessions_empty_for_viewer
+            .swap(0, Ordering::AcqRel);
         info!(
             target: "video",
-            "forwarded_datagrams/sec={} dropped_queue_full/sec={}",
+            "forwarded_datagrams/sec={} dropped_queue_full/sec={} malformed/sec={} unauthorized/sec={} viewer_ids_empty/sec={} sessions_empty_for_viewer/sec={}",
             forwarded,
-            dropped
+            dropped,
+            malformed,
+            unauthorized,
+            viewer_ids_empty,
+            sessions_empty_for_viewer
         );
     }
 
