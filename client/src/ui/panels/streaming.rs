@@ -117,7 +117,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel) {
                 egui::pos2(video_rect.left(), video_rect.bottom() + 8.0),
                 egui::pos2(video_rect.right(), rect.bottom() - 4.0),
             );
-            ui.allocate_new_ui(egui::UiBuilder::new().max_rect(controls_rect), |ui| {
+            ui.scope_builder(egui::UiBuilder::new().max_rect(controls_rect), |ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(format!(
                         "Stream tags: {}",
@@ -173,7 +173,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel) {
                     (dbg.current_resolution.clone(), dbg.viewport.clone())
                 };
 
-                ui.allocate_new_ui(
+                ui.scope_builder(
                     egui::UiBuilder::new().max_rect(stats_rect.shrink(10.0)),
                     |ui| {
                         ui.label(
