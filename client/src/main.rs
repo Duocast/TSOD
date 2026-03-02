@@ -2639,10 +2639,11 @@ async fn connect_and_run_session(
                                                                     if is_blocked {
                                                                         video_counters.video_tx_blocked.fetch_add(1, Ordering::Relaxed);
                                                                         Ok(())
+                                                                    } else {
+                                                                        video_counters.video_tx_errors.fetch_add(1, Ordering::Relaxed);
+                                                                        warn!(stream_tag, error = ?e, "[video] send_datagram error");
+                                                                        Err(e)
                                                                     }
-                                                                    video_counters.video_tx_errors.fetch_add(1, Ordering::Relaxed);
-                                                                    warn!(stream_tag, error = ?e, "[video] send_datagram error");
-                                                                    Err(e)
                                                                 }
                                                             }
                                                         }).await {
