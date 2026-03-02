@@ -393,20 +393,50 @@ mod linux {
                     }
 
                     let negotiated_channels = state.format.channels().max(1) as usize;
+                    let chunk = datas[0].chunk();
+                    let offset = chunk
+                        .as_ref()
+                        .map(|c| c.offset() as usize)
+                        .unwrap_or(0)
+                        .min(raw.len());
+                    let available_bytes = raw.len().saturating_sub(offset);
+                    let size = chunk
+                        .as_ref()
+                        .map(|c| c.size() as usize)
+                        .unwrap_or(available_bytes)
+                        .min(available_bytes);
+                    if size < 2 {
+                        return;
+                    }
 
+                    let sample_bytes = &raw[offset..offset + size - (size % 2)];
                     let samples = unsafe {
-                        std::slice::from_raw_parts(raw.as_ptr() as *const i16, raw.len() / 2)
+                        std::slice::from_raw_parts(
+                            sample_bytes.as_ptr() as *const i16,
+                            sample_bytes.len() / 2,
+                        )
                     };
 
                     state.mono_in.clear();
-                    if negotiated_channels == 1 {
-                        state
-                            .mono_in
-                            .extend(samples.iter().map(|&s| s as f32 / i16::MAX as f32));
+                    let frame_stride_samples = chunk
+                        .as_ref()
+                        .map(|c| (c.stride() as usize) / 2)
+                        .filter(|&stride| stride >= negotiated_channels)
+                        .unwrap_or(negotiated_channels);
+
+                    if negotiated_channels == 1 && frame_stride_samples == 1 {
+                        state.mono_in.extend(
+                            samples
+                                .iter()
+                                .map(|&s| (s as f32 / i16::MAX as f32).clamp(-1.0, 1.0)),
+                        );
                     } else {
-                        state.mono_in.reserve(samples.len() / negotiated_channels);
-                        for frame in samples.chunks_exact(negotiated_channels) {
-                            let sum: f32 = frame.iter().map(|&s| s as f32 / i16::MAX as f32).sum();
+                        state.mono_in.reserve(samples.len() / frame_stride_samples);
+                        for frame in samples.chunks_exact(frame_stride_samples) {
+                            let sum: f32 = frame[..negotiated_channels]
+                                .iter()
+                                .map(|&s| (s as f32 / i16::MAX as f32).clamp(-1.0, 1.0))
+                                .sum();
                             state.mono_in.push(sum / negotiated_channels as f32);
                         }
                     }
