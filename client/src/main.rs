@@ -149,6 +149,7 @@ struct VideoRuntimeCounters {
 #[derive(Clone)]
 struct SharedStreamState {
     active_streams: Arc<RwLock<HashMap<u64, Arc<Mutex<VideoReceiver>>>>>,
+    stream_codecs: Arc<RwLock<HashMap<u64, pb::VideoCodec>>>,
     counters: Arc<VideoRuntimeCounters>,
     latest_frame: Arc<std::sync::RwLock<Option<ui::model::StreamFrameView>>>,
 }
@@ -157,9 +158,19 @@ impl SharedStreamState {
     fn new() -> Self {
         Self {
             active_streams: Arc::new(RwLock::new(HashMap::new())),
+            stream_codecs: Arc::new(RwLock::new(HashMap::new())),
             counters: Arc::new(VideoRuntimeCounters::default()),
             latest_frame: Arc::new(std::sync::RwLock::new(None)),
         }
+    }
+}
+
+fn video_codec_name(codec: pb::VideoCodec) -> &'static str {
+    match codec {
+        pb::VideoCodec::Av1 => "AV1",
+        pb::VideoCodec::Vp9 => "VP9",
+        pb::VideoCodec::VideoCodecUnspecified => "UNSPECIFIED",
+        _ => "UNKNOWN",
     }
 }
 
@@ -1983,6 +1994,10 @@ async fn connect_and_run_session(
                             let mut streams = stream_state.active_streams.write().await;
                             streams.remove(&event.stream_tag);
                         }
+                        {
+                            let mut stream_codecs = stream_state.stream_codecs.write().await;
+                            stream_codecs.remove(&event.stream_tag);
+                        }
                         let _ = tx_event.send(UiEvent::AppendLog(format!(
                             "[video] unsubscribed stream_tag={}",
                             event.stream_tag
@@ -2002,6 +2017,10 @@ async fn connect_and_run_session(
                                     vp_voice::MAX_FRAGS_PER_FRAME,
                                 ))),
                             );
+                        }
+                        if let Ok(codec) = pb::VideoCodec::try_from(event.codec) {
+                            let mut stream_codecs = stream_state.stream_codecs.write().await;
+                            stream_codecs.insert(event.stream_tag, codec);
                         }
                         let _ = tx_event.send(UiEvent::AppendLog(format!(
                             "[video] subscribed stream_tag={} codec={}",
@@ -2173,6 +2192,21 @@ async fn connect_and_run_session(
                     + stream_state.counters.dropped_channel_full.load(Ordering::Relaxed)
                     + stream_state.counters.sender_frame_errors.load(Ordering::Relaxed);
                 let total_frames = completed_frames_per_sec + dropped_frames;
+                let negotiated_video_codecs = {
+                    let stream_codecs = stream_state.stream_codecs.read().await;
+                    let mut names = active_stream_tags
+                        .iter()
+                        .filter_map(|tag| stream_codecs.get(tag).copied())
+                        .map(video_codec_name)
+                        .collect::<Vec<_>>();
+                    names.sort_unstable();
+                    names.dedup();
+                    if names.is_empty() {
+                        "unknown".to_string()
+                    } else {
+                        names.join("/")
+                    }
+                };
                 let snapshot = ui::model::StreamDebugView {
                     active_stream_tags,
                     video_datagrams_per_sec: stream_state.counters.video_datagrams.swap(0, Ordering::Relaxed),
@@ -2191,7 +2225,7 @@ async fn connect_and_run_session(
                     last_frame_size_bytes: stream_state.counters.last_frame_size_bytes.load(Ordering::Relaxed) as usize,
                     last_frame_seq: stream_state.counters.last_frame_seq.load(Ordering::Relaxed),
                     last_frame_ts_ms: stream_state.counters.last_frame_ts_ms.load(Ordering::Relaxed),
-                    codec_video: "av01.0.08M.08 (399)".to_string(),
+                    codec_video: negotiated_video_codecs,
                     codec_audio: "opus (251)".to_string(),
                     connection_speed_kbps: (video_tx_bytes_per_sec.saturating_mul(8)) / 1000,
                     network_activity_bytes: video_tx_bytes_per_sec,
@@ -2690,7 +2724,6 @@ async fn connect_and_run_session(
                             }
                             let preferred_codec = match saved_settings.screen_share_codec.as_str() {
                                 "AV1" => pb::video_caps::Codec::Av1,
-                                "VP8" => pb::video_caps::Codec::Vp8,
                                 _ => pb::video_caps::Codec::Vp9,
                             };
                             let (profile_layer, sender_profile) = if saved_settings.screen_share_profile == "1440p60" {
@@ -2729,6 +2762,19 @@ async fn connect_and_run_session(
                                             streams
                                                 .entry(stream_tag)
                                                 .or_insert_with(|| Arc::new(Mutex::new(VideoReceiver::new(4, vp_voice::MAX_FRAGS_PER_FRAME))));
+                                        }
+                                        {
+                                            let mut stream_codecs = stream_state.stream_codecs.write().await;
+                                            if let Ok(codec) = pb::VideoCodec::try_from(r.primary_codec) {
+                                                stream_codecs.insert(stream_tag, codec);
+                                            }
+                                            if let (Some(fallback_tag), Some(fallback_codec)) =
+                                                (r.fallback_stream_tag, r.fallback_codec)
+                                            {
+                                                if let Ok(codec) = pb::VideoCodec::try_from(fallback_codec) {
+                                                    stream_codecs.insert(fallback_tag, codec);
+                                                }
+                                            }
                                         }
                                         let _ = tx_event.send(UiEvent::AppendLog(format!("[video] StartScreenShareRequest ok stream_tag={stream_tag}")));
                                         let (share_stop_tx, mut share_stop_rx) = watch::channel(false);

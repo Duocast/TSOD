@@ -744,21 +744,14 @@ fn now_ts() -> pb::Timestamp {
 }
 
 fn default_media_capabilities() -> pb::ClientMediaCapabilities {
-    let supports_av1 = true;
-    let supports_vp9 = cfg!(feature = "video-vp9")
-        || cfg!(feature = "video-call")
-        || cfg!(feature = "screen-share");
-    let supports_vp8 = true;
-
+    let supports_av1 = cfg!(feature = "video-av1");
+    let supports_vp9 = cfg!(feature = "video-vp9");
     let mut decode = Vec::new();
     if supports_av1 {
         decode.push(pb::VideoCodec::Av1 as i32);
     }
     if supports_vp9 {
         decode.push(pb::VideoCodec::Vp9 as i32);
-    }
-    if supports_vp8 {
-        decode.push(pb::VideoCodec::Vp8 as i32);
     }
 
     pb::ClientMediaCapabilities {
@@ -774,6 +767,21 @@ fn default_media_capabilities() -> pb::ClientMediaCapabilities {
 }
 
 fn default_caps(alpn: &str) -> pb::ClientCaps {
+    let media_caps = default_media_capabilities();
+    let screen_video_codecs: Vec<i32> = media_caps
+        .encode
+        .iter()
+        .filter_map(|codec| match pb::VideoCodec::try_from(*codec).ok() {
+            Some(pb::VideoCodec::Av1) => Some(pb::video_caps::Codec::Av1 as i32),
+            Some(pb::VideoCodec::Vp9) => Some(pb::video_caps::Codec::Vp9 as i32),
+            _ => None,
+        })
+        .collect();
+    let preferred_screenshare_codec = screen_video_codecs
+        .first()
+        .copied()
+        .unwrap_or(pb::video_caps::Codec::Vp9 as i32);
+
     pb::ClientCaps {
         build: Some(pb::BuildInfo {
             client_name: "vp-client".into(),
@@ -805,11 +813,7 @@ fn default_caps(alpn: &str) -> pb::ClientCaps {
             max_simultaneous_decodes: 8,
         }),
         screen_video: Some(pb::VideoCaps {
-            codecs: vec![
-                pb::video_caps::Codec::Av1 as i32,
-                pb::video_caps::Codec::Vp9 as i32,
-                pb::video_caps::Codec::Vp8 as i32,
-            ],
+            codecs: screen_video_codecs,
             max_width: 1920,
             max_height: 1080,
             max_fps: 60,
@@ -820,7 +824,7 @@ fn default_caps(alpn: &str) -> pb::ClientCaps {
             sha256: alpn.as_bytes().to_vec(),
         }),
         screen_share: Some(pb::ScreenShareCaps {
-            codec: pb::video_caps::Codec::Av1 as i32,
+            codec: preferred_screenshare_codec,
             max_width: 1920,
             max_height: 1080,
             max_fps: 60,
