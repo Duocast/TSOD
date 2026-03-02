@@ -373,7 +373,7 @@ pub struct StreamForwarder {
 #[derive(Clone)]
 struct ViewerLoopHandle {
     tx: mpsc::Sender<EnqueuedFragment>,
-    last_active: Instant,
+    last_active_ms: Arc<AtomicU64>,
 }
 
 #[derive(Clone)]
@@ -638,6 +638,15 @@ impl StreamForwarder {
         );
     }
 
+    fn now_ms() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX)
+    }
+
     /// Enqueue a datagram to a specific viewer session's frame-aware queue.
     async fn enqueue_to_viewer(
         &self,
@@ -649,12 +658,12 @@ impl StreamForwarder {
         codec: i32,
     ) -> bool {
         let key = (viewer, session_id);
-        if let Some(tx) = self
+        if let Some((tx, last_active_ms)) = self
             .viewer_loops
             .read()
             .await
             .get(&key)
-            .map(|h| h.tx.clone())
+            .map(|h| (h.tx.clone(), h.last_active_ms.clone()))
         {
             if tx
                 .try_send(EnqueuedFragment {
@@ -664,15 +673,14 @@ impl StreamForwarder {
                 })
                 .is_ok()
             {
-                if let Some(loop_handle) = self.viewer_loops.write().await.get_mut(&key) {
-                    loop_handle.last_active = Instant::now();
-                }
+                last_active_ms.store(Self::now_ms(), Ordering::Relaxed);
                 return true;
             }
             return false;
         }
 
         let tx = self.spawn_viewer_loop(key.clone(), dtx);
+        let last_active_ms = Arc::new(AtomicU64::new(Self::now_ms()));
         if tx
             .try_send(EnqueuedFragment {
                 datagram: datagram.clone(),
@@ -681,13 +689,10 @@ impl StreamForwarder {
             })
             .is_ok()
         {
-            self.viewer_loops.write().await.insert(
-                key,
-                ViewerLoopHandle {
-                    tx,
-                    last_active: Instant::now(),
-                },
-            );
+            self.viewer_loops
+                .write()
+                .await
+                .insert(key, ViewerLoopHandle { tx, last_active_ms });
             true
         } else {
             false
@@ -770,7 +775,9 @@ impl StreamForwarder {
     /// Periodic cleanup of stale viewer queues (call from a background timer).
     pub async fn cleanup_stale_viewers(&self, max_idle: std::time::Duration) {
         let mut loops = self.viewer_loops.write().await;
-        loops.retain(|_key, egress| egress.last_active.elapsed() < max_idle);
+        let cutoff_ms =
+            Self::now_ms().saturating_sub(max_idle.as_millis().try_into().unwrap_or(u64::MAX));
+        loops.retain(|_key, egress| egress.last_active_ms.load(Ordering::Relaxed) >= cutoff_ms);
     }
 }
 
