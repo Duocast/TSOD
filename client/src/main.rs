@@ -1220,7 +1220,7 @@ fn start_capture_with_fallback(
 ) -> Result<audio::capture::Capture> {
     if let Some(device) = preferred_device {
         info!("audio open input by id: {device}");
-        match audio::capture::Capture::start_with_device(
+        match audio::capture::Capture::start_with_mode(
             sample_rate,
             channels,
             frame_ms,
@@ -1239,7 +1239,7 @@ fn start_capture_with_fallback(
             }
         }
     }
-    match audio::capture::Capture::start_with_device(
+    match audio::capture::Capture::start_with_mode(
         sample_rate,
         channels,
         frame_ms,
