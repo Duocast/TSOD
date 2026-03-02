@@ -451,20 +451,25 @@ mod linux {
                         return;
                     }
 
-                    let Some(raw) = datas[0].data() else {
-                        return;
-                    };
-
                     let negotiated_format = state.format.format();
                     if negotiated_format != requested_format {
                         return;
                     }
 
                     let negotiated_channels = state.format.channels().max(1) as usize;
+
                     let chunk = datas[0].chunk();
-                    let offset = (chunk.offset() as usize).min(raw.len());
+                    let chunk_offset = chunk.offset() as usize;
+                    let chunk_size = chunk.size() as usize;
+                    let chunk_stride = chunk.stride() as usize;
+
+                    let Some(raw) = datas[0].data() else {
+                        return;
+                    };
+
+                    let offset = chunk_offset.min(raw.len());
                     let available_bytes = raw.len().saturating_sub(offset);
-                    let size = (chunk.size() as usize).min(available_bytes);
+                    let size = chunk_size.min(available_bytes);
                     if size < 2 {
                         return;
                     }
@@ -479,7 +484,7 @@ mod linux {
 
                     state.mono_in.clear();
                     let frame_stride_samples = {
-                        let stride = (chunk.stride() as usize) / 2;
+                        let stride = chunk_stride / 2;
                         if stride >= negotiated_channels { stride } else { negotiated_channels }
                     };
 
