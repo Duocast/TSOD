@@ -2639,7 +2639,7 @@ async fn connect_and_run_session(
                                                         if let Err(e) = sender.send_frame_async(ts_ms, frame_idx % 60 == 0, &synthetic, |dg| {
                                                             let dg_len = dg.len() as u64;
                                                             let _ = dg_len;
-                                                            if egress_send.enqueue_video_fragment(stream_tag, frame_idx, frame_idx % 60 == 0, Instant::now(), dg).is_ok() {
+                                                            if egress_send.enqueue_video_fragment(stream_tag, frame_idx, frame_idx % 60 == 0, std::time::Instant::now(), dg).is_ok() {
                                                                 video_counters.video_tx_datagrams.fetch_add(1, Ordering::Relaxed);
                                                             }
                                                         }).await {
@@ -3472,7 +3472,7 @@ async fn voice_send_loop(
     voice_counters: Arc<VoiceTelemetryCounters>,
     local_user_id: String,
     push_to_talk: bool,
-    voice_die_tx: watch::Sender<bool>,
+    _voice_die_tx: watch::Sender<bool>,
 ) {
     let mut seq: u32 = 0;
     let ssrc: u32 = rand::random();
