@@ -378,16 +378,18 @@ impl EgressScheduler {
                 Ok(()) => true,
                 Err(quinn::SendDatagramError::TooLarge) => {
                     match item.kind {
-                        DatagramKind::Voice => self
-                            .stats
-                            .drop_too_large_voice
-                            .fetch_add(1, Ordering::Relaxed),
-                        DatagramKind::Video => self
-                            .stats
-                            .drop_too_large_video
-                            .fetch_add(1, Ordering::Relaxed),
+                        DatagramKind::Voice => {
+                            self.stats
+                                .drop_too_large_voice
+                                .fetch_add(1, Ordering::Relaxed);
+                        }
+                        DatagramKind::Video => {
+                            self.stats
+                                .drop_too_large_video
+                                .fetch_add(1, Ordering::Relaxed);
+                        }
                         DatagramKind::Control => {}
-                    };
+                    }
                     let _ = self.ui_log_tx.send(format!(
                         "[egress] drop TooLarge kind={:?} len={} mtu={}",
                         item.kind,
