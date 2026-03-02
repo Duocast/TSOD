@@ -15,13 +15,14 @@
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    sync::atomic::{AtomicU64, Ordering},
     sync::Arc,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use bytes::Bytes;
 use tokio::sync::{mpsc, RwLock};
-use tracing::debug;
+use tracing::{debug, info};
 
 use vp_control::ids::{ChannelId, UserId};
 
@@ -361,6 +362,8 @@ pub struct StreamForwarder {
 
     /// Per-viewer send loops: (user_id, session_id) → enqueue handle.
     viewer_loops: RwLock<HashMap<(UserId, String), ViewerLoopHandle>>,
+    forwarded_fragments: AtomicU64,
+    dropped_queue_full: AtomicU64,
 }
 
 #[derive(Clone)]
@@ -391,6 +394,8 @@ impl StreamForwarder {
             streams: RwLock::new(HashMap::new()),
             subscriptions: RwLock::new(HashMap::new()),
             viewer_loops: RwLock::new(HashMap::new()),
+            forwarded_fragments: AtomicU64::new(0),
+            dropped_queue_full: AtomicU64::new(0),
         }
     }
 
@@ -544,10 +549,12 @@ impl StreamForwarder {
                     .await;
                 if outcome {
                     forwarded += 1;
+                    self.forwarded_fragments.fetch_add(1, Ordering::Relaxed);
                     self.metrics.inc_forwarded_bytes(datagram.len());
                     self.metrics
                         .inc_forwarded_bytes_codec(datagram.len(), reg.codec);
                 } else {
+                    self.dropped_queue_full.fetch_add(1, Ordering::Relaxed);
                     self.metrics.inc_drop_by_reason(StreamDropReason::QueueFull);
                     self.metrics
                         .inc_drop_by_reason_codec(StreamDropReason::QueueFull, reg.codec);
@@ -556,6 +563,35 @@ impl StreamForwarder {
         }
 
         self.metrics.inc_forwarded(forwarded);
+        self.maybe_log_forwarding_rates();
+    }
+
+    fn maybe_log_forwarding_rates(&self) {
+        static LAST_LOGGED_SEC: AtomicU64 = AtomicU64::new(0);
+
+        let now_sec = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let last = LAST_LOGGED_SEC.load(Ordering::Relaxed);
+        if now_sec <= last {
+            return;
+        }
+        if LAST_LOGGED_SEC
+            .compare_exchange(last, now_sec, Ordering::AcqRel, Ordering::Relaxed)
+            .is_err()
+        {
+            return;
+        }
+
+        let forwarded = self.forwarded_fragments.swap(0, Ordering::AcqRel);
+        let dropped = self.dropped_queue_full.swap(0, Ordering::AcqRel);
+        info!(
+            target: "video",
+            "forwarded_datagrams/sec={} dropped_queue_full/sec={}",
+            forwarded,
+            dropped
+        );
     }
 
     /// Enqueue a datagram to a specific viewer session's frame-aware queue.
@@ -589,7 +625,6 @@ impl StreamForwarder {
                 }
                 return true;
             }
-            self.viewer_loops.write().await.remove(&key);
             return false;
         }
 
@@ -620,9 +655,10 @@ impl StreamForwarder {
         key: (UserId, String),
         dtx: Arc<dyn DatagramTx>,
     ) -> mpsc::Sender<EnqueuedFragment> {
-        let (tx, mut rx) = mpsc::channel::<EnqueuedFragment>(self.cfg.per_viewer_queue_fragments);
-        let metrics = self.metrics.clone();
         let cfg = self.cfg.clone();
+        let cap = cfg.per_viewer_queue_fragments.max(1024);
+        let (tx, mut rx) = mpsc::channel::<EnqueuedFragment>(cap);
+        let metrics = self.metrics.clone();
 
         tokio::spawn(async move {
             let mut queue =
@@ -632,6 +668,43 @@ impl StreamForwarder {
 
             loop {
                 tokio::select! {
+                    biased;
+                    _ = interval.tick() => {
+                        let mut rx_closed = false;
+                        loop {
+                            match rx.try_recv() {
+                                Ok(fragment) => {
+                                    let outcome = queue.push(fragment.datagram, &fragment.hdr);
+                                    if outcome.evicted_frames > 0 {
+                                        metrics.inc_frames_evicted(outcome.evicted_frames);
+                                    }
+                                    if let Some(reason) = outcome.drop_reason {
+                                        metrics.inc_drop_by_reason(reason);
+                                        metrics.inc_drop_by_reason_codec(reason, fragment.codec);
+                                    }
+                                },
+                                Err(mpsc::error::TryRecvError::Empty) => break,
+                                Err(mpsc::error::TryRecvError::Disconnected) => {
+                                    rx_closed = true;
+                                    break;
+                                }
+                            }
+                        }
+
+                        if queue.len() > 0 {
+                            let datagrams: Vec<Bytes> = queue.drain().collect();
+                            for datagram in datagrams {
+                                if let Err(e) = dtx.send(datagram).await {
+                                    debug!(error = %e, viewer = %key.0.0, session_id = %key.1, "viewer session send loop ended");
+                                    return;
+                                }
+                            }
+                        }
+
+                        if rx_closed {
+                            break;
+                        }
+                    }
                     maybe_fragment = rx.recv() => {
                         let Some(fragment) = maybe_fragment else { break; };
                         let outcome = queue.push(fragment.datagram, &fragment.hdr);
@@ -641,19 +714,6 @@ impl StreamForwarder {
                         if let Some(reason) = outcome.drop_reason {
                             metrics.inc_drop_by_reason(reason);
                             metrics.inc_drop_by_reason_codec(reason, fragment.codec);
-                        }
-                    }
-                    _ = interval.tick() => {
-                        if queue.len() == 0 {
-                            continue;
-                        }
-
-                        let datagrams: Vec<Bytes> = queue.drain().collect();
-                        for datagram in datagrams {
-                            if let Err(e) = dtx.send(datagram).await {
-                                debug!(error = %e, viewer = %key.0.0, session_id = %key.1, "viewer session send loop ended");
-                                return;
-                            }
                         }
                     }
                 }
