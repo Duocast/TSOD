@@ -190,7 +190,8 @@ mod linux {
     }
 
     pub struct LinuxCapture {
-        _thread: Option<std::thread::JoinHandle<()>>,
+        thread: Option<std::thread::JoinHandle<()>>,
+        stop: Arc<AtomicBool>,
         backend: LinuxCaptureBackend,
     }
 
@@ -207,6 +208,8 @@ mod linux {
                 let tx_event_thread = tx_event.clone();
                 let reported = Arc::new(AtomicBool::new(false));
                 let reported_thread = reported.clone();
+                let stop = Arc::new(AtomicBool::new(false));
+                let stop_thread = stop.clone();
                 let thread = std::thread::Builder::new()
                     .name("tsod-pipewire-capture".to_string())
                     .spawn(move || {
@@ -215,6 +218,7 @@ mod linux {
                             channels,
                             prod,
                             preferred_device_owned,
+                            stop_thread,
                         ) {
                             eprintln!("pipewire capture thread failed: {e:#}");
                             if reported_thread
@@ -232,7 +236,8 @@ mod linux {
                     .context("spawn PipeWire capture thread")?;
 
                 return Ok(Self {
-                    _thread: Some(thread),
+                    thread: Some(thread),
+                    stop,
                     backend: LinuxCaptureBackend::PipeWire,
                 });
             }
@@ -241,7 +246,8 @@ mod linux {
             let pulse =
                 CpalCapture::start(sample_rate, channels, prod, preferred_device, tx_event)?;
             Ok(Self {
-                _thread: None,
+                thread: None,
+                stop: Arc::new(AtomicBool::new(false)),
                 backend: LinuxCaptureBackend::Pulse(pulse),
             })
         }
@@ -257,6 +263,15 @@ mod linux {
             match &self.backend {
                 LinuxCaptureBackend::PipeWire => true,
                 LinuxCaptureBackend::Pulse(cpal) => cpal.is_healthy(),
+            }
+        }
+    }
+
+    impl Drop for LinuxCapture {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Relaxed);
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
             }
         }
     }
@@ -278,6 +293,7 @@ mod linux {
         channels: u16,
         mut prod: HeapProd<i16>,
         preferred_device: Option<String>,
+        stop: Arc<AtomicBool>,
     ) -> Result<()> {
         pw::init();
 
@@ -447,7 +463,11 @@ mod linux {
             .context("connect PipeWire capture stream")?;
 
         let _listener = listener;
-        mainloop.run();
+        while !stop.load(Ordering::Relaxed) {
+            let _ = mainloop
+                .loop_()
+                .iterate(std::time::Duration::from_millis(100));
+        }
         Ok(())
     }
 
