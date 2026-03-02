@@ -9,7 +9,7 @@ use tracing::{debug, error, info};
 use wasapi::{BufferFlags, Direction, SampleType, ShareMode, StreamMode, WaveFormat};
 
 use crate::{
-    audio::resample::LinearResampler,
+    audio::resample::{ResamplerImpl, ResamplerMode},
     ui::{
         model::{AudioBackend, AudioDeviceId, AudioDeviceInfo, AudioDirection},
         UiEvent,
@@ -268,7 +268,14 @@ fn run_playout_thread(
         })
         .context("start WASAPI render stream")?;
 
-    let mut resampler = LinearResampler::new(sample_rate, device_rate);
+    let resampler_mode = ResamplerMode::from_env();
+    tracing::info!(
+        "[audio] wasapi playout resampler={} in_rate={} out_rate={} channels=1",
+        resampler_mode.as_str(),
+        sample_rate,
+        device_rate
+    );
+    let mut resampler = ResamplerImpl::new(sample_rate, device_rate, 1, resampler_mode);
     let source_channels = channels.max(1) as usize;
     let mut consecutive_timeouts = 0u32;
     let mut source_mono = Vec::<f32>::new();
@@ -320,7 +327,7 @@ fn run_playout_thread(
 
             fill_source_mono(&mut cons, &mut source_mono, need_in, source_channels);
             scratch_resampled.clear();
-            resampler.process(&source_mono, &mut scratch_resampled);
+            resampler.process_mono(&source_mono, &mut scratch_resampled);
             out_fifo.extend_from_slice(&scratch_resampled);
 
             refill_loops += 1;
