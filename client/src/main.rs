@@ -129,6 +129,10 @@ struct VoiceTelemetryCounters {
 #[derive(Default)]
 struct VideoRuntimeCounters {
     video_datagrams: AtomicU64,
+    video_tx_datagrams: AtomicU64,
+    video_tx_bytes: AtomicU64,
+    video_tx_blocked: AtomicU64,
+    video_tx_errors: AtomicU64,
     completed_frames: AtomicU64,
     dropped_no_subscription: AtomicU64,
     dropped_channel_full: AtomicU64,
@@ -2046,6 +2050,10 @@ async fn connect_and_run_session(
                 let snapshot = ui::model::StreamDebugView {
                     active_stream_tags,
                     video_datagrams_per_sec: stream_state.counters.video_datagrams.swap(0, Ordering::Relaxed),
+                    video_tx_datagrams_per_sec: stream_state.counters.video_tx_datagrams.swap(0, Ordering::Relaxed),
+                    video_tx_bytes_per_sec: stream_state.counters.video_tx_bytes.swap(0, Ordering::Relaxed),
+                    video_tx_blocked: stream_state.counters.video_tx_blocked.load(Ordering::Relaxed),
+                    video_tx_errors: stream_state.counters.video_tx_errors.load(Ordering::Relaxed),
                     completed_frames_per_sec: stream_state.counters.completed_frames.swap(0, Ordering::Relaxed),
                     dropped_no_subscription: stream_state.counters.dropped_no_subscription.load(Ordering::Relaxed),
                     dropped_channel_full: stream_state.counters.dropped_channel_full.load(Ordering::Relaxed),
@@ -2619,10 +2627,28 @@ async fn connect_and_run_session(
                                                         synthetic[8..].copy_from_slice(&rgba);
                                                         let ts_ms = unix_ms() as u32;
                                                         if let Err(e) = sender.send_frame_async(ts_ms, frame_idx % 60 == 0, &synthetic, |dg| {
-                                                            let _ = conn_send.send_datagram(dg);
+                                                            let dg_len = dg.len() as u64;
+                                                            match conn_send.send_datagram(dg) {
+                                                                Ok(()) => {
+                                                                    video_counters.video_tx_datagrams.fetch_add(1, Ordering::Relaxed);
+                                                                    video_counters.video_tx_bytes.fetch_add(dg_len, Ordering::Relaxed);
+                                                                    Ok(())
+                                                                }
+                                                                Err(e) => {
+                                                                    let is_blocked = e.to_string().contains("blocked");
+                                                                    if is_blocked {
+                                                                        video_counters.video_tx_blocked.fetch_add(1, Ordering::Relaxed);
+                                                                        Ok(())
+                                                                    }
+                                                                    video_counters.video_tx_errors.fetch_add(1, Ordering::Relaxed);
+                                                                    warn!(stream_tag, error = ?e, "[video] send_datagram error");
+                                                                    Err(e)
+                                                                }
+                                                            }
                                                         }).await {
                                                             video_counters.sender_frame_errors.fetch_add(1, Ordering::Relaxed);
                                                             warn!(error=?e, frame_size=synthetic.len(), "[video] send_frame failed");
+                                                            break;
                                                         }
                                                         frame_idx = frame_idx.wrapping_add(1);
                                                     }

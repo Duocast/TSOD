@@ -474,6 +474,10 @@ pub enum UiIntent {
 pub struct StreamDebugView {
     pub active_stream_tags: Vec<u64>,
     pub video_datagrams_per_sec: u64,
+    pub video_tx_datagrams_per_sec: u64,
+    pub video_tx_bytes_per_sec: u64,
+    pub video_tx_blocked: u64,
+    pub video_tx_errors: u64,
     pub completed_frames_per_sec: u64,
     pub dropped_no_subscription: u64,
     pub dropped_channel_full: u64,
