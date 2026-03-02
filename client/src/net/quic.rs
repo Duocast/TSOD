@@ -3,7 +3,7 @@ use quinn::{ClientConfig, Endpoint, TransportConfig};
 use std::{net::SocketAddr, sync::Arc};
 
 pub const QUIC_MAX_DATAGRAM_SIZE: usize = vp_voice::QUIC_MAX_DATAGRAM_BYTES;
-const QUIC_DATAGRAM_RECV_BUFFER_SIZE: usize = QUIC_MAX_DATAGRAM_SIZE;
+const QUIC_DATAGRAM_RECV_BUFFER_SIZE: usize = 2 * 1024 * 1024;
 const QUIC_DATAGRAM_SEND_BUFFER_SIZE: usize = 1024 * 1024;
 
 pub fn client_config_with_transport(crypto: rustls::ClientConfig) -> Result<ClientConfig> {

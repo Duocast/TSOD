@@ -135,6 +135,7 @@ struct VideoRuntimeCounters {
     video_tx_drop_queue_full: AtomicU64,
     video_tx_drop_deadline: AtomicU64,
     voice_tx_drop_queue_full: AtomicU64,
+    rx_oversized_datagram_drops: AtomicU64,
 
     completed_frames: AtomicU64,
     dropped_no_subscription: AtomicU64,
@@ -183,6 +184,13 @@ async fn datagram_demux_loop(
                 return;
             }
         };
+
+        if datagram.len() > vp_voice::QUIC_MAX_DATAGRAM_BYTES {
+            counters
+                .rx_oversized_datagram_drops
+                .fetch_add(1, Ordering::Relaxed);
+            continue;
+        }
 
         let is_video = is_video_datagram(&datagram);
         let target = if is_video { &video_tx } else { &voice_tx };
