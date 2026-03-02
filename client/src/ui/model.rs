@@ -480,6 +480,8 @@ pub struct StreamDebugView {
     pub video_tx_drop_queue_full: u64,
     pub video_tx_drop_deadline: u64,
     pub voice_tx_drop_queue_full: u64,
+    pub voice_tx_drop_too_large: u64,
+    pub video_tx_drop_too_large: u64,
     pub completed_frames_per_sec: u64,
     pub dropped_no_subscription: u64,
     pub dropped_channel_full: u64,

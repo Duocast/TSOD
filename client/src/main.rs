@@ -27,8 +27,7 @@ use net::egress::EgressScheduler;
 use net::video_datagram::VideoHeader;
 use net::video_transport::{VideoReceiver, VideoSender, VideoStreamProfile};
 use net::voice_datagram::{
-    make_voice_datagram, outbound_payload_fits, VOICE_FORWARDED_HDR_LEN, VOICE_HDR_LEN,
-    VOICE_VERSION,
+    make_voice_datagram, VOICE_FORWARDED_HDR_LEN, VOICE_HDR_LEN, VOICE_VERSION,
 };
 use proto::voiceplatform::v1 as pb;
 use std::collections::HashMap;
@@ -1983,8 +1982,17 @@ async fn connect_and_run_session(
     let _session_voice_flag = SessionVoiceFlag::new(session_voice_active.clone());
     let _ = tx_event.send(UiEvent::VoiceSessionHealth(true));
 
+    let voice_max_inbound = mtu.saturating_sub(vp_voice::FORWARDER_ADDED_HEADER_BYTES);
+    let max_opus_payload_runtime =
+        voice_max_inbound.saturating_sub(vp_voice::CLIENT_VOICE_HEADER_BYTES);
+    let _ = tx_event.send(UiEvent::AppendLog(format!(
+        "[net] mtu={} voice_max_inbound={} max_opus_payload={}",
+        mtu, voice_max_inbound, max_opus_payload_runtime
+    )));
+
     let _voice_send = tokio::spawn(voice_send_loop(
         egress.clone(),
+        mtu,
         encoder.clone(),
         capture.clone(),
         playout.clone(),
@@ -2083,6 +2091,8 @@ async fn connect_and_run_session(
                     video_tx_drop_queue_full: egress_stats.drop_queue_full_video.load(Ordering::Relaxed),
                     video_tx_drop_deadline: egress_stats.drop_deadline_video.load(Ordering::Relaxed),
                     voice_tx_drop_queue_full: egress_stats.drop_queue_full_voice.load(Ordering::Relaxed),
+                    voice_tx_drop_too_large: egress_stats.drop_too_large_voice.load(Ordering::Relaxed),
+                    video_tx_drop_too_large: egress_stats.drop_too_large_video.load(Ordering::Relaxed),
                     completed_frames_per_sec: stream_state.counters.completed_frames.swap(0, Ordering::Relaxed),
                     dropped_no_subscription: stream_state.counters.dropped_no_subscription.load(Ordering::Relaxed),
                     dropped_channel_full: stream_state.counters.dropped_channel_full.load(Ordering::Relaxed),
@@ -3474,6 +3484,7 @@ async fn mic_test_loop(
 
 async fn voice_send_loop(
     egress: Arc<EgressScheduler>,
+    mtu: usize,
     encoder: Arc<Mutex<audio::opus::OpusEncoder>>,
     capture: Arc<RwLock<Arc<audio::capture::Capture>>>,
     playout: Arc<RwLock<Arc<audio::playout::Playout>>>,
@@ -3510,6 +3521,9 @@ async fn voice_send_loop(
     let mut stream_ts_ms = 0u32;
     let mut last_local_speaking = false;
     let mut last_oversize_warn = Instant::now();
+    let voice_max_inbound = mtu.saturating_sub(vp_voice::FORWARDER_ADDED_HEADER_BYTES);
+    let max_opus_payload_runtime =
+        voice_max_inbound.saturating_sub(vp_voice::CLIENT_VOICE_HEADER_BYTES);
     let mut vad_hysteresis =
         audio::dsp::vad::VadHysteresis::from_timing(0.6, 0.45, 60, 300, frame_ms);
 
@@ -3629,7 +3643,7 @@ async fn voice_send_loop(
             Err(_) => continue,
         };
 
-        if !outbound_payload_fits(n) {
+        if n > max_opus_payload_runtime {
             voice_counters
                 .tx_oversized_payload_drops
                 .fetch_add(1, Ordering::Relaxed);
@@ -3637,8 +3651,7 @@ async fn voice_send_loop(
                 last_oversize_warn = Instant::now();
                 let _ = tx_event.send(UiEvent::AppendLog(format!(
                     "[voice] dropping oversized opus payload: {} > {} bytes",
-                    n,
-                    vp_voice::MAX_OPUS_PAYLOAD_BYTES
+                    n, max_opus_payload_runtime
                 )));
             }
             continue;
@@ -3655,7 +3668,7 @@ async fn voice_send_loop(
         seq = seq.wrapping_add(1);
         stream_ts_ms = stream_ts_ms.wrapping_add(frame_ms);
 
-        debug_assert!(d.len() <= vp_voice::MAX_INBOUND_VOICE_DATAGRAM_BYTES);
+        debug_assert!(d.len() <= voice_max_inbound);
 
         voice_counters.tx_packets.fetch_add(1, Ordering::Relaxed);
         voice_counters
