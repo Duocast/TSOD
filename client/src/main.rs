@@ -2090,24 +2090,40 @@ async fn connect_and_run_session(
                     let streams = stream_state.active_streams.read().await;
                     streams.keys().copied().collect::<Vec<_>>()
                 };
+                let video_tx_bytes_per_sec = egress_stats.tx_bytes.swap(0, Ordering::Relaxed);
+                let completed_frames_per_sec = stream_state.counters.completed_frames.swap(0, Ordering::Relaxed);
+                let dropped_frames = stream_state.counters.dropped_no_subscription.load(Ordering::Relaxed)
+                    + stream_state.counters.dropped_channel_full.load(Ordering::Relaxed)
+                    + stream_state.counters.sender_frame_errors.load(Ordering::Relaxed);
+                let total_frames = completed_frames_per_sec + dropped_frames;
                 let snapshot = ui::model::StreamDebugView {
                     active_stream_tags,
                     video_datagrams_per_sec: stream_state.counters.video_datagrams.swap(0, Ordering::Relaxed),
                     video_tx_datagrams_per_sec: egress_stats.tx_video.swap(0, Ordering::Relaxed),
-                    video_tx_bytes_per_sec: egress_stats.tx_bytes.swap(0, Ordering::Relaxed),
+                    video_tx_bytes_per_sec,
                     video_tx_blocked_per_sec: egress_stats.blocked_events.swap(0, Ordering::Relaxed),
                     video_tx_drop_queue_full: egress_stats.drop_queue_full_video.load(Ordering::Relaxed),
                     video_tx_drop_deadline: egress_stats.drop_deadline_video.load(Ordering::Relaxed),
                     voice_tx_drop_queue_full: egress_stats.drop_queue_full_voice.load(Ordering::Relaxed),
                     voice_tx_drop_too_large: egress_stats.drop_too_large_voice.load(Ordering::Relaxed),
                     video_tx_drop_too_large: egress_stats.drop_too_large_video.load(Ordering::Relaxed),
-                    completed_frames_per_sec: stream_state.counters.completed_frames.swap(0, Ordering::Relaxed),
+                    completed_frames_per_sec,
                     dropped_no_subscription: stream_state.counters.dropped_no_subscription.load(Ordering::Relaxed),
                     dropped_channel_full: stream_state.counters.dropped_channel_full.load(Ordering::Relaxed),
                     sender_frame_errors: stream_state.counters.sender_frame_errors.load(Ordering::Relaxed),
                     last_frame_size_bytes: stream_state.counters.last_frame_size_bytes.load(Ordering::Relaxed) as usize,
                     last_frame_seq: stream_state.counters.last_frame_seq.load(Ordering::Relaxed),
                     last_frame_ts_ms: stream_state.counters.last_frame_ts_ms.load(Ordering::Relaxed),
+                    codec_video: "av01.0.08M.08 (399)".to_string(),
+                    codec_audio: "opus (251)".to_string(),
+                    connection_speed_kbps: (video_tx_bytes_per_sec.saturating_mul(8)) / 1000,
+                    network_activity_bytes: video_tx_bytes_per_sec,
+                    buffer_health_seconds: if completed_frames_per_sec > 0 { 1.0 } else { 0.0 },
+                    current_resolution: "0x0@0".to_string(),
+                    optimal_resolution: "0x0@0".to_string(),
+                    viewport: "0x0*1.00".to_string(),
+                    dropped_frames,
+                    total_frames,
                 };
                 let _ = tx_event.send(UiEvent::StreamDebugUpdate(snapshot));
             }
