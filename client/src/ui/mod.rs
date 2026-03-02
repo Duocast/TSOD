@@ -846,7 +846,7 @@ impl eframe::App for VpApp {
 
             match self.model.current_channel_type() {
                 Some(model::ChannelType::Streaming) => {
-                    panels::streaming::show(ui, &self.model);
+                    panels::streaming::show(ui, &mut self.model);
                 }
                 _ => {
                     panels::chat::show(ui, &mut self.model, &self.tx_intent);

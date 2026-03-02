@@ -489,6 +489,16 @@ pub struct StreamDebugView {
     pub last_frame_size_bytes: usize,
     pub last_frame_seq: u32,
     pub last_frame_ts_ms: u32,
+    pub codec_video: String,
+    pub codec_audio: String,
+    pub connection_speed_kbps: u64,
+    pub network_activity_bytes: u64,
+    pub buffer_health_seconds: f32,
+    pub current_resolution: String,
+    pub optimal_resolution: String,
+    pub viewport: String,
+    pub dropped_frames: u64,
+    pub total_frames: u64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1231,6 +1241,7 @@ pub struct UiModel {
     pub start_share_in_flight: bool,
     pub stream_debug: StreamDebugView,
     pub latest_stream_frame: Option<StreamFrameView>,
+    pub show_stream_stats: bool,
     pub avatar_path_draft: String,
     pub show_poke_dialog: bool,
     pub poke_target_user_id: String,
@@ -1535,6 +1546,7 @@ impl Default for UiModel {
             start_share_in_flight: false,
             stream_debug: StreamDebugView::default(),
             latest_stream_frame: None,
+            show_stream_stats: false,
             avatar_path_draft: String::new(),
             show_poke_dialog: false,
             poke_target_user_id: String::new(),
