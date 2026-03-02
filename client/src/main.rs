@@ -3606,12 +3606,6 @@ async fn voice_send_loop(
             let _ = tx_event.send(UiEvent::MicTestWaveform(waveform));
         }
 
-        let raw_level = audio::pcm_peak_level(&pcm);
-        let _ = tx_event.send(UiEvent::VoiceMeter {
-            user_id: local_user_id.clone(),
-            level: raw_level,
-        });
-
         let can_send = active_voice_channel_route.load(Ordering::Relaxed) != 0
             && !self_muted.load(Ordering::Relaxed)
             && !self_deafened.load(Ordering::Relaxed)
@@ -3627,6 +3621,10 @@ async fn voice_send_loop(
                     speaking: false,
                 });
             }
+            let _ = tx_event.send(UiEvent::VoiceMeter {
+                user_id: local_user_id.clone(),
+                level: 0.0,
+            });
             continue;
         }
 
@@ -3648,6 +3646,12 @@ async fn voice_send_loop(
                 let _ = tx_event.send(UiEvent::VadLevel(d.last_vad_probability()));
             }
         }
+
+        let processed_level = audio::pcm_peak_level(&pcm);
+        let _ = tx_event.send(UiEvent::VoiceMeter {
+            user_id: local_user_id.clone(),
+            level: processed_level,
+        });
 
         let gated_on = match capture_mode_from_u8(capture_mode.load(Ordering::Relaxed)) {
             ui::model::CaptureMode::PushToTalk => ptt_active.load(Ordering::Relaxed),
