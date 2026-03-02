@@ -9,6 +9,7 @@ use std::{
 
 use bytes::Bytes;
 use tokio::{sync::Notify, task::JoinHandle, time::timeout};
+use tracing::warn;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DatagramKind {
@@ -334,56 +335,23 @@ impl EgressScheduler {
                 }
             }
 
-            loop {
-                if self.conn.datagram_send_buffer_space() < item.bytes.len() {
-                    self.stats.blocked_events.fetch_add(1, Ordering::Relaxed);
-                    if self
-                        .conn
-                        .send_datagram_wait(item.bytes.clone())
-                        .await
-                        .is_err()
-                    {
-                        self.stats.fatal_errors.fetch_add(1, Ordering::Relaxed);
-                        return;
-                    }
-                    self.stats.tx_datagrams.fetch_add(1, Ordering::Relaxed);
-                    self.stats
-                        .tx_bytes
-                        .fetch_add(item.bytes.len() as u64, Ordering::Relaxed);
-                    match item.kind {
-                        DatagramKind::Voice => self.stats.tx_voice.fetch_add(1, Ordering::Relaxed),
-                        DatagramKind::Video => self.stats.tx_video.fetch_add(1, Ordering::Relaxed),
-                        DatagramKind::Control => {
-                            self.stats.tx_control.fetch_add(1, Ordering::Relaxed)
-                        }
-                    };
-                    break;
-                }
-                match self.conn.send_datagram(item.bytes.clone()) {
-                    Ok(()) => {
-                        self.stats.tx_datagrams.fetch_add(1, Ordering::Relaxed);
-                        self.stats
-                            .tx_bytes
-                            .fetch_add(item.bytes.len() as u64, Ordering::Relaxed);
-                        match item.kind {
-                            DatagramKind::Voice => {
-                                self.stats.tx_voice.fetch_add(1, Ordering::Relaxed)
-                            }
-                            DatagramKind::Video => {
-                                self.stats.tx_video.fetch_add(1, Ordering::Relaxed)
-                            }
-                            DatagramKind::Control => {
-                                self.stats.tx_control.fetch_add(1, Ordering::Relaxed)
-                            }
-                        };
-                        break;
-                    }
-                    Err(_) => {
-                        self.stats.fatal_errors.fetch_add(1, Ordering::Relaxed);
-                        return;
-                    }
-                }
+            if self.conn.datagram_send_buffer_space() < item.bytes.len() {
+                self.stats.blocked_events.fetch_add(1, Ordering::Relaxed);
             }
+            if let Err(e) = self.conn.send_datagram_wait(item.bytes.clone()).await {
+                self.stats.fatal_errors.fetch_add(1, Ordering::Relaxed);
+                warn!("[egress] exiting: send_datagram_wait failed ({e:?})");
+                return;
+            }
+            self.stats.tx_datagrams.fetch_add(1, Ordering::Relaxed);
+            self.stats
+                .tx_bytes
+                .fetch_add(item.bytes.len() as u64, Ordering::Relaxed);
+            match item.kind {
+                DatagramKind::Voice => self.stats.tx_voice.fetch_add(1, Ordering::Relaxed),
+                DatagramKind::Video => self.stats.tx_video.fetch_add(1, Ordering::Relaxed),
+                DatagramKind::Control => self.stats.tx_control.fetch_add(1, Ordering::Relaxed),
+            };
         }
     }
 
