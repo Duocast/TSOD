@@ -3,7 +3,10 @@ use ring::rand::SecureRandom;
 use scopeguard::defer;
 use std::{
     collections::{HashMap, HashSet},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
 };
 use tokio::{
     sync::mpsc,
@@ -175,13 +178,68 @@ impl Gateway {
         let user_for_dg = user_id;
         let conn_dg = conn.clone();
         tokio::spawn(async move {
+            const VOICE_DATAGRAM_QUEUE_CAPACITY: usize = 1024;
+            const VIDEO_DATAGRAM_QUEUE_CAPACITY: usize = 8192;
+            const VIDEO_DATAGRAM_WORKERS: usize = 2;
+
+            let oversized_drops = Arc::new(AtomicU64::new(0));
+            let voice_queue_full_drops = Arc::new(AtomicU64::new(0));
+            let video_queue_full_drops = Arc::new(AtomicU64::new(0));
+
+            let (voice_dg_tx, mut voice_dg_rx) =
+                mpsc::channel::<bytes::Bytes>(VOICE_DATAGRAM_QUEUE_CAPACITY);
+            let mut video_senders = Vec::with_capacity(VIDEO_DATAGRAM_WORKERS);
+            for _ in 0..VIDEO_DATAGRAM_WORKERS {
+                let (video_dg_tx, mut video_dg_rx) =
+                    mpsc::channel::<bytes::Bytes>(VIDEO_DATAGRAM_QUEUE_CAPACITY);
+                video_senders.push(video_dg_tx);
+
+                let video = video.clone();
+                let user_for_video = user_for_dg;
+                tokio::spawn(async move {
+                    while let Some(d) = video_dg_rx.recv().await {
+                        video.handle_incoming_datagram(user_for_video, d).await;
+                    }
+                });
+            }
+
+            let voice_for_worker = voice.clone();
+            let user_for_voice = user_for_dg;
+            tokio::spawn(async move {
+                while let Some(d) = voice_dg_rx.recv().await {
+                    voice_for_worker.handle_incoming(user_for_voice, d).await;
+                }
+            });
+
+            let mut video_rr = 0usize;
             while let Ok(d) = conn_dg.read_datagram().await {
+                if d.len() > vp_voice::QUIC_MAX_DATAGRAM_BYTES {
+                    oversized_drops.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
+
                 // Dispatch: byte[1] == 0x02 → video, otherwise → voice.
                 if is_video_datagram(&d) {
-                    video.handle_incoming_datagram(user_for_dg, d).await;
-                } else {
-                    voice.handle_incoming(user_for_dg, d).await;
+                    if !video_senders.is_empty() {
+                        let idx = video_rr % video_senders.len();
+                        video_rr = video_rr.wrapping_add(1);
+                        if video_senders[idx].try_send(d).is_err() {
+                            video_queue_full_drops.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                } else if voice_dg_tx.try_send(d).is_err() {
+                    voice_queue_full_drops.fetch_add(1, Ordering::Relaxed);
                 }
+            }
+
+            let oversized = oversized_drops.load(Ordering::Relaxed);
+            let voice_drops = voice_queue_full_drops.load(Ordering::Relaxed);
+            let video_drops = video_queue_full_drops.load(Ordering::Relaxed);
+            if oversized > 0 || voice_drops > 0 || video_drops > 0 {
+                warn!(
+                    oversized,
+                    voice_drops, video_drops, "datagram recv loop ended with dropped datagrams"
+                );
             }
         });
 
