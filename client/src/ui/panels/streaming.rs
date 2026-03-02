@@ -60,8 +60,12 @@ pub fn show(ui: &mut egui::Ui, model: &UiModel) {
                     dbg.video_datagrams_per_sec, dbg.video_tx_datagrams_per_sec, dbg.video_tx_bytes_per_sec
                 ));
                 ui.label(format!(
-                    "Completed frames/sec: {} | tx blocked: {} | tx errors: {}",
-                    dbg.completed_frames_per_sec, dbg.video_tx_blocked, dbg.video_tx_errors
+                    "Completed frames/sec: {} | tx blocked/sec: {}",
+                    dbg.completed_frames_per_sec, dbg.video_tx_blocked_per_sec
+                ));
+                ui.label(format!(
+                    "Tx drops video(queue/deadline): {}/{} | voice(queue): {}",
+                    dbg.video_tx_drop_queue_full, dbg.video_tx_drop_deadline, dbg.voice_tx_drop_queue_full
                 ));
                 ui.label(format!(
                     "Drops (no subscription): {} | Drops (channel full): {} | Sender frame errors: {}",
