@@ -10,6 +10,7 @@ use std::{
 use anyhow::Result;
 use bytes::Bytes;
 use tokio::{sync::Notify, time::timeout};
+use tracing::warn;
 
 type FrameKey = (u64, u32);
 
@@ -18,6 +19,7 @@ pub struct EgressStats {
     pub blocked_events: AtomicU64,
     pub drop_queue_full: AtomicU64,
     pub drop_deadline: AtomicU64,
+    pub fatal_errors: AtomicU64,
 }
 
 struct FrameBucket {
@@ -206,17 +208,12 @@ impl EgressScheduler {
                 let _ = timeout(Duration::from_millis(10), self.notify.notified()).await;
                 continue;
             };
-            loop {
-                if self.conn.datagram_send_buffer_space() < bytes.len() {
-                    self.stats.blocked_events.fetch_add(1, Ordering::Relaxed);
-                    if self.conn.send_datagram_wait(bytes.clone()).await.is_err() {
-                        return;
-                    }
-                    break;
-                }
-                if self.conn.send_datagram(bytes.clone()).is_ok() {
-                    break;
-                }
+            if self.conn.datagram_send_buffer_space() < bytes.len() {
+                self.stats.blocked_events.fetch_add(1, Ordering::Relaxed);
+            }
+            if let Err(e) = self.conn.send_datagram_wait(bytes.clone()).await {
+                self.stats.fatal_errors.fetch_add(1, Ordering::Relaxed);
+                warn!("[gateway-egress] exiting: send_datagram_wait failed ({e:?})");
                 return;
             }
         }
