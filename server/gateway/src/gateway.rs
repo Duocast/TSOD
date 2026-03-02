@@ -185,6 +185,8 @@ impl Gateway {
             let oversized_drops = Arc::new(AtomicU64::new(0));
             let voice_queue_full_drops = Arc::new(AtomicU64::new(0));
             let video_queue_full_drops = Arc::new(AtomicU64::new(0));
+            let video_rx_count = Arc::new(AtomicU64::new(0));
+            let video_rx_bytes = Arc::new(AtomicU64::new(0));
 
             let (voice_dg_tx, mut voice_dg_rx) =
                 mpsc::channel::<bytes::Bytes>(VOICE_DATAGRAM_QUEUE_CAPACITY);
@@ -212,14 +214,24 @@ impl Gateway {
             });
 
             let mut video_rr = 0usize;
+            let mut last_log = Instant::now();
             while let Ok(d) = conn_dg.read_datagram().await {
-                if d.len() > vp_voice::QUIC_MAX_DATAGRAM_BYTES {
+                if d.len() > vp_voice::APP_MEDIA_MTU {
                     oversized_drops.fetch_add(1, Ordering::Relaxed);
+                    if last_log.elapsed() >= Duration::from_secs(1) {
+                        let drops = oversized_drops.swap(0, Ordering::Relaxed);
+                        if drops > 0 {
+                            warn!(oversized_drops = drops, "dropping oversized datagrams");
+                        }
+                        last_log = Instant::now();
+                    }
                     continue;
                 }
 
                 // Dispatch: byte[1] == 0x02 → video, otherwise → voice.
                 if is_video_datagram(&d) {
+                    video_rx_count.fetch_add(1, Ordering::Relaxed);
+                    video_rx_bytes.fetch_add(d.len() as u64, Ordering::Relaxed);
                     if !video_senders.is_empty() {
                         let idx = video_rr % video_senders.len();
                         video_rr = video_rr.wrapping_add(1);
@@ -229,6 +241,19 @@ impl Gateway {
                     }
                 } else if voice_dg_tx.try_send(d).is_err() {
                     voice_queue_full_drops.fetch_add(1, Ordering::Relaxed);
+                }
+
+                if last_log.elapsed() >= Duration::from_secs(1) {
+                    let c = video_rx_count.swap(0, Ordering::Relaxed);
+                    let b = video_rx_bytes.swap(0, Ordering::Relaxed);
+                    if c > 0 {
+                        info!("[video] server rx datagrams/sec={} bytes/sec={}", c, b);
+                    }
+                    let drops = oversized_drops.swap(0, Ordering::Relaxed);
+                    if drops > 0 {
+                        warn!(oversized_drops = drops, "dropping oversized datagrams");
+                    }
+                    last_log = Instant::now();
                 }
             }
 
