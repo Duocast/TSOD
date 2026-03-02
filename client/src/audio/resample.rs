@@ -1,6 +1,7 @@
+use audioadapter_buffers::direct::SequentialSliceOfVecs;
 use rubato::{
-    Resampler as _, SincFixedIn, SincInterpolationParameters, SincInterpolationType,
-    WindowFunction,
+    Async as AsyncResampler, FixedAsync, Resampler as _, SincInterpolationParameters,
+    SincInterpolationType, WindowFunction,
 };
 
 const DEFAULT_INPUT_FRAMES: usize = 960;
@@ -71,7 +72,7 @@ impl ResamplerImpl {
 }
 
 struct RubatoResampler {
-    inner: SincFixedIn<f32>,
+    inner: AsyncResampler<f32>,
     channels: usize,
     in_planar: Vec<Vec<f32>>,
     out_planar: Vec<Vec<f32>>,
@@ -83,7 +84,7 @@ impl RubatoResampler {
         input_rate: u32,
         output_rate: u32,
         channels: usize,
-    ) -> Result<Self, rubato::ResampleError> {
+    ) -> Result<Self, rubato::ResamplerConstructionError> {
         let ratio = output_rate as f64 / input_rate as f64;
         let params = SincInterpolationParameters {
             sinc_len: 128,
@@ -93,7 +94,14 @@ impl RubatoResampler {
             window: WindowFunction::BlackmanHarris2,
         };
         let chunk_size = DEFAULT_INPUT_FRAMES;
-        let mut inner = SincFixedIn::<f32>::new(ratio, 1.0, params, chunk_size, channels)?;
+        let inner = AsyncResampler::<f32>::new_sinc(
+            ratio,
+            1.0,
+            &params,
+            chunk_size,
+            channels,
+            FixedAsync::Input,
+        )?;
         let max_out = inner.output_frames_max();
         let mut in_planar = Vec::with_capacity(channels);
         let mut out_planar = Vec::with_capacity(channels);
@@ -140,9 +148,16 @@ impl RubatoResampler {
                 }
             }
 
+            let in_adapter =
+                SequentialSliceOfVecs::new(&self.in_planar[..], channels, in_chunk)
+                    .expect("in_planar size mismatch");
+            let out_frames_cap = self.out_planar[0].len();
+            let mut out_adapter =
+                SequentialSliceOfVecs::new_mut(&mut self.out_planar[..], channels, out_frames_cap)
+                    .expect("out_planar size mismatch");
             match self
                 .inner
-                .process_into_buffer(&self.in_planar, &mut self.out_planar, None)
+                .process_into_buffer(&in_adapter, &mut out_adapter, None)
             {
                 Ok((_in, out_frames)) => {
                     let needed = out_frames * channels;
