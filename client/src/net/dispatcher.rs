@@ -573,7 +573,10 @@ async fn dispatcher_task(
         loop {
             let msg: pb::ServerToClient = match read_delimited(&mut recv, MAX_CTRL_MSG).await {
                 Ok(m) => m,
-                Err(e) => return Err::<(), anyhow::Error>(e),
+                Err(e) => {
+                    warn!("[dispatcher] exiting: control read/decode failed for ServerToClient ({e:?})");
+                    return Err::<(), anyhow::Error>(e);
+                }
             };
 
             if let Some(rid) = msg.request_id.as_ref().map(|x| x.value) {
@@ -595,12 +598,21 @@ async fn dispatcher_task(
     loop {
         tokio::select! {
             _ = shutdown_rx.changed() => {
-                if *shutdown_rx.borrow() { break; }
+                if *shutdown_rx.borrow() {
+                    warn!("[dispatcher] exiting: shutdown signal received");
+                    break;
+                }
             }
             cmd = cmd_rx.recv() => {
                 match cmd {
-                    None => break,
-                    Some(Command::Shutdown) => break,
+                    None => {
+                        warn!("[dispatcher] exiting: command channel closed");
+                        break;
+                    }
+                    Some(Command::Shutdown) => {
+                        warn!("[dispatcher] exiting: shutdown command received");
+                        break;
+                    }
                     Some(Command::Send { payload, resp_tx, timeout: _ }) => {
                         let rid = {
                             let mut g = next_req.lock().await;
@@ -620,7 +632,7 @@ async fn dispatcher_task(
                         };
 
                         if let Err(e) = write_delimited(&mut send, &msg).await {
-                            warn!("control send failed: {e:#}");
+                            warn!("[dispatcher] exiting: control send failed ({e:?})");
                             fail_all_pending(&pending).await;
                             break;
                         }
@@ -630,13 +642,13 @@ async fn dispatcher_task(
             r = &mut reader => {
                 match r {
                     Ok(Ok(())) => {
-                        warn!("control reader stopped cleanly");
+                        warn!("[dispatcher] exiting: control reader stopped cleanly");
                     }
                     Ok(Err(e)) => {
-                        warn!("control reader stream error: {:#}", e);
+                        warn!("[dispatcher] exiting: control reader stream error ({e:?})");
                     }
                     Err(e) => {
-                        warn!("control reader join error: {}", e);
+                        warn!("[dispatcher] exiting: control reader join error ({e:?})");
                     }
                 }
                 fail_all_pending(&pending).await;

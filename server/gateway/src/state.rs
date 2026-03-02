@@ -81,11 +81,17 @@ impl QuinnDatagramTx {
 #[async_trait::async_trait]
 impl DatagramTx for QuinnDatagramTx {
     async fn send(&self, bytes: Bytes) -> Result<()> {
-        if let Err(e) = self.conn.send_datagram(bytes) {
-            warn!(error = ?e, "failed to forward datagram");
-            return Err(e.into());
+        match self.conn.send_datagram(bytes) {
+            Ok(()) => Ok(()),
+            Err(e) if e.to_string().contains("blocked") => {
+                tracing::debug!("quic datagram blocked; dropping viewer datagram");
+                Ok(())
+            }
+            Err(e) => {
+                warn!(error = ?e, "failed to forward datagram");
+                Err(e.into())
+            }
         }
-        Ok(())
     }
 }
 

@@ -56,8 +56,12 @@ pub fn show(ui: &mut egui::Ui, model: &UiModel) {
                 ui.add_space(6.0);
                 ui.label(format!("Active stream tags: {tags}"));
                 ui.label(format!(
-                    "Video datagrams/sec: {} | Completed frames/sec: {}",
-                    dbg.video_datagrams_per_sec, dbg.completed_frames_per_sec
+                    "Video rx datagrams/sec: {} | tx datagrams/sec: {} | tx bytes/sec: {}",
+                    dbg.video_datagrams_per_sec, dbg.video_tx_datagrams_per_sec, dbg.video_tx_bytes_per_sec
+                ));
+                ui.label(format!(
+                    "Completed frames/sec: {} | tx blocked: {} | tx errors: {}",
+                    dbg.completed_frames_per_sec, dbg.video_tx_blocked, dbg.video_tx_errors
                 ));
                 ui.label(format!(
                     "Drops (no subscription): {} | Drops (channel full): {} | Sender frame errors: {}",
