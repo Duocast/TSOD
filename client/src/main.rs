@@ -34,7 +34,7 @@ use std::collections::HashMap;
 #[cfg(debug_assertions)]
 use std::collections::HashSet;
 use std::sync::{
-    atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering},
     Arc,
 };
 #[cfg(debug_assertions)]
@@ -413,6 +413,22 @@ fn persist_settings(tx_event: &Sender<UiEvent>, settings: &ui::model::AppSetting
     }
 }
 
+fn capture_mode_to_u8(mode: ui::model::CaptureMode) -> u8 {
+    match mode {
+        ui::model::CaptureMode::PushToTalk => 0,
+        ui::model::CaptureMode::VoiceActivation => 1,
+        ui::model::CaptureMode::Continuous => 2,
+    }
+}
+
+fn capture_mode_from_u8(mode: u8) -> ui::model::CaptureMode {
+    match mode {
+        0 => ui::model::CaptureMode::PushToTalk,
+        2 => ui::model::CaptureMode::Continuous,
+        _ => ui::model::CaptureMode::VoiceActivation,
+    }
+}
+
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env().add_directive(Level::INFO.into()))
@@ -566,6 +582,14 @@ async fn app_task(
     }
     let _ = tx_event.send(UiEvent::SettingsLoaded(Box::new(saved_settings.clone())));
 
+    ptt_active.store(
+        saved_settings.capture_mode != ui::model::CaptureMode::PushToTalk,
+        Ordering::Relaxed,
+    );
+    let capture_mode = Arc::new(AtomicU8::new(capture_mode_to_u8(
+        saved_settings.capture_mode,
+    )));
+
     let audio_runtime = AudioRuntimeSettings::from_app_settings(&saved_settings);
 
     // Audio constants
@@ -680,6 +704,7 @@ async fn app_task(
             active_channel_audio_mode.clone(),
             selected_audio.clone(),
             ptt_active.clone(),
+            capture_mode.clone(),
             self_muted.clone(),
             self_deafened.clone(),
             server_deafened.clone(),
@@ -1340,6 +1365,7 @@ async fn connect_and_run_session(
     active_channel_audio_mode: Arc<std::sync::RwLock<ChannelAudioMode>>,
     selected_audio: Arc<Mutex<AudioSelection>>,
     ptt_active: Arc<AtomicBool>,
+    capture_mode: Arc<AtomicU8>,
     self_muted: Arc<AtomicBool>,
     self_deafened: Arc<AtomicBool>,
     server_deafened: Arc<AtomicBool>,
@@ -2009,6 +2035,7 @@ async fn connect_and_run_session(
         active_voice_channel_route.clone(),
         active_channel_audio_mode.clone(),
         ptt_active.clone(),
+        capture_mode.clone(),
         self_muted.clone(),
         self_deafened.clone(),
         server_deafened.clone(),
@@ -2017,7 +2044,6 @@ async fn connect_and_run_session(
         audio_runtime.clone(),
         voice_counters.clone(),
         local_user_id.clone(),
-        cfg.push_to_talk,
         voice_die_tx.clone(),
     ));
 
@@ -2875,8 +2901,11 @@ async fn connect_and_run_session(
 
                             // Update PTT mode
                             let is_ptt = settings.capture_mode == ui::model::CaptureMode::PushToTalk;
-                            let is_continuous = settings.capture_mode == ui::model::CaptureMode::Continuous;
-                            ptt_active.store(!is_ptt || is_continuous, Ordering::Relaxed);
+                            ptt_active.store(!is_ptt, Ordering::Relaxed);
+                            capture_mode.store(
+                                capture_mode_to_u8(settings.capture_mode),
+                                Ordering::Relaxed,
+                            );
 
                             {
                                 let mut state = selected_audio.lock().await;
@@ -3516,6 +3545,7 @@ async fn voice_send_loop(
     active_voice_channel_route: Arc<AtomicU32>,
     active_channel_audio_mode: Arc<std::sync::RwLock<ChannelAudioMode>>,
     ptt_active: Arc<AtomicBool>,
+    capture_mode: Arc<AtomicU8>,
     self_muted: Arc<AtomicBool>,
     self_deafened: Arc<AtomicBool>,
     server_deafened: Arc<AtomicBool>,
@@ -3524,7 +3554,6 @@ async fn voice_send_loop(
     audio_runtime: AudioRuntimeSettings,
     voice_counters: Arc<VoiceTelemetryCounters>,
     local_user_id: String,
-    push_to_talk: bool,
     _voice_die_tx: watch::Sender<bool>,
 ) {
     let mut seq: u32 = 0;
@@ -3587,7 +3616,9 @@ async fn voice_send_loop(
             && !self_muted.load(Ordering::Relaxed)
             && !self_deafened.load(Ordering::Relaxed)
             && !server_deafened.load(Ordering::Relaxed)
-            && (!push_to_talk || ptt_active.load(Ordering::Relaxed));
+            && (capture_mode_from_u8(capture_mode.load(Ordering::Relaxed))
+                != ui::model::CaptureMode::PushToTalk
+                || ptt_active.load(Ordering::Relaxed));
         if !can_send {
             if last_local_speaking {
                 last_local_speaking = false;
@@ -3618,12 +3649,16 @@ async fn voice_send_loop(
             }
         }
 
-        let gated_on = if push_to_talk {
-            ptt_active.load(Ordering::Relaxed)
-        } else if music_channel {
-            true
-        } else {
-            vad_hysteresis.update(vad_score)
+        let gated_on = match capture_mode_from_u8(capture_mode.load(Ordering::Relaxed)) {
+            ui::model::CaptureMode::PushToTalk => ptt_active.load(Ordering::Relaxed),
+            ui::model::CaptureMode::Continuous => true,
+            ui::model::CaptureMode::VoiceActivation => {
+                if music_channel {
+                    true
+                } else {
+                    vad_hysteresis.update(vad_score)
+                }
+            }
         };
 
         if gated_on != last_local_speaking {
