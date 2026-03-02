@@ -2632,17 +2632,14 @@ async fn connect_and_run_session(
                                                                 Ok(()) => {
                                                                     video_counters.video_tx_datagrams.fetch_add(1, Ordering::Relaxed);
                                                                     video_counters.video_tx_bytes.fetch_add(dg_len, Ordering::Relaxed);
-                                                                    Ok(())
                                                                 }
                                                                 Err(e) => {
                                                                     let is_blocked = e.to_string().contains("blocked");
                                                                     if is_blocked {
                                                                         video_counters.video_tx_blocked.fetch_add(1, Ordering::Relaxed);
-                                                                        Ok(())
                                                                     } else {
                                                                         video_counters.video_tx_errors.fetch_add(1, Ordering::Relaxed);
                                                                         warn!(stream_tag, error = ?e, "[video] send_datagram error");
-                                                                        Err(e)
                                                                     }
                                                                 }
                                                             }
