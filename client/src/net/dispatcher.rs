@@ -4,6 +4,7 @@ use tokio::{
     sync::{mpsc, oneshot, watch, Mutex, RwLock},
     time::timeout,
 };
+use tracing::info;
 
 use crate::{
     identity::DeviceIdentity,
@@ -222,10 +223,16 @@ impl ControlDispatcher {
 
         match resp.payload {
             Some(pb::server_to_client::Payload::AuthResponse(a)) => {
+                let media_caps = default_media_capabilities();
+                info!(
+                    encode = ?media_caps.encode,
+                    decode = ?media_caps.decode,
+                    "advertising media codec capabilities"
+                );
                 let _ = self
                     .send_request(
                         pb::client_to_server::Payload::CapabilitiesUpdate(pb::CapabilitiesUpdate {
-                            caps: Some(default_media_capabilities()),
+                            caps: Some(media_caps),
                         }),
                         Duration::from_secs(2),
                     )
@@ -744,19 +751,18 @@ fn now_ts() -> pb::Timestamp {
 }
 
 fn default_media_capabilities() -> pb::ClientMediaCapabilities {
-    let supports_av1 = cfg!(feature = "video-av1");
-    let supports_vp9 = cfg!(feature = "video-vp9");
-    let mut decode = Vec::new();
-    if supports_av1 {
-        decode.push(pb::VideoCodec::Av1 as i32);
+    let mut codecs = Vec::with_capacity(3);
+    if cfg!(feature = "video-av1") {
+        codecs.push(pb::VideoCodec::Av1 as i32);
     }
-    if supports_vp9 {
-        decode.push(pb::VideoCodec::Vp9 as i32);
+    if cfg!(feature = "video-vp9") {
+        codecs.push(pb::VideoCodec::Vp9 as i32);
     }
+    codecs.push(pb::VideoCodec::Vp8 as i32);
 
     pb::ClientMediaCapabilities {
-        decode: decode.clone(),
-        encode: decode,
+        decode: codecs.clone(),
+        encode: codecs,
         hw_encode_av1: false,
         hw_encode_vp9: false,
         hw_encode_vp8: false,

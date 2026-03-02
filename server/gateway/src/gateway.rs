@@ -184,7 +184,9 @@ impl Gateway {
 
             let oversized_drops = Arc::new(AtomicU64::new(0));
             let voice_queue_full_drops = Arc::new(AtomicU64::new(0));
+            let voice_queue_closed_drops = Arc::new(AtomicU64::new(0));
             let video_queue_full_drops = Arc::new(AtomicU64::new(0));
+            let video_queue_closed_drops = Arc::new(AtomicU64::new(0));
             let video_rx_count = Arc::new(AtomicU64::new(0));
             let video_rx_bytes = Arc::new(AtomicU64::new(0));
 
@@ -235,18 +237,33 @@ impl Gateway {
                     if !video_senders.is_empty() {
                         let idx = video_rr % video_senders.len();
                         video_rr = video_rr.wrapping_add(1);
-                        if video_senders[idx].try_send(d).is_err() {
-                            video_queue_full_drops.fetch_add(1, Ordering::Relaxed);
+                        if let Err(err) = video_senders[idx].try_send(d) {
+                            match err {
+                                mpsc::error::TrySendError::Full(_) => {
+                                    video_queue_full_drops.fetch_add(1, Ordering::Relaxed);
+                                }
+                                mpsc::error::TrySendError::Closed(_) => {
+                                    video_queue_closed_drops.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
                         }
                     }
-                } else if voice_dg_tx.try_send(d).is_err() {
-                    voice_queue_full_drops.fetch_add(1, Ordering::Relaxed);
+                } else if let Err(err) = voice_dg_tx.try_send(d) {
+                    match err {
+                        mpsc::error::TrySendError::Full(_) => {
+                            voice_queue_full_drops.fetch_add(1, Ordering::Relaxed);
+                        }
+                        mpsc::error::TrySendError::Closed(_) => {
+                            voice_queue_closed_drops.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
                 }
 
                 if last_log.elapsed() >= Duration::from_secs(1) {
                     let c = video_rx_count.swap(0, Ordering::Relaxed);
                     let b = video_rx_bytes.swap(0, Ordering::Relaxed);
                     let video_drops = video_queue_full_drops.swap(0, Ordering::Relaxed);
+                    let video_closed = video_queue_closed_drops.swap(0, Ordering::Relaxed);
                     if c > 0 {
                         info!(
                             "[video] server rx datagrams/sec={} bytes/sec={} queue_full_drops/sec={}",
@@ -256,6 +273,19 @@ impl Gateway {
                         info!(
                             "[video] server rx datagrams/sec=0 bytes/sec=0 queue_full_drops/sec={}",
                             video_drops
+                        );
+                    }
+                    if video_closed > 0 {
+                        warn!(
+                            video_queue_closed_drops = video_closed,
+                            "[video] datagram worker channel closed"
+                        );
+                    }
+                    let voice_closed = voice_queue_closed_drops.swap(0, Ordering::Relaxed);
+                    if voice_closed > 0 {
+                        warn!(
+                            voice_queue_closed_drops = voice_closed,
+                            "[voice] datagram worker channel closed"
                         );
                     }
                     let drops = oversized_drops.swap(0, Ordering::Relaxed);
@@ -268,11 +298,22 @@ impl Gateway {
 
             let oversized = oversized_drops.load(Ordering::Relaxed);
             let voice_drops = voice_queue_full_drops.load(Ordering::Relaxed);
+            let voice_closed = voice_queue_closed_drops.load(Ordering::Relaxed);
             let video_drops = video_queue_full_drops.load(Ordering::Relaxed);
-            if oversized > 0 || voice_drops > 0 || video_drops > 0 {
+            let video_closed = video_queue_closed_drops.load(Ordering::Relaxed);
+            if oversized > 0
+                || voice_drops > 0
+                || voice_closed > 0
+                || video_drops > 0
+                || video_closed > 0
+            {
                 warn!(
                     oversized,
-                    voice_drops, video_drops, "datagram recv loop ended with dropped datagrams"
+                    voice_drops,
+                    voice_closed,
+                    video_drops,
+                    video_closed,
+                    "datagram recv loop ended with dropped datagrams"
                 );
             }
         });

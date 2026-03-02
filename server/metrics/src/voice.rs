@@ -4,54 +4,70 @@ use crate::labels::LabelPolicy;
 
 /// Metric names under: {ns}_voice_*
 pub struct VoiceMetricsImpl {
-    ns: &'static str,
+    rx_packets_name: &'static str,
+    rx_bytes_name: &'static str,
+    forwarded_name: &'static str,
+    fanout_name: &'static str,
+    drops_name: &'static str,
+    send_queue_drops_name: &'static str,
+    rx_by_channel_name: &'static str,
     policy: LabelPolicy,
 }
 
 impl VoiceMetricsImpl {
     pub fn new(namespace: &'static str, policy: LabelPolicy) -> Self {
         Self {
-            ns: namespace,
+            rx_packets_name: Box::leak(
+                format!("{namespace}_voice_rx_packets_total").into_boxed_str(),
+            ),
+            rx_bytes_name: Box::leak(format!("{namespace}_voice_rx_bytes_total").into_boxed_str()),
+            forwarded_name: Box::leak(
+                format!("{namespace}_voice_forwarded_total").into_boxed_str(),
+            ),
+            fanout_name: Box::leak(format!("{namespace}_voice_fanout").into_boxed_str()),
+            drops_name: Box::leak(format!("{namespace}_voice_drops_total").into_boxed_str()),
+            send_queue_drops_name: Box::leak(
+                format!("{namespace}_voice_send_queue_drops_total").into_boxed_str(),
+            ),
+            rx_by_channel_name: Box::leak(
+                format!("{namespace}_voice_rx_packets_by_channel_total").into_boxed_str(),
+            ),
             policy,
         }
     }
 
     #[inline]
     pub fn rx_packet(&self) {
-        counter!(format!("{}_voice_rx_packets_total", self.ns)).increment(1);
+        counter!(self.rx_packets_name).increment(1);
     }
 
     #[inline]
     pub fn rx_bytes(&self, n: usize) {
-        counter!(format!("{}_voice_rx_bytes_total", self.ns)).increment(n as u64);
+        counter!(self.rx_bytes_name).increment(n as u64);
     }
 
     #[inline]
     pub fn forwarded(&self, fanout: usize) {
-        counter!(format!("{}_voice_forwarded_total", self.ns)).increment(1);
-        histogram!(format!("{}_voice_fanout", self.ns)).record(fanout as f64);
+        counter!(self.forwarded_name).increment(1);
+        histogram!(self.fanout_name).record(fanout as f64);
     }
 
     #[inline]
     pub fn drop_reason(&self, reason: &'static str) {
-        counter!(
-            format!("{}_voice_drops_total", self.ns),
-            "reason" => crate::labels::LabelPolicy::reason(reason).as_str().to_string()
-        )
-        .increment(1);
+        counter!(self.drops_name, "reason" => reason).increment(1);
     }
 
     #[inline]
     pub fn enqueue_drop(&self) {
         self.drop_reason("send_queue_full");
-        counter!(format!("{}_voice_send_queue_drops_total", self.ns)).increment(1);
+        counter!(self.send_queue_drops_name).increment(1);
     }
 
     #[inline]
     pub fn per_channel_rx(&self, channel_route_hash: u32) {
         counter!(
-            format!("{}_voice_rx_packets_by_channel_total", self.ns),
-            "ch" => self.policy.channel_bucket(channel_route_hash).as_str().to_string()
+            self.rx_by_channel_name,
+            "ch" => self.policy.channel_bucket(channel_route_hash).into_static()
         )
         .increment(1);
     }
