@@ -167,7 +167,6 @@ fn default_caps(alpn: &str) -> pb::ClientCaps {
             codecs: vec![
                 pb::video_caps::Codec::Av1 as i32,
                 pb::video_caps::Codec::Vp9 as i32,
-                pb::video_caps::Codec::Vp8 as i32,
             ],
             max_width: 1920,
             max_height: 1080,
