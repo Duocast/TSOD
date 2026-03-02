@@ -1,3 +1,172 @@
+use rubato::{
+    Resampler as _, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
+};
+
+const DEFAULT_INPUT_FRAMES: usize = 960;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ResamplerMode {
+    Rubato,
+    Linear,
+}
+
+impl ResamplerMode {
+    pub fn from_env() -> Self {
+        match std::env::var("VP_AUDIO_RESAMPLER") {
+            Ok(mode) if mode.eq_ignore_ascii_case("linear") => Self::Linear,
+            _ => Self::Rubato,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Rubato => "rubato",
+            Self::Linear => "linear",
+        }
+    }
+}
+
+pub(crate) enum ResamplerImpl {
+    Rubato(RubatoResampler),
+    Linear(LinearResampler),
+}
+
+impl ResamplerImpl {
+    pub fn new(input_rate: u32, output_rate: u32, channels: usize, mode: ResamplerMode) -> Self {
+        if input_rate == output_rate {
+            return Self::Linear(LinearResampler::new(input_rate, output_rate));
+        }
+
+        match mode {
+            ResamplerMode::Rubato => RubatoResampler::new(input_rate, output_rate, channels)
+                .map(Self::Rubato)
+                .unwrap_or_else(|err| {
+                    tracing::warn!(
+                        "[audio] failed to initialize rubato resampler ({} -> {}, ch={}): {}; using linear fallback",
+                        input_rate,
+                        output_rate,
+                        channels,
+                        err
+                    );
+                    Self::Linear(LinearResampler::new(input_rate, output_rate))
+                }),
+            ResamplerMode::Linear => Self::Linear(LinearResampler::new(input_rate, output_rate)),
+        }
+    }
+
+    pub fn process_mono(&mut self, input: &[f32], out: &mut Vec<f32>) {
+        match self {
+            Self::Rubato(r) => r.process_mono(input, out),
+            Self::Linear(r) => r.process(input, out),
+        }
+    }
+
+    pub fn process_interleaved(&mut self, input: &[f32], channels: usize, out: &mut Vec<f32>) {
+        match self {
+            Self::Rubato(r) => r.process_interleaved(input, channels, out),
+            Self::Linear(r) => process_linear_interleaved(r, input, channels, out),
+        }
+    }
+}
+
+struct RubatoResampler {
+    inner: SincFixedIn<f32>,
+    channels: usize,
+    in_planar: Vec<Vec<f32>>,
+    out_planar: Vec<Vec<f32>>,
+    out_interleaved: Vec<f32>,
+}
+
+impl RubatoResampler {
+    fn new(
+        input_rate: u32,
+        output_rate: u32,
+        channels: usize,
+    ) -> Result<Self, rubato::ResampleError> {
+        let ratio = output_rate as f64 / input_rate as f64;
+        let params = SincInterpolationParameters {
+            sinc_len: 128,
+            f_cutoff: 0.95,
+            interpolation: SincInterpolationType::Linear,
+            oversampling_factor: 128,
+            window: WindowFunction::BlackmanHarris2,
+        };
+        let chunk_size = DEFAULT_INPUT_FRAMES;
+        let mut inner = SincFixedIn::<f32>::new(ratio, 1.0, params, chunk_size, channels)?;
+        let max_out = inner.output_frames_max();
+        let mut in_planar = Vec::with_capacity(channels);
+        let mut out_planar = Vec::with_capacity(channels);
+        for _ in 0..channels {
+            in_planar.push(vec![0.0; chunk_size]);
+            out_planar.push(vec![0.0; max_out]);
+        }
+
+        Ok(Self {
+            inner,
+            channels,
+            in_planar,
+            out_planar,
+            out_interleaved: vec![0.0; max_out.saturating_mul(channels)],
+        })
+    }
+
+    fn process_mono(&mut self, input: &[f32], out: &mut Vec<f32>) {
+        self.process_interleaved(input, 1, out);
+    }
+
+    fn process_interleaved(&mut self, input: &[f32], channels: usize, out: &mut Vec<f32>) {
+        if input.is_empty() || channels == 0 || channels != self.channels {
+            return;
+        }
+
+        let frames = input.len() / channels;
+        if frames == 0 {
+            return;
+        }
+
+        let mut processed_frames = 0usize;
+        while processed_frames < frames {
+            let max_in = self.inner.input_frames_max();
+            let in_chunk = (frames - processed_frames).min(max_in);
+            for ch in 0..channels {
+                self.in_planar[ch].resize(in_chunk, 0.0);
+            }
+
+            for frame_idx in 0..in_chunk {
+                let src_base = (processed_frames + frame_idx) * channels;
+                for ch in 0..channels {
+                    self.in_planar[ch][frame_idx] = input[src_base + ch];
+                }
+            }
+
+            match self
+                .inner
+                .process_into_buffer(&self.in_planar, &mut self.out_planar, None)
+            {
+                Ok((_in, out_frames)) => {
+                    let needed = out_frames * channels;
+                    if self.out_interleaved.len() < needed {
+                        self.out_interleaved.resize(needed, 0.0);
+                    }
+                    for frame_idx in 0..out_frames {
+                        let dst_base = frame_idx * channels;
+                        for ch in 0..channels {
+                            self.out_interleaved[dst_base + ch] = self.out_planar[ch][frame_idx];
+                        }
+                    }
+                    out.extend_from_slice(&self.out_interleaved[..needed]);
+                }
+                Err(err) => {
+                    tracing::warn!("[audio] rubato process failed: {err}");
+                    return;
+                }
+            }
+
+            processed_frames += in_chunk;
+        }
+    }
+}
+
 /// Phase-tracking linear interpolation resampler for mono audio.
 ///
 /// Converts between arbitrary sample rates using first-order (linear)
@@ -39,5 +208,112 @@ impl LinearResampler {
             self.history.drain(..consumed);
             self.phase -= consumed as f64;
         }
+    }
+}
+
+fn process_linear_interleaved(
+    linear: &mut LinearResampler,
+    input: &[f32],
+    channels: usize,
+    out: &mut Vec<f32>,
+) {
+    if channels == 0 || input.is_empty() {
+        return;
+    }
+    if channels == 1 {
+        linear.process(input, out);
+        return;
+    }
+
+    let frames = input.len() / channels;
+    if frames == 0 {
+        return;
+    }
+
+    let mut mono = Vec::with_capacity(frames);
+    let mut mono_out = Vec::new();
+    for ch in 0..channels {
+        mono.clear();
+        for frame in input.chunks_exact(channels) {
+            mono.push(frame[ch]);
+        }
+        mono_out.clear();
+        linear.process(&mono, &mut mono_out);
+        if ch == 0 {
+            out.resize(mono_out.len() * channels, 0.0);
+        }
+        for (idx, &sample) in mono_out.iter().enumerate() {
+            out[idx * channels + ch] = sample;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ResamplerImpl, ResamplerMode};
+
+    fn sine(frames: usize, rate: u32, freq: f32) -> Vec<f32> {
+        (0..frames)
+            .map(|i| ((i as f32 * freq * 2.0 * std::f32::consts::PI) / rate as f32).sin())
+            .collect()
+    }
+
+    #[test]
+    fn ratio_48k_to_44k1_close() {
+        let mut r = ResamplerImpl::new(48_000, 44_100, 1, ResamplerMode::Rubato);
+        let input = sine(4_800, 48_000, 440.0);
+        let mut out = Vec::new();
+        r.process_mono(&input, &mut out);
+        let expected = (input.len() as f64 * 44_100f64 / 48_000f64) as isize;
+        assert!((out.len() as isize - expected).abs() <= 4);
+    }
+
+    #[test]
+    fn ratio_44k1_to_48k_close() {
+        let mut r = ResamplerImpl::new(44_100, 48_000, 1, ResamplerMode::Rubato);
+        let input = sine(4_410, 44_100, 440.0);
+        let mut out = Vec::new();
+        r.process_mono(&input, &mut out);
+        let expected = (input.len() as f64 * 48_000f64 / 44_100f64) as isize;
+        assert!((out.len() as isize - expected).abs() <= 4);
+    }
+
+    #[test]
+    fn interleaved_stays_separated() {
+        let mut r = ResamplerImpl::new(48_000, 44_100, 2, ResamplerMode::Rubato);
+        let frames = 4_800;
+        let mut input = Vec::with_capacity(frames * 2);
+        for i in 0..frames {
+            input.push((i as f32 / 100.0).sin());
+            input.push(0.0);
+        }
+        let mut out = Vec::new();
+        r.process_interleaved(&input, 2, &mut out);
+        let right_energy: f32 =
+            out.chunks_exact(2).map(|f| f[1].abs()).sum::<f32>() / (out.len().max(2) / 2) as f32;
+        assert!(right_energy < 1e-4);
+    }
+
+    #[test]
+    fn sequential_calls_keep_state() {
+        let mut r = ResamplerImpl::new(48_000, 44_100, 1, ResamplerMode::Rubato);
+        let input = sine(9_600, 48_000, 220.0);
+
+        let mut whole = Vec::new();
+        r.process_mono(&input, &mut whole);
+
+        let mut r2 = ResamplerImpl::new(48_000, 44_100, 1, ResamplerMode::Rubato);
+        let mut chunked = Vec::new();
+        for chunk in input.chunks(240) {
+            r2.process_mono(chunk, &mut chunked);
+        }
+
+        assert_eq!(whole.len(), chunked.len());
+        let max_delta = whole
+            .iter()
+            .zip(chunked.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(max_delta < 0.02);
     }
 }

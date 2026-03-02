@@ -36,6 +36,7 @@ ring = "0.17.14"
 # Audio (cross-platform)
 opus = "0.3.1"
 ringbuf = "0.4.8"
+rubato = "=1.0.1"
 
 # DSP
 nnnoiseless = "0.5.2"      # Pure Rust RNNoise (noise suppression + VAD)

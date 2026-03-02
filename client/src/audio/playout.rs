@@ -161,11 +161,12 @@ mod linux {
         engine_channels: u16,
         sink_rate: u32,
         sink_channels: u32,
-        resampler: Option<LinearResampler>,
+        resampler: Option<ResamplerImpl>,
         in_mono: Vec<f32>,
         out_mono_tmp: Vec<f32>,
         out_fifo: VecDeque<f32>,
         log_once: bool,
+        resampler_mode: ResamplerMode,
     }
 
     enum LinuxPlayoutBackend {
@@ -324,6 +325,7 @@ mod linux {
                 out_mono_tmp: Vec::new(),
                 out_fifo: VecDeque::new(),
                 log_once: false,
+                resampler_mode: ResamplerMode::from_env(),
             })
             .param_changed(move |_, state, id, param| {
                 if id != pw::spa::param::ParamType::Format.as_raw() {
@@ -343,11 +345,12 @@ mod linux {
 
                 if !state.log_once {
                     info!(
-                        "[audio] pipewire playout negotiated: rate={} channels={} format={:?}; engine={}/mono",
+                        "[audio] pipewire playout resampler={} in_rate={} out_rate={} channels={} format={:?}",
+                        state.resampler_mode.as_str(),
+                        state.engine_rate,
                         negotiated_rate,
-                        negotiated_channels,
-                        negotiated_format,
-                        state.engine_rate
+                        1,
+                        negotiated_format
                     );
                     state.log_once = true;
                 }
@@ -369,7 +372,7 @@ mod linux {
                     state.in_mono.clear();
                 }
                 state.resampler = if negotiated_rate != state.engine_rate {
-                    Some(LinearResampler::new(state.engine_rate, negotiated_rate))
+                    Some(ResamplerImpl::new(state.engine_rate, negotiated_rate, 1, state.resampler_mode))
                 } else {
                     None
                 };
@@ -422,7 +425,7 @@ mod linux {
 
                         state.out_mono_tmp.clear();
                         if let Some(resampler) = state.resampler.as_mut() {
-                            resampler.process(&state.in_mono, &mut state.out_mono_tmp);
+                            resampler.process_mono(&state.in_mono, &mut state.out_mono_tmp);
                         } else {
                             state.out_mono_tmp.extend_from_slice(&state.in_mono);
                         }
@@ -543,7 +546,7 @@ mod linux {
         devices
     }
 
-    use crate::audio::resample::LinearResampler;
+    use crate::audio::resample::{ResamplerImpl, ResamplerMode};
     #[cfg(target_os = "windows")]
     use crate::audio::windows::mmdevice;
 
@@ -714,12 +717,7 @@ mod linux {
             .ok()
             .map(|desc| desc.to_string())
             .filter(|name| !name.trim().is_empty())
-            .or_else(|| {
-                device
-                    .name()
-                    .ok()
-                    .filter(|name| !name.trim().is_empty())
-            })
+            .or_else(|| device.name().ok().filter(|name| !name.trim().is_empty()))
     }
 
     fn device_info(device: &cpal::Device) -> Option<AudioDeviceInfo> {
@@ -823,7 +821,14 @@ mod linux {
         let target_rate = stream_cfg.sample_rate;
         let target_channels = stream_cfg.channels.max(1) as usize;
         let source_channels = source_channels.max(1) as usize;
-        let mut resampler = LinearResampler::new(source_rate, target_rate);
+        let resampler_mode = ResamplerMode::from_env();
+        tracing::info!(
+            "[audio] cpal playout resampler={} in_rate={} out_rate={} channels=1",
+            resampler_mode.as_str(),
+            source_rate,
+            target_rate
+        );
+        let mut resampler = ResamplerImpl::new(source_rate, target_rate, 1, resampler_mode);
         let mut source_mono = Vec::<f32>::new();
         let mut source_resampled = Vec::<f32>::new();
         let mut out_fifo = VecDeque::<f32>::new();
@@ -851,7 +856,7 @@ mod linux {
                     }
 
                     source_resampled.clear();
-                    resampler.process(&source_mono, &mut source_resampled);
+                    resampler.process_mono(&source_mono, &mut source_resampled);
                     if source_resampled.is_empty() {
                         break;
                     }
@@ -900,7 +905,7 @@ mod non_linux {
     };
     use tracing::{debug, info, warn};
 
-    use crate::audio::resample::LinearResampler;
+    use crate::audio::resample::{ResamplerImpl, ResamplerMode};
     #[cfg(target_os = "windows")]
     use crate::audio::windows::mmdevice;
     use crate::ui::{
@@ -1087,12 +1092,7 @@ mod non_linux {
             .ok()
             .map(|desc| desc.to_string())
             .filter(|name| !name.trim().is_empty())
-            .or_else(|| {
-                device
-                    .name()
-                    .ok()
-                    .filter(|name| !name.trim().is_empty())
-            })
+            .or_else(|| device.name().ok().filter(|name| !name.trim().is_empty()))
     }
 
     fn device_info(device: &cpal::Device) -> Option<AudioDeviceInfo> {
@@ -1197,7 +1197,14 @@ mod non_linux {
         let target_channels = stream_cfg.channels.max(1) as usize;
         let source_channels = source_channels.max(1) as usize;
 
-        let mut resampler = LinearResampler::new(source_rate, target_rate);
+        let resampler_mode = ResamplerMode::from_env();
+        tracing::info!(
+            "[audio] cpal playout resampler={} in_rate={} out_rate={} channels=1",
+            resampler_mode.as_str(),
+            source_rate,
+            target_rate
+        );
+        let mut resampler = ResamplerImpl::new(source_rate, target_rate, 1, resampler_mode);
         let mut source_mono = Vec::<f32>::new();
         let mut resampled = Vec::<f32>::new();
 
@@ -1223,7 +1230,7 @@ mod non_linux {
                 }
 
                 resampled.clear();
-                resampler.process(&source_mono, &mut resampled);
+                resampler.process_mono(&source_mono, &mut resampled);
 
                 let mut idx = 0usize;
                 for frame in out.chunks_mut(target_channels) {

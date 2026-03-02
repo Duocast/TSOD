@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use tracing::{debug, error, info};
 use wasapi::{Direction, SampleType, StreamMode};
 
-use crate::audio::resample::LinearResampler;
+use crate::audio::resample::{ResamplerImpl, ResamplerMode};
 use crate::ui::{
     model::{AudioBackend, AudioDeviceId, AudioDeviceInfo, AudioDirection},
     UiEvent,
@@ -222,7 +222,14 @@ fn run_capture_thread(
         })
         .context("start WASAPI capture stream")?;
 
-    let mut resampler = LinearResampler::new(device_rate, sample_rate);
+    let resampler_mode = ResamplerMode::from_env();
+    tracing::info!(
+        "[audio] wasapi capture resampler={} in_rate={} out_rate={} channels=1",
+        resampler_mode.as_str(),
+        device_rate,
+        sample_rate
+    );
+    let mut resampler = ResamplerImpl::new(device_rate, sample_rate, 1, resampler_mode);
     let target_channels = channels.max(1) as usize;
     let mut consecutive_timeouts = 0u32;
     let mut consecutive_empty_wakeups = 0u32;
@@ -281,7 +288,7 @@ fn run_capture_thread(
                     }
 
                     resampled.clear();
-                    resampler.process(&mono, &mut resampled);
+                    resampler.process_mono(&mono, &mut resampled);
                     for &sample in &resampled {
                         let v = (sample.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16;
                         for _ in 0..target_channels {

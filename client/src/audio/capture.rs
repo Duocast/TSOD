@@ -207,7 +207,7 @@ mod linux {
 
     use tracing::info;
 
-    use crate::audio::resample::LinearResampler;
+    use crate::audio::resample::{ResamplerImpl, ResamplerMode};
     use crate::ui::{
         model::{AudioBackend, AudioDeviceId, AudioDeviceInfo, AudioDirection},
         UiEvent,
@@ -217,10 +217,11 @@ mod linux {
         format: pw::spa::param::audio::AudioInfoRaw,
         target_rate: u32,
         target_channels: u16,
-        resampler: Option<LinearResampler>,
+        resampler: Option<ResamplerImpl>,
         mono_in: Vec<f32>,
         mono_out: Vec<f32>,
         log_once: bool,
+        resampler_mode: ResamplerMode,
     }
 
     enum LinuxCaptureBackend {
@@ -398,6 +399,7 @@ mod linux {
                 mono_in: Vec::new(),
                 mono_out: Vec::new(),
                 log_once: false,
+                resampler_mode: ResamplerMode::from_env(),
             })
             .param_changed(move |_, state, id, param| {
                 if id != pw::spa::param::ParamType::Format.as_raw() {
@@ -417,11 +419,12 @@ mod linux {
 
                 if !state.log_once {
                     info!(
-                        "[audio] pipewire capture negotiated: rate={} channels={} format={:?}; engine={}/mono",
+                        "[audio] pipewire capture resampler={} in_rate={} out_rate={} channels={} format={:?}",
+                        state.resampler_mode.as_str(),
                         negotiated_rate,
-                        negotiated_channels,
-                        negotiated_format,
-                        state.target_rate
+                        state.target_rate,
+                        1,
+                        negotiated_format
                     );
                     state.log_once = true;
                 }
@@ -435,7 +438,7 @@ mod linux {
                 }
 
                 state.resampler = if negotiated_rate != state.target_rate {
-                    Some(LinearResampler::new(negotiated_rate, state.target_rate))
+                    Some(ResamplerImpl::new(negotiated_rate, state.target_rate, 1, state.resampler_mode))
                 } else {
                     None
                 };
@@ -507,7 +510,7 @@ mod linux {
 
                     state.mono_out.clear();
                     if let Some(resampler) = state.resampler.as_mut() {
-                        resampler.process(&state.mono_in, &mut state.mono_out);
+                        resampler.process_mono(&state.mono_in, &mut state.mono_out);
                     } else {
                         state.mono_out.extend_from_slice(&state.mono_in);
                     }
@@ -892,7 +895,14 @@ mod linux {
         let source_rate = stream_cfg.sample_rate;
         let source_channels = stream_cfg.channels.max(1) as usize;
         let target_channels = target_channels.max(1) as usize;
-        let mut resampler = LinearResampler::new(source_rate, target_rate);
+        let resampler_mode = ResamplerMode::from_env();
+        tracing::info!(
+            "[audio] cpal capture resampler={} in_rate={} out_rate={} channels=1",
+            resampler_mode.as_str(),
+            source_rate,
+            target_rate
+        );
+        let mut resampler = ResamplerImpl::new(source_rate, target_rate, 1, resampler_mode);
         let mut mono = Vec::<f32>::new();
         let mut resampled = Vec::<f32>::new();
 
@@ -913,7 +923,7 @@ mod linux {
                 }
 
                 resampled.clear();
-                resampler.process(&mono, &mut resampled);
+                resampler.process_mono(&mono, &mut resampled);
 
                 for &s in &resampled {
                     let v = (s.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16;
@@ -954,7 +964,7 @@ mod non_linux {
     };
     use tracing::{debug, info, warn};
 
-    use crate::audio::resample::LinearResampler;
+    use crate::audio::resample::{ResamplerImpl, ResamplerMode};
     #[cfg(target_os = "windows")]
     use crate::audio::windows::mmdevice;
     use crate::ui::{
@@ -1242,7 +1252,14 @@ mod non_linux {
         let source_rate = stream_cfg.sample_rate;
         let source_channels = stream_cfg.channels.max(1) as usize;
         let target_channels = target_channels.max(1) as usize;
-        let mut resampler = LinearResampler::new(source_rate, target_rate);
+        let resampler_mode = ResamplerMode::from_env();
+        tracing::info!(
+            "[audio] cpal capture resampler={} in_rate={} out_rate={} channels=1",
+            resampler_mode.as_str(),
+            source_rate,
+            target_rate
+        );
+        let mut resampler = ResamplerImpl::new(source_rate, target_rate, 1, resampler_mode);
         let mut mono = Vec::<f32>::new();
         let mut resampled = Vec::<f32>::new();
 
@@ -1263,7 +1280,7 @@ mod non_linux {
                 }
 
                 resampled.clear();
-                resampler.process(&mono, &mut resampled);
+                resampler.process_mono(&mono, &mut resampled);
 
                 for &s in &resampled {
                     let v = (s.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16;
