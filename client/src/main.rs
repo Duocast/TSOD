@@ -23,6 +23,7 @@ use config::Config;
 use crossbeam_channel::{bounded, Receiver, Sender};
 use identity::DeviceIdentity;
 use net::dispatcher::{ControlDispatcher, PushEvent};
+use net::egress::EgressScheduler;
 use net::video_datagram::VideoHeader;
 use net::video_transport::{VideoReceiver, VideoSender, VideoStreamProfile};
 use net::voice_datagram::{
@@ -132,7 +133,10 @@ struct VideoRuntimeCounters {
     video_tx_datagrams: AtomicU64,
     video_tx_bytes: AtomicU64,
     video_tx_blocked: AtomicU64,
-    video_tx_errors: AtomicU64,
+    video_tx_drop_queue_full: AtomicU64,
+    video_tx_drop_deadline: AtomicU64,
+    voice_tx_drop_queue_full: AtomicU64,
+
     completed_frames: AtomicU64,
     dropped_no_subscription: AtomicU64,
     dropped_channel_full: AtomicU64,
@@ -1952,12 +1956,16 @@ async fn connect_and_run_session(
         "Connected and ready",
     );
 
+    let egress = EgressScheduler::new(conn.clone(), Default::default());
+    let egress_stats = egress.stats();
+    let _egress_task = egress.clone().start();
+
     let (voice_die_tx, mut voice_die_rx) = watch::channel::<bool>(false);
     let _session_voice_flag = SessionVoiceFlag::new(session_voice_active.clone());
     let _ = tx_event.send(UiEvent::VoiceSessionHealth(true));
 
     let _voice_send = tokio::spawn(voice_send_loop(
-        conn.clone(),
+        egress.clone(),
         encoder.clone(),
         capture.clone(),
         playout.clone(),
@@ -2050,10 +2058,12 @@ async fn connect_and_run_session(
                 let snapshot = ui::model::StreamDebugView {
                     active_stream_tags,
                     video_datagrams_per_sec: stream_state.counters.video_datagrams.swap(0, Ordering::Relaxed),
-                    video_tx_datagrams_per_sec: stream_state.counters.video_tx_datagrams.swap(0, Ordering::Relaxed),
-                    video_tx_bytes_per_sec: stream_state.counters.video_tx_bytes.swap(0, Ordering::Relaxed),
-                    video_tx_blocked: stream_state.counters.video_tx_blocked.load(Ordering::Relaxed),
-                    video_tx_errors: stream_state.counters.video_tx_errors.load(Ordering::Relaxed),
+                    video_tx_datagrams_per_sec: egress_stats.tx_video.swap(0, Ordering::Relaxed),
+                    video_tx_bytes_per_sec: egress_stats.tx_bytes.swap(0, Ordering::Relaxed),
+                    video_tx_blocked_per_sec: egress_stats.blocked_events.swap(0, Ordering::Relaxed),
+                    video_tx_drop_queue_full: egress_stats.drop_queue_full_video.load(Ordering::Relaxed),
+                    video_tx_drop_deadline: egress_stats.drop_deadline_video.load(Ordering::Relaxed),
+                    voice_tx_drop_queue_full: egress_stats.drop_queue_full_voice.load(Ordering::Relaxed),
                     completed_frames_per_sec: stream_state.counters.completed_frames.swap(0, Ordering::Relaxed),
                     dropped_no_subscription: stream_state.counters.dropped_no_subscription.load(Ordering::Relaxed),
                     dropped_channel_full: stream_state.counters.dropped_channel_full.load(Ordering::Relaxed),
@@ -2595,7 +2605,7 @@ async fn connect_and_run_session(
                                         let (share_stop_tx, mut share_stop_rx) = watch::channel(false);
                                         active_share_stop = Some(share_stop_tx);
                                         share_state = ShareState::Active;
-                                        let conn_send = conn.clone();
+                                        let egress_send = egress.clone();
                                         let video_counters = stream_state.counters.clone();
                                         tokio::spawn(async move {
                                             let mut sender = VideoSender::new(stream_tag, 0, sender_profile);
@@ -2628,20 +2638,9 @@ async fn connect_and_run_session(
                                                         let ts_ms = unix_ms() as u32;
                                                         if let Err(e) = sender.send_frame_async(ts_ms, frame_idx % 60 == 0, &synthetic, |dg| {
                                                             let dg_len = dg.len() as u64;
-                                                            match conn_send.send_datagram(dg) {
-                                                                Ok(()) => {
-                                                                    video_counters.video_tx_datagrams.fetch_add(1, Ordering::Relaxed);
-                                                                    video_counters.video_tx_bytes.fetch_add(dg_len, Ordering::Relaxed);
-                                                                }
-                                                                Err(e) => {
-                                                                    let is_blocked = e.to_string().contains("blocked");
-                                                                    if is_blocked {
-                                                                        video_counters.video_tx_blocked.fetch_add(1, Ordering::Relaxed);
-                                                                    } else {
-                                                                        video_counters.video_tx_errors.fetch_add(1, Ordering::Relaxed);
-                                                                        warn!(stream_tag, error = ?e, "[video] send_datagram error");
-                                                                    }
-                                                                }
+                                                            let _ = dg_len;
+                                                            if egress_send.enqueue_video_fragment(stream_tag, frame_idx, frame_idx % 60 == 0, Instant::now(), dg).is_ok() {
+                                                                video_counters.video_tx_datagrams.fetch_add(1, Ordering::Relaxed);
                                                             }
                                                         }).await {
                                                             video_counters.sender_frame_errors.fetch_add(1, Ordering::Relaxed);
@@ -3455,7 +3454,7 @@ async fn mic_test_loop(
 }
 
 async fn voice_send_loop(
-    conn: quinn::Connection,
+    egress: Arc<EgressScheduler>,
     encoder: Arc<Mutex<audio::opus::OpusEncoder>>,
     capture: Arc<RwLock<Arc<audio::capture::Capture>>>,
     playout: Arc<RwLock<Arc<audio::playout::Playout>>>,
@@ -3644,12 +3643,10 @@ async fn voice_send_loop(
             .tx_bytes
             .fetch_add(d.len() as u64, Ordering::Relaxed);
 
-        if let Err(e) = conn.send_datagram(d) {
-            let _ = tx_event.send(UiEvent::AppendLog(format!(
-                "[voice] send_datagram failed: {e:?}"
-            )));
-            let _ = voice_die_tx.send(true);
-            return;
+        if egress.enqueue_voice(d).is_err() {
+            let _ = tx_event.send(UiEvent::AppendLog(
+                "[voice] egress queue full; dropped voice datagram".into(),
+            ));
         }
     }
 }

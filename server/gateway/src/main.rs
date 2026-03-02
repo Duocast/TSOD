@@ -1,6 +1,7 @@
 mod auth;
 mod bootstrap;
 mod config;
+mod egress;
 mod frame;
 mod gateway;
 mod media;

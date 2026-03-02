@@ -6,9 +6,10 @@ use std::{
 use anyhow::Result;
 use bytes::Bytes;
 use dashmap::DashMap;
+use std::time::Instant;
 use tokio::sync::mpsc;
-use tracing::warn;
 
+use crate::egress::EgressScheduler;
 use crate::proto::voiceplatform::v1 as pb;
 
 use vp_control::ids::{ChannelId, UserId};
@@ -69,29 +70,41 @@ pub fn channel_route_key(channel_id: ChannelId) -> u32 {
 
 #[derive(Clone)]
 pub struct QuinnDatagramTx {
-    conn: quinn::Connection,
+    egress: Arc<EgressScheduler>,
 }
 
 impl QuinnDatagramTx {
     pub fn new(conn: quinn::Connection) -> Self {
-        Self { conn }
+        Self {
+            egress: EgressScheduler::new(conn),
+        }
     }
 }
 
 #[async_trait::async_trait]
 impl DatagramTx for QuinnDatagramTx {
     async fn send(&self, bytes: Bytes) -> Result<()> {
-        match self.conn.send_datagram(bytes) {
-            Ok(()) => Ok(()),
-            Err(e) if e.to_string().contains("blocked") => {
-                tracing::debug!("quic datagram blocked; dropping viewer datagram");
-                Ok(())
-            }
-            Err(e) => {
-                warn!(error = ?e, "failed to forward datagram");
-                Err(e.into())
-            }
+        if bytes.len() >= vp_voice::VIDEO_HEADER_BYTES
+            && bytes[0] == vp_voice::VIDEO_VERSION
+            && bytes[1] == vp_voice::DATAGRAM_KIND_VIDEO
+        {
+            let stream_tag = u64::from_le_bytes([
+                bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7], bytes[8], bytes[9],
+            ]);
+            let flags = bytes[11];
+            let frame_seq = u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]);
+            let is_keyframe = (flags & vp_voice::VIDEO_FLAG_KEYFRAME) != 0;
+            self.egress.enqueue_video(
+                bytes,
+                stream_tag,
+                frame_seq,
+                is_keyframe,
+                Instant::now() + std::time::Duration::from_millis(80),
+            );
+        } else {
+            self.egress.enqueue_voice(bytes);
         }
+        Ok(())
     }
 }
 
