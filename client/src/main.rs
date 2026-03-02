@@ -2587,7 +2587,6 @@ async fn connect_and_run_session(
                                 )));
                                 continue;
                             }
-                            share_state = ShareState::Starting;
                             let preferred_codec = match saved_settings.screen_share_codec.as_str() {
                                 "AV1" => pb::video_caps::Codec::Av1,
                                 "VP8" => pb::video_caps::Codec::Vp8,

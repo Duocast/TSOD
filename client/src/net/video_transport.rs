@@ -16,7 +16,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use super::video_datagram::{self, VideoHeader, MAX_VIDEO_PAYLOAD, VIDEO_HDR_LEN};
+use super::video_datagram::{self, VideoHeader, VIDEO_HDR_LEN};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VideoSendError {
