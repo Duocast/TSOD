@@ -2055,6 +2055,7 @@ async fn connect_and_run_session(
         conn.clone(),
         net::egress::EgressConfig {
             mtu_bytes: mtu,
+            frame_deadline_ms: 160,
             ..Default::default()
         },
         ui_log_tx.clone(),
@@ -2737,6 +2738,7 @@ async fn connect_and_run_session(
                                         let video_counters = stream_state.counters.clone();
                                         tokio::spawn(async move {
                                             let mut sender = VideoSender::new(stream_tag, 0, sender_profile, mtu);
+                                            sender.set_pacing_enabled(false);
                                             const WIDTH: u16 = 160;
                                             const HEIGHT: u16 = 90;
                                             const STRIDE_BYTES: u32 = WIDTH as u32 * 4;

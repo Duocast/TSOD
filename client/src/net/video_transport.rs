@@ -113,6 +113,7 @@ pub struct VideoSender {
     max_frame_bytes: usize,
     max_frags_per_frame: u16,
     pacer: Pacer,
+    pacing_enabled: bool,
     force_recovery_next_frame: bool,
     last_recovery_request_at: Option<Instant>,
 }
@@ -149,6 +150,7 @@ impl VideoSender {
                 },
                 mtu_bytes,
             ),
+            pacing_enabled: true,
             force_recovery_next_frame: false,
             last_recovery_request_at: None,
         }
@@ -180,6 +182,14 @@ impl VideoSender {
             },
             self.max_payload + VIDEO_HDR_LEN,
         );
+    }
+
+    /// Enable/disable sender-side pacing.
+    ///
+    /// Disable this when pacing is handled downstream (e.g., by egress scheduler)
+    /// to avoid double-pacing bursts.
+    pub fn set_pacing_enabled(&mut self, enabled: bool) {
+        self.pacing_enabled = enabled;
     }
 
     #[inline]
@@ -262,7 +272,9 @@ impl VideoSender {
                 ts_ms,
             };
 
-            self.pacer.acquire((VIDEO_HDR_LEN + chunk.len()) as u64);
+            if self.pacing_enabled {
+                self.pacer.acquire((VIDEO_HDR_LEN + chunk.len()) as u64);
+            }
             let mut buf = self.pool.get();
             let datagram = video_datagram::write_video_datagram_into(&mut buf, &hdr, chunk);
             // Return the BytesMut shell to the pool (its backing storage was split off).
@@ -341,9 +353,11 @@ impl VideoSender {
                 ts_ms,
             };
 
-            self.pacer
-                .acquire_async((VIDEO_HDR_LEN + chunk.len()) as u64)
-                .await;
+            if self.pacing_enabled {
+                self.pacer
+                    .acquire_async((VIDEO_HDR_LEN + chunk.len()) as u64)
+                    .await;
+            }
             let mut buf = self.pool.get();
             let datagram = video_datagram::write_video_datagram_into(&mut buf, &hdr, chunk);
             self.pool.put(buf);
