@@ -462,17 +462,9 @@ mod linux {
 
                     let negotiated_channels = state.format.channels().max(1) as usize;
                     let chunk = datas[0].chunk();
-                    let offset = chunk
-                        .as_ref()
-                        .map(|c| c.offset() as usize)
-                        .unwrap_or(0)
-                        .min(raw.len());
+                    let offset = (chunk.offset() as usize).min(raw.len());
                     let available_bytes = raw.len().saturating_sub(offset);
-                    let size = chunk
-                        .as_ref()
-                        .map(|c| c.size() as usize)
-                        .unwrap_or(available_bytes)
-                        .min(available_bytes);
+                    let size = (chunk.size() as usize).min(available_bytes);
                     if size < 2 {
                         return;
                     }
@@ -486,11 +478,10 @@ mod linux {
                     };
 
                     state.mono_in.clear();
-                    let frame_stride_samples = chunk
-                        .as_ref()
-                        .map(|c| (c.stride() as usize) / 2)
-                        .filter(|&stride| stride >= negotiated_channels)
-                        .unwrap_or(negotiated_channels);
+                    let frame_stride_samples = {
+                        let stride = (chunk.stride() as usize) / 2;
+                        if stride >= negotiated_channels { stride } else { negotiated_channels }
+                    };
 
                     if negotiated_channels == 1 && frame_stride_samples == 1 {
                         state.mono_in.extend(
