@@ -722,11 +722,17 @@ mod linux {
             .ok()
             .map(|desc| desc.to_string())
             .filter(|name| !name.trim().is_empty())
+            .or_else(|| {
+                device
+                    .name()
+                    .ok()
+                    .filter(|name| !name.trim().is_empty())
+            })
     }
 
     fn device_info(device: &cpal::Device) -> Option<AudioDeviceInfo> {
         let id_str = device.id().ok()?.to_string();
-        let label = device_label(device)?;
+        let label = device_label(device).unwrap_or_else(|| id_str.clone());
         Some(AudioDeviceInfo {
             key: AudioDeviceId {
                 backend: super::cpal_backend(),
@@ -1066,11 +1072,17 @@ mod non_linux {
             .ok()
             .map(|desc| desc.to_string())
             .filter(|name| !name.trim().is_empty())
+            .or_else(|| {
+                device
+                    .name()
+                    .ok()
+                    .filter(|name| !name.trim().is_empty())
+            })
     }
 
     fn device_info(device: &cpal::Device) -> Option<AudioDeviceInfo> {
         let id_str = device.id().ok()?.to_string();
-        let label = device_label(device)?;
+        let label = device_label(device).unwrap_or_else(|| id_str.clone());
         Some(AudioDeviceInfo {
             key: AudioDeviceId {
                 backend: super::cpal_backend(),
