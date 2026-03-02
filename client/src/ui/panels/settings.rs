@@ -106,6 +106,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                                 ui,
                                 &mut model.settings_draft,
                                 &model.input_devices,
+                                &model.capture_modes,
                                 model.loopback_active,
                                 model.vad_level,
                                 &model.mic_test_waveform,
@@ -382,6 +383,7 @@ fn page_capture(
     ui: &mut egui::Ui,
     s: &mut AppSettings,
     input_devices: &[AudioDeviceInfo],
+    capture_modes: &[String],
     loopback_active: bool,
     vad_level: Option<f32>,
     mic_test_waveform: &[f32],
@@ -439,6 +441,33 @@ fn page_capture(
     hint(
         ui,
         &format!("{} input device(s) detected", input_devices.len()),
+    );
+
+    ui.horizontal(|ui: &mut egui::Ui| {
+        ui.label("Capture Mode:");
+        egui::ComboBox::from_id_salt("capture_backend_mode")
+            .selected_text(&s.capture_backend_mode)
+            .width(300.0)
+            .show_ui(ui, |ui: &mut egui::Ui| {
+                let mut changed = false;
+                for mode in capture_modes {
+                    if ui
+                        .selectable_value(&mut s.capture_backend_mode, mode.clone(), mode.as_str())
+                        .changed()
+                    {
+                        changed = true;
+                    }
+                }
+                if changed {
+                    dirty = true;
+                    let _ =
+                        tx_intent.send(UiIntent::SetCaptureMode(s.capture_backend_mode.clone()));
+                }
+            });
+    });
+    hint(
+        ui,
+        "Capture mode options are detected automatically for this client.",
     );
 
     section(ui, "Voice Activation Mode");
