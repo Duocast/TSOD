@@ -23,6 +23,11 @@ pub struct Capture {
     frame_samples: usize,
 }
 
+pub const CAPTURE_MODE_AUTO: &str = "Automatically use best mode";
+pub const CAPTURE_MODE_PIPEWIRE: &str = "PipeWire";
+pub const CAPTURE_MODE_PULSEAUDIO: &str = "PulseAudio";
+pub const CAPTURE_MODE_WASAPI: &str = "WASAPI";
+
 #[cfg(target_os = "linux")]
 type CaptureBackend = linux::LinuxCapture;
 
@@ -51,17 +56,47 @@ impl Capture {
         preferred_device: Option<&str>,
         tx_event: Option<Sender<UiEvent>>,
     ) -> Result<Self> {
+        Self::start_with_mode(
+            sample_rate,
+            channels,
+            frame_ms,
+            preferred_device,
+            None,
+            tx_event,
+        )
+    }
+
+    pub fn start_with_mode(
+        sample_rate: u32,
+        channels: u16,
+        frame_ms: u32,
+        preferred_device: Option<&str>,
+        preferred_mode: Option<&str>,
+        tx_event: Option<Sender<UiEvent>>,
+    ) -> Result<Self> {
         let frame_samples = (sample_rate as usize * frame_ms as usize / 1000) * channels as usize;
         let rb = HeapRb::<i16>::new(frame_samples * 50);
         let (prod, cons) = rb.split();
 
         #[cfg(target_os = "linux")]
-        let backend =
-            CaptureBackend::start(sample_rate, channels, prod, preferred_device, tx_event)?;
+        let backend = CaptureBackend::start(
+            sample_rate,
+            channels,
+            prod,
+            preferred_device,
+            preferred_mode,
+            tx_event,
+        )?;
 
         #[cfg(not(target_os = "linux"))]
-        let backend =
-            CaptureBackend::start(sample_rate, channels, prod, preferred_device, tx_event)?;
+        let backend = CaptureBackend::start(
+            sample_rate,
+            channels,
+            prod,
+            preferred_device,
+            preferred_mode,
+            tx_event,
+        )?;
 
         Ok(Self {
             backend,
@@ -136,6 +171,10 @@ pub fn enumerate_input_devices() -> Vec<AudioDeviceInfo> {
     devices
 }
 
+pub fn enumerate_capture_modes() -> Vec<String> {
+    CaptureBackend::enumerate_capture_modes()
+}
+
 #[cfg(target_os = "windows")]
 fn cpal_backend() -> AudioBackend {
     AudioBackend::Wasapi
@@ -201,9 +240,17 @@ mod linux {
             channels: u16,
             prod: HeapProd<i16>,
             preferred_device: Option<&str>,
+            preferred_mode: Option<&str>,
             tx_event: Option<Sender<UiEvent>>,
         ) -> Result<Self> {
-            if pipewire_is_available() {
+            let prefer_pipewire = preferred_mode
+                .map(|mode| mode == super::CAPTURE_MODE_PIPEWIRE)
+                .unwrap_or(false);
+            let prefer_pulse = preferred_mode
+                .map(|mode| mode == super::CAPTURE_MODE_PULSEAUDIO)
+                .unwrap_or(false);
+
+            if !prefer_pulse && pipewire_is_available() {
                 let preferred_device_owned = preferred_device.map(str::to_string);
                 let tx_event_thread = tx_event.clone();
                 let reported = Arc::new(AtomicBool::new(false));
@@ -242,9 +289,19 @@ mod linux {
                 });
             }
 
+            if prefer_pipewire {
+                return Err(anyhow!("PipeWire capture mode requested but unavailable"));
+            }
+
             eprintln!("PipeWire unavailable, falling back to PulseAudio capture via CPAL");
-            let pulse =
-                CpalCapture::start(sample_rate, channels, prod, preferred_device, tx_event)?;
+            let pulse = CpalCapture::start(
+                sample_rate,
+                channels,
+                prod,
+                preferred_device,
+                None,
+                tx_event,
+            )?;
             Ok(Self {
                 thread: None,
                 stop: Arc::new(AtomicBool::new(false)),
@@ -257,6 +314,17 @@ mod linux {
                 return enumerate_pipewire_inputs();
             }
             CpalCapture::enumerate_input_devices()
+        }
+
+        pub fn enumerate_capture_modes() -> Vec<String> {
+            let mut modes = vec![super::CAPTURE_MODE_AUTO.to_string()];
+            if pipewire_is_available() {
+                modes.push(super::CAPTURE_MODE_PIPEWIRE.to_string());
+            }
+            if !CpalCapture::enumerate_input_devices().is_empty() {
+                modes.push(super::CAPTURE_MODE_PULSEAUDIO.to_string());
+            }
+            modes
         }
 
         pub fn is_healthy(&self) -> bool {
@@ -572,6 +640,7 @@ mod linux {
             channels: u16,
             prod: HeapProd<i16>,
             preferred_device: Option<&str>,
+            _preferred_mode: Option<&str>,
             tx_event: Option<Sender<UiEvent>>,
         ) -> Result<Self> {
             let host = cpal::default_host();
@@ -722,12 +791,7 @@ mod linux {
             .ok()
             .map(|desc| desc.to_string())
             .filter(|name| !name.trim().is_empty())
-            .or_else(|| {
-                device
-                    .name()
-                    .ok()
-                    .filter(|name| !name.trim().is_empty())
-            })
+            .or_else(|| device.name().ok().filter(|name| !name.trim().is_empty()))
     }
 
     fn device_info(device: &cpal::Device) -> Option<AudioDeviceInfo> {
@@ -913,6 +977,7 @@ mod non_linux {
             channels: u16,
             prod: HeapProd<i16>,
             preferred_device: Option<&str>,
+            _preferred_mode: Option<&str>,
             tx_event: Option<Sender<UiEvent>>,
         ) -> Result<Self> {
             let host = cpal::default_host();
@@ -1061,6 +1126,10 @@ mod non_linux {
             }
         }
 
+        pub fn enumerate_capture_modes() -> Vec<String> {
+            vec![super::CAPTURE_MODE_AUTO.to_string()]
+        }
+
         pub fn is_healthy(&self) -> bool {
             !self.unhealthy.load(Ordering::Relaxed)
         }
@@ -1072,12 +1141,7 @@ mod non_linux {
             .ok()
             .map(|desc| desc.to_string())
             .filter(|name| !name.trim().is_empty())
-            .or_else(|| {
-                device
-                    .name()
-                    .ok()
-                    .filter(|name| !name.trim().is_empty())
-            })
+            .or_else(|| device.name().ok().filter(|name| !name.trim().is_empty()))
     }
 
     fn device_info(device: &cpal::Device) -> Option<AudioDeviceInfo> {

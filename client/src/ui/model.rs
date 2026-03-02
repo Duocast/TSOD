@@ -262,6 +262,7 @@ pub enum UiEvent {
     SetAudioDevices {
         input_devices: Vec<AudioDeviceInfo>,
         output_devices: Vec<AudioDeviceInfo>,
+        capture_modes: Vec<String>,
         playback_modes: Vec<String>,
     },
 
@@ -418,6 +419,7 @@ pub enum UiIntent {
     SetVadThreshold(f32),
     SetInputDevice(AudioDeviceId),
     SetOutputDevice(AudioDeviceId),
+    SetCaptureMode(String),
     SetPlaybackMode(String),
     SetInputGain(f32),
     SetOutputGain(f32),
@@ -521,6 +523,7 @@ pub struct AppSettings {
         deserialize_with = "deserialize_input_device_id"
     )]
     pub capture_device: AudioDeviceId,
+    pub capture_backend_mode: String,
     pub capture_mode: CaptureMode,
     pub ptt_key: String,
     pub ptt_delay_ms: u32,
@@ -616,6 +619,7 @@ impl Default for AppSettings {
         Self {
             // Capture
             capture_device: AudioDeviceId::default_input(),
+            capture_backend_mode: "Automatically use best mode".into(),
             capture_mode: CaptureMode::PushToTalk,
             ptt_key: "Space".into(),
             ptt_delay_ms: 300,
@@ -1201,6 +1205,7 @@ pub struct UiModel {
     // Audio devices (enumerated at runtime)
     pub input_devices: Vec<AudioDeviceInfo>,
     pub output_devices: Vec<AudioDeviceInfo>,
+    pub capture_modes: Vec<String>,
     pub playback_modes: Vec<String>,
 
     // Mic test loopback (runtime)
@@ -1512,6 +1517,7 @@ impl Default for UiModel {
             connection_details: VecDeque::new(),
             input_devices: Vec::new(),
             output_devices: Vec::new(),
+            capture_modes: Vec::new(),
             playback_modes: Vec::new(),
             loopback_active: false,
             mic_test_waveform: Vec::new(),
@@ -1912,10 +1918,12 @@ impl UiModel {
             UiEvent::SetAudioDevices {
                 input_devices,
                 output_devices,
+                capture_modes,
                 playback_modes,
             } => {
                 self.input_devices = input_devices;
                 self.output_devices = output_devices;
+                self.capture_modes = capture_modes;
                 self.playback_modes = playback_modes;
             }
             UiEvent::ChannelCreated(entry) => {

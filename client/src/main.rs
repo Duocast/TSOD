@@ -554,10 +554,12 @@ async fn app_task(
     // Enumerate and report audio devices to the UI
     let input_devices = audio::capture::enumerate_input_devices();
     let output_devices = audio::playout::enumerate_output_devices();
+    let capture_modes = audio::capture::enumerate_capture_modes();
     let playback_modes = audio::playout::enumerate_playback_modes();
     let _ = tx_event.send(UiEvent::SetAudioDevices {
         input_devices: input_devices.clone(),
         output_devices: output_devices.clone(),
+        capture_modes,
         playback_modes,
     });
 
@@ -600,6 +602,7 @@ async fn app_task(
     let selected_audio = Arc::new(Mutex::new(AudioSelection {
         input_device: saved_settings.capture_device.clone(),
         output_device: saved_settings.playback_device.clone(),
+        capture_mode: normalize_capture_mode(&saved_settings.capture_backend_mode),
         playback_mode: normalize_playback_mode(&saved_settings.playback_mode),
     }));
 
@@ -620,6 +623,7 @@ async fn app_task(
         channels,
         frame_ms,
         preferred_device_id(&initial_selection.input_device),
+        initial_selection.capture_mode.as_deref(),
         &tx_event,
     )?)));
     let playout = Arc::new(RwLock::new(Arc::new(start_playout_with_fallback(
@@ -909,6 +913,28 @@ async fn app_task(
                                     )));
                                 }
                             }
+                            UiIntent::SetCaptureMode(mode) => {
+                                {
+                                    let mut state = selected_audio.lock().await;
+                                    state.capture_mode = normalize_capture_mode(&mode);
+                                }
+
+                                if let Err(e) = restart_audio_streams(
+                                    &capture,
+                                    &playout,
+                                    &selected_audio,
+                                    &tx_event,
+                                    sample_rate,
+                                    channels,
+                                    frame_ms,
+                                )
+                                .await
+                                {
+                                    let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                        "[audio] failed to switch capture mode: {e:#}"
+                                    )));
+                                }
+                            }
                             UiIntent::SaveSettings(ref settings) => {
                                 saved_settings = (**settings).clone();
                                 persist_settings(&tx_event, &saved_settings);
@@ -1154,6 +1180,7 @@ fn choose_initial_selected_channel(
 struct AudioSelection {
     input_device: AudioDeviceId,
     output_device: AudioDeviceId,
+    capture_mode: Option<String>,
     playback_mode: Option<String>,
 }
 
@@ -1162,6 +1189,15 @@ fn preferred_device_id(device: &AudioDeviceId) -> Option<&str> {
         None
     } else {
         Some(device.id.as_str())
+    }
+}
+
+fn normalize_capture_mode(mode: &str) -> Option<String> {
+    let trimmed = mode.trim();
+    if trimmed.is_empty() || trimmed == audio::capture::CAPTURE_MODE_AUTO {
+        None
+    } else {
+        Some(trimmed.to_string())
     }
 }
 
@@ -1179,6 +1215,7 @@ fn start_capture_with_fallback(
     channels: u16,
     frame_ms: u32,
     preferred_device: Option<&str>,
+    preferred_mode: Option<&str>,
     tx_event: &Sender<UiEvent>,
 ) -> Result<audio::capture::Capture> {
     if let Some(device) = preferred_device {
@@ -1188,6 +1225,7 @@ fn start_capture_with_fallback(
             channels,
             frame_ms,
             Some(device),
+            preferred_mode,
             Some(tx_event.clone()),
         ) {
             Ok(capture) => return Ok(capture),
@@ -1206,6 +1244,7 @@ fn start_capture_with_fallback(
         channels,
         frame_ms,
         None,
+        preferred_mode,
         Some(tx_event.clone()),
     ) {
         Ok(capture) => Ok(capture),
@@ -1274,6 +1313,7 @@ async fn restart_audio_streams(
     let selected = selection.lock().await.clone();
     let preferred_input = preferred_device_id(&selected.input_device);
     let preferred_output = preferred_device_id(&selected.output_device);
+    let preferred_capture_mode = selected.capture_mode.as_deref();
     let preferred_mode = selected.playback_mode.as_deref();
     let input_label = resolve_device_label(&selected.input_device, true);
     let output_label = resolve_device_label(&selected.output_device, false);
@@ -1295,9 +1335,15 @@ async fn restart_audio_streams(
         selected.output_device.backend, selected.output_device.id, output_label
     )));
 
-    let new_capture =
-        start_capture_with_fallback(sample_rate, channels, frame_ms, preferred_input, tx_event)
-            .context("restart capture")?;
+    let new_capture = start_capture_with_fallback(
+        sample_rate,
+        channels,
+        frame_ms,
+        preferred_input,
+        preferred_capture_mode,
+        tx_event,
+    )
+    .context("restart capture")?;
     let new_playout = start_playout_with_fallback(
         sample_rate,
         channels,
@@ -1317,9 +1363,13 @@ async fn restart_audio_streams(
     }
 
     let _ = tx_event.send(UiEvent::AppendLog(format!(
-        "[audio] streams restarted (input={}, output={}, mode={})",
+        "[audio] streams restarted (input={}, output={}, capture_mode={}, playback_mode={})",
         preferred_device_id(&selected.input_device).unwrap_or("(system default)"),
         preferred_device_id(&selected.output_device).unwrap_or("(system default)"),
+        selected
+            .capture_mode
+            .as_deref()
+            .unwrap_or(audio::capture::CAPTURE_MODE_AUTO),
         selected
             .playback_mode
             .as_deref()
@@ -2803,6 +2853,28 @@ async fn connect_and_run_session(
                                 )));
                             }
                         }
+                        UiIntent::SetCaptureMode(mode) => {
+                            {
+                                let mut state = selected_audio.lock().await;
+                                state.capture_mode = normalize_capture_mode(&mode);
+                            }
+
+                            if let Err(e) = restart_audio_streams(
+                                &capture,
+                                &playout,
+                                &selected_audio,
+                                tx_event,
+                                sample_rate,
+                                channels,
+                                frame_ms,
+                            )
+                            .await
+                            {
+                                let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                    "[audio] failed to switch capture mode: {e:#}"
+                                )));
+                            }
+                        }
                         UiIntent::SetPlaybackMode(mode) => {
                             {
                                 let mut state = selected_audio.lock().await;
@@ -2911,6 +2983,7 @@ async fn connect_and_run_session(
                                 let mut state = selected_audio.lock().await;
                                 state.input_device = settings.capture_device.clone();
                                 state.output_device = settings.playback_device.clone();
+                                state.capture_mode = normalize_capture_mode(&settings.capture_backend_mode);
                                 state.playback_mode = normalize_playback_mode(&settings.playback_mode);
                             }
 

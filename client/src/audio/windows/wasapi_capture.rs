@@ -36,6 +36,7 @@ impl WasapiCapture {
         channels: u16,
         prod: HeapProd<i16>,
         preferred_device: Option<&str>,
+        _preferred_mode: Option<&str>,
         tx_event: Option<Sender<UiEvent>>,
     ) -> Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
@@ -111,6 +112,13 @@ impl WasapiCapture {
                 is_default: default_id.as_deref() == Some(endpoint_id.as_str()),
             })
             .collect()
+    }
+
+    pub fn enumerate_capture_modes() -> Vec<String> {
+        vec![
+            crate::audio::capture::CAPTURE_MODE_AUTO.to_string(),
+            crate::audio::capture::CAPTURE_MODE_WASAPI.to_string(),
+        ]
     }
 
     pub fn is_healthy(&self) -> bool {
