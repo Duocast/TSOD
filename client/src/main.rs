@@ -185,7 +185,7 @@ async fn datagram_demux_loop(
             }
         };
 
-        if datagram.len() > vp_voice::QUIC_MAX_DATAGRAM_BYTES {
+        if datagram.len() > vp_voice::APP_MEDIA_MTU {
             counters
                 .rx_oversized_datagram_drops
                 .fetch_add(1, Ordering::Relaxed);
@@ -1973,8 +1973,8 @@ async fn connect_and_run_session(
 
     let mtu = conn
         .max_datagram_size()
-        .unwrap_or(vp_voice::QUIC_MAX_DATAGRAM_BYTES)
-        .min(vp_voice::QUIC_MAX_DATAGRAM_BYTES);
+        .unwrap_or(vp_voice::APP_MEDIA_MTU)
+        .min(vp_voice::APP_MEDIA_MTU);
     let egress = EgressScheduler::new(
         conn.clone(),
         net::egress::EgressConfig {

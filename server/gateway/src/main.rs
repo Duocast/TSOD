@@ -30,7 +30,7 @@ use crate::metrics_adapter::{stream_metrics, voice_metrics};
 use crate::outbox_dispatch::{run_outbox_dispatcher, OutboxDispatcherConfig};
 use crate::state::{MembershipCache, PushHub, Sessions};
 
-const QUIC_DATAGRAM_RECV_BUFFER_SIZE: usize = 2 * 1024 * 1024;
+const QUIC_DATAGRAM_RECV_BUFFER_SIZE: usize = vp_voice::APP_MEDIA_MTU;
 const QUIC_DATAGRAM_SEND_BUFFER_SIZE: usize = 1024 * 1024;
 
 #[tokio::main]
