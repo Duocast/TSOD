@@ -211,10 +211,24 @@ impl EgressScheduler {
             if self.conn.datagram_send_buffer_space() < bytes.len() {
                 self.stats.blocked_events.fetch_add(1, Ordering::Relaxed);
             }
-            if let Err(e) = self.conn.send_datagram_wait(bytes.clone()).await {
-                self.stats.fatal_errors.fetch_add(1, Ordering::Relaxed);
-                warn!("[gateway-egress] exiting: send_datagram_wait failed ({e:?})");
-                return;
+            match self.conn.send_datagram(bytes.clone()) {
+                Ok(()) => {}
+                Err(quinn::SendDatagramError::TooLarge) => {
+                    warn!("[gateway-egress] drop fragment: datagram too large");
+                    continue;
+                }
+                Err(quinn::SendDatagramError::ConnectionLost(_)) => {
+                    warn!("[gateway-egress] exiting: connection closed");
+                    return;
+                }
+                Err(
+                    quinn::SendDatagramError::UnsupportedByPeer
+                    | quinn::SendDatagramError::Disabled,
+                ) => {
+                    self.stats.fatal_errors.fetch_add(1, Ordering::Relaxed);
+                    warn!("[gateway-egress] exiting: send_datagram failed");
+                    return;
+                }
             }
         }
     }

@@ -109,6 +109,7 @@ pub struct VideoSender {
     layer_id: u8,
     frame_seq: u32,
     pool: BufferPool,
+    max_payload: usize,
     max_frame_bytes: usize,
     max_frags_per_frame: u16,
     pacer: Pacer,
@@ -120,24 +121,33 @@ impl VideoSender {
     /// Create a new sender for a given stream.
     ///
     /// `max_fragments_per_frame`: pre-size the buffer pool (e.g., 64 for large frames).
-    pub fn new(stream_tag: u64, layer_id: u8, profile: VideoStreamProfile) -> Self {
+    pub fn new(
+        stream_tag: u64,
+        layer_id: u8,
+        profile: VideoStreamProfile,
+        mtu_bytes: usize,
+    ) -> Self {
         let config = profile.transport_config();
+        let max_payload = (mtu_bytes.saturating_sub(vp_voice::VIDEO_HEADER_BYTES))
+            .min(video_datagram::MAX_VIDEO_PAYLOAD)
+            .max(1);
         Self {
             stream_tag,
             layer_id,
             frame_seq: 0,
             pool: BufferPool::new(
-                VIDEO_HDR_LEN + MAX_VIDEO_PAYLOAD,
+                VIDEO_HDR_LEN + max_payload,
                 config.max_frags_per_frame as usize,
             ),
-            max_frame_bytes: config.max_frags_per_frame as usize * MAX_VIDEO_PAYLOAD,
+            max_payload,
+            max_frame_bytes: config.max_frags_per_frame as usize * max_payload,
             max_frags_per_frame: config.max_frags_per_frame,
             pacer: Pacer::new(
                 PacingPolicy {
                     target_bps: config.target_bps,
                     max_burst_packets: config.initial_burst_packets,
                 },
-                vp_voice::MAX_VIDEO_DATAGRAM_BYTES,
+                mtu_bytes,
             ),
             force_recovery_next_frame: false,
             last_recovery_request_at: None,
@@ -168,7 +178,7 @@ impl VideoSender {
                 target_bps,
                 max_burst_packets,
             },
-            vp_voice::MAX_VIDEO_DATAGRAM_BYTES,
+            self.max_payload + VIDEO_HDR_LEN,
         );
     }
 
@@ -204,7 +214,7 @@ impl VideoSender {
         let frame_seq = self.frame_seq;
         self.frame_seq = self.frame_seq.wrapping_add(1);
 
-        let max_payload = MAX_VIDEO_PAYLOAD;
+        let max_payload = self.max_payload;
         let frag_total = if encoded_frame.is_empty() {
             1
         } else {
@@ -284,7 +294,7 @@ impl VideoSender {
         let frame_seq = self.frame_seq;
         self.frame_seq = self.frame_seq.wrapping_add(1);
 
-        let max_payload = MAX_VIDEO_PAYLOAD;
+        let max_payload = self.max_payload;
         let frag_total = if encoded_frame.is_empty() {
             1
         } else {
@@ -702,7 +712,12 @@ mod tests {
 
     #[test]
     fn sender_fragments_small_frame() {
-        let mut sender = VideoSender::new(42, 0, VideoStreamProfile::P1080p60);
+        let mut sender = VideoSender::new(
+            42,
+            0,
+            VideoStreamProfile::P1080p60,
+            vp_voice::MAX_VIDEO_DATAGRAM_BYTES,
+        );
         let frame = b"small frame data";
         let mut datagrams = Vec::new();
 
@@ -722,7 +737,12 @@ mod tests {
 
     #[test]
     fn sender_fragments_large_frame() {
-        let mut sender = VideoSender::new(1, 0, VideoStreamProfile::P1080p60);
+        let mut sender = VideoSender::new(
+            1,
+            0,
+            VideoStreamProfile::P1080p60,
+            vp_voice::MAX_VIDEO_DATAGRAM_BYTES,
+        );
         // Create a frame larger than MAX_VIDEO_PAYLOAD.
         let frame = vec![0xABu8; MAX_VIDEO_PAYLOAD * 3 + 100];
         let mut datagrams = Vec::new();
@@ -747,7 +767,12 @@ mod tests {
 
     #[test]
     fn sender_increments_frame_seq() {
-        let mut sender = VideoSender::new(1, 0, VideoStreamProfile::P1080p60);
+        let mut sender = VideoSender::new(
+            1,
+            0,
+            VideoStreamProfile::P1080p60,
+            vp_voice::MAX_VIDEO_DATAGRAM_BYTES,
+        );
         let mut seqs = Vec::new();
 
         for _ in 0..5 {
@@ -848,7 +873,12 @@ mod tests {
 
     #[test]
     fn sender_receiver_roundtrip() {
-        let mut sender = VideoSender::new(42, 0, VideoStreamProfile::P1080p60);
+        let mut sender = VideoSender::new(
+            42,
+            0,
+            VideoStreamProfile::P1080p60,
+            vp_voice::MAX_VIDEO_DATAGRAM_BYTES,
+        );
         let mut receiver = VideoReceiver::new(4, vp_voice::MAX_FRAGS_PER_FRAME);
 
         let original = b"This is a test frame for the roundtrip".to_vec();
@@ -875,7 +905,12 @@ mod tests {
 
     #[test]
     fn sender_rejects_too_many_fragments() {
-        let mut sender = VideoSender::new(1, 0, VideoStreamProfile::P1080p60);
+        let mut sender = VideoSender::new(
+            1,
+            0,
+            VideoStreamProfile::P1080p60,
+            vp_voice::MAX_VIDEO_DATAGRAM_BYTES,
+        );
         let frame = vec![0u8; MAX_VIDEO_PAYLOAD * (vp_voice::MAX_FRAGS_PER_FRAME as usize + 1)];
         let err = sender.send_frame(0, false, &frame, |_dg| {}).unwrap_err();
         assert_eq!(err, VideoSendError::FrameTooLarge);
@@ -883,7 +918,12 @@ mod tests {
 
     #[test]
     fn oversized_frame_returns_frame_too_large() {
-        let mut sender = VideoSender::new(1, 0, VideoStreamProfile::P1080p60);
+        let mut sender = VideoSender::new(
+            1,
+            0,
+            VideoStreamProfile::P1080p60,
+            vp_voice::MAX_VIDEO_DATAGRAM_BYTES,
+        );
         let frame = vec![0u8; MAX_VIDEO_PAYLOAD * vp_voice::MAX_FRAGS_PER_FRAME as usize + 1];
         let err = sender.send_frame(0, false, &frame, |_dg| {}).unwrap_err();
         assert_eq!(err, VideoSendError::FrameTooLarge);
@@ -891,7 +931,12 @@ mod tests {
 
     #[test]
     fn frame_at_boundary_fragments_to_max_frags() {
-        let mut sender = VideoSender::new(1, 0, VideoStreamProfile::P1080p60);
+        let mut sender = VideoSender::new(
+            1,
+            0,
+            VideoStreamProfile::P1080p60,
+            vp_voice::MAX_VIDEO_DATAGRAM_BYTES,
+        );
         let frame = vec![7u8; MAX_VIDEO_PAYLOAD * vp_voice::MAX_FRAGS_PER_FRAME as usize];
         let mut count = 0usize;
         sender
@@ -917,7 +962,12 @@ mod tests {
 
     #[tokio::test]
     async fn sender_async_keyframe_is_paced_and_spaced() {
-        let mut sender = VideoSender::new(1, 0, VideoStreamProfile::P1080p60);
+        let mut sender = VideoSender::new(
+            1,
+            0,
+            VideoStreamProfile::P1080p60,
+            vp_voice::MAX_VIDEO_DATAGRAM_BYTES,
+        );
         sender.set_pacing_policy(8_000, 1);
 
         let mut emitted_at = Vec::new();
@@ -939,7 +989,12 @@ mod tests {
 
     #[tokio::test]
     async fn sender_async_rejects_too_many_fragments() {
-        let mut sender = VideoSender::new(1, 0, VideoStreamProfile::P1080p60);
+        let mut sender = VideoSender::new(
+            1,
+            0,
+            VideoStreamProfile::P1080p60,
+            vp_voice::MAX_VIDEO_DATAGRAM_BYTES,
+        );
         let frame = vec![0u8; MAX_VIDEO_PAYLOAD * (vp_voice::MAX_FRAGS_PER_FRAME as usize + 1)];
         let err = sender
             .send_frame_async(0, false, &frame, |_dg| {})
@@ -950,7 +1005,12 @@ mod tests {
 
     #[test]
     fn recovery_rate_limit_works() {
-        let mut sender = VideoSender::new(1, 0, VideoStreamProfile::P1080p60);
+        let mut sender = VideoSender::new(
+            1,
+            0,
+            VideoStreamProfile::P1080p60,
+            vp_voice::MAX_VIDEO_DATAGRAM_BYTES,
+        );
         let now = Instant::now();
         assert!(sender.request_recovery(now, Duration::from_millis(500)));
         assert!(
@@ -981,5 +1041,16 @@ mod tests {
         }
         assert!(rx.free_slot_count() > 0);
         assert_eq!(rx.slot_allocations(), 1);
+    }
+    #[test]
+    fn sender_respects_runtime_mtu_payload_limit() {
+        let mtu = 256usize;
+        let mut sender = VideoSender::new(1, 0, VideoStreamProfile::P1080p60, mtu);
+        let payload = vec![7u8; 700];
+        let mut frags = Vec::new();
+        sender
+            .send_frame(1, false, &payload, |dg| frags.push(dg))
+            .unwrap();
+        assert!(frags.iter().all(|dg| dg.len() <= mtu));
     }
 }
