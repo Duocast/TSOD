@@ -1,5 +1,7 @@
-use rubato::asynch::SincFixedIn;
-use rubato::{Resampler as _, SincInterpolationParameters, SincInterpolationType, WindowFunction};
+use rubato::{
+    Resampler as _, SincFixedIn, SincInterpolationParameters, SincInterpolationType,
+    WindowFunction,
+};
 
 const DEFAULT_INPUT_FRAMES: usize = 960;
 
