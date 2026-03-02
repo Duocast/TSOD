@@ -169,7 +169,7 @@ fn video_codec_name(codec: pb::VideoCodec) -> &'static str {
     match codec {
         pb::VideoCodec::Av1 => "AV1",
         pb::VideoCodec::Vp9 => "VP9",
-        pb::VideoCodec::VideoCodecUnspecified => "UNSPECIFIED",
+        pb::VideoCodec::Vp8 => "VP8",
         _ => "UNKNOWN",
     }
 }
