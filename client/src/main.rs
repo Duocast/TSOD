@@ -1391,8 +1391,16 @@ async fn connect_and_run_session(
         ),
     );
 
+    let (ui_log_tx, mut ui_log_rx) = mpsc::unbounded_channel::<String>();
+    let tx_event_log = tx_event.clone();
+    tokio::spawn(async move {
+        while let Some(line) = ui_log_rx.recv().await {
+            let _ = tx_event_log.send(UiEvent::AppendLog(line));
+        }
+    });
+
     let (send, recv) = conn.open_bi().await.context("open control stream")?;
-    let dispatcher = ControlDispatcher::start(send, recv, shutdown_rx.clone());
+    let dispatcher = ControlDispatcher::start(send, recv, shutdown_rx.clone(), ui_log_tx.clone());
 
     set_connection_stage(
         tx_event,
@@ -1956,7 +1964,18 @@ async fn connect_and_run_session(
         "Connected and ready",
     );
 
-    let egress = EgressScheduler::new(conn.clone(), Default::default());
+    let mtu = conn
+        .max_datagram_size()
+        .unwrap_or(vp_voice::QUIC_MAX_DATAGRAM_BYTES)
+        .min(vp_voice::QUIC_MAX_DATAGRAM_BYTES);
+    let egress = EgressScheduler::new(
+        conn.clone(),
+        net::egress::EgressConfig {
+            mtu_bytes: mtu,
+            ..Default::default()
+        },
+        ui_log_tx.clone(),
+    );
     let egress_stats = egress.stats();
     let _egress_task = egress.clone().start();
 
@@ -2608,7 +2627,7 @@ async fn connect_and_run_session(
                                         let egress_send = egress.clone();
                                         let video_counters = stream_state.counters.clone();
                                         tokio::spawn(async move {
-                                            let mut sender = VideoSender::new(stream_tag, 0, sender_profile);
+                                            let mut sender = VideoSender::new(stream_tag, 0, sender_profile, mtu);
                                             const WIDTH: u16 = 160;
                                             const HEIGHT: u16 = 90;
                                             const STRIDE_BYTES: u32 = WIDTH as u32 * 4;

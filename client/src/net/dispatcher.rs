@@ -4,11 +4,13 @@ use tokio::{
     sync::{mpsc, oneshot, watch, Mutex, RwLock},
     time::timeout,
 };
-use tracing::warn;
 
 use crate::{
     identity::DeviceIdentity,
-    net::frame::{read_delimited, write_delimited},
+    net::{
+        frame::{read_delimited, write_delimited},
+        UiLogTx,
+    },
     proto::voiceplatform::v1 as pb,
 };
 
@@ -115,6 +117,7 @@ impl ControlDispatcher {
         send: quinn::SendStream,
         recv: quinn::RecvStream,
         shutdown_rx: watch::Receiver<bool>,
+        ui_log_tx: UiLogTx,
     ) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::channel::<Command>(256);
         let (push_tx, push_rx) = mpsc::channel::<PushEvent>(1024);
@@ -132,6 +135,7 @@ impl ControlDispatcher {
             recv,
             cmd_rx,
             shutdown_rx,
+            ui_log_tx,
         ));
 
         Self { inner }
@@ -561,6 +565,7 @@ async fn dispatcher_task(
     mut recv: quinn::RecvStream,
     mut cmd_rx: mpsc::Receiver<Command>,
     mut shutdown_rx: watch::Receiver<bool>,
+    ui_log_tx: UiLogTx,
 ) {
     let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<pb::ServerToClient>>>>> =
         Arc::new(Mutex::new(HashMap::new()));
@@ -569,12 +574,13 @@ async fn dispatcher_task(
     // Spawn reader task
     let reader_pending = pending.clone();
     let reader_inner = inner.clone();
+    let reader_ui_log_tx = ui_log_tx.clone();
     let reader = tokio::spawn(async move {
         loop {
             let msg: pb::ServerToClient = match read_delimited(&mut recv, MAX_CTRL_MSG).await {
                 Ok(m) => m,
                 Err(e) => {
-                    warn!("[dispatcher] exiting: control read/decode failed for ServerToClient ({e:?})");
+                    let _ = reader_ui_log_tx.send(format!("[dispatcher] exiting: control read/decode failed for ServerToClient ({e:?})"));
                     return Err::<(), anyhow::Error>(e);
                 }
             };
@@ -599,18 +605,18 @@ async fn dispatcher_task(
         tokio::select! {
             _ = shutdown_rx.changed() => {
                 if *shutdown_rx.borrow() {
-                    warn!("[dispatcher] exiting: shutdown signal received");
+                    let _ = ui_log_tx.send("[dispatcher] exiting: shutdown signal received".to_string());
                     break;
                 }
             }
             cmd = cmd_rx.recv() => {
                 match cmd {
                     None => {
-                        warn!("[dispatcher] exiting: command channel closed");
+                        let _ = ui_log_tx.send("[dispatcher] exiting: command channel closed".to_string());
                         break;
                     }
                     Some(Command::Shutdown) => {
-                        warn!("[dispatcher] exiting: shutdown command received");
+                        let _ = ui_log_tx.send("[dispatcher] exiting: shutdown command received".to_string());
                         break;
                     }
                     Some(Command::Send { payload, resp_tx, timeout: _ }) => {
@@ -632,7 +638,7 @@ async fn dispatcher_task(
                         };
 
                         if let Err(e) = write_delimited(&mut send, &msg).await {
-                            warn!("[dispatcher] exiting: control send failed ({e:?})");
+                            let _ = ui_log_tx.send(format!("[dispatcher] exiting: control send failed ({e:?})"));
                             fail_all_pending(&pending).await;
                             break;
                         }
@@ -642,13 +648,13 @@ async fn dispatcher_task(
             r = &mut reader => {
                 match r {
                     Ok(Ok(())) => {
-                        warn!("[dispatcher] exiting: control reader stopped cleanly");
+                        let _ = ui_log_tx.send("[dispatcher] exiting: control reader stopped cleanly".to_string());
                     }
                     Ok(Err(e)) => {
-                        warn!("[dispatcher] exiting: control reader stream error ({e:?})");
+                        let _ = ui_log_tx.send(format!("[dispatcher] exiting: control reader stream error ({e:?})"));
                     }
                     Err(e) => {
-                        warn!("[dispatcher] exiting: control reader join error ({e:?})");
+                        let _ = ui_log_tx.send(format!("[dispatcher] exiting: control reader join error ({e:?})"));
                     }
                 }
                 fail_all_pending(&pending).await;

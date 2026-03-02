@@ -11,6 +11,8 @@ use bytes::Bytes;
 use tokio::{sync::Notify, task::JoinHandle, time::timeout};
 use tracing::warn;
 
+use crate::net::UiLogTx;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DatagramKind {
     Voice,
@@ -207,6 +209,7 @@ struct QueueState {
 
 pub struct EgressScheduler {
     conn: quinn::Connection,
+    ui_log_tx: UiLogTx,
     cfg: EgressConfig,
     state: Mutex<QueueState>,
     notify: Notify,
@@ -214,9 +217,10 @@ pub struct EgressScheduler {
 }
 
 impl EgressScheduler {
-    pub fn new(conn: quinn::Connection, cfg: EgressConfig) -> Arc<Self> {
+    pub fn new(conn: quinn::Connection, cfg: EgressConfig, ui_log_tx: UiLogTx) -> Arc<Self> {
         Arc::new(Self {
             conn,
+            ui_log_tx,
             state: Mutex::new(QueueState {
                 voice: VecDeque::new(),
                 video: VideoFrameQueue::new(cfg.max_queue_video_frames, cfg.max_queue_video_frags),
@@ -338,10 +342,44 @@ impl EgressScheduler {
             if self.conn.datagram_send_buffer_space() < item.bytes.len() {
                 self.stats.blocked_events.fetch_add(1, Ordering::Relaxed);
             }
-            if let Err(e) = self.conn.send_datagram_wait(item.bytes.clone()).await {
-                self.stats.fatal_errors.fetch_add(1, Ordering::Relaxed);
-                warn!("[egress] exiting: send_datagram_wait failed ({e:?})");
-                return;
+            let sent = match self.conn.send_datagram(item.bytes.clone()) {
+                Ok(()) => true,
+                Err(quinn::SendDatagramError::TooLarge) => {
+                    self.stats
+                        .drop_queue_full_video
+                        .fetch_add(1, Ordering::Relaxed);
+                    let _ = self
+                        .ui_log_tx
+                        .send("[egress] drop: datagram too large".to_string());
+                    continue;
+                }
+                Err(quinn::SendDatagramError::UnsupportedByPeer) => {
+                    self.stats.fatal_errors.fetch_add(1, Ordering::Relaxed);
+                    let line = "[egress] exiting: send_datagram(_wait) failed: UnsupportedByPeer"
+                        .to_string();
+                    let _ = self.ui_log_tx.send(line.clone());
+                    warn!("{line}");
+                    return;
+                }
+                Err(quinn::SendDatagramError::Disabled) => {
+                    self.stats.fatal_errors.fetch_add(1, Ordering::Relaxed);
+                    let line =
+                        "[egress] exiting: send_datagram(_wait) failed: Disabled".to_string();
+                    let _ = self.ui_log_tx.send(line.clone());
+                    warn!("{line}");
+                    return;
+                }
+                Err(quinn::SendDatagramError::ConnectionLost(_)) => {
+                    self.stats.fatal_errors.fetch_add(1, Ordering::Relaxed);
+                    let line =
+                        "[egress] exiting: send_datagram(_wait) failed: ConnectionLost".to_string();
+                    let _ = self.ui_log_tx.send(line.clone());
+                    warn!("{line}");
+                    return;
+                }
+            };
+            if !sent {
+                continue;
             }
             self.stats.tx_datagrams.fetch_add(1, Ordering::Relaxed);
             self.stats
