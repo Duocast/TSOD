@@ -44,6 +44,20 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
             hovered_ct, dropped_ct, hover_pos
         ));
     });
+
+    let (hovered_ct, dropped_ct, hover_pos, focused) = ui.ctx().input(|i| {
+        (
+            i.raw.hovered_files.len(),
+            i.raw.dropped_files.len(),
+            i.pointer.hover_pos(),
+            i.raw.focused,
+        )
+    });
+    
+    ui.monospace(format!(
+        "DND: hovered={} dropped={} focused={} pointer={:?}",
+        hovered_ct, dropped_ct, focused, hover_pos
+    ));
     
     // Log details on drop
     ui.ctx().input(|i| {
