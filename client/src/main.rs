@@ -2427,6 +2427,8 @@ async fn connect_and_run_session(
     tokio::pin!(ctl_keepalive);
     let mut audio_health_tick = tokio::time::interval(Duration::from_secs(1));
     let mut stream_ui_tick = tokio::time::interval(Duration::from_secs(1));
+    let mut consecutive_audio_stalls = 0_u32;
+    let mut last_stall_recovery_notice = Instant::now() - Duration::from_secs(30);
     loop {
         tokio::select! {
             _ = stream_ui_tick.tick() => {
@@ -2504,26 +2506,47 @@ async fn connect_and_run_session(
                     out.is_healthy()
                 };
 
-                if !capture_healthy || !playout_healthy {
-                    let _ = tx_event.send(UiEvent::AppendLog(
-                        "[audio] stream error detected; attempting restart".into(),
-                    ));
-                    if let Err(e) = restart_audio_streams(
-                        &capture,
-                        &playout,
-                        &selected_audio,
-                        tx_event,
-                        sample_rate,
-                        channels,
-                        frame_ms,
-                    )
-                    .await
-                    {
-                        let _ = tx_event.send(UiEvent::AppendLog(format!(
-                            "[audio] stream restart failed: {e:#}"
-                        )));
-                    }
+                if capture_healthy && playout_healthy {
+                    consecutive_audio_stalls = 0;
+                    continue;
                 }
+
+                consecutive_audio_stalls = consecutive_audio_stalls.saturating_add(1);
+                let _ = tx_event.send(UiEvent::AppendLog(format!(
+                    "[audio] stall detected (capture_healthy={}, playout_healthy={}, consecutive={}); monitoring",
+                    capture_healthy, playout_healthy, consecutive_audio_stalls
+                )));
+
+                if consecutive_audio_stalls < 3 {
+                    continue;
+                }
+
+                let _ = tx_event.send(UiEvent::AppendLog(format!(
+                    "[audio] repeated stalls detected ({} checks); attempting seamless stream re-init",
+                    consecutive_audio_stalls
+                )));
+                if let Err(e) = restart_audio_streams(
+                    &capture,
+                    &playout,
+                    &selected_audio,
+                    tx_event,
+                    sample_rate,
+                    channels,
+                    frame_ms,
+                )
+                .await
+                {
+                    let _ = tx_event.send(UiEvent::AppendLog(format!(
+                        "[audio] stream re-init failed: {e:#}"
+                    )));
+                } else if last_stall_recovery_notice.elapsed() >= Duration::from_secs(10) {
+                    let _ = tx_event.send(UiEvent::Notify {
+                        text: "Audio stream stalled repeatedly. Reinitialized capture/playout.".to_string(),
+                        kind: ui::model::NotificationKind::Error,
+                    });
+                    last_stall_recovery_notice = Instant::now();
+                }
+                consecutive_audio_stalls = 0;
             }
             // Check for UI intents (non-blocking poll from crossbeam)
             _ = tokio::time::sleep(Duration::from_millis(10)) => {
