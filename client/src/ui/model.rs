@@ -808,7 +808,7 @@ impl VoiceProcessingMode {
                 settings.dsp_enabled = true;
                 settings.noise_suppression = true;
                 settings.agc_enabled = true;
-                settings.agc_preset = AgcPreset::Broadcast;
+                settings.agc_preset = AgcPreset::Boosted;
                 settings.fec_mode = FecMode::On;
                 settings.fec_strength = 70;
             }
