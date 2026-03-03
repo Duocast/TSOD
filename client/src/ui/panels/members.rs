@@ -55,9 +55,10 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
             }
 
             if response.middle_clicked() {
-                model.show_member_connection_info = true;
-                model.connection_info_target_user_id = member.user_id.clone();
-                model.connection_info_target_display_name = member.display_name.clone();
+                model.open_member_connection_info_window(
+                    member.user_id.clone(),
+                    member.display_name.clone(),
+                );
             }
 
             let avatar_size = 32.0;
@@ -234,9 +235,10 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                     .on_disabled_hover_text("Missing permission: Move Members");
                 ui.separator();
                 if ui.button("Get Connection Info").clicked() {
-                    model.show_member_connection_info = true;
-                    model.connection_info_target_user_id = member.user_id.clone();
-                    model.connection_info_target_display_name = member.display_name.clone();
+                    model.open_member_connection_info_window(
+                        member.user_id.clone(),
+                        member.display_name.clone(),
+                    );
                     ui.close();
                 }
                 ui.separator();
@@ -277,36 +279,36 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
             });
     }
 
-    if model.show_member_connection_info {
+    let now = std::time::Instant::now();
+    let mut close_window_indices = Vec::new();
+    for (index, connection_info) in model.member_connection_info_windows.iter().enumerate() {
         let mut open = true;
         egui::Window::new(format!(
             "Connection Info — {}",
-            model.connection_info_target_display_name
+            connection_info.display_name
         ))
         .open(&mut open)
         .collapsible(false)
         .resizable(true)
         .default_width(460.0)
         .show(ui.ctx(), |ui| {
-            let telemetry_data = &model.telemetry;
-            let now = std::time::Instant::now();
             let connected_for = model
                 .connection_established_at
                 .map(|t| now.saturating_duration_since(t))
                 .unwrap_or_default();
             let idle_for = model
                 .member_last_active_at
-                .get(&model.connection_info_target_user_id)
+                .get(&connection_info.user_id)
                 .map(|t| now.saturating_duration_since(*t))
                 .or_else(|| {
                     model
                         .member_first_seen_at
-                        .get(&model.connection_info_target_user_id)
+                        .get(&connection_info.user_id)
                         .map(|t| now.saturating_duration_since(*t))
                 })
                 .unwrap_or_default();
 
-            egui::Grid::new("member_connection_info_grid")
+            egui::Grid::new(format!("member_connection_info_grid_{index}"))
                 .num_columns(2)
                 .spacing([20.0, 4.0])
                 .show(ui, |ui| {
@@ -323,24 +325,24 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                     ui.end_row();
 
                     ui.label("Ping:");
-                    ui.label(format!("{} ms", telemetry_data.rtt_ms));
+                    ui.label(format!("{} ms", connection_info.telemetry.rtt_ms));
                     ui.end_row();
 
                     ui.label("Client address:");
-                    ui.label(model.connection_host_draft.as_str());
+                    ui.label(connection_info.connection_host.as_str());
                     ui.end_row();
 
                     ui.label("Packet Loss:");
-                    let loss_color = if telemetry_data.loss_rate > 0.05 {
+                    let loss_color = if connection_info.telemetry.loss_rate > 0.05 {
                         theme::COLOR_DANGER
-                    } else if telemetry_data.loss_rate > 0.01 {
+                    } else if connection_info.telemetry.loss_rate > 0.01 {
                         theme::COLOR_IDLE
                     } else {
                         theme::COLOR_ONLINE
                     };
                     ui.colored_label(
                         loss_color,
-                        format!("{:.1}%", telemetry_data.loss_rate * 100.0),
+                        format!("{:.1}%", connection_info.telemetry.loss_rate * 100.0),
                     );
                     ui.end_row();
 
@@ -349,65 +351,75 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                     ui.end_row();
 
                     ui.label("Jitter:");
-                    ui.label(format!("{} ms", telemetry_data.jitter_ms));
+                    ui.label(format!("{} ms", connection_info.telemetry.jitter_ms));
                     ui.end_row();
 
                     ui.label("RX Bitrate:");
                     ui.label(format!(
                         "{} ({}/s)",
-                        telemetry::format_bitrate(telemetry_data.rx_bitrate_bps),
-                        telemetry_data.rx_pps
+                        telemetry::format_bitrate(connection_info.telemetry.rx_bitrate_bps),
+                        connection_info.telemetry.rx_pps
                     ));
                     ui.end_row();
 
                     ui.label("TX Bitrate:");
                     ui.label(format!(
                         "{} ({}/s)",
-                        telemetry::format_bitrate(telemetry_data.tx_bitrate_bps),
-                        telemetry_data.tx_pps
+                        telemetry::format_bitrate(connection_info.telemetry.tx_bitrate_bps),
+                        connection_info.telemetry.tx_pps
                     ));
                     ui.end_row();
 
                     ui.label("Jitter Buffer:");
-                    ui.label(format!("{} pkts", telemetry_data.jitter_buffer_depth));
+                    ui.label(format!(
+                        "{} pkts",
+                        connection_info.telemetry.jitter_buffer_depth
+                    ));
                     ui.end_row();
 
                     ui.label("Late/Lost:");
                     ui.label(format!(
                         "{}/{}",
-                        telemetry_data.late_packets, telemetry_data.lost_packets
+                        connection_info.telemetry.late_packets,
+                        connection_info.telemetry.lost_packets
                     ));
                     ui.end_row();
 
                     ui.label("Concealment:");
-                    ui.label(format!("{} frames", telemetry_data.concealment_frames));
+                    ui.label(format!(
+                        "{} frames",
+                        connection_info.telemetry.concealment_frames
+                    ));
                     ui.end_row();
 
                     ui.label("Peak Stream Level:");
-                    ui.label(format!("{:.0}%", telemetry_data.peak_stream_level * 100.0));
+                    ui.label(format!(
+                        "{:.0}%",
+                        connection_info.telemetry.peak_stream_level * 100.0
+                    ));
                     ui.end_row();
 
                     ui.label("Server Send-Queue Drops:");
-                    ui.label(telemetry_data.send_queue_drop_count.to_string());
+                    ui.label(connection_info.telemetry.send_queue_drop_count.to_string());
                     ui.end_row();
 
                     ui.label("Playout Delay:");
-                    ui.label(format!("{} ms", telemetry_data.playout_delay_ms));
+                    ui.label(format!("{} ms", connection_info.telemetry.playout_delay_ms));
                     ui.end_row();
 
                     ui.label("AGC Gain:");
-                    ui.label(format!("{:.1} dB", telemetry_data.agc_gain_db));
+                    ui.label(format!("{:.1} dB", connection_info.telemetry.agc_gain_db));
                     ui.end_row();
 
                     ui.label("VAD Probability:");
-                    let vad_color = if telemetry_data.vad_probability > 0.5 {
+                    let vad_color = if connection_info.telemetry.vad_probability > 0.5 {
                         theme::COLOR_ONLINE
                     } else {
                         theme::text_muted()
                     };
                     ui.colored_label(
                         vad_color,
-                        format!("{:.0}%", telemetry_data.vad_probability * 100.0),
+                        format!("{:.0}%", connection_info.telemetry.vad_probability * 100.0),
                     );
                     ui.end_row();
                 });
@@ -415,9 +427,9 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
             ui.separator();
             ui.label(egui::RichText::new("Network Quality").strong().size(13.0));
             let quality = telemetry::compute_quality_score(
-                telemetry_data.rtt_ms,
-                telemetry_data.loss_rate,
-                telemetry_data.jitter_ms,
+                connection_info.telemetry.rtt_ms,
+                connection_info.telemetry.loss_rate,
+                connection_info.telemetry.jitter_ms,
             );
             let (quality_text, quality_color) = match quality {
                 80..=100 => ("Excellent", theme::COLOR_ONLINE),
@@ -444,8 +456,12 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
             });
         });
         if !open {
-            model.show_member_connection_info = false;
+            close_window_indices.push(index);
         }
+    }
+
+    for index in close_window_indices.into_iter().rev() {
+        model.member_connection_info_windows.remove(index);
     }
 }
 
