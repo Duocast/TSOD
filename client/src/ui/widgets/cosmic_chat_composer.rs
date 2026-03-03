@@ -89,6 +89,27 @@ impl ChatComposer {
         self.set_text("");
     }
 
+    fn select_all(&mut self) {
+        let Some((end_line, end_col)) = self.editor.with_buffer(|buffer| {
+            if buffer.lines.is_empty() {
+                return None;
+            }
+
+            let last_line = buffer.lines.len() - 1;
+            let last_col = buffer.lines[last_line].text().chars().count();
+            Some((last_line, last_col))
+        }) else {
+            return;
+        };
+
+        self.editor
+            .set_cursor(cosmic_text::Cursor::new(end_line, end_col));
+        self.editor
+            .set_selection(cosmic_text::Selection::Normal(cosmic_text::Cursor::new(
+                0, 0,
+            )));
+    }
+
     pub fn apply_format_action(&mut self, action: ComposerFormatAction) {
         match action {
             ComposerFormatAction::Bold => self.wrap_selection("**", "**"),
@@ -292,7 +313,11 @@ impl ChatComposer {
                             egui::Key::Backspace => Some(Action::Backspace),
                             egui::Key::Delete => Some(Action::Delete),
                             egui::Key::Escape => Some(Action::Escape),
-                            egui::Key::A if ctrl => Some(Action::SelectAll),
+                            egui::Key::A if ctrl => {
+                                self.select_all();
+                                self.dirty = true;
+                                None
+                            }
                             egui::Key::C if ctrl => {
                                 if let Some(copied) = self.editor.copy_selection() {
                                     ui.ctx().copy_text(copied);
