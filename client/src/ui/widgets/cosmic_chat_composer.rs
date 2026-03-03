@@ -417,7 +417,7 @@ impl Renderer for SoftwareEguiRenderer {
         let y = glyph.y - image.placement.top;
         let w = image.placement.width as usize;
         let h = image.placement.height as usize;
-        let data = image.data.as_ref();
+        let data: &[u8] = image.data.as_ref();
         let content = image.content;
 
         match content {
