@@ -414,6 +414,7 @@ pub enum UiIntent {
     SetNoiseSuppression(bool),
     SetDspEnabled(bool),
     SetDspMethod(DspMethod),
+    SetVoiceProcessingMode(VoiceProcessingMode),
     SetAgcEnabled(bool),
     SetAgcTargetDb(f32),
     SetAgcPreset(AgcPreset),
@@ -537,6 +538,8 @@ pub struct AppSettings {
     pub dsp_enabled: bool,
     pub dsp_method: DspMethod,
     pub noise_suppression: bool,
+    #[serde(default)]
+    pub voice_processing_mode: VoiceProcessingMode,
     pub agc_enabled: bool,
     pub agc_target_db: f32,
     #[serde(default)]
@@ -637,6 +640,7 @@ impl Default for AppSettings {
             dsp_enabled: true,
             dsp_method: DspMethod::Rubato,
             noise_suppression: true,
+            voice_processing_mode: VoiceProcessingMode::NoiseSuppression,
             agc_enabled: true,
             agc_target_db: -18.0,
             agc_preset: AgcPreset::Balanced,
@@ -733,6 +737,82 @@ impl DspMethod {
         match self {
             DspMethod::Rubato => "rubato",
             DspMethod::Linear => "linear",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+pub enum VoiceProcessingMode {
+    Natural,
+    #[default]
+    NoiseSuppression,
+    LowBandwidth,
+    Music,
+}
+
+impl VoiceProcessingMode {
+    pub const ALL: [VoiceProcessingMode; 4] = [
+        VoiceProcessingMode::Natural,
+        VoiceProcessingMode::NoiseSuppression,
+        VoiceProcessingMode::LowBandwidth,
+        VoiceProcessingMode::Music,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            VoiceProcessingMode::Natural => "Natural",
+            VoiceProcessingMode::NoiseSuppression => "Noise suppression",
+            VoiceProcessingMode::LowBandwidth => "Low bandwidth",
+            VoiceProcessingMode::Music => "Music",
+        }
+    }
+
+    pub fn help_text(self) -> &'static str {
+        match self {
+            VoiceProcessingMode::Natural => {
+                "Opus Voice profile with minimal DSP for a more raw microphone sound."
+            }
+            VoiceProcessingMode::NoiseSuppression => {
+                "Opus Voice profile with RNNoise + AGC enabled for cleaner speech in noisy rooms."
+            }
+            VoiceProcessingMode::LowBandwidth => {
+                "Opus Voice profile with RNNoise + AGC and stronger FEC defaults for unstable links."
+            }
+            VoiceProcessingMode::Music => {
+                "Opus Music profile with speech DSP disabled to preserve dynamics and tone."
+            }
+        }
+    }
+
+    pub fn apply_to_settings(self, settings: &mut AppSettings) {
+        match self {
+            VoiceProcessingMode::Natural => {
+                settings.dsp_enabled = false;
+                settings.noise_suppression = false;
+                settings.agc_enabled = false;
+                settings.fec_mode = FecMode::Auto;
+            }
+            VoiceProcessingMode::NoiseSuppression => {
+                settings.dsp_enabled = true;
+                settings.noise_suppression = true;
+                settings.agc_enabled = true;
+                settings.agc_preset = AgcPreset::Balanced;
+                settings.fec_mode = FecMode::Auto;
+            }
+            VoiceProcessingMode::LowBandwidth => {
+                settings.dsp_enabled = true;
+                settings.noise_suppression = true;
+                settings.agc_enabled = true;
+                settings.agc_preset = AgcPreset::Broadcast;
+                settings.fec_mode = FecMode::On;
+                settings.fec_strength = 70;
+            }
+            VoiceProcessingMode::Music => {
+                settings.dsp_enabled = false;
+                settings.noise_suppression = false;
+                settings.agc_enabled = false;
+                settings.fec_mode = FecMode::Auto;
+            }
         }
     }
 }

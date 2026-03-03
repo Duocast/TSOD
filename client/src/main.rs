@@ -918,6 +918,52 @@ async fn app_task(
                                 }
                                 persist_settings(&tx_event, &saved_settings);
                             }
+                            UiIntent::SetVoiceProcessingMode(mode) => {
+                                saved_settings.voice_processing_mode = mode;
+                                mode.apply_to_settings(&mut saved_settings);
+                                dsp_enabled.store(
+                                    saved_settings.dsp_enabled && !cfg.no_noise_suppression,
+                                    Ordering::Relaxed,
+                                );
+                                if let Some(ref dsp) = capture_dsp {
+                                    let mut d = dsp.lock().await;
+                                    d.set_noise_suppression(saved_settings.noise_suppression);
+                                    d.set_agc(saved_settings.agc_enabled);
+                                    d.set_agc_preset(saved_settings.agc_preset);
+                                    d.set_agc_target(saved_settings.agc_target_db);
+                                }
+                                audio_runtime
+                                    .fec_mode
+                                    .store(saved_settings.fec_mode as u32, Ordering::Relaxed);
+                                audio_runtime
+                                    .fec_strength
+                                    .store(saved_settings.fec_strength as u32, Ordering::Relaxed);
+                                let bitrate = active_channel_audio_mode
+                                    .read()
+                                    .map(|mode| mode.bitrate_bps)
+                                    .unwrap_or(64_000);
+                                let mut enc = encoder.lock().await;
+                                match audio::opus::OpusEncoder::new(
+                                    sample_rate,
+                                    channels as u8,
+                                    encoder_profile_for_mode(saved_settings.voice_processing_mode),
+                                ) {
+                                    Ok(mut new_encoder) => {
+                                        let _ = new_encoder.set_bitrate(bitrate as i32);
+                                        let _ = apply_fec_encoder_settings(
+                                            &mut new_encoder,
+                                            &audio_runtime,
+                                        );
+                                        *enc = new_encoder;
+                                    }
+                                    Err(e) => {
+                                        let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                            "[audio] failed to reconfigure encoder profile: {e:#}"
+                                        )));
+                                    }
+                                }
+                                persist_settings(&tx_event, &saved_settings);
+                            }
                             UiIntent::SetDspEnabled(enabled) => {
                                 saved_settings.dsp_enabled = enabled;
                                 dsp_enabled
@@ -1246,6 +1292,15 @@ fn pb_channel_type_to_ui(channel_type: i32) -> ui::model::ChannelType {
 fn opus_profile_from_pb(opus_profile: i32) -> audio::opus::OpusEncoderProfile {
     match pb::OpusProfile::try_from(opus_profile).ok() {
         Some(pb::OpusProfile::OpusMusic) => audio::opus::OpusEncoderProfile::Music,
+        _ => audio::opus::OpusEncoderProfile::Voice,
+    }
+}
+
+fn encoder_profile_for_mode(
+    mode: ui::model::VoiceProcessingMode,
+) -> audio::opus::OpusEncoderProfile {
+    match mode {
+        ui::model::VoiceProcessingMode::Music => audio::opus::OpusEncoderProfile::Music,
         _ => audio::opus::OpusEncoderProfile::Voice,
     }
 }
@@ -2596,7 +2651,7 @@ async fn connect_and_run_session(
                                         match audio::opus::OpusEncoder::new(
                                             sample_rate,
                                             channels as u8,
-                                            opus_profile_from_pb(info.opus_profile),
+                                            encoder_profile_for_mode(saved_settings.voice_processing_mode),
                                         ) {
                                             Ok(mut new_encoder) => {
                                                 let _ = new_encoder.set_bitrate(info.bitrate as i32);
@@ -2738,7 +2793,46 @@ async fn connect_and_run_session(
                                 "[help] Space=PTT | Enter=Send | Settings for audio config".into(),
                             ));
                         }
-                        UiIntent::SetDspEnabled(enabled) => {
+                        UiIntent::SetVoiceProcessingMode(mode) => {
+                                saved_settings.voice_processing_mode = mode;
+                                mode.apply_to_settings(&mut saved_settings);
+                                dsp_enabled.store(
+                                    saved_settings.dsp_enabled && !cfg.no_noise_suppression,
+                                    Ordering::Relaxed,
+                                );
+                                if let Some(ref dsp) = capture_dsp {
+                                    let mut d = dsp.lock().await;
+                                    d.set_noise_suppression(saved_settings.noise_suppression);
+                                    d.set_agc(saved_settings.agc_enabled);
+                                    d.set_agc_preset(saved_settings.agc_preset);
+                                    d.set_agc_target(saved_settings.agc_target_db);
+                                }
+                                audio_runtime.fec_mode.store(saved_settings.fec_mode as u32, Ordering::Relaxed);
+                                audio_runtime.fec_strength.store(saved_settings.fec_strength as u32, Ordering::Relaxed);
+                                let bitrate = active_channel_audio_mode
+                                    .read()
+                                    .map(|mode| mode.bitrate_bps)
+                                    .unwrap_or(64_000);
+                                let mut enc = encoder.lock().await;
+                                match audio::opus::OpusEncoder::new(
+                                    sample_rate,
+                                    channels as u8,
+                                    encoder_profile_for_mode(saved_settings.voice_processing_mode),
+                                ) {
+                                    Ok(mut new_encoder) => {
+                                        let _ = new_encoder.set_bitrate(bitrate as i32);
+                                        let _ = apply_fec_encoder_settings(&mut new_encoder, &audio_runtime);
+                                        *enc = new_encoder;
+                                    }
+                                    Err(e) => {
+                                        let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                            "[audio] failed to reconfigure encoder profile: {e:#}"
+                                        )));
+                                    }
+                                }
+                                persist_settings(&tx_event, &saved_settings);
+                            }
+                            UiIntent::SetDspEnabled(enabled) => {
                             saved_settings.dsp_enabled = enabled;
                             dsp_enabled.store(enabled && !cfg.no_noise_suppression, Ordering::Relaxed);
                             info!("[audio] set dsp_enabled={enabled}");
