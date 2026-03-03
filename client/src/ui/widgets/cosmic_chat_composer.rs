@@ -91,24 +91,14 @@ impl ChatComposer {
 
     pub fn apply_format_action(&mut self, action: ComposerFormatAction) {
         match action {
-            ComposerFormatAction::Bold => self.wrap_selection_or_insert("**", "**", "bold text"),
-            ComposerFormatAction::Italic => self.wrap_selection_or_insert("*", "*", "italic text"),
-            ComposerFormatAction::Underline => {
-                self.wrap_selection_or_insert("<u>", "</u>", "underlined text")
-            }
-            ComposerFormatAction::Strikethrough => {
-                self.wrap_selection_or_insert("~~", "~~", "strikethrough")
-            }
-            ComposerFormatAction::OrderedList => {
-                self.insert_string("1. First item\n2. Second item")
-            }
-            ComposerFormatAction::UnorderedList => {
-                self.insert_string("- First item\n- Second item")
-            }
-            ComposerFormatAction::Quote => self.insert_string("> quoted text"),
-            ComposerFormatAction::CodeBlock => {
-                self.wrap_selection_or_insert("```\n", "\n```", "code")
-            }
+            ComposerFormatAction::Bold => self.wrap_selection("**", "**"),
+            ComposerFormatAction::Italic => self.wrap_selection("*", "*"),
+            ComposerFormatAction::Underline => self.wrap_selection("<u>", "</u>"),
+            ComposerFormatAction::Strikethrough => self.wrap_selection("~~", "~~"),
+            ComposerFormatAction::OrderedList => self.insert_string("1. "),
+            ComposerFormatAction::UnorderedList => self.insert_string("- "),
+            ComposerFormatAction::Quote => self.insert_string("> "),
+            ComposerFormatAction::CodeBlock => self.wrap_selection("```\n", "\n```"),
         }
         self.dirty = true;
     }
@@ -117,20 +107,16 @@ impl ChatComposer {
         self.editor.insert_string(text, None);
     }
 
-    fn wrap_selection_or_insert(&mut self, prefix: &str, suffix: &str, fallback: &str) {
-        if let Some(selected) = self.editor.copy_selection() {
-            if !selected.is_empty() {
-                self.editor.delete_selection();
-                self.insert_string(&format!("{prefix}{selected}{suffix}"));
-                return;
-            }
+    fn wrap_selection(&mut self, prefix: &str, suffix: &str) {
+        let Some(selected) = self.editor.copy_selection() else {
+            return;
+        };
+        if selected.is_empty() {
+            return;
         }
 
-        self.insert_string(&format!("{prefix}{fallback}{suffix}"));
-        for _ in 0..(suffix.chars().count() + fallback.chars().count()) {
-            self.editor
-                .action(&mut self.font_system, Action::Motion(Motion::Left));
-        }
+        self.editor.delete_selection();
+        self.insert_string(&format!("{prefix}{selected}{suffix}"));
     }
 
     pub fn ui(
@@ -290,6 +276,7 @@ impl ChatComposer {
                             egui::Key::Backspace => Some(Action::Backspace),
                             egui::Key::Delete => Some(Action::Delete),
                             egui::Key::Escape => Some(Action::Escape),
+                            egui::Key::A if ctrl => Some(Action::SelectAll),
                             egui::Key::Enter => {
                                 if shift {
                                     Some(Action::Enter)
