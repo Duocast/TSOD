@@ -2398,6 +2398,7 @@ async fn connect_and_run_session(
     let _video_recv = tokio::spawn(video_recv_loop(video_rx_rx, stream_state.clone()));
 
     let disp_keepalive = dispatcher.clone();
+    let disp_health = dispatcher.clone();
     let ctl_keepalive = tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(10));
         loop {
@@ -2491,7 +2492,7 @@ async fn connect_and_run_session(
                 let _ = tx_event.send(UiEvent::StreamDebugUpdate(snapshot));
             }
             _ = audio_health_tick.tick() => {
-                let ping_rtt_ms = disp_keepalive
+                let ping_rtt_ms = disp_health
                     .ping()
                     .await
                     .map(|rtt| rtt.as_millis().min(u32::MAX as u128) as u32)
