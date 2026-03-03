@@ -44,7 +44,7 @@ use tokio::time::{sleep, Duration, Instant};
 use tracing::{debug, info, warn, Level};
 use tracing_subscriber::EnvFilter;
 use ui::model::AudioDeviceId;
-use ui::model::{FecMode, PerUserAudioSettings};
+use ui::model::{DspMethod, FecMode, PerUserAudioSettings};
 use ui::{UiEvent, UiIntent, VpApp};
 
 #[cfg(debug_assertions)]
@@ -440,6 +440,10 @@ fn capture_mode_from_u8(mode: u8) -> ui::model::CaptureMode {
     }
 }
 
+fn apply_resampler_mode(mode: DspMethod) {
+    std::env::set_var("VP_AUDIO_RESAMPLER", mode.label());
+}
+
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env().add_directive(Level::INFO.into()))
@@ -604,6 +608,10 @@ async fn app_task(
     )));
 
     let audio_runtime = AudioRuntimeSettings::from_app_settings(&saved_settings);
+    let dsp_enabled = Arc::new(AtomicBool::new(
+        saved_settings.dsp_enabled && !cfg.no_noise_suppression,
+    ));
+    apply_resampler_mode(saved_settings.dsp_method);
 
     // Audio constants
     let sample_rate = 48_000u32;
@@ -646,8 +654,7 @@ async fn app_task(
     )?)));
 
     // DSP pipeline
-    let dsp_enabled = !cfg.no_noise_suppression;
-    let capture_dsp = if dsp_enabled {
+    let capture_dsp = if !cfg.no_noise_suppression {
         Some(Arc::new(Mutex::new(audio::dsp::CaptureDsp::new(
             sample_rate,
         )?)))
@@ -687,6 +694,7 @@ async fn app_task(
     let _telemetry = tokio::spawn(emit_telemetry_loop(
         tx_event.clone(),
         capture_dsp.clone(),
+        dsp_enabled.clone(),
         voice_counters.clone(),
         send_queue_drop_count.clone(),
         running.clone(),
@@ -715,6 +723,7 @@ async fn app_task(
             capture.clone(),
             playout.clone(),
             capture_dsp.clone(),
+            dsp_enabled.clone(),
             active_voice_channel_route.clone(),
             active_channel_audio_mode.clone(),
             selected_audio.clone(),
@@ -775,6 +784,32 @@ async fn app_task(
                                 if let Some(ref dsp) = capture_dsp {
                                     let mut d = dsp.lock().await;
                                     d.set_echo_cancellation(enabled);
+                                }
+                                persist_settings(&tx_event, &saved_settings);
+                            }
+                            UiIntent::SetDspEnabled(enabled) => {
+                                saved_settings.dsp_enabled = enabled;
+                                dsp_enabled
+                                    .store(enabled && !cfg.no_noise_suppression, Ordering::Relaxed);
+                                persist_settings(&tx_event, &saved_settings);
+                            }
+                            UiIntent::SetDspMethod(method) => {
+                                saved_settings.dsp_method = method;
+                                apply_resampler_mode(method);
+                                if let Err(e) = restart_audio_streams(
+                                    &capture,
+                                    &playout,
+                                    &selected_audio,
+                                    &tx_event,
+                                    sample_rate,
+                                    channels,
+                                    frame_ms,
+                                )
+                                .await
+                                {
+                                    let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                        "[audio] failed to switch DSP method: {e:#}"
+                                    )));
                                 }
                                 persist_settings(&tx_event, &saved_settings);
                             }
@@ -1422,6 +1457,7 @@ async fn connect_and_run_session(
     capture: Arc<RwLock<Arc<audio::capture::Capture>>>,
     playout: Arc<RwLock<Arc<audio::playout::Playout>>>,
     capture_dsp: Option<Arc<Mutex<audio::dsp::CaptureDsp>>>,
+    dsp_enabled: Arc<AtomicBool>,
     active_voice_channel_route: Arc<AtomicU32>,
     active_channel_audio_mode: Arc<std::sync::RwLock<ChannelAudioMode>>,
     selected_audio: Arc<Mutex<AudioSelection>>,
@@ -2101,6 +2137,7 @@ async fn connect_and_run_session(
         capture.clone(),
         playout.clone(),
         capture_dsp.clone(),
+        dsp_enabled.clone(),
         tx_event.clone(),
         active_voice_channel_route.clone(),
         active_channel_audio_mode.clone(),
@@ -2556,6 +2593,33 @@ async fn connect_and_run_session(
                                 "[help] Space=PTT | Enter=Send | Settings for audio config".into(),
                             ));
                         }
+                        UiIntent::SetDspEnabled(enabled) => {
+                            saved_settings.dsp_enabled = enabled;
+                            dsp_enabled.store(enabled && !cfg.no_noise_suppression, Ordering::Relaxed);
+                            info!("[audio] set dsp_enabled={enabled}");
+                            persist_settings(tx_event, &saved_settings);
+                        }
+                        UiIntent::SetDspMethod(method) => {
+                            saved_settings.dsp_method = method;
+                            apply_resampler_mode(method);
+                            info!("[audio] set dsp_method={}", method.label());
+                            if let Err(e) = restart_audio_streams(
+                                &capture,
+                                &playout,
+                                &selected_audio,
+                                tx_event,
+                                sample_rate,
+                                channels,
+                                frame_ms,
+                            )
+                            .await
+                            {
+                                let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                    "[audio] failed to switch DSP method: {e:#}"
+                                )));
+                            }
+                            persist_settings(tx_event, &saved_settings);
+                        }
                         UiIntent::SetNoiseSuppression(enabled) => {
                             saved_settings.noise_suppression = enabled;
                             if let Some(ref dsp) = capture_dsp {
@@ -2979,6 +3043,11 @@ async fn connect_and_run_session(
                         }
                         UiIntent::ApplySettings(ref settings) => {
                             *saved_settings = (**settings).clone();
+                            dsp_enabled.store(
+                                settings.dsp_enabled && !cfg.no_noise_suppression,
+                                Ordering::Relaxed,
+                            );
+                            apply_resampler_mode(settings.dsp_method);
                             // Apply all settings to the audio pipeline
                             if let Some(ref dsp) = capture_dsp {
                                 let mut d = dsp.lock().await;
@@ -2995,7 +3064,9 @@ async fn connect_and_run_session(
                             }
                             audio_runtime.apply(settings);
                             info!(
-                                "[audio] apply settings ns={} agc={} agc_target={:.1} aec={} typing_attn={} fec={:?} fec_strength={} auto_level={} mono_expansion={} comfort_noise={} comfort_noise_level={:.3} ducking={} duck_db={}",
+                                "[audio] apply settings dsp_enabled={} dsp_method={} ns={} agc={} agc_target={:.1} aec={} typing_attn={} fec={:?} fec_strength={} auto_level={} mono_expansion={} comfort_noise={} comfort_noise_level={:.3} ducking={} duck_db={}",
+                                settings.dsp_enabled,
+                                settings.dsp_method.label(),
                                 settings.noise_suppression,
                                 settings.agc_enabled,
                                 settings.agc_target_db,
@@ -3526,6 +3597,7 @@ async fn upload_attachment_quic(
 async fn emit_telemetry_loop(
     tx_event: Sender<UiEvent>,
     capture_dsp: Option<Arc<Mutex<audio::dsp::CaptureDsp>>>,
+    dsp_enabled: Arc<AtomicBool>,
     counters: Arc<VoiceTelemetryCounters>,
     send_queue_drop_count: Arc<AtomicU32>,
     running: Arc<AtomicBool>,
@@ -3583,9 +3655,13 @@ async fn emit_telemetry_loop(
         prev_lost = lost;
         prev_conceal = conceal;
 
-        let vad_probability = if let Some(ref dsp) = capture_dsp {
-            let d = dsp.lock().await;
-            d.last_vad_probability()
+        let vad_probability = if dsp_enabled.load(Ordering::Relaxed) {
+            if let Some(ref dsp) = capture_dsp {
+                let d = dsp.lock().await;
+                d.last_vad_probability()
+            } else {
+                0.0
+            }
         } else {
             0.0
         };
@@ -3662,6 +3738,7 @@ async fn voice_send_loop(
     capture: Arc<RwLock<Arc<audio::capture::Capture>>>,
     playout: Arc<RwLock<Arc<audio::playout::Playout>>>,
     capture_dsp: Option<Arc<Mutex<audio::dsp::CaptureDsp>>>,
+    dsp_enabled: Arc<AtomicBool>,
     tx_event: Sender<UiEvent>,
     active_voice_channel_route: Arc<AtomicU32>,
     active_channel_audio_mode: Arc<std::sync::RwLock<ChannelAudioMode>>,
@@ -3757,15 +3834,19 @@ async fn voice_send_loop(
 
         // Apply DSP pipeline (noise suppression + AGC + VAD)
         let mut vad_score = 1.0_f32;
-        if let Some(ref dsp) = capture_dsp {
-            let mut d = dsp.lock().await;
-            vad_score = d.process_frame(&mut pcm);
+        if dsp_enabled.load(Ordering::Relaxed) {
+            if let Some(ref dsp) = capture_dsp {
+                let mut d = dsp.lock().await;
+                vad_score = d.process_frame(&mut pcm);
 
-            // Report VAD level to GUI periodically
-            vad_report_counter += 1;
-            if vad_report_counter % 10 == 0 {
-                let _ = tx_event.send(UiEvent::VadLevel(d.last_vad_probability()));
+                // Report VAD level to GUI periodically
+                vad_report_counter += 1;
+                if vad_report_counter % 10 == 0 {
+                    let _ = tx_event.send(UiEvent::VadLevel(d.last_vad_probability()));
+                }
             }
+        } else {
+            vad_score = audio::pcm_peak_level(&pcm);
         }
 
         let processed_level = audio::pcm_peak_level(&pcm);
