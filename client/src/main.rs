@@ -127,6 +127,117 @@ struct VoiceTelemetryCounters {
 }
 
 #[derive(Default)]
+struct SharedNetworkTelemetry {
+    rtt_ms: AtomicU32,
+    loss_ppm: AtomicU32,
+    jitter_ms: AtomicU32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NetworkClass {
+    Good,
+    Moderate,
+    Poor,
+}
+
+impl NetworkClass {
+    fn opus_target_bitrate_bps(self) -> i32 {
+        match self {
+            Self::Good => 36_000,
+            Self::Moderate => 28_000,
+            Self::Poor => 20_000,
+        }
+    }
+
+    fn encoder_fec_params(self) -> (bool, i32) {
+        match self {
+            Self::Good => (false, 8),
+            Self::Moderate => (true, 10),
+            Self::Poor => (true, 18),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct NetworkSample {
+    rtt_ms: u32,
+    loss_rate: f32,
+    jitter_ms: u32,
+    jitter_buffer_depth: u32,
+}
+
+#[derive(Debug)]
+struct OpusAdaptationController {
+    class: NetworkClass,
+    pending_class: Option<NetworkClass>,
+    pending_samples: u32,
+}
+
+impl Default for OpusAdaptationController {
+    fn default() -> Self {
+        Self {
+            class: NetworkClass::Good,
+            pending_class: None,
+            pending_samples: 0,
+        }
+    }
+}
+
+impl OpusAdaptationController {
+    fn classify(&self, sample: NetworkSample) -> NetworkClass {
+        let in_poor = sample.loss_rate >= 0.12
+            || sample.rtt_ms >= 280
+            || sample.jitter_ms >= 50
+            || sample.jitter_buffer_depth >= 10;
+        if in_poor {
+            return NetworkClass::Poor;
+        }
+
+        let in_moderate = sample.loss_rate >= 0.04
+            || sample.rtt_ms >= 140
+            || sample.jitter_ms >= 25
+            || sample.jitter_buffer_depth >= 6;
+        if in_moderate {
+            return NetworkClass::Moderate;
+        }
+        NetworkClass::Good
+    }
+
+    fn promote_threshold(target: NetworkClass) -> u32 {
+        match target {
+            NetworkClass::Poor => 2,
+            NetworkClass::Moderate => 3,
+            NetworkClass::Good => 4,
+        }
+    }
+
+    fn update(&mut self, sample: NetworkSample) -> Option<NetworkClass> {
+        let candidate = self.classify(sample);
+        if candidate == self.class {
+            self.pending_class = None;
+            self.pending_samples = 0;
+            return None;
+        }
+
+        if self.pending_class != Some(candidate) {
+            self.pending_class = Some(candidate);
+            self.pending_samples = 1;
+            return None;
+        }
+
+        self.pending_samples = self.pending_samples.saturating_add(1);
+        if self.pending_samples >= Self::promote_threshold(candidate) {
+            self.class = candidate;
+            self.pending_class = None;
+            self.pending_samples = 0;
+            return Some(candidate);
+        }
+
+        None
+    }
+}
+
+#[derive(Default)]
 struct VideoRuntimeCounters {
     video_datagrams: AtomicU64,
     video_tx_datagrams: AtomicU64,
@@ -418,6 +529,22 @@ fn apply_fec_encoder_settings(
     Ok(())
 }
 
+fn apply_network_class_encoder_settings(
+    encoder: &mut audio::opus::OpusEncoder,
+    class: NetworkClass,
+) -> Result<()> {
+    let bitrate = class.opus_target_bitrate_bps();
+    let (enable_fec, loss_perc) = class.encoder_fec_params();
+    encoder.set_bitrate(bitrate)?;
+    encoder.set_inband_fec(enable_fec)?;
+    encoder.set_packet_loss_perc(loss_perc)?;
+    info!(
+        "[audio] network_class={class:?} apply opus bitrate={} fec={} packet_loss_perc={}",
+        bitrate, enable_fec, loss_perc
+    );
+    Ok(())
+}
+
 fn persist_settings(tx_event: &Sender<UiEvent>, settings: &ui::model::AppSettings) {
     if let Err(e) = settings_io::save_settings(settings) {
         let _ = tx_event.send(UiEvent::AppendLog(format!("[settings] save failed: {e:#}")));
@@ -690,12 +817,14 @@ async fn app_task(
     let active_channel_audio_mode = Arc::new(std::sync::RwLock::new(ChannelAudioMode::default()));
     let voice_counters = Arc::new(VoiceTelemetryCounters::default());
     let send_queue_drop_count = Arc::new(AtomicU32::new(0));
+    let network_telemetry = Arc::new(SharedNetworkTelemetry::default());
 
     let _telemetry = tokio::spawn(emit_telemetry_loop(
         tx_event.clone(),
         capture_dsp.clone(),
         dsp_enabled.clone(),
         voice_counters.clone(),
+        network_telemetry.clone(),
         send_queue_drop_count.clone(),
         running.clone(),
         shutdown_rx.clone(),
@@ -738,6 +867,7 @@ async fn app_task(
             loopback_active.clone(),
             session_voice_active.clone(),
             voice_counters.clone(),
+            network_telemetry.clone(),
             audio_runtime.clone(),
             sample_rate,
             channels,
@@ -1472,6 +1602,7 @@ async fn connect_and_run_session(
     loopback_active: Arc<AtomicBool>,
     session_voice_active: Arc<AtomicBool>,
     voice_counters: Arc<VoiceTelemetryCounters>,
+    network_telemetry: Arc<SharedNetworkTelemetry>,
     audio_runtime: AudioRuntimeSettings,
     sample_rate: u32,
     channels: u16,
@@ -2150,6 +2281,7 @@ async fn connect_and_run_session(
         loopback_active.clone(),
         audio_runtime.clone(),
         voice_counters.clone(),
+        network_telemetry.clone(),
         local_user_id.clone(),
         voice_die_tx.clone(),
     ));
@@ -2276,6 +2408,9 @@ async fn connect_and_run_session(
                 let _ = tx_event.send(UiEvent::StreamDebugUpdate(snapshot));
             }
             _ = audio_health_tick.tick() => {
+                let rtt_ms = conn.rtt().as_millis().min(u32::MAX as u128) as u32;
+                network_telemetry.rtt_ms.store(rtt_ms, Ordering::Relaxed);
+
                 let capture_healthy = {
                     let cap = capture.read().await;
                     cap.is_healthy()
@@ -3599,6 +3734,7 @@ async fn emit_telemetry_loop(
     capture_dsp: Option<Arc<Mutex<audio::dsp::CaptureDsp>>>,
     dsp_enabled: Arc<AtomicBool>,
     counters: Arc<VoiceTelemetryCounters>,
+    network_telemetry: Arc<SharedNetworkTelemetry>,
     send_queue_drop_count: Arc<AtomicU32>,
     running: Arc<AtomicBool>,
     mut shutdown_rx: watch::Receiver<bool>,
@@ -3655,6 +3791,17 @@ async fn emit_telemetry_loop(
         prev_lost = lost;
         prev_conceal = conceal;
 
+        let observed_packets = rx_pps.saturating_add(lost_delta).max(1);
+        let loss_rate = (lost_delta as f32 / observed_packets as f32).clamp(0.0, 1.0);
+        let rtt_ms = network_telemetry.rtt_ms.load(Ordering::Relaxed);
+        let jitter_ms = (jitter_buffer_depth.saturating_mul(4)).clamp(0, 250);
+        network_telemetry
+            .loss_ppm
+            .store((loss_rate * 1_000_000.0) as u32, Ordering::Relaxed);
+        network_telemetry
+            .jitter_ms
+            .store(jitter_ms, Ordering::Relaxed);
+
         let vad_probability = if dsp_enabled.load(Ordering::Relaxed) {
             if let Some(ref dsp) = capture_dsp {
                 let d = dsp.lock().await;
@@ -3667,6 +3814,9 @@ async fn emit_telemetry_loop(
         };
 
         let _ = tx_event.send(UiEvent::TelemetryUpdate(ui::model::TelemetryData {
+            rtt_ms,
+            loss_rate,
+            jitter_ms,
             tx_bitrate_bps,
             rx_bitrate_bps,
             tx_pps,
@@ -3751,6 +3901,7 @@ async fn voice_send_loop(
     loopback_active: Arc<AtomicBool>,
     audio_runtime: AudioRuntimeSettings,
     voice_counters: Arc<VoiceTelemetryCounters>,
+    network_telemetry: Arc<SharedNetworkTelemetry>,
     local_user_id: String,
     _voice_die_tx: watch::Sender<bool>,
 ) {
@@ -3776,6 +3927,10 @@ async fn voice_send_loop(
         voice_max_inbound.saturating_sub(vp_voice::CLIENT_VOICE_HEADER_BYTES);
     let mut vad_hysteresis =
         audio::dsp::vad::VadHysteresis::from_timing(0.6, 0.45, 60, 300, frame_ms);
+    let mut adaptation = OpusAdaptationController::default();
+    if let Ok(mut enc) = encoder.try_lock() {
+        let _ = apply_network_class_encoder_settings(&mut enc, NetworkClass::Good);
+    }
 
     loop {
         tick.tick().await;
@@ -3824,6 +3979,19 @@ async fn voice_send_loop(
                 level: 0.0,
             });
             continue;
+        }
+
+        let sample = NetworkSample {
+            rtt_ms: network_telemetry.rtt_ms.load(Ordering::Relaxed),
+            loss_rate: network_telemetry.loss_ppm.load(Ordering::Relaxed) as f32 / 1_000_000.0,
+            jitter_ms: network_telemetry.jitter_ms.load(Ordering::Relaxed),
+            jitter_buffer_depth: voice_counters.jitter_buffer_depth.load(Ordering::Relaxed) as u32,
+        };
+        if let Some(new_class) = adaptation.update(sample) {
+            let mut enc = encoder.lock().await;
+            if let Err(e) = apply_network_class_encoder_settings(&mut enc, new_class) {
+                warn!("[audio] failed to apply network-class opus settings: {e:#}");
+            }
         }
 
         let channel_mode = active_channel_audio_mode
@@ -4037,11 +4205,10 @@ async fn voice_recv_loop(
                 }
                 let opus_use_inband_fec = fec_mode != FecMode::Off;
 
+                let mut jitter_depth_max = 0u64;
                 for stream in streams.values_mut() {
                     let mut frame_present = false;
-                    voice_counters
-                        .jitter_buffer_depth
-                        .fetch_max(stream.jitter.depth() as u64, Ordering::Relaxed);
+                    jitter_depth_max = jitter_depth_max.max(stream.jitter.depth() as u64);
                     let mut frame_level = 0.0_f32;
 
                     let ready = stream
@@ -4157,6 +4324,10 @@ async fn voice_recv_loop(
                     }
                     true
                 });
+
+                voice_counters
+                    .jitter_buffer_depth
+                    .store(jitter_depth_max, Ordering::Relaxed);
 
                 let speaking_streams = streams.values().filter(|s| s.speaking).count();
                 mixed_pcm.fill(0);
