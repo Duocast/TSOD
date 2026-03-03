@@ -498,7 +498,7 @@ fn write_render_bytes(
                         scale_to_i32(mono.get(frame_idx).copied().unwrap_or(0.0), scale);
                     if valid_bits > 0 && valid_bits < 32 {
                         let shift = 32 - valid_bits;
-                        sample = (sample << shift) >> shift;
+                        sample <<= shift;
                     }
                     let encoded = sample.to_le_bytes();
                     for ch in 0..channels {
@@ -523,6 +523,24 @@ fn int_scale(valid_bits: u16) -> f32 {
         0 => 1.0,
         1..=31 => ((1_i64 << (valid_bits - 1)) - 1) as f32,
         _ => i32::MAX as f32,
+    }
+}
+
+#[cfg(test)]
+mod wasapi_format_tests {
+    use super::write_render_bytes;
+    use wasapi::SampleType;
+
+    #[test]
+    fn packs_24bit_in_32bit_container_with_high_bit_alignment() {
+        let mut dst = vec![0u8; 4];
+        let mono = [1.0f32];
+
+        let _ = write_render_bytes(&mut dst, 1, 4, 1, SampleType::Int, &mono, 24)
+            .expect("write should succeed");
+
+        let sample = i32::from_le_bytes([dst[0], dst[1], dst[2], dst[3]]);
+        assert_eq!(sample, 0x7fffff00);
     }
 }
 
