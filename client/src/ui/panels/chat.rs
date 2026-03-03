@@ -136,21 +136,33 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
         };
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let input_button = if model.chat_input_options_open {
-                "Input ▴"
+            let input_icon = if model.chat_input_options_open {
+                "\u{2796}" // ➖  (collapse)
             } else {
-                "Input ▾"
+                "\u{2795}" // ➕  (expand)
             };
-            if ui.button(input_button).clicked() {
+            let toggle_btn = ui.add(
+                egui::Button::new(egui::RichText::new(input_icon).size(14.0))
+                    .min_size(egui::vec2(28.0, 28.0)),
+            );
+            if toggle_btn.clicked() {
                 model.chat_input_options_open = !model.chat_input_options_open;
             }
+            toggle_btn.on_hover_text(if model.chat_input_options_open {
+                "Hide formatting"
+            } else {
+                "Show formatting"
+            });
 
             let send_clicked = ui.button("Send").clicked();
 
             // Composer fills remaining space to the left of the buttons
-            let composer_result = model
-                .chat_composer
-                .ui(ui, hint, ui.available_width().max(120.0));
+            let composer_result = model.chat_composer.ui(
+                ui,
+                hint,
+                ui.available_width().max(120.0),
+                model.chat_input_options_open,
+            );
             model.chat_input_focused = composer_result.has_focus;
 
             if composer_result.send_requested || send_clicked {
@@ -166,21 +178,33 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
 
 fn show_input_options_toolbar(ui: &mut egui::Ui, model: &mut UiModel) {
     ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing.x = 6.0;
+        ui.spacing_mut().item_spacing.x = 2.0;
 
-        for (label, action) in [
-            ("B", ComposerFormatAction::Bold),
-            ("I", ComposerFormatAction::Italic),
-            ("U", ComposerFormatAction::Underline),
-            ("S", ComposerFormatAction::Strikethrough),
-            ("• List", ComposerFormatAction::UnorderedList),
-            ("1. List", ComposerFormatAction::OrderedList),
-            ("Quote", ComposerFormatAction::Quote),
-            ("Code", ComposerFormatAction::CodeBlock),
-        ] {
-            if ui.button(label).clicked() {
+        // (icon, tooltip, action)
+        let buttons: &[(&str, &str, ComposerFormatAction)] = &[
+            ("\u{1D401}", "Bold",          ComposerFormatAction::Bold),           // 𝐁
+            ("\u{1D43C}", "Italic",        ComposerFormatAction::Italic),         // 𝐼
+            ("\u{0055}\u{0332}", "Underline",     ComposerFormatAction::Underline),      // U̲
+            ("\u{0053}\u{0336}", "Strikethrough", ComposerFormatAction::Strikethrough),  // S̶
+            ("\u{2022}",  "Bullet list",   ComposerFormatAction::UnorderedList),  // •
+            ("\u{0031}.",  "Numbered list", ComposerFormatAction::OrderedList),    // 1.
+            ("\u{275D}",  "Quote",         ComposerFormatAction::Quote),          // ❝
+            ("</>",       "Code block",    ComposerFormatAction::CodeBlock),      // </>
+        ];
+
+        for &(icon, tooltip, action) in buttons {
+            let btn = ui.add(
+                egui::Button::new(
+                    egui::RichText::new(icon).size(16.0).color(theme::text_color()),
+                )
+                .min_size(egui::vec2(30.0, 26.0))
+                .fill(theme::bg_light())
+                .corner_radius(egui::CornerRadius::same(4)),
+            );
+            if btn.clicked() {
                 model.chat_composer.apply_format_action(action);
             }
+            btn.on_hover_text(tooltip);
         }
     });
 }

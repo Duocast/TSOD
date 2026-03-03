@@ -11,6 +11,11 @@ const PADDING_X: f32 = 10.0;
 const PADDING_Y: f32 = 8.0;
 const MIN_HEIGHT: f32 = 40.0;
 const MAX_HEIGHT: f32 = 96.0;
+const MAX_HEIGHT_EXPANDED: f32 = 160.0;
+
+/// Green accent color for the focus indicator line.
+const FOCUS_LINE_COLOR: egui::Color32 = egui::Color32::from_rgb(35, 165, 90);
+const FOCUS_LINE_THICKNESS: f32 = 2.0;
 
 #[derive(Debug, Clone, Copy)]
 pub enum ComposerFormatAction {
@@ -126,14 +131,10 @@ impl ChatComposer {
     }
 
     fn wrap_selection(&mut self, prefix: &str, suffix: &str) {
-        let Some(selected) = self.editor.copy_selection() else {
-            return;
-        };
-        if selected.is_empty() {
-            return;
+        let selected = self.editor.copy_selection().unwrap_or_default();
+        if !selected.is_empty() {
+            self.editor.delete_selection();
         }
-
-        self.editor.delete_selection();
         self.insert_string(&format!("{prefix}{selected}{suffix}"));
     }
 
@@ -142,14 +143,16 @@ impl ChatComposer {
         ui: &mut egui::Ui,
         hint: &str,
         desired_width: f32,
+        expanded: bool,
     ) -> ChatComposerUiResult {
         let mut result = ChatComposerUiResult::default();
 
         let desired_width = desired_width.max(120.0);
+        let max_h = if expanded { MAX_HEIGHT_EXPANDED } else { MAX_HEIGHT };
         let content_height = self
             .editor
             .with_buffer(|buffer| (buffer.lines.len() as f32) * LINE_HEIGHT + (PADDING_Y * 2.0));
-        let height = content_height.clamp(MIN_HEIGHT, MAX_HEIGHT);
+        let height = content_height.clamp(MIN_HEIGHT, max_h);
 
         let (rect, response) = ui.allocate_exact_size(
             egui::vec2(desired_width, height),
@@ -210,6 +213,13 @@ impl ChatComposer {
         if has_focus {
             for event in ui.input(|i| i.events.clone()) {
                 match event {
+                    egui::Event::Paste(text) => {
+                        // Handle paste from OS clipboard (right-click paste
+                        // and Ctrl+V both funnel through this event).
+                        if !text.is_empty() {
+                            insert_text.push(text);
+                        }
+                    }
                     egui::Event::Text(text) => {
                         insert_text.push(text);
                     }
@@ -250,6 +260,13 @@ impl ChatComposer {
                                 }
                                 None
                             }
+                            egui::Key::V if ctrl => {
+                                // Trigger OS paste; the clipboard contents arrive
+                                // as an Event::Paste on the next frame.
+                                ui.ctx()
+                                    .send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+                                None
+                            }
                             egui::Key::Enter => {
                                 if shift {
                                     Some(Action::Enter)
@@ -277,11 +294,6 @@ impl ChatComposer {
                 self.dirty = true;
             }
 
-            if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::C)) {
-                if let Some(copied) = self.editor.copy_selection() {
-                    ui.ctx().copy_text(copied);
-                }
-            }
             if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::X)) {
                 if let Some(copied) = self.editor.copy_selection() {
                     ui.ctx().copy_text(copied);
@@ -342,6 +354,18 @@ impl ChatComposer {
                 hint,
                 egui::TextStyle::Body.resolve(ui.style()),
                 theme::text_muted(),
+            );
+        }
+
+        // Green focus indicator line under the input box
+        if has_focus {
+            let line_y = frame_rect.bottom();
+            ui.painter().line_segment(
+                [
+                    egui::pos2(frame_rect.left(), line_y),
+                    egui::pos2(frame_rect.right(), line_y),
+                ],
+                egui::Stroke::new(FOCUS_LINE_THICKNESS, FOCUS_LINE_COLOR),
             );
         }
 
