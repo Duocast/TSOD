@@ -74,6 +74,7 @@ impl ResamplerImpl {
 struct RubatoResampler {
     inner: AsyncResampler<f32>,
     channels: usize,
+    pending_interleaved: Vec<f32>,
     in_planar: Vec<Vec<f32>>,
     out_planar: Vec<Vec<f32>>,
     out_interleaved: Vec<f32>,
@@ -113,6 +114,7 @@ impl RubatoResampler {
         Ok(Self {
             inner,
             channels,
+            pending_interleaved: Vec::new(),
             in_planar,
             out_planar,
             out_interleaved: vec![0.0; max_out.saturating_mul(channels)],
@@ -128,29 +130,29 @@ impl RubatoResampler {
             return;
         }
 
-        let frames = input.len() / channels;
-        if frames == 0 {
+        if input.len() < channels {
             return;
         }
 
-        let mut processed_frames = 0usize;
-        while processed_frames < frames {
-            let max_in = self.inner.input_frames_max();
-            let in_chunk = (frames - processed_frames).min(max_in);
+        self.pending_interleaved.extend_from_slice(input);
+
+        let required_in = self.inner.input_frames_next();
+        let required_samples = required_in.saturating_mul(channels);
+
+        while self.pending_interleaved.len() >= required_samples {
             for ch in 0..channels {
-                self.in_planar[ch].resize(in_chunk, 0.0);
+                self.in_planar[ch].resize(required_in, 0.0);
             }
 
-            for frame_idx in 0..in_chunk {
-                let src_base = (processed_frames + frame_idx) * channels;
+            for frame_idx in 0..required_in {
+                let src_base = frame_idx * channels;
                 for ch in 0..channels {
-                    self.in_planar[ch][frame_idx] = input[src_base + ch];
+                    self.in_planar[ch][frame_idx] = self.pending_interleaved[src_base + ch];
                 }
             }
 
-            let in_adapter =
-                SequentialSliceOfVecs::new(&self.in_planar[..], channels, in_chunk)
-                    .expect("in_planar size mismatch");
+            let in_adapter = SequentialSliceOfVecs::new(&self.in_planar[..], channels, required_in)
+                .expect("in_planar size mismatch");
             let out_frames_cap = self.out_planar[0].len();
             let mut out_adapter =
                 SequentialSliceOfVecs::new_mut(&mut self.out_planar[..], channels, out_frames_cap)
@@ -178,7 +180,7 @@ impl RubatoResampler {
                 }
             }
 
-            processed_frames += in_chunk;
+            self.pending_interleaved.drain(..required_samples);
         }
     }
 }
@@ -331,5 +333,19 @@ mod tests {
             .map(|(a, b)| (a - b).abs())
             .fold(0.0f32, f32::max);
         assert!(max_delta < 0.02);
+    }
+
+    #[test]
+    fn rubato_handles_sub_chunk_inputs_without_error() {
+        let mut r = ResamplerImpl::new(48_000, 44_100, 1, ResamplerMode::Rubato);
+        let input = sine(1_120, 48_000, 220.0);
+
+        let mut first = Vec::new();
+        r.process_mono(&input[..560], &mut first);
+        assert!(first.is_empty());
+
+        let mut second = Vec::new();
+        r.process_mono(&input[560..], &mut second);
+        assert!(!second.is_empty());
     }
 }
