@@ -47,7 +47,7 @@ sonora-aec3 = { version = "0.1", optional = true }
 eframe = "0.33.3"
 egui = "0.33.3"
 egui_extras = { version = "0.33.3", features = ["image"] }
-image = { version = "0.25.9", default-features = false, features = ["png", "jpeg", "gif"] }
+image = { version = "0.25.9", default-features = false, features = ["png", "jpeg", "gif", "webp", "avif"] }
 
 # Utilities
 serde = { version = "1.0.228", features = ["derive"] }

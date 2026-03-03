@@ -17,6 +17,7 @@ const ALLOWED_ATTACHMENT_MIME: &[&str] = &[
     "image/jpeg",
     "image/webp",
     "image/gif",
+    "image/avif",
     "video/mp4",
     "video/webm",
 ];
@@ -677,6 +678,7 @@ fn detect_mime_type(path: &Path, raw_mime: &str) -> String {
         "jpg" | "jpeg" => "image/jpeg",
         "webp" => "image/webp",
         "gif" => "image/gif",
+        "avif" => "image/avif",
         "mp4" => "video/mp4",
         "webm" => "video/webm",
         _ => "application/octet-stream",
@@ -1064,8 +1066,9 @@ fn format_size(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        format_day_label, format_timestamp, linkify_message, should_group_messages,
-        truncate_filename, ChatMessage, MessageSegment, MESSAGE_GROUP_WINDOW_MS,
+        detect_mime_type, format_day_label, format_timestamp, linkify_message,
+        should_group_messages, truncate_filename, ChatMessage, MessageSegment,
+        MESSAGE_GROUP_WINDOW_MS,
     };
     use chrono::{Days, Local, TimeZone};
 
@@ -1083,6 +1086,12 @@ mod tests {
             pinned: false,
             edited: false,
         }
+    }
+
+    #[test]
+    fn detects_avif_mime_from_extension() {
+        let mime = detect_mime_type(std::path::Path::new("sample.avif"), "");
+        assert_eq!(mime, "image/avif");
     }
 
     #[test]
