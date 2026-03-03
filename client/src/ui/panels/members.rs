@@ -313,7 +313,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                 .spacing([20.0, 4.0])
                 .show(ui, |ui| {
                     ui.label("Client name:");
-                    ui.label("vp-client");
+                    ui.label(connection_info.display_name.as_str());
                     ui.end_row();
 
                     ui.label("Connection time:");
