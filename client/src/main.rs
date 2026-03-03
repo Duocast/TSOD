@@ -797,6 +797,7 @@ async fn app_task(
         d.set_agc_preset(saved_settings.agc_preset);
         d.set_agc_target(saved_settings.agc_target_db);
         d.set_echo_cancellation(saved_settings.echo_cancellation);
+        d.set_echo_reference_enabled(should_enable_aec_reference(&saved_settings.playback_device));
     }
 
     // Shared self-mute/deafen state for the audio pipeline
@@ -1128,6 +1129,12 @@ async fn app_task(
                                 {
                                     let mut state = selected_audio.lock().await;
                                     state.output_device = dev;
+                                    if let Some(ref dsp) = capture_dsp {
+                                        let mut d = dsp.lock().await;
+                                        d.set_echo_reference_enabled(should_enable_aec_reference(
+                                            &state.output_device,
+                                        ));
+                                    }
                                 }
                                 if let Err(e) = restart_audio_streams(
                                     &capture,
@@ -1431,6 +1438,18 @@ fn preferred_device_id(device: &AudioDeviceId) -> Option<&str> {
     } else {
         Some(device.id.as_str())
     }
+}
+
+fn should_enable_aec_reference(device: &AudioDeviceId) -> bool {
+    let id = device.id.to_ascii_lowercase();
+    let label = device.label.to_ascii_lowercase();
+    let display_label = device.display_label.to_ascii_lowercase();
+    let looks_like_headset = ["headset", "headphone", "earbud", "airpods"]
+        .iter()
+        .any(|needle| {
+            id.contains(needle) || label.contains(needle) || display_label.contains(needle)
+        });
+    !looks_like_headset
 }
 
 fn normalize_capture_mode(mode: &str) -> Option<String> {
@@ -3306,6 +3325,7 @@ async fn connect_and_run_session(
                                 d.set_agc_preset(settings.agc_preset);
                                 d.set_agc_target(settings.agc_target_db);
                                 d.set_echo_cancellation(settings.echo_cancellation);
+                                d.set_echo_reference_enabled(should_enable_aec_reference(&settings.playback_device));
                             }
                             input_gain.store(f32_to_u32(settings.input_gain), Ordering::Relaxed);
                             output_gain.store(f32_to_u32(settings.output_gain), Ordering::Relaxed);
@@ -3355,6 +3375,10 @@ async fn connect_and_run_session(
                                 state.output_device = settings.playback_device.clone();
                                 state.capture_mode = normalize_capture_mode(&settings.capture_backend_mode);
                                 state.playback_mode = normalize_playback_mode(&settings.playback_mode);
+                                if let Some(ref dsp) = capture_dsp {
+                                    let mut d = dsp.lock().await;
+                                    d.set_echo_reference_enabled(should_enable_aec_reference(&state.output_device));
+                                }
                             }
 
                             if let Err(e) = restart_audio_streams(

@@ -13,6 +13,10 @@ pub mod rnnoise;
 pub mod vad;
 
 use anyhow::Result;
+#[cfg(feature = "aec")]
+use std::time::{Duration, Instant};
+#[cfg(feature = "aec")]
+use tracing::warn;
 
 /// Full DSP pipeline for the capture (microphone) path.
 pub struct CaptureDsp {
@@ -25,6 +29,12 @@ pub struct CaptureDsp {
     aec: Option<aec::Aec>,
     echo_cancellation_enabled: bool,
     echo_ref_scratch: Vec<i16>,
+    #[cfg(feature = "aec")]
+    echo_reference_enabled: bool,
+    #[cfg(feature = "aec")]
+    last_valid_echo_reference_at: Option<Instant>,
+    #[cfg(feature = "aec")]
+    last_echo_reference_warning_at: Option<Instant>,
 }
 
 impl CaptureDsp {
@@ -45,6 +55,12 @@ impl CaptureDsp {
             aec: Some(aec::Aec::new(sample_rate)?),
             echo_cancellation_enabled: false,
             echo_ref_scratch: Vec::with_capacity(960),
+            #[cfg(feature = "aec")]
+            echo_reference_enabled: true,
+            #[cfg(feature = "aec")]
+            last_valid_echo_reference_at: None,
+            #[cfg(feature = "aec")]
+            last_echo_reference_warning_at: None,
         })
     }
 
@@ -59,6 +75,7 @@ impl CaptureDsp {
 
         #[cfg(feature = "aec")]
         if self.echo_cancellation_enabled {
+            self.maybe_warn_if_reference_missing();
             if let Some(aec) = self.aec.as_mut() {
                 aec.process(pcm);
             }
@@ -111,15 +128,55 @@ impl CaptureDsp {
         self.echo_cancellation_enabled = enabled;
     }
 
+    pub fn set_echo_reference_enabled(&mut self, enabled: bool) {
+        #[cfg(feature = "aec")]
+        {
+            self.echo_reference_enabled = enabled;
+            self.last_valid_echo_reference_at = None;
+            self.last_echo_reference_warning_at = None;
+        }
+        #[cfg(not(feature = "aec"))]
+        {
+            let _ = enabled;
+        }
+    }
+
     /// Feed playout/reference audio to the echo canceller.
     pub fn feed_echo_reference(&mut self, pcm: &[i16]) {
         #[cfg(feature = "aec")]
-        if self.echo_cancellation_enabled {
+        if self.echo_cancellation_enabled && self.echo_reference_enabled {
             if let Some(aec) = self.aec.as_mut() {
                 self.echo_ref_scratch.clear();
                 self.echo_ref_scratch.extend_from_slice(pcm);
                 aec.feed_reference(&self.echo_ref_scratch);
+                if self.echo_ref_scratch.iter().any(|s| s.unsigned_abs() > 8) {
+                    self.last_valid_echo_reference_at = Some(Instant::now());
+                    self.last_echo_reference_warning_at = None;
+                }
             }
+        }
+    }
+
+    #[cfg(feature = "aec")]
+    fn maybe_warn_if_reference_missing(&mut self) {
+        if !self.echo_reference_enabled {
+            return;
+        }
+        let now = Instant::now();
+        let reference_stale = self
+            .last_valid_echo_reference_at
+            .is_none_or(|last| now.duration_since(last) > Duration::from_secs(2));
+        if !reference_stale {
+            return;
+        }
+        let should_warn = self
+            .last_echo_reference_warning_at
+            .is_none_or(|last| now.duration_since(last) > Duration::from_secs(5));
+        if should_warn {
+            warn!(
+                "[audio] AEC enabled but no valid echo reference is flowing; verify speaker output routing"
+            );
+            self.last_echo_reference_warning_at = Some(now);
         }
     }
 }
