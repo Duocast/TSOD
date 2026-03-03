@@ -90,7 +90,21 @@ impl ChatComposer {
     }
 
     fn select_all(&mut self) {
-        self.editor.select_all();
+        let end_cursor = self.editor.with_buffer(|buffer| {
+            let last_line = buffer.lines.len().saturating_sub(1);
+            let last_col = buffer
+                .lines
+                .get(last_line)
+                .map(|line| line.text().chars().count())
+                .unwrap_or(0);
+            cosmic_text::Cursor::new(last_line, last_col)
+        });
+
+        self.editor.set_cursor(end_cursor);
+        self.editor
+            .set_selection(cosmic_text::Selection::Normal(cosmic_text::Cursor::new(
+                0, 0,
+            )));
     }
 
     pub fn apply_format_action(&mut self, action: ComposerFormatAction) {
