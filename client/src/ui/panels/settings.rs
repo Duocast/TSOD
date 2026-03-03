@@ -5,7 +5,8 @@
 
 use crate::settings_io;
 use crate::ui::model::{
-    AppSettings, AudioDeviceInfo, CaptureMode, FecMode, SettingsPage, UiEvent, UiIntent, UiModel,
+    AppSettings, AudioDeviceInfo, CaptureMode, DspMethod, FecMode, SettingsPage, UiEvent, UiIntent,
+    UiModel,
 };
 use crate::ui::theme;
 use crossbeam_channel::Sender;
@@ -577,6 +578,34 @@ fn page_capture(
     }
 
     section(ui, "Signal Processing");
+
+    let dsp_prev = s.dsp_enabled;
+    ui.checkbox(&mut s.dsp_enabled, "Enable DSP");
+    if s.dsp_enabled != dsp_prev {
+        dirty = true;
+        let _ = tx_intent.send(UiIntent::SetDspEnabled(s.dsp_enabled));
+    }
+
+    ui.horizontal(|ui: &mut egui::Ui| {
+        ui.label("DSP Method:");
+        let prev = s.dsp_method;
+        egui::ComboBox::from_id_salt("dsp_method")
+            .selected_text(s.dsp_method.label())
+            .width(180.0)
+            .show_ui(ui, |ui: &mut egui::Ui| {
+                for method in DspMethod::ALL {
+                    ui.selectable_value(&mut s.dsp_method, method, method.label());
+                }
+            });
+        if s.dsp_method != prev {
+            dirty = true;
+            let _ = tx_intent.send(UiIntent::SetDspMethod(s.dsp_method));
+        }
+    });
+    hint(
+        ui,
+        "Select rubato for higher-quality resampling or linear for lower CPU use.",
+    );
 
     let ns_prev = s.noise_suppression;
     ui.checkbox(&mut s.noise_suppression, "Noise Suppression (RNNoise)");

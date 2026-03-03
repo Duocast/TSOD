@@ -410,6 +410,8 @@ pub enum UiIntent {
 
     // Settings: Audio
     SetNoiseSuppression(bool),
+    SetDspEnabled(bool),
+    SetDspMethod(DspMethod),
     SetAgcEnabled(bool),
     SetAgcTargetDb(f32),
     SetEchoCancellation(bool),
@@ -529,6 +531,8 @@ pub struct AppSettings {
     pub ptt_delay_ms: u32,
     pub vad_threshold: f32,
     pub input_gain: f32,
+    pub dsp_enabled: bool,
+    pub dsp_method: DspMethod,
     pub noise_suppression: bool,
     pub agc_enabled: bool,
     pub agc_target_db: f32,
@@ -625,6 +629,8 @@ impl Default for AppSettings {
             ptt_delay_ms: 300,
             vad_threshold: 0.5,
             input_gain: 1.0,
+            dsp_enabled: true,
+            dsp_method: DspMethod::Rubato,
             noise_suppression: true,
             agc_enabled: true,
             agc_target_db: -18.0,
@@ -704,6 +710,23 @@ impl Default for AppSettings {
             max_download_size_mb: 100,
             auto_download_images: true,
             auto_download_files: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum DspMethod {
+    Rubato,
+    Linear,
+}
+
+impl DspMethod {
+    pub const ALL: [DspMethod; 2] = [DspMethod::Rubato, DspMethod::Linear];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            DspMethod::Rubato => "rubato",
+            DspMethod::Linear => "linear",
         }
     }
 }
