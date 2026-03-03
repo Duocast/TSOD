@@ -174,6 +174,8 @@ mod linux {
         Pulse(CpalPlayout),
     }
 
+    const PULSE_FALLBACK_PLAYOUT_LATENCY_MS: u32 = 60;
+
     pub struct LinuxPlayout {
         _thread: Option<std::thread::JoinHandle<()>>,
         backend: LinuxPlayoutBackend,
@@ -235,6 +237,12 @@ mod linux {
             }
 
             eprintln!("PipeWire unavailable, falling back to PulseAudio playback via CPAL");
+            if let Some(tx) = &tx_event {
+                let _ = tx.send(UiEvent::AppendLog(format!(
+                    "[audio] using PulseAudio fallback for playback (target latency {} ms)",
+                    PULSE_FALLBACK_PLAYOUT_LATENCY_MS
+                )));
+            }
             let pulse =
                 CpalPlayout::start(sample_rate, channels, cons, preferred_device, tx_event)?;
             Ok(Self {
@@ -578,6 +586,7 @@ mod linux {
                 .unwrap_or_else(|| "<unknown-id>".to_string());
             let selected_name = device_label(&dev).unwrap_or_else(|| "Unknown device".to_string());
             let stream_cfg = native_output_config(&dev)?;
+            let tuned_stream_cfg = tune_pulse_output_config(&stream_cfg);
             info!(
                 endpoint_id = %selected_id,
                 friendly_name = %selected_name,
@@ -592,7 +601,7 @@ mod linux {
             let stream = match stream_cfg.sample_format() {
                 cpal::SampleFormat::I8 => build_output_stream::<i8>(
                     &dev,
-                    &stream_cfg.config(),
+                    &tuned_stream_cfg,
                     sample_rate,
                     channels,
                     cons,
@@ -602,7 +611,7 @@ mod linux {
                 )?,
                 cpal::SampleFormat::I16 => build_output_stream::<i16>(
                     &dev,
-                    &stream_cfg.config(),
+                    &tuned_stream_cfg,
                     sample_rate,
                     channels,
                     cons,
@@ -612,7 +621,7 @@ mod linux {
                 )?,
                 cpal::SampleFormat::I32 => build_output_stream::<i32>(
                     &dev,
-                    &stream_cfg.config(),
+                    &tuned_stream_cfg,
                     sample_rate,
                     channels,
                     cons,
@@ -622,7 +631,7 @@ mod linux {
                 )?,
                 cpal::SampleFormat::I64 => build_output_stream::<i64>(
                     &dev,
-                    &stream_cfg.config(),
+                    &tuned_stream_cfg,
                     sample_rate,
                     channels,
                     cons,
@@ -632,7 +641,7 @@ mod linux {
                 )?,
                 cpal::SampleFormat::U8 => build_output_stream::<u8>(
                     &dev,
-                    &stream_cfg.config(),
+                    &tuned_stream_cfg,
                     sample_rate,
                     channels,
                     cons,
@@ -642,7 +651,7 @@ mod linux {
                 )?,
                 cpal::SampleFormat::U16 => build_output_stream::<u16>(
                     &dev,
-                    &stream_cfg.config(),
+                    &tuned_stream_cfg,
                     sample_rate,
                     channels,
                     cons,
@@ -652,7 +661,7 @@ mod linux {
                 )?,
                 cpal::SampleFormat::U32 => build_output_stream::<u32>(
                     &dev,
-                    &stream_cfg.config(),
+                    &tuned_stream_cfg,
                     sample_rate,
                     channels,
                     cons,
@@ -662,7 +671,7 @@ mod linux {
                 )?,
                 cpal::SampleFormat::U64 => build_output_stream::<u64>(
                     &dev,
-                    &stream_cfg.config(),
+                    &tuned_stream_cfg,
                     sample_rate,
                     channels,
                     cons,
@@ -672,7 +681,7 @@ mod linux {
                 )?,
                 cpal::SampleFormat::F32 => build_output_stream::<f32>(
                     &dev,
-                    &stream_cfg.config(),
+                    &tuned_stream_cfg,
                     sample_rate,
                     channels,
                     cons,
@@ -682,7 +691,7 @@ mod linux {
                 )?,
                 cpal::SampleFormat::F64 => build_output_stream::<f64>(
                     &dev,
-                    &stream_cfg.config(),
+                    &tuned_stream_cfg,
                     sample_rate,
                     channels,
                     cons,
@@ -803,6 +812,24 @@ mod linux {
     fn native_output_config(dev: &cpal::Device) -> Result<cpal::SupportedStreamConfig> {
         dev.default_output_config()
             .context("no supported output configuration")
+    }
+
+    fn tune_pulse_output_config(cfg: &cpal::SupportedStreamConfig) -> cpal::StreamConfig {
+        let mut tuned = cfg.config();
+        let target_frames =
+            ((tuned.sample_rate.0 as u64 * PULSE_FALLBACK_PLAYOUT_LATENCY_MS as u64) / 1000) as u32;
+        tuned.buffer_size = match cfg.buffer_size() {
+            cpal::SupportedBufferSize::Range { min, max } => {
+                cpal::BufferSize::Fixed(target_frames.clamp(*min, *max))
+            }
+            cpal::SupportedBufferSize::Unknown => cpal::BufferSize::Fixed(target_frames.max(1024)),
+        };
+        tracing::info!(
+            "[audio] pulse fallback playout tuning: buffer={} frames (~{} ms target)",
+            target_frames,
+            PULSE_FALLBACK_PLAYOUT_LATENCY_MS
+        );
+        tuned
     }
 
     fn build_output_stream<T>(

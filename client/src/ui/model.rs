@@ -283,6 +283,7 @@ pub enum UiEvent {
     // Loopback
     SetLoopbackActive(bool),
     SetDefaultChannelId(Option<String>),
+    SetPipeWirePulseFallbackSuggested(bool),
 
     // Settings loaded from disk
     SettingsLoaded(Box<AppSettings>),
@@ -1320,6 +1321,7 @@ pub struct UiModel {
     pub output_devices: Vec<AudioDeviceInfo>,
     pub capture_modes: Vec<String>,
     pub playback_modes: Vec<String>,
+    pub pipewire_pulse_fallback_suggested: bool,
 
     // Mic test loopback (runtime)
     pub loopback_active: bool,
@@ -1632,6 +1634,7 @@ impl Default for UiModel {
             output_devices: Vec::new(),
             capture_modes: Vec::new(),
             playback_modes: Vec::new(),
+            pipewire_pulse_fallback_suggested: false,
             loopback_active: false,
             mic_test_waveform: Vec::new(),
             show_create_channel: false,
@@ -2117,6 +2120,9 @@ impl UiModel {
             }
             UiEvent::SetDefaultChannelId(channel_id) => {
                 self.default_channel_id = channel_id;
+            }
+            UiEvent::SetPipeWirePulseFallbackSuggested(suggested) => {
+                self.pipewire_pulse_fallback_suggested = suggested;
             }
             UiEvent::SettingsLoaded(s) => {
                 self.settings = *s.clone();

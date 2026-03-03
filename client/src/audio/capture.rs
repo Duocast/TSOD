@@ -204,6 +204,7 @@ mod linux {
         atomic::{AtomicBool, Ordering},
         Arc,
     };
+    use std::time::{Duration, Instant};
 
     use tracing::info;
 
@@ -222,12 +223,19 @@ mod linux {
         mono_out: Vec<f32>,
         log_once: bool,
         resampler_mode: ResamplerMode,
+        tx_event: Option<Sender<UiEvent>>,
+        graph_logged: bool,
+        last_process_at: Option<Instant>,
+        timing_unstable_hits: u32,
     }
 
     enum LinuxCaptureBackend {
         PipeWire,
         Pulse(CpalCapture),
     }
+
+    static PIPEWIRE_CAPTURE_FAILURES: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
 
     pub struct LinuxCapture {
         thread: Option<std::thread::JoinHandle<()>>,
@@ -267,22 +275,54 @@ mod linux {
                             prod,
                             preferred_device_owned,
                             stop_thread,
+                            tx_event_thread.clone(),
                         ) {
                             eprintln!("pipewire capture thread failed: {e:#}");
+                            let failures = PIPEWIRE_CAPTURE_FAILURES.fetch_add(1, Ordering::Relaxed) + 1;
                             if reported_thread
                                 .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
                                 .is_ok()
                             {
                                 if let Some(tx) = &tx_event_thread {
+                                    let detail = format!("{e:#}");
+                                    let detail_lower = detail.to_ascii_lowercase();
                                     let _ = tx.send(UiEvent::AppendLog(format!(
-                                        "[audio] pipewire capture thread failed: {e:#}"
+                                        "[audio] pipewire capture thread failed: {detail}"
                                     )));
+                                    if detail_lower.contains("permission")
+                                        || detail_lower.contains("portal")
+                                        || detail_lower.contains("access denied")
+                                    {
+                                        let _ = tx.send(UiEvent::AppendLog(
+                                            "[audio] PipeWire diagnostics: check xdg-desktop-portal and WirePlumber session permissions for microphone access.".to_string(),
+                                        ));
+                                    }
+                                    if detail_lower.contains("target")
+                                        || detail_lower.contains("node")
+                                        || detail_lower.contains("object")
+                                    {
+                                        let _ = tx.send(UiEvent::AppendLog(
+                                            "[audio] PipeWire diagnostics: selected node may be unavailable; verify default source in WirePlumber/pavucontrol to avoid wrong-default-mic selection.".to_string(),
+                                        ));
+                                    }
+                                    if failures >= 3 {
+                                        let _ = tx.send(UiEvent::SetPipeWirePulseFallbackSuggested(true));
+                                        let _ = tx.send(UiEvent::AppendLog(
+                                            "[audio] PipeWire capture setup has failed repeatedly; use the 'Use PulseAudio fallback now' button in Settings → Capture for a one-click fallback.".to_string(),
+                                        ));
+                                    }
                                 }
                             }
                         }
                     })
                     .context("spawn PipeWire capture thread")?;
 
+                if let Some(tx) = &tx_event {
+                    let _ = tx.send(UiEvent::SetPipeWirePulseFallbackSuggested(false));
+                    let _ = tx.send(UiEvent::AppendLog(
+                        "[audio] capture backend active: PipeWire native".to_string(),
+                    ));
+                }
                 return Ok(Self {
                     thread: Some(thread),
                     stop,
@@ -295,6 +335,11 @@ mod linux {
             }
 
             eprintln!("PipeWire unavailable, falling back to PulseAudio capture via CPAL");
+            if let Some(tx) = &tx_event {
+                let _ = tx.send(UiEvent::AppendLog(
+                    "[audio] using PulseAudio fallback for capture".to_string(),
+                ));
+            }
             let pulse = CpalCapture::start(
                 sample_rate,
                 channels,
@@ -363,6 +408,7 @@ mod linux {
         mut prod: HeapProd<i16>,
         preferred_device: Option<String>,
         stop: Arc<AtomicBool>,
+        tx_event: Option<Sender<UiEvent>>,
     ) -> Result<()> {
         pw::init();
 
@@ -400,6 +446,10 @@ mod linux {
                 mono_out: Vec::new(),
                 log_once: false,
                 resampler_mode: ResamplerMode::from_env(),
+                tx_event: tx_event.clone(),
+                graph_logged: false,
+                last_process_at: None,
+                timing_unstable_hits: 0,
             })
             .param_changed(move |_, state, id, param| {
                 if id != pw::spa::param::ParamType::Format.as_raw() {
@@ -427,6 +477,22 @@ mod linux {
                         negotiated_format
                     );
                     state.log_once = true;
+                }
+
+                if !state.graph_logged {
+                    if negotiated_rate != 48_000 {
+                        tracing::warn!(
+                            "[audio] pipewire graph guidance: negotiated capture rate is {} Hz; 48 kHz is recommended for lower resampling pressure",
+                            negotiated_rate
+                        );
+                        if let Some(tx) = &state.tx_event {
+                            let _ = tx.send(UiEvent::AppendLog(format!(
+                                "[audio] diagnostics: PipeWire negotiated {} Hz. Recommended profile: 48 kHz.",
+                                negotiated_rate
+                            )));
+                        }
+                    }
+                    state.graph_logged = true;
                 }
 
                 if negotiated_format != requested_format {
@@ -469,6 +535,26 @@ mod linux {
                     let Some(raw) = datas[0].data() else {
                         return;
                     };
+
+                    if let Some(prev) = state.last_process_at.replace(Instant::now()) {
+                        let delta = prev.elapsed();
+                        let expected = Duration::from_secs_f64(256.0 / state.format.rate().max(1) as f64);
+                        if delta > expected.mul_f32(1.75) {
+                            state.timing_unstable_hits += 1;
+                            if state.timing_unstable_hits == 6 {
+                                tracing::warn!(
+                                    "[audio] pipewire graph guidance: capture callback jitter looks high (latest {:?}); consider 48 kHz + smaller quantum where hardware allows",
+                                    delta
+                                );
+                                if let Some(tx) = &state.tx_event {
+                                    let _ = tx.send(UiEvent::AppendLog(format!(
+                                        "[audio] diagnostics: PipeWire graph timing looks unstable (callback gap {:?}). Consider 48 kHz and smaller quantum where hardware allows.",
+                                        delta
+                                    )));
+                                }
+                            }
+                        }
+                    }
 
                     let offset = chunk_offset.min(raw.len());
                     let available_bytes = raw.len().saturating_sub(offset);
@@ -658,6 +744,7 @@ mod linux {
             let selected_name = device_label(&dev).unwrap_or_else(|| "Unknown device".to_string());
             info!(endpoint_id = %selected_id, friendly_name = %selected_name, "starting input stream");
             let stream_cfg = native_input_config(&dev)?;
+            let tuned_stream_cfg = tune_pulse_input_config(&stream_cfg);
             let unhealthy = Arc::new(AtomicBool::new(false));
             let unhealthy_cb = unhealthy.clone();
             let reported = Arc::new(AtomicBool::new(false));
@@ -665,7 +752,7 @@ mod linux {
             let stream = match stream_cfg.sample_format() {
                 cpal::SampleFormat::I8 => build_input_stream::<i8>(
                     &dev,
-                    &stream_cfg.config(),
+                    &tuned_stream_cfg,
                     sample_rate,
                     channels,
                     prod,
@@ -675,7 +762,7 @@ mod linux {
                 )?,
                 cpal::SampleFormat::I16 => build_input_stream::<i16>(
                     &dev,
-                    &stream_cfg.config(),
+                    &tuned_stream_cfg,
                     sample_rate,
                     channels,
                     prod,
@@ -685,7 +772,7 @@ mod linux {
                 )?,
                 cpal::SampleFormat::I32 => build_input_stream::<i32>(
                     &dev,
-                    &stream_cfg.config(),
+                    &tuned_stream_cfg,
                     sample_rate,
                     channels,
                     prod,
@@ -695,7 +782,7 @@ mod linux {
                 )?,
                 cpal::SampleFormat::I64 => build_input_stream::<i64>(
                     &dev,
-                    &stream_cfg.config(),
+                    &tuned_stream_cfg,
                     sample_rate,
                     channels,
                     prod,
@@ -705,7 +792,7 @@ mod linux {
                 )?,
                 cpal::SampleFormat::U8 => build_input_stream::<u8>(
                     &dev,
-                    &stream_cfg.config(),
+                    &tuned_stream_cfg,
                     sample_rate,
                     channels,
                     prod,
@@ -715,7 +802,7 @@ mod linux {
                 )?,
                 cpal::SampleFormat::U16 => build_input_stream::<u16>(
                     &dev,
-                    &stream_cfg.config(),
+                    &tuned_stream_cfg,
                     sample_rate,
                     channels,
                     prod,
@@ -725,7 +812,7 @@ mod linux {
                 )?,
                 cpal::SampleFormat::U32 => build_input_stream::<u32>(
                     &dev,
-                    &stream_cfg.config(),
+                    &tuned_stream_cfg,
                     sample_rate,
                     channels,
                     prod,
@@ -735,7 +822,7 @@ mod linux {
                 )?,
                 cpal::SampleFormat::U64 => build_input_stream::<u64>(
                     &dev,
-                    &stream_cfg.config(),
+                    &tuned_stream_cfg,
                     sample_rate,
                     channels,
                     prod,
@@ -745,7 +832,7 @@ mod linux {
                 )?,
                 cpal::SampleFormat::F32 => build_input_stream::<f32>(
                     &dev,
-                    &stream_cfg.config(),
+                    &tuned_stream_cfg,
                     sample_rate,
                     channels,
                     prod,
@@ -755,7 +842,7 @@ mod linux {
                 )?,
                 cpal::SampleFormat::F64 => build_input_stream::<f64>(
                     &dev,
-                    &stream_cfg.config(),
+                    &tuned_stream_cfg,
                     sample_rate,
                     channels,
                     prod,
@@ -876,6 +963,23 @@ mod linux {
     fn native_input_config(dev: &cpal::Device) -> Result<cpal::SupportedStreamConfig> {
         dev.default_input_config()
             .context("no supported input configuration")
+    }
+
+    fn tune_pulse_input_config(cfg: &cpal::SupportedStreamConfig) -> cpal::StreamConfig {
+        let mut tuned = cfg.config();
+        let min_frames = (tuned.sample_rate.0 / 50).max(960);
+        tuned.buffer_size = match cfg.buffer_size() {
+            cpal::SupportedBufferSize::Range { min, max } => {
+                cpal::BufferSize::Fixed(min_frames.clamp(*min, *max))
+            }
+            cpal::SupportedBufferSize::Unknown => cpal::BufferSize::Fixed(min_frames),
+        };
+        tracing::info!(
+            "[audio] pulse fallback capture tuning: buffer={} frames (~{} ms) for scheduler jitter headroom",
+            min_frames,
+            (min_frames as f32 * 1000.0) / tuned.sample_rate.0 as f32
+        );
+        tuned
     }
 
     fn build_input_stream<T>(
