@@ -31,9 +31,12 @@ impl CaptureDsp {
     /// Create a new capture DSP pipeline.
     /// `sample_rate` must be 48000 (RNNoise requirement).
     pub fn new(sample_rate: u32) -> Result<Self> {
-        anyhow::ensure!(sample_rate == 48_000, "RNNoise requires 48kHz, got {sample_rate}");
+        anyhow::ensure!(
+            sample_rate == 48_000,
+            "RNNoise requires 48kHz, got {sample_rate}"
+        );
         Ok(Self {
-            agc: agc::Agc::new(-18.0, 0.3),
+            agc: agc::Agc::with_preset(agc::AgcPreset::Balanced),
             denoiser: rnnoise::Denoiser::new(),
             vad_threshold: 0.5,
             noise_suppression_enabled: true,
@@ -85,6 +88,10 @@ impl CaptureDsp {
         self.agc.set_target(target_db);
     }
 
+    pub fn set_agc_preset(&mut self, preset: agc::AgcPreset) {
+        self.agc.set_preset(preset);
+    }
+
     pub fn last_vad_probability(&self) -> f32 {
         self.denoiser.last_vad()
     }
@@ -126,7 +133,7 @@ pub struct PlayoutDsp {
 impl PlayoutDsp {
     pub fn new() -> Self {
         Self {
-            agc: agc::Agc::new(-14.0, 0.2),
+            agc: agc::Agc::with_preset(agc::AgcPreset::Balanced),
             frame_scratch: Vec::with_capacity(960),
         }
     }

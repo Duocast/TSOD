@@ -3,6 +3,8 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use tracing::debug;
 
+use crate::audio::dsp::agc::AgcPreset;
+
 /// Maximum number of chat messages to retain per channel.
 const MAX_MESSAGES_PER_CHANNEL: usize = 500;
 
@@ -414,6 +416,7 @@ pub enum UiIntent {
     SetDspMethod(DspMethod),
     SetAgcEnabled(bool),
     SetAgcTargetDb(f32),
+    SetAgcPreset(AgcPreset),
     SetEchoCancellation(bool),
     SetTypingAttenuation(bool),
     SetFecMode(FecMode),
@@ -536,6 +539,8 @@ pub struct AppSettings {
     pub noise_suppression: bool,
     pub agc_enabled: bool,
     pub agc_target_db: f32,
+    #[serde(default)]
+    pub agc_preset: AgcPreset,
     pub echo_cancellation: bool,
     pub denoise_attenuation_db: i32,
     pub typing_attenuation: bool,
@@ -634,6 +639,7 @@ impl Default for AppSettings {
             noise_suppression: true,
             agc_enabled: true,
             agc_target_db: -18.0,
+            agc_preset: AgcPreset::Balanced,
             echo_cancellation: false,
             denoise_attenuation_db: -30,
             typing_attenuation: true,

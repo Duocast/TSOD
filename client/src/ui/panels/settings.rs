@@ -3,6 +3,7 @@
 //! Categories: Application, Capture, Playback, Hotkeys, Chat, Downloads,
 //!             Notifications, Whisper, Screen Share, Video Call, Security
 
+use crate::audio::dsp::agc::AgcPreset;
 use crate::settings_io;
 use crate::ui::model::{
     AppSettings, AudioDeviceInfo, CaptureMode, DspMethod, FecMode, SettingsPage, UiEvent, UiIntent,
@@ -628,7 +629,24 @@ fn page_capture(
 
     if s.agc_enabled {
         ui.horizontal(|ui: &mut egui::Ui| {
-            ui.label("AGC Target:");
+            ui.label("AGC Preset:");
+            let prev = s.agc_preset;
+            egui::ComboBox::from_id_salt("agc_preset")
+                .selected_text(s.agc_preset.label())
+                .width(180.0)
+                .show_ui(ui, |ui: &mut egui::Ui| {
+                    for preset in AgcPreset::ALL {
+                        ui.selectable_value(&mut s.agc_preset, preset, preset.label());
+                    }
+                });
+            if s.agc_preset != prev {
+                dirty = true;
+                let _ = tx_intent.send(UiIntent::SetAgcPreset(s.agc_preset));
+            }
+        });
+
+        ui.horizontal(|ui: &mut egui::Ui| {
+            ui.label("AGC Target (override):");
             let prev = s.agc_target_db;
             ui.add(egui::Slider::new(&mut s.agc_target_db, -30.0..=-6.0).suffix(" dBFS"));
             if (s.agc_target_db - prev).abs() > 0.1 {
