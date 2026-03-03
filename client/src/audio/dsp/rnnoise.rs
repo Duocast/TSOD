@@ -3,7 +3,7 @@
 //! RNNoise processes 480-sample frames (10ms at 48kHz) of f32 audio.
 //! It returns a VAD probability alongside the denoised output.
 
-use nnnoiseless::DenoiseState;
+use nnnoiseless::{DenoiseState, RnnModel};
 
 pub struct Denoiser {
     state: Box<DenoiseState<'static>>,
@@ -16,8 +16,25 @@ pub struct Denoiser {
 
 impl Denoiser {
     pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Create a denoiser with an owned custom RNNoise model.
+    pub fn from_model(model: RnnModel) -> Self {
         Self {
-            state: DenoiseState::new(),
+            state: DenoiseState::from_model(model),
+            last_vad: 0.0,
+            f32_buf: vec![0.0; DenoiseState::FRAME_SIZE],
+            output_buf: vec![0.0; DenoiseState::FRAME_SIZE],
+        }
+    }
+
+    /// Create a denoiser with a borrowed custom RNNoise model.
+    ///
+    /// The model reference must be `'static` to match this denoiser's storage.
+    pub fn with_model(model: &'static RnnModel) -> Self {
+        Self {
+            state: DenoiseState::with_model(model),
             last_vad: 0.0,
             f32_buf: vec![0.0; DenoiseState::FRAME_SIZE],
             output_buf: vec![0.0; DenoiseState::FRAME_SIZE],
@@ -60,5 +77,16 @@ impl Denoiser {
     /// Last VAD probability from the most recent `process_frame` call.
     pub fn last_vad(&self) -> f32 {
         self.last_vad
+    }
+}
+
+impl Default for Denoiser {
+    fn default() -> Self {
+        Self {
+            state: DenoiseState::new(),
+            last_vad: 0.0,
+            f32_buf: vec![0.0; DenoiseState::FRAME_SIZE],
+            output_buf: vec![0.0; DenoiseState::FRAME_SIZE],
+        }
     }
 }
