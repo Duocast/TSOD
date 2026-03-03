@@ -1442,13 +1442,9 @@ fn preferred_device_id(device: &AudioDeviceId) -> Option<&str> {
 
 fn should_enable_aec_reference(device: &AudioDeviceId) -> bool {
     let id = device.id.to_ascii_lowercase();
-    let label = device.label.to_ascii_lowercase();
-    let display_label = device.display_label.to_ascii_lowercase();
     let looks_like_headset = ["headset", "headphone", "earbud", "airpods"]
         .iter()
-        .any(|needle| {
-            id.contains(needle) || label.contains(needle) || display_label.contains(needle)
-        });
+        .any(|needle| id.contains(needle));
     !looks_like_headset
 }
 
@@ -2837,7 +2833,7 @@ async fn connect_and_run_session(
                         }
                         UiIntent::SetVoiceProcessingMode(mode) => {
                                 saved_settings.voice_processing_mode = mode;
-                                mode.apply_to_settings(&mut saved_settings);
+                                mode.apply_to_settings(saved_settings);
                                 dsp_enabled.store(
                                     saved_settings.dsp_enabled && !cfg.no_noise_suppression,
                                     Ordering::Relaxed,
