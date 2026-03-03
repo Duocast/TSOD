@@ -48,6 +48,7 @@ impl MediaService {
                 "image/jpeg",
                 "image/webp",
                 "image/gif",
+                "image/avif",
                 "text/plain",
             ]),
         })
