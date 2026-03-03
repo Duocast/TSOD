@@ -1093,6 +1093,14 @@ pub struct TelemetryData {
 }
 
 #[derive(Debug, Clone)]
+pub struct MemberConnectionInfoWindow {
+    pub user_id: String,
+    pub display_name: String,
+    pub telemetry: TelemetryData,
+    pub connection_host: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct UserProfileData {
     pub user_id: String,
     pub display_name: String,
@@ -1307,9 +1315,7 @@ pub struct UiModel {
     pub show_settings: bool,
     pub show_telemetry: bool,
     pub show_connections: bool,
-    pub show_member_connection_info: bool,
-    pub connection_info_target_user_id: String,
-    pub connection_info_target_display_name: String,
+    pub member_connection_info_windows: Vec<MemberConnectionInfoWindow>,
     pub status_line: String,
     pub connection_host_draft: String,
     pub connection_port_draft: String,
@@ -1623,9 +1629,7 @@ impl Default for UiModel {
             show_settings: false,
             show_telemetry: false,
             show_connections: false,
-            show_member_connection_info: false,
-            connection_info_target_user_id: String::new(),
-            connection_info_target_display_name: String::new(),
+            member_connection_info_windows: Vec::new(),
             status_line: String::new(),
             connection_host_draft: "127.0.0.1".into(),
             connection_port_draft: "4433".into(),
@@ -1742,6 +1746,16 @@ impl UiModel {
 
     pub fn can_start_screen_share(&self) -> bool {
         !self.start_share_in_flight && !self.sharing_active
+    }
+
+    pub fn open_member_connection_info_window(&mut self, user_id: String, display_name: String) {
+        self.member_connection_info_windows
+            .push(MemberConnectionInfoWindow {
+                user_id,
+                display_name,
+                telemetry: self.telemetry.clone(),
+                connection_host: self.connection_host_draft.clone(),
+            });
     }
 
     pub fn apply_event(&mut self, ev: UiEvent) {
@@ -2349,6 +2363,52 @@ mod tests {
         assert_eq!(model.connection_nickname_draft, "Overdose");
         assert_eq!(model.connection_host_draft, "192.168.1.120");
         assert_eq!(model.connection_port_draft, "6000");
+    }
+
+    #[test]
+    fn open_member_connection_info_window_snapshots_connection_data_per_user() {
+        let mut model = UiModel::new();
+        model.connection_host_draft = "10.0.0.5".into();
+        model.telemetry.rtt_ms = 42;
+        model.telemetry.loss_rate = 0.03;
+
+        model.open_member_connection_info_window("user-a".into(), "Alice".into());
+
+        model.connection_host_draft = "10.0.0.8".into();
+        model.telemetry.rtt_ms = 128;
+        model.telemetry.loss_rate = 0.12;
+        model.open_member_connection_info_window("user-b".into(), "Bob".into());
+
+        assert_eq!(model.member_connection_info_windows.len(), 2);
+        assert_eq!(model.member_connection_info_windows[0].user_id, "user-a");
+        assert_eq!(
+            model.member_connection_info_windows[0].display_name,
+            "Alice"
+        );
+        assert_eq!(
+            model.member_connection_info_windows[0].connection_host,
+            "10.0.0.5"
+        );
+        assert_eq!(model.member_connection_info_windows[0].telemetry.rtt_ms, 42);
+        assert_eq!(
+            model.member_connection_info_windows[0].telemetry.loss_rate,
+            0.03
+        );
+
+        assert_eq!(model.member_connection_info_windows[1].user_id, "user-b");
+        assert_eq!(model.member_connection_info_windows[1].display_name, "Bob");
+        assert_eq!(
+            model.member_connection_info_windows[1].connection_host,
+            "10.0.0.8"
+        );
+        assert_eq!(
+            model.member_connection_info_windows[1].telemetry.rtt_ms,
+            128
+        );
+        assert_eq!(
+            model.member_connection_info_windows[1].telemetry.loss_rate,
+            0.12
+        );
     }
 
     #[test]
