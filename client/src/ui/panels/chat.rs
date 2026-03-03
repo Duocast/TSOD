@@ -33,47 +33,6 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
     let chat_rect = ui.max_rect();
     let shift_held = ui.ctx().input(|i| i.modifiers.shift);
     
-// --- DEBUG: drag+drop sanity check (remove when done) ---
-    let (hovered_ct, dropped_ct, hover_pos) = ui.ctx().input(|i| {
-        (i.raw.hovered_files.len(), i.raw.dropped_files.len(), i.pointer.hover_pos())
-    });
-    
-    ui.horizontal(|ui| {
-        ui.monospace(format!(
-            "DND: hovered={} dropped={} pointer={:?}",
-            hovered_ct, dropped_ct, hover_pos
-        ));
-    });
-
-    let (hovered_ct, dropped_ct, hover_pos, focused) = ui.ctx().input(|i| {
-        (
-            i.raw.hovered_files.len(),
-            i.raw.dropped_files.len(),
-            i.pointer.hover_pos(),
-            i.raw.focused,
-        )
-    });
-    
-    ui.monospace(format!(
-        "DND: hovered={} dropped={} focused={} pointer={:?}",
-        hovered_ct, dropped_ct, focused, hover_pos
-    ));
-    
-    // Log details on drop
-    ui.ctx().input(|i| {
-        if !i.raw.dropped_files.is_empty() {
-            for f in &i.raw.dropped_files {
-                eprintln!(
-                    "DROPPED: name={:?} path={:?} bytes={}",
-                    f.name,
-                    f.path,
-                    f.bytes.as_ref().map(|b| b.len()).unwrap_or(0)
-                );
-            }
-        }
-    });
-// --- /DEBUG ---
-    
     // Handle drag-and-drop (overlay state + file collection + shift-drop)
     handle_drag_and_drop(ui.ctx(), model, tx_intent, chat_rect, shift_held);
     
