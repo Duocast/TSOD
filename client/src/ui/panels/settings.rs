@@ -112,6 +112,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                                 model.loopback_active,
                                 model.vad_level,
                                 &model.mic_test_waveform,
+                                model.pipewire_pulse_fallback_suggested,
                                 tx_intent,
                             ),
                             SettingsPage::Playback => page_playback(
@@ -389,6 +390,7 @@ fn page_capture(
     loopback_active: bool,
     vad_level: Option<f32>,
     mic_test_waveform: &[f32],
+    pipewire_pulse_fallback_suggested: bool,
     tx_intent: &Sender<UiIntent>,
 ) -> bool {
     let mut dirty = false;
@@ -471,6 +473,34 @@ fn page_capture(
         ui,
         "Capture mode options are detected automatically for this client.",
     );
+
+    let pipewire_available = capture_modes.iter().any(|m| m == "PipeWire");
+    let pipewire_preferred = pipewire_available
+        && (s.capture_backend_mode == "Automatically use best mode"
+            || s.capture_backend_mode == "PipeWire");
+    if pipewire_preferred {
+        ui.horizontal(|ui: &mut egui::Ui| {
+            ui.label(egui::RichText::new("PipeWire native").strong());
+            ui.small("quality badge");
+        });
+    }
+
+    if pipewire_pulse_fallback_suggested {
+        ui.add_space(6.0);
+        ui.horizontal(|ui: &mut egui::Ui| {
+            ui.label("PipeWire native");
+            ui.small("recommended");
+        });
+        hint(
+            ui,
+            "PipeWire setup failed repeatedly on this system. You can switch to PulseAudio fallback with one click.",
+        );
+        if ui.button("Use PulseAudio fallback now").clicked() {
+            s.capture_backend_mode = "PulseAudio".to_string();
+            dirty = true;
+            let _ = tx_intent.send(UiIntent::SetCaptureMode(s.capture_backend_mode.clone()));
+        }
+    }
 
     section(ui, "Voice Activation Mode");
 
