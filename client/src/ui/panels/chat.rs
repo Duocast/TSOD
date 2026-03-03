@@ -8,9 +8,7 @@ use crossbeam_channel::Sender;
 use eframe::egui;
 use std::path::Path;
 use std::time::{Duration, Instant};
-use tracing::debug;
 
-const MESSAGE_GROUP_WINDOW_MS: i64 = 5 * 60 * 1000;
 const MAX_PREVIEW_IMAGE_SIZE: f32 = 240.0;
 const MAX_ATTACHMENT_BYTES: u64 = 25 * 1024 * 1024;
 const ALLOWED_ATTACHMENT_MIME: &[&str] = &[
@@ -68,7 +66,6 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
         .stick_to_bottom(true)
         .show(ui, |ui| {
             if let Some(messages) = model.current_messages() {
-                let mut prev_msg: Option<&ChatMessage> = None;
                 let mut prev_day: Option<NaiveDate> = None;
 
                 for msg in messages.iter() {
@@ -77,10 +74,8 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                         show_date_separator(ui, msg_day.unwrap());
                     }
 
-                    let grouped = prev_msg.is_some_and(|prev| should_group_messages(prev, msg));
-                    show_message(ui, msg, grouped, tx_intent);
+                    show_message(ui, msg, tx_intent);
 
-                    prev_msg = Some(msg);
                     prev_day = msg_day;
                 }
             } else {
@@ -738,37 +733,30 @@ fn detect_mime_type(path: &Path, raw_mime: &str) -> String {
     .to_string()
 }
 
-fn show_message(ui: &mut egui::Ui, msg: &ChatMessage, grouped: bool, tx_intent: &Sender<UiIntent>) {
+fn show_message(ui: &mut egui::Ui, msg: &ChatMessage, tx_intent: &Sender<UiIntent>) {
     ui.horizontal(|ui| {
-        if !grouped {
-            // Full message with author + timestamp
-            ui.vertical(|ui| {
-                ui.horizontal(|ui| {
+        ui.vertical(|ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(&msg.author_name)
+                        .strong()
+                        .color(theme::text_color()),
+                );
+                let ts = format_timestamp(msg.timestamp);
+                ui.label(egui::RichText::new(ts).small().color(theme::text_muted()));
+                if msg.edited {
                     ui.label(
-                        egui::RichText::new(&msg.author_name)
-                            .strong()
-                            .color(theme::text_color()),
+                        egui::RichText::new("(edited)")
+                            .small()
+                            .color(theme::text_muted()),
                     );
-                    let ts = format_timestamp(msg.timestamp);
-                    ui.label(egui::RichText::new(ts).small().color(theme::text_muted()));
-                    if msg.edited {
-                        ui.label(
-                            egui::RichText::new("(edited)")
-                                .small()
-                                .color(theme::text_muted()),
-                        );
-                    }
-                    if msg.pinned {
-                        ui.label(egui::RichText::new("\u{1F4CC}").small());
-                    }
-                });
-                show_message_content(ui, msg, tx_intent);
+                }
+                if msg.pinned {
+                    ui.label(egui::RichText::new("\u{1F4CC}").small());
+                }
             });
-        } else {
-            // Grouped message: content only, indented.
-            ui.add_space(8.0);
             show_message_content(ui, msg, tx_intent);
-        }
+        });
     });
 }
 
@@ -785,62 +773,6 @@ fn show_date_separator(ui: &mut egui::Ui, date: NaiveDate) {
         ui.add(egui::Separator::default().spacing(6.0));
     });
     ui.add_space(4.0);
-}
-
-fn should_group_messages(previous: &ChatMessage, current: &ChatMessage) -> bool {
-    let previous_author = canonical_author_key(previous);
-    let current_author = canonical_author_key(current);
-    if previous_author != current_author {
-        debug!(
-            previous_author,
-            current_author,
-            previous_message_id = %previous.message_id,
-            current_message_id = %current.message_id,
-            grouped = false,
-            "chat grouping decision"
-        );
-        return false;
-    }
-
-    let previous_day = message_day(previous.timestamp);
-    let current_day = message_day(current.timestamp);
-    if previous_day.is_none() || current_day.is_none() || previous_day != current_day {
-        debug!(
-            previous_author,
-            current_author,
-            previous_message_id = %previous.message_id,
-            current_message_id = %current.message_id,
-            grouped = false,
-            "chat grouping decision"
-        );
-        return false;
-    }
-
-    let elapsed = current.timestamp - previous.timestamp;
-    let grouped = (0..=MESSAGE_GROUP_WINDOW_MS).contains(&elapsed);
-    debug!(
-        previous_author,
-        current_author,
-        previous_message_id = %previous.message_id,
-        current_message_id = %current.message_id,
-        grouped,
-        "chat grouping decision"
-    );
-    grouped
-}
-
-fn canonical_author_key(message: &ChatMessage) -> String {
-    let author_id = message.author_id.trim();
-    if !author_id.is_empty() {
-        return format!("id:{author_id}");
-    }
-
-    let author_name = message.author_name.trim();
-    if !author_name.is_empty() {
-        return format!("name:{author_name}:{}", message.message_id);
-    }
-
-    format!("message:{}", message.message_id)
 }
 
 fn message_day(unix_millis: i64) -> Option<NaiveDate> {
@@ -1119,26 +1051,9 @@ fn format_size(bytes: u64) -> String {
 mod tests {
     use super::{
         detect_mime_type, format_day_label, format_timestamp, linkify_message,
-        should_group_messages, truncate_filename, ChatMessage, MessageSegment,
-        MESSAGE_GROUP_WINDOW_MS,
+        truncate_filename, MessageSegment,
     };
     use chrono::{Days, Local, TimeZone};
-
-    fn msg(author_id: &str, timestamp: i64) -> ChatMessage {
-        ChatMessage {
-            message_id: format!("{author_id}-{timestamp}"),
-            channel_id: "lounge-1".into(),
-            author_id: author_id.into(),
-            author_name: author_id.into(),
-            text: "hello".into(),
-            timestamp,
-            attachments: vec![],
-            reply_to: None,
-            reactions: vec![],
-            pinned: false,
-            edited: false,
-        }
-    }
 
     #[test]
     fn detects_avif_mime_from_extension() {
@@ -1162,54 +1077,6 @@ mod tests {
     #[test]
     fn invalid_timestamp_uses_placeholder() {
         assert_eq!(format_timestamp(i64::MAX), "--:--");
-    }
-
-    #[test]
-    fn groups_only_same_author_within_window() {
-        let now = Local::now().timestamp_millis();
-        assert!(should_group_messages(
-            &msg("u1", now),
-            &msg("u1", now + 60_000)
-        ));
-        assert!(!should_group_messages(
-            &msg("u1", now),
-            &msg("u2", now + 60_000)
-        ));
-        assert!(!should_group_messages(
-            &msg("u1", now),
-            &msg("u1", now + MESSAGE_GROUP_WINDOW_MS + 1)
-        ));
-    }
-
-    #[test]
-    fn author_change_within_window_starts_new_group() {
-        let now = Local::now().timestamp_millis();
-        assert!(!should_group_messages(
-            &msg("dresk-id", now),
-            &msg("overdose-id", now + 30_000)
-        ));
-    }
-
-    #[test]
-    fn same_author_id_different_names_is_grouped() {
-        let now = Local::now().timestamp_millis();
-        let mut first = msg("shared-auth-id", now);
-        let mut second = msg("shared-auth-id", now + 5_000);
-        first.author_name = "Overdose".into();
-        second.author_name = "Dresk".into();
-
-        assert!(should_group_messages(&first, &second));
-    }
-
-    #[test]
-    fn same_text_different_author_is_not_grouped() {
-        let now = Local::now().timestamp_millis();
-        let mut first = msg("dresk-id", now);
-        let mut second = msg("overdose-id", now + 5_000);
-        first.text = "indeed".into();
-        second.text = "indeed".into();
-
-        assert!(!should_group_messages(&first, &second));
     }
 
     #[test]
