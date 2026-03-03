@@ -2040,7 +2040,12 @@ impl UiModel {
             UiEvent::VoiceMeter { user_id, level } => {
                 self.voice_levels.insert(user_id, level.clamp(0.0, 1.0));
             }
-            UiEvent::TelemetryUpdate(t) => self.telemetry = t,
+            UiEvent::TelemetryUpdate(t) => {
+                self.telemetry = t.clone();
+                for window in &mut self.member_connection_info_windows {
+                    window.telemetry = t.clone();
+                }
+            }
             UiEvent::PokeReceived { from_name, message } => {
                 let text = if message.is_empty() {
                     format!("{from_name} poked you!")
@@ -2408,6 +2413,32 @@ mod tests {
         assert_eq!(
             model.member_connection_info_windows[1].telemetry.loss_rate,
             0.12
+        );
+    }
+
+    #[test]
+    fn telemetry_update_refreshes_open_member_connection_info_windows() {
+        let mut model = UiModel::new();
+        model.open_member_connection_info_window("user-a".into(), "Alice".into());
+
+        let mut update = TelemetryData::default();
+        update.rtt_ms = 77;
+        update.loss_rate = 0.125;
+        update.jitter_ms = 11;
+
+        model.apply_event(UiEvent::TelemetryUpdate(update.clone()));
+
+        assert_eq!(model.telemetry.rtt_ms, 77);
+        assert_eq!(model.telemetry.loss_rate, 0.125);
+        assert_eq!(model.member_connection_info_windows.len(), 1);
+        assert_eq!(model.member_connection_info_windows[0].telemetry.rtt_ms, 77);
+        assert_eq!(
+            model.member_connection_info_windows[0].telemetry.loss_rate,
+            0.125
+        );
+        assert_eq!(
+            model.member_connection_info_windows[0].telemetry.jitter_ms,
+            11
         );
     }
 
