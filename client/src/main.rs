@@ -4247,6 +4247,8 @@ async fn voice_recv_loop(
     const SPEAKING_HANGOVER_MS: u64 = 350;
     const STREAM_IDLE_DROP_MS: u64 = 10_000;
     const PLC_MAX_FRAMES: usize = 5;
+    const PLC_TO_NOISE_CROSSFADE_FRAMES: usize = 3;
+    const RECOVERY_FADE_IN_FRAMES: usize = 2;
     let sample_rate = 48_000u32;
     let channels = 1usize;
     let frame_ms = 20u32;
@@ -4340,8 +4342,16 @@ async fn voice_recv_loop(
                             if n > 0 {
                                 frame_present = true;
                                 stream.plc_frames = 0;
+                                stream.consecutive_misses = 0;
+                                if stream.in_comfort_noise {
+                                    stream.recovery_fade_in_remaining = RECOVERY_FADE_IN_FRAMES;
+                                    stream.in_comfort_noise = false;
+                                }
+                                let recovery_gain = stream.take_recovery_gain(RECOVERY_FADE_IN_FRAMES);
                                 for (acc, sample) in mix_out[..n].iter_mut().zip(stream.pcm_out[..n].iter()) {
-                                    let scaled = *sample as f32 * stream.effective_gain(&per_user_audio);
+                                    let scaled = *sample as f32
+                                        * recovery_gain
+                                        * stream.effective_gain(&per_user_audio);
                                     frame_level = frame_level.max((scaled.abs() / 32768.0).min(1.0));
                                     *acc += scaled;
                                 }
@@ -4352,18 +4362,14 @@ async fn voice_recv_loop(
                             if stream.last_packet_wall_ms != 0 && stream.plc_frames < PLC_MAX_FRAMES =>
                         {
                             voice_counters.lost_packets.fetch_add(1, Ordering::Relaxed);
-                            let n = if opus_use_inband_fec {
-                                match stream.jitter.peek_expected() {
-                                    Some(next_frame) => stream
-                                        .decoder
-                                        .decode_fec(next_frame, &mut stream.pcm_out)
-                                        .or_else(|_| stream.decoder.decode_plc(&mut stream.pcm_out))
-                                        .unwrap_or(0),
-                                    None => stream.decoder.decode_plc(&mut stream.pcm_out).unwrap_or(0),
-                                }
-                            } else {
-                                stream.decoder.decode_plc(&mut stream.pcm_out).unwrap_or(0)
-                            };
+                            stream.consecutive_misses += 1;
+                            let n = stream.render_concealment_frame(
+                                opus_use_inband_fec,
+                                audio_runtime.comfort_noise.load(Ordering::Relaxed),
+                                u32_to_f32(audio_runtime.comfort_noise_level.load(Ordering::Relaxed)),
+                                PLC_MAX_FRAMES,
+                                PLC_TO_NOISE_CROSSFADE_FRAMES,
+                            );
                             if n > 0 {
                                 stream.plc_frames += 1;
                                 voice_counters.concealment_frames.fetch_add(1, Ordering::Relaxed);
@@ -4381,10 +4387,14 @@ async fn voice_recv_loop(
                         {
                             let since_packet = now_ms.saturating_sub(stream.last_packet_wall_ms);
                             if since_packet <= (PLC_MAX_FRAMES as u64 * frame_ms as u64) {
-                                let n = match stream.decoder.decode_plc(&mut stream.pcm_out) {
-                                    Ok(n) => n,
-                                    Err(_) => 0,
-                                };
+                                stream.consecutive_misses += 1;
+                                let n = stream.render_concealment_frame(
+                                    false,
+                                    audio_runtime.comfort_noise.load(Ordering::Relaxed),
+                                    u32_to_f32(audio_runtime.comfort_noise_level.load(Ordering::Relaxed)),
+                                    PLC_MAX_FRAMES,
+                                    PLC_TO_NOISE_CROSSFADE_FRAMES,
+                                );
                                 if n > 0 {
                                     stream.plc_frames += 1;
                                     voice_counters.concealment_frames.fetch_add(1, Ordering::Relaxed);
@@ -4532,6 +4542,10 @@ struct InboundStreamState {
     last_packet_wall_ms: u64,
     last_voice_frame_wall_ms: u64,
     plc_frames: usize,
+    consecutive_misses: usize,
+    in_comfort_noise: bool,
+    recovery_fade_in_remaining: usize,
+    noise_rng_state: u32,
     missing_wait: MissingWaitController,
     speaking: bool,
     last_emitted_speaking: bool,
@@ -4552,10 +4566,86 @@ impl InboundStreamState {
             last_packet_wall_ms: 0,
             last_voice_frame_wall_ms: 0,
             plc_frames: 0,
+            consecutive_misses: 0,
+            in_comfort_noise: false,
+            recovery_fade_in_remaining: 0,
+            noise_rng_state: 0xA5A5_1F3Du32,
             missing_wait: MissingWaitController::new(),
             speaking: false,
             last_emitted_speaking: false,
         }
+    }
+
+    fn take_recovery_gain(&mut self, fade_frames: usize) -> f32 {
+        if self.recovery_fade_in_remaining == 0 || fade_frames == 0 {
+            return 1.0;
+        }
+        let completed = fade_frames.saturating_sub(self.recovery_fade_in_remaining);
+        self.recovery_fade_in_remaining = self.recovery_fade_in_remaining.saturating_sub(1);
+        ((completed + 1) as f32 / fade_frames as f32).clamp(0.0, 1.0)
+    }
+
+    fn render_concealment_frame(
+        &mut self,
+        use_fec: bool,
+        comfort_noise_enabled: bool,
+        comfort_noise_level: f32,
+        plc_max_frames: usize,
+        crossfade_frames: usize,
+    ) -> usize {
+        if self.consecutive_misses <= plc_max_frames {
+            self.in_comfort_noise = false;
+            return if use_fec {
+                match self.jitter.peek_expected() {
+                    Some(next_frame) => self
+                        .decoder
+                        .decode_fec(next_frame, &mut self.pcm_out)
+                        .or_else(|_| self.decoder.decode_plc(&mut self.pcm_out))
+                        .unwrap_or(0),
+                    None => self.decoder.decode_plc(&mut self.pcm_out).unwrap_or(0),
+                }
+            } else {
+                self.decoder.decode_plc(&mut self.pcm_out).unwrap_or(0)
+            };
+        }
+
+        let noise_level = if comfort_noise_enabled {
+            comfort_noise_level.clamp(0.0, 0.1)
+        } else {
+            0.0
+        };
+        if noise_level <= 0.0 {
+            return 0;
+        }
+
+        let transition_idx = self.consecutive_misses.saturating_sub(plc_max_frames + 1);
+        let crossfade_pos = transition_idx.min(crossfade_frames);
+        let noise_gain = if crossfade_frames == 0 {
+            1.0
+        } else {
+            (crossfade_pos as f32 / crossfade_frames as f32).clamp(0.0, 1.0)
+        };
+        let plc_gain = 1.0 - noise_gain;
+
+        if plc_gain > 0.0 {
+            let _ = self.decoder.decode_plc(&mut self.pcm_out).unwrap_or(0);
+        } else {
+            self.pcm_out.fill(0);
+        }
+
+        for sample in &mut self.pcm_out {
+            self.noise_rng_state = self
+                .noise_rng_state
+                .wrapping_mul(1_664_525)
+                .wrapping_add(1_013_904_223);
+            let centered = ((self.noise_rng_state >> 16) as f32 / 65_535.0) * 2.0 - 1.0;
+            let plc = *sample as f32 * plc_gain;
+            let noise = centered * 32_767.0 * noise_level * noise_gain;
+            *sample = (plc + noise).clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+        }
+
+        self.in_comfort_noise = true;
+        self.pcm_out.len()
     }
 }
 
