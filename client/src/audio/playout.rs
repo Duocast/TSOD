@@ -726,7 +726,6 @@ mod linux {
             .ok()
             .map(|desc| desc.to_string())
             .filter(|name| !name.trim().is_empty())
-            .or_else(|| device.name().ok().filter(|name| !name.trim().is_empty()))
     }
 
     fn device_info(device: &cpal::Device) -> Option<AudioDeviceInfo> {
@@ -817,7 +816,7 @@ mod linux {
     fn tune_pulse_output_config(cfg: &cpal::SupportedStreamConfig) -> cpal::StreamConfig {
         let mut tuned = cfg.config();
         let target_frames =
-            ((tuned.sample_rate.0 as u64 * PULSE_FALLBACK_PLAYOUT_LATENCY_MS as u64) / 1000) as u32;
+            ((tuned.sample_rate as u64 * PULSE_FALLBACK_PLAYOUT_LATENCY_MS as u64) / 1000) as u32;
         tuned.buffer_size = match cfg.buffer_size() {
             cpal::SupportedBufferSize::Range { min, max } => {
                 cpal::BufferSize::Fixed(target_frames.clamp(*min, *max))
