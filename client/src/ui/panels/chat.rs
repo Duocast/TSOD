@@ -129,6 +129,10 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
         );
         response.context_menu(|ui| {
             if ui.button("Paste").clicked() {
+                // RequestPaste inserts into the currently focused widget.
+                // Right-clicking does not always keep focus on the text edit,
+                // so re-focus it before requesting the paste.
+                response.request_focus();
                 ui.ctx()
                     .send_viewport_cmd(egui::ViewportCommand::RequestPaste);
                 ui.close();
