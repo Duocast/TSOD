@@ -54,6 +54,12 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                 );
             }
 
+            if response.middle_clicked() {
+                model.show_member_connection_info = true;
+                model.connection_info_target_user_id = member.user_id.clone();
+                model.connection_info_target_display_name = member.display_name.clone();
+            }
+
             let avatar_size = 32.0;
             let avatar_rect = egui::Rect::from_min_size(
                 row_rect.min + egui::vec2(4.0, (row_height - avatar_size) * 0.5),
