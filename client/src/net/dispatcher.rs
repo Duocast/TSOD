@@ -1,5 +1,9 @@
 use anyhow::{anyhow, Context, Result};
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tokio::{
     sync::{mpsc, oneshot, watch, Mutex, RwLock},
     time::timeout,
@@ -296,8 +300,9 @@ impl ControlDispatcher {
         }
     }
 
-    pub async fn ping(&self) -> Result<()> {
+    pub async fn ping(&self) -> Result<Duration> {
         let nonce = rand::random::<u64>();
+        let started_at = Instant::now();
         let resp = self
             .send_request(
                 pb::client_to_server::Payload::Ping(pb::Ping { nonce }),
@@ -306,7 +311,9 @@ impl ControlDispatcher {
             .await??;
 
         match resp.payload {
-            Some(pb::server_to_client::Payload::Pong(p)) if p.nonce == nonce => Ok(()),
+            Some(pb::server_to_client::Payload::Pong(p)) if p.nonce == nonce => {
+                Ok(started_at.elapsed())
+            }
             _ => Err(anyhow!("bad pong")),
         }
     }
