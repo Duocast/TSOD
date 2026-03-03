@@ -11,8 +11,8 @@ use windows::{
             DEVICE_STATE_ACTIVE,
         },
         System::Com::{
-            CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize,
-            CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, STGM_READ,
+            CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_INPROC_SERVER,
+            COINIT_MULTITHREADED, STGM_READ,
         },
     },
 };
@@ -149,7 +149,9 @@ struct ComScope;
 impl ComScope {
     fn new() -> Result<Self> {
         unsafe {
-            CoInitializeEx(None, COINIT_MULTITHREADED).ok().context("initialize COM for MMDevice")?;
+            CoInitializeEx(None, COINIT_MULTITHREADED)
+                .ok()
+                .context("initialize COM for MMDevice")?;
         }
         Ok(Self)
     }

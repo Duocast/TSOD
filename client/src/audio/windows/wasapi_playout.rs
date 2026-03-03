@@ -6,7 +6,7 @@ use std::sync::{
     Arc,
 };
 use tracing::{debug, error, info};
-use wasapi::{BufferFlags, Direction, SampleType, ShareMode, StreamMode, WaveFormat};
+use wasapi::{BufferFlags, Direction, SampleType, StreamMode};
 
 use crate::{
     audio::resample::{ResamplerImpl, ResamplerMode},
@@ -16,7 +16,9 @@ use crate::{
     },
 };
 
-use super::wasapi_common::{default_endpoint_id, enumerate_endpoints, open_device, ComGuard};
+use super::wasapi_common::{
+    default_endpoint_id, enumerate_endpoints, negotiate_shared_voice_format, open_device, ComGuard,
+};
 
 pub struct WasapiPlayout {
     thread: Option<std::thread::JoinHandle<()>>,
@@ -162,41 +164,8 @@ fn run_playout_thread(
     let mix_valid_bits = mix.get_validbitspersample() as u16;
     let mix_sample_type = mix.get_subformat().context("get WASAPI mix sample type")?;
 
-    let mut stream_format = mix.clone();
-    if sample_rate != mix_rate {
-        let requested = WaveFormat::new(
-            mix_bits_per_sample as usize,
-            mix_valid_bits.max(1) as usize,
-            &mix_sample_type,
-            sample_rate as usize,
-            mix_channels,
-            Some(mix.get_dwchannelmask()),
-        );
-
-        match audio_client.is_supported(&requested, &ShareMode::Shared) {
-            Ok(None) => {
-                info!(
-                    "[wasapi playout] selected endpoint supports requested shared rate {}; using requested stream format",
-                    sample_rate
-                );
-                stream_format = requested;
-            }
-            Ok(Some(closest)) => {
-                let closest_rate = closest.get_samplespersec();
-                info!(
-                    "[wasapi playout] requested shared rate {} not directly supported; closest shared format is {}Hz",
-                    sample_rate, closest_rate
-                );
-                stream_format = closest;
-            }
-            Err(error) => {
-                debug!(
-                    "[wasapi playout] shared support query for {}Hz failed ({error:#}); using mix format {}Hz",
-                    sample_rate, mix_rate
-                );
-            }
-        }
-    }
+    let stream_format =
+        negotiate_shared_voice_format(&audio_client, &mix, sample_rate, &[2, 1], "wasapi playout");
 
     let device_rate = stream_format.get_samplespersec();
     let device_channels = stream_format.get_nchannels().max(1) as usize;
