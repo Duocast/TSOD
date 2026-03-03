@@ -7,7 +7,7 @@ use crate::audio::dsp::agc::AgcPreset;
 use crate::settings_io;
 use crate::ui::model::{
     AppSettings, AudioDeviceInfo, CaptureMode, DspMethod, FecMode, SettingsPage, UiEvent, UiIntent,
-    UiModel,
+    UiModel, VoiceProcessingMode,
 };
 use crate::ui::theme;
 use crossbeam_channel::Sender;
@@ -579,6 +579,25 @@ fn page_capture(
     }
 
     section(ui, "Signal Processing");
+
+    ui.horizontal(|ui: &mut egui::Ui| {
+        ui.label("Voice Processing Mode:");
+        let prev = s.voice_processing_mode;
+        egui::ComboBox::from_id_salt("voice_processing_mode")
+            .selected_text(s.voice_processing_mode.label())
+            .width(220.0)
+            .show_ui(ui, |ui: &mut egui::Ui| {
+                for mode in VoiceProcessingMode::ALL {
+                    ui.selectable_value(&mut s.voice_processing_mode, mode, mode.label());
+                }
+            });
+        if s.voice_processing_mode != prev {
+            s.voice_processing_mode.apply_to_settings(s);
+            dirty = true;
+            let _ = tx_intent.send(UiIntent::SetVoiceProcessingMode(s.voice_processing_mode));
+        }
+    });
+    hint(ui, s.voice_processing_mode.help_text());
 
     let dsp_prev = s.dsp_enabled;
     ui.checkbox(&mut s.dsp_enabled, "Enable DSP");
