@@ -64,7 +64,7 @@
                 Some(content_rect.width().max(1.0)),
                 Some(content_rect.height().max(1.0)),
             );
-@@ -255,50 +271,56 @@ impl ChatComposer {
+					impl ChatComposer {
                         pressed: true,
                         modifiers,
                         ..
