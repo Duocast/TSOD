@@ -176,6 +176,10 @@ pub enum UiEvent {
         stage: ConnectionStage,
         detail: String,
     },
+    Notify {
+        text: String,
+        kind: NotificationKind,
+    },
 
     // Channel list
     SetChannels(Vec<ChannelEntry>),
@@ -1813,6 +1817,13 @@ impl UiModel {
                 if self.connection_details.len() > 64 {
                     self.connection_details.pop_front();
                 }
+            }
+            UiEvent::Notify { text, kind } => {
+                self.notifications.push_back(Notification {
+                    text,
+                    created: std::time::Instant::now(),
+                    kind,
+                });
             }
             UiEvent::SetChannels(chs) => {
                 self.channels = chs;
