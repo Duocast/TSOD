@@ -464,7 +464,6 @@ mod linux {
                 }
 
                 let negotiated_rate = state.format.rate();
-                let negotiated_channels = state.format.channels();
                 let negotiated_format = state.format.format();
 
                 if !state.log_once {
@@ -877,7 +876,6 @@ mod linux {
             .ok()
             .map(|desc| desc.to_string())
             .filter(|name| !name.trim().is_empty())
-            .or_else(|| device.name().ok().filter(|name| !name.trim().is_empty()))
     }
 
     fn device_info(device: &cpal::Device) -> Option<AudioDeviceInfo> {
@@ -967,7 +965,7 @@ mod linux {
 
     fn tune_pulse_input_config(cfg: &cpal::SupportedStreamConfig) -> cpal::StreamConfig {
         let mut tuned = cfg.config();
-        let min_frames = (tuned.sample_rate.0 / 50).max(960);
+        let min_frames = (tuned.sample_rate / 50).max(960);
         tuned.buffer_size = match cfg.buffer_size() {
             cpal::SupportedBufferSize::Range { min, max } => {
                 cpal::BufferSize::Fixed(min_frames.clamp(*min, *max))
@@ -977,7 +975,7 @@ mod linux {
         tracing::info!(
             "[audio] pulse fallback capture tuning: buffer={} frames (~{} ms) for scheduler jitter headroom",
             min_frames,
-            (min_frames as f32 * 1000.0) / tuned.sample_rate.0 as f32
+            (min_frames as f32 * 1000.0) / tuned.sample_rate as f32
         );
         tuned
     }
