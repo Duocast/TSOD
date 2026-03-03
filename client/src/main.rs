@@ -2403,7 +2403,7 @@ async fn connect_and_run_session(
         loop {
             interval.tick().await;
             if let Err(e) = disp_keepalive.ping().await {
-                return Err::<(), anyhow::Error>(e);
+                return Err::<(), anyhow::Error>(e.context("control keepalive ping failed"));
             }
         }
     });
@@ -2491,8 +2491,17 @@ async fn connect_and_run_session(
                 let _ = tx_event.send(UiEvent::StreamDebugUpdate(snapshot));
             }
             _ = audio_health_tick.tick() => {
-                let rtt_ms = conn.rtt().as_millis().min(u32::MAX as u128) as u32;
-                network_telemetry.rtt_ms.store(rtt_ms, Ordering::Relaxed);
+                let ping_rtt_ms = disp_keepalive
+                    .ping()
+                    .await
+                    .map(|rtt| rtt.as_millis().min(u32::MAX as u128) as u32)
+                    .unwrap_or_else(|e| {
+                        warn!(error = %e, "control ping failed; falling back to transport RTT");
+                        conn.rtt().as_millis().min(u32::MAX as u128) as u32
+                    });
+                network_telemetry
+                    .rtt_ms
+                    .store(ping_rtt_ms, Ordering::Relaxed);
 
                 let capture_healthy = {
                     let cap = capture.read().await;
