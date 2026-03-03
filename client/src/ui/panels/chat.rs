@@ -135,7 +135,6 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
             "Type a message..."
         };
 
-        let mut send_clicked = false;
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let input_button = if model.chat_input_options_open {
                 "Input ▴"
@@ -146,17 +145,18 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                 model.chat_input_options_open = !model.chat_input_options_open;
             }
 
-            send_clicked = ui.button("Send").clicked();
+            let send_clicked = ui.button("Send").clicked();
+
+            // Composer fills remaining space to the left of the buttons
+            let composer_result = model
+                .chat_composer
+                .ui(ui, hint, ui.available_width().max(120.0));
+            model.chat_input_focused = composer_result.has_focus;
+
+            if composer_result.send_requested || send_clicked {
+                send_chat_from_input(model, tx_intent);
+            }
         });
-
-        let composer_result = model
-            .chat_composer
-            .ui(ui, hint, ui.available_width().max(120.0));
-        model.chat_input_focused = composer_result.has_focus;
-
-        if composer_result.send_requested || send_clicked {
-            send_chat_from_input(model, tx_intent);
-        }
     });
 
     // === Overlays (painted on top of everything) ===
