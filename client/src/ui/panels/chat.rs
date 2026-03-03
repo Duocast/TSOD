@@ -34,8 +34,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
     let shift_held = ui.ctx().input(|i| i.modifiers.shift);
     
 // --- DEBUG: drag+drop sanity check (remove when done) ---
-    let ctx = ui.ctx();
-    let (hovered_ct, dropped_ct, hover_pos) = ctx.input(|i| {
+    let (hovered_ct, dropped_ct, hover_pos) = ui.ctx().input(|i| {
         (i.raw.hovered_files.len(), i.raw.dropped_files.len(), i.pointer.hover_pos())
     });
     
@@ -46,7 +45,8 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
         ));
     });
     
-    ctx.input(|i| {
+    // Log details on drop
+    ui.ctx().input(|i| {
         if !i.raw.dropped_files.is_empty() {
             for f in &i.raw.dropped_files {
                 eprintln!(
@@ -58,7 +58,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
             }
         }
     });
-    // --- /DEBUG ---
+// --- /DEBUG ---
     
     // Handle drag-and-drop (overlay state + file collection + shift-drop)
     handle_drag_and_drop(ui.ctx(), model, tx_intent, chat_rect, shift_held);
