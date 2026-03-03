@@ -122,32 +122,14 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
         } else {
             "Type a message..."
         };
-        let response = ui.add(
-            egui::TextEdit::singleline(&mut model.chat_input)
-                .hint_text(hint)
-                .desired_width(ui.available_width() - 70.0)
-                .frame(true),
-        );
-        response.context_menu(|ui| {
-            if ui.button("Paste").clicked() {
-                // RequestPaste inserts into the currently focused widget.
-                // Right-clicking does not always keep focus on the text edit,
-                // so re-focus it before requesting the paste.
-                response.request_focus();
-                ui.ctx()
-                    .send_viewport_cmd(egui::ViewportCommand::RequestPaste);
-                ui.close();
-            }
-        });
 
-        model.chat_input_focused = response.has_focus();
+        let composer_result =
+            model
+                .chat_composer
+                .ui(ui, hint, (ui.available_width() - 70.0).max(120.0));
+        model.chat_input_focused = composer_result.has_focus;
 
-        if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-            send_chat_from_input(model, tx_intent);
-            response.request_focus();
-        }
-
-        if ui.button("Send").clicked() {
+        if composer_result.send_requested || ui.button("Send").clicked() {
             send_chat_from_input(model, tx_intent);
         }
     });
@@ -632,7 +614,7 @@ fn truncate_filename(name: &str, max_len: usize) -> String {
 // ── Send logic ──────────────────────────────────────────────────────────
 
 fn send_chat_from_input(model: &mut UiModel, tx_intent: &Sender<UiIntent>) {
-    let text = model.chat_input.trim().to_string();
+    let text = model.chat_composer.text().trim().to_string();
     if text.is_empty() && model.pending_attachments.is_empty() {
         return;
     }
@@ -655,7 +637,7 @@ fn send_chat_from_input(model: &mut UiModel, tx_intent: &Sender<UiIntent>) {
         .collect::<Vec<_>>();
 
     let _ = tx_intent.send(UiIntent::SendChat { text, attachments });
-    model.chat_input.clear();
+    model.chat_composer.clear();
     model.pending_attachments.clear();
     model.clear_current_draft();
 }

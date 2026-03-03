@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use tracing::debug;
 
 use crate::audio::dsp::agc::AgcPreset;
+use crate::ui::widgets::cosmic_chat_composer::ChatComposer;
 
 /// Maximum number of chat messages to retain per channel.
 const MAX_MESSAGES_PER_CHANNEL: usize = 500;
@@ -1271,7 +1272,7 @@ pub struct UiModel {
 
     // Chat (keyed by channel_id)
     pub messages: HashMap<String, VecDeque<ChatMessage>>,
-    pub chat_input: String,
+    pub chat_composer: ChatComposer,
     pub chat_input_focused: bool,
     pub pending_attachments: Vec<PendingAttachment>,
     pub typing_users: HashMap<String, Vec<(String, std::time::Instant)>>,
@@ -1598,7 +1599,7 @@ impl Default for UiModel {
             speaking_users: HashMap::new(),
             voice_levels: HashMap::new(),
             messages: HashMap::new(),
-            chat_input: String::new(),
+            chat_composer: ChatComposer::new(),
             chat_input_focused: false,
             pending_attachments: Vec::new(),
             typing_users: HashMap::new(),
@@ -1751,11 +1752,12 @@ impl UiModel {
             UiEvent::SetChannelName(n) => {
                 // Save current channel's draft before switching
                 if let Some(ref old_ch) = self.selected_channel {
-                    if !self.chat_input.is_empty() || !self.pending_attachments.is_empty() {
+                    let composer_text = self.chat_composer.text();
+                    if !composer_text.is_empty() || !self.pending_attachments.is_empty() {
                         self.drafts.insert(
                             old_ch.clone(),
                             DraftState {
-                                text: std::mem::take(&mut self.chat_input),
+                                text: composer_text,
                                 attachments: std::mem::take(&mut self.pending_attachments),
                             },
                         );
@@ -1765,10 +1767,10 @@ impl UiModel {
                 }
                 // Load new channel's draft
                 if let Some(draft) = self.drafts.remove(&n) {
-                    self.chat_input = draft.text;
+                    self.chat_composer.set_text(&draft.text);
                     self.pending_attachments = draft.attachments;
                 } else {
-                    self.chat_input.clear();
+                    self.chat_composer.clear();
                     self.pending_attachments.clear();
                 }
                 self.selected_channel = Some(n.clone());

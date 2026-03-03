@@ -7,3 +7,5 @@
 //! - emoji.rs: Emoji picker
 //! - file_preview.rs: File/image previews
 //! - toast.rs: Toast notifications
+
+pub mod cosmic_chat_composer;
