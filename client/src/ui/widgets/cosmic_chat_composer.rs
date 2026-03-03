@@ -1,7 +1,7 @@
 use crate::ui::theme;
 use cosmic_text::{
-    Action, Attrs, Buffer, BufferRef, Color, Edit, Editor, FontSystem, Metrics, Motion, Renderer,
-    Shaping, SwashCache, SwashContent,
+    Action, Attrs, Buffer, BufferRef, Color, Edit, Editor, FontSystem, Metrics, Motion,
+    PhysicalGlyph, Renderer, Shaping, SwashCache, SwashContent,
 };
 use eframe::egui;
 
@@ -32,8 +32,7 @@ impl ChatComposer {
         let mut font_system = FontSystem::new();
         let metrics = Metrics::new(FONT_SIZE, LINE_HEIGHT);
         let buffer = Buffer::new(&mut font_system, metrics);
-        let mut editor = Editor::new(BufferRef::Owned(buffer));
-        editor.set_wrap(cosmic_text::Wrap::WordOrGlyph);
+        let editor = Editor::new(BufferRef::Owned(buffer));
 
         Self {
             font_system,
@@ -47,7 +46,13 @@ impl ChatComposer {
 
     pub fn set_text(&mut self, text: &str) {
         self.editor.with_buffer_mut(|buffer| {
-            buffer.set_text(&mut self.font_system, text, Attrs::new(), Shaping::Advanced);
+            buffer.set_text(
+                &mut self.font_system,
+                text,
+                &Attrs::new(),
+                Shaping::Advanced,
+                None,
+            );
         });
         self.editor
             .set_cursor(cosmic_text::Cursor::new(0, text.chars().count()));
@@ -276,21 +281,19 @@ impl ChatComposer {
         let height_px = content_rect.height().max(1.0).round() as usize;
 
         if self.dirty || self.texture_size != [width, height_px] {
-            let mut renderer = SoftwareEguiRenderer::new(width, height_px);
+            let mut renderer = SoftwareEguiRenderer::new(
+                width,
+                height_px,
+                &mut self.font_system,
+                &mut self.swash_cache,
+            );
             let text = to_cosmic_color(theme::text_color());
             let cursor = to_cosmic_color(theme::text_color());
             let selection = to_cosmic_color(theme::COLOR_ACCENT.linear_multiply(0.35));
             let selected_text = to_cosmic_color(theme::text_color());
 
-            self.editor.render(
-                &mut self.font_system,
-                &mut self.swash_cache,
-                text,
-                cursor,
-                selection,
-                selected_text,
-                &mut renderer,
-            );
+            self.editor
+                .render(&mut renderer, text, cursor, selection, selected_text);
 
             let image =
                 egui::ColorImage::from_rgba_unmultiplied([width, height_px], &renderer.pixels);
@@ -344,14 +347,23 @@ struct SoftwareEguiRenderer {
     width: usize,
     height: usize,
     pixels: Vec<u8>,
+    font_system: *mut FontSystem,
+    swash_cache: *mut SwashCache,
 }
 
 impl SoftwareEguiRenderer {
-    fn new(width: usize, height: usize) -> Self {
+    fn new(
+        width: usize,
+        height: usize,
+        font_system: &mut FontSystem,
+        swash_cache: &mut SwashCache,
+    ) -> Self {
         Self {
             width,
             height,
             pixels: vec![0; width * height * 4],
+            font_system,
+            swash_cache,
         }
     }
 
@@ -380,12 +392,12 @@ impl SoftwareEguiRenderer {
 }
 
 impl Renderer for SoftwareEguiRenderer {
-    fn rectangle(&mut self, x: f32, y: f32, width: f32, height: f32, color: Color) {
+    fn rectangle(&mut self, x: i32, y: i32, width: u32, height: u32, color: Color) {
         let color = [color.r(), color.g(), color.b(), color.a()];
-        let x0 = x.floor() as i32;
-        let y0 = y.floor() as i32;
-        let x1 = (x + width).ceil() as i32;
-        let y1 = (y + height).ceil() as i32;
+        let x0 = x;
+        let y0 = y;
+        let x1 = x.saturating_add(width as i32);
+        let y1 = y.saturating_add(height as i32);
 
         for py in y0..y1 {
             for px in x0..x1 {
@@ -394,16 +406,20 @@ impl Renderer for SoftwareEguiRenderer {
         }
     }
 
-    fn glyph(
-        &mut self,
-        x: i32,
-        y: i32,
-        w: usize,
-        h: usize,
-        color: Color,
-        data: &[u8],
-        content: SwashContent,
-    ) {
+    fn glyph(&mut self, glyph: PhysicalGlyph, color: Color) {
+        let Some(image) = (unsafe { &mut *self.swash_cache })
+            .get_image(unsafe { &mut *self.font_system }, glyph.cache_key)
+        else {
+            return;
+        };
+
+        let x = glyph.x + image.placement.left;
+        let y = glyph.y - image.placement.top;
+        let w = image.placement.width as usize;
+        let h = image.placement.height as usize;
+        let data = image.data.as_ref();
+        let content = image.content;
+
         match content {
             SwashContent::Mask => {
                 for gy in 0..h {
