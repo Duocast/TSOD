@@ -1,7 +1,7 @@
 use crate::ui::theme;
 use cosmic_text::{
-    Action, Attrs, Buffer, BufferRef, Color, Editor, FontSystem, Metrics, Motion, PhysicalGlyph,
-    Renderer, Shaping, SwashCache, SwashContent,
+    Action, Attrs, Buffer, BufferRef, Color, Edit, Editor, FontSystem, Metrics, Motion,
+    PhysicalGlyph, Renderer, Shaping, SwashCache, SwashContent,
 };
 use eframe::egui;
 
