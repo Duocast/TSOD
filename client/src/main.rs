@@ -794,6 +794,7 @@ async fn app_task(
         d.set_vad_threshold(cfg.vad_threshold);
         d.set_noise_suppression(saved_settings.noise_suppression);
         d.set_agc(saved_settings.agc_enabled);
+        d.set_agc_preset(saved_settings.agc_preset);
         d.set_agc_target(saved_settings.agc_target_db);
         d.set_echo_cancellation(saved_settings.echo_cancellation);
     }
@@ -956,6 +957,15 @@ async fn app_task(
                                 if let Some(ref dsp) = capture_dsp {
                                     let mut d = dsp.lock().await;
                                     d.set_agc(enabled);
+                                }
+                                persist_settings(&tx_event, &saved_settings);
+                            }
+                            UiIntent::SetAgcPreset(preset) => {
+                                saved_settings.agc_preset = preset;
+                                saved_settings.agc_target_db = preset.target_db();
+                                if let Some(ref dsp) = capture_dsp {
+                                    let mut d = dsp.lock().await;
+                                    d.set_agc_preset(preset);
                                 }
                                 persist_settings(&tx_event, &saved_settings);
                             }
@@ -2773,6 +2783,16 @@ async fn connect_and_run_session(
                             info!("[audio] set agc_enabled={enabled}");
                             persist_settings(tx_event, &saved_settings);
                         }
+                        UiIntent::SetAgcPreset(preset) => {
+                            saved_settings.agc_preset = preset;
+                            saved_settings.agc_target_db = preset.target_db();
+                            if let Some(ref dsp) = capture_dsp {
+                                let mut d = dsp.lock().await;
+                                d.set_agc_preset(preset);
+                            }
+                            info!("[audio] set agc_preset={}", preset.label());
+                            persist_settings(tx_event, &saved_settings);
+                        }
                         UiIntent::SetAgcTargetDb(target_db) => {
                             saved_settings.agc_target_db = target_db;
                             if let Some(ref dsp) = capture_dsp {
@@ -3189,6 +3209,7 @@ async fn connect_and_run_session(
                                 d.set_noise_suppression(settings.noise_suppression);
                                 d.set_agc(settings.agc_enabled);
                                 d.set_vad_threshold(settings.vad_threshold);
+                                d.set_agc_preset(settings.agc_preset);
                                 d.set_agc_target(settings.agc_target_db);
                                 d.set_echo_cancellation(settings.echo_cancellation);
                             }
@@ -3199,11 +3220,12 @@ async fn connect_and_run_session(
                             }
                             audio_runtime.apply(settings);
                             info!(
-                                "[audio] apply settings dsp_enabled={} dsp_method={} ns={} agc={} agc_target={:.1} aec={} typing_attn={} fec={:?} fec_strength={} auto_level={} mono_expansion={} comfort_noise={} comfort_noise_level={:.3} ducking={} duck_db={}",
+                                "[audio] apply settings dsp_enabled={} dsp_method={} ns={} agc={} agc_preset={} agc_target={:.1} aec={} typing_attn={} fec={:?} fec_strength={} auto_level={} mono_expansion={} comfort_noise={} comfort_noise_level={:.3} ducking={} duck_db={}",
                                 settings.dsp_enabled,
                                 settings.dsp_method.label(),
                                 settings.noise_suppression,
                                 settings.agc_enabled,
+                                settings.agc_preset.label(),
                                 settings.agc_target_db,
                                 settings.echo_cancellation,
                                 settings.typing_attenuation,
