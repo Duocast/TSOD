@@ -144,6 +144,22 @@ impl ChatComposer {
             response.request_focus();
         }
         response.context_menu(|ui| {
+            let has_selection = self
+                .editor
+                .copy_selection()
+                .map(|text| !text.is_empty())
+                .unwrap_or(false);
+
+            if ui
+                .add_enabled(has_selection, egui::Button::new("Copy"))
+                .clicked()
+            {
+                if let Some(copied) = self.editor.copy_selection() {
+                    ui.ctx().copy_text(copied);
+                }
+                ui.close();
+            }
+
             if ui.button("Paste").clicked() {
                 response.request_focus();
                 ui.ctx()
@@ -277,6 +293,12 @@ impl ChatComposer {
                             egui::Key::Delete => Some(Action::Delete),
                             egui::Key::Escape => Some(Action::Escape),
                             egui::Key::A if ctrl => Some(Action::SelectAll),
+                            egui::Key::C if ctrl => {
+                                if let Some(copied) = self.editor.copy_selection() {
+                                    ui.ctx().copy_text(copied);
+                                }
+                                None
+                            }
                             egui::Key::Enter => {
                                 if shift {
                                     Some(Action::Enter)
