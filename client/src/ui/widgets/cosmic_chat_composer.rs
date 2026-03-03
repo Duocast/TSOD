@@ -203,7 +203,18 @@ impl ChatComposer {
                 Some(content_rect.width().max(1.0)),
                 Some(content_rect.height().max(1.0)),
             );
-					impl ChatComposer {
+        });
+
+        let mut insert_text = Vec::new();
+
+        if has_focus {
+            for event in ui.input(|i| i.events.clone()) {
+                match event {
+                    egui::Event::Text(text) => {
+                        insert_text.push(text);
+                    }
+                    egui::Event::Key {
+                        key,
                         pressed: true,
                         modifiers,
                         ..
