@@ -1274,6 +1274,7 @@ pub struct UiModel {
     pub messages: HashMap<String, VecDeque<ChatMessage>>,
     pub chat_composer: ChatComposer,
     pub chat_input_focused: bool,
+    pub chat_input_options_open: bool,
     pub pending_attachments: Vec<PendingAttachment>,
     pub typing_users: HashMap<String, Vec<(String, std::time::Instant)>>,
 
@@ -1601,6 +1602,7 @@ impl Default for UiModel {
             messages: HashMap::new(),
             chat_composer: ChatComposer::new(),
             chat_input_focused: false,
+            chat_input_options_open: false,
             pending_attachments: Vec::new(),
             typing_users: HashMap::new(),
             drafts: HashMap::new(),

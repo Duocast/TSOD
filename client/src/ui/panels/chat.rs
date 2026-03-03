@@ -2,6 +2,7 @@
 
 use crate::ui::model::{AttachmentData, ChatMessage, PendingAttachment, UiIntent, UiModel};
 use crate::ui::theme;
+use crate::ui::widgets::cosmic_chat_composer::ComposerFormatAction;
 use chrono::{Days, Local, NaiveDate, TimeZone};
 use crossbeam_channel::Sender;
 use eframe::egui;
@@ -48,13 +49,18 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
     });
     ui.separator();
 
-    // Reserve space for bottom area: typing + separator + preview strip + input
+    // Reserve space for bottom area: typing + separator + preview strip + optional toolbar + input
     let preview_height = if model.pending_attachments.is_empty() {
         0.0
     } else {
         PREVIEW_CARD_HEIGHT + 12.0
     };
-    let available = ui.available_height() - 64.0 - preview_height;
+    let input_toolbar_height = if model.chat_input_options_open {
+        36.0
+    } else {
+        0.0
+    };
+    let available = ui.available_height() - 78.0 - preview_height - input_toolbar_height;
 
     // Messages area
     egui::ScrollArea::vertical()
@@ -108,12 +114,18 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
         );
     }
 
-    let lower_input_spacer = (ui.available_height() - 34.0 - preview_height).max(2.0);
+    let lower_input_spacer =
+        (ui.available_height() - 42.0 - preview_height - input_toolbar_height).max(6.0);
     ui.add_space(lower_input_spacer);
     ui.separator();
 
     // Discord-like attachment preview strip (above the input bar)
     show_attachment_preview_strip(ui, model);
+
+    if model.chat_input_options_open {
+        show_input_options_toolbar(ui, model);
+        ui.add_space(4.0);
+    }
 
     // Input bar
     ui.horizontal(|ui| {
@@ -123,20 +135,51 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
             "Type a message..."
         };
 
+        let controls_width = 150.0;
         let composer_result =
             model
                 .chat_composer
-                .ui(ui, hint, (ui.available_width() - 70.0).max(120.0));
+                .ui(ui, hint, (ui.available_width() - controls_width).max(120.0));
         model.chat_input_focused = composer_result.has_focus;
 
         if composer_result.send_requested || ui.button("Send").clicked() {
             send_chat_from_input(model, tx_intent);
+        }
+
+        let input_button = if model.chat_input_options_open {
+            "Input ▴"
+        } else {
+            "Input ▾"
+        };
+        if ui.button(input_button).clicked() {
+            model.chat_input_options_open = !model.chat_input_options_open;
         }
     });
 
     // === Overlays (painted on top of everything) ===
     show_drag_overlay(ui, model, chat_rect);
     show_notifications(ui, model);
+}
+
+fn show_input_options_toolbar(ui: &mut egui::Ui, model: &mut UiModel) {
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+
+        for (label, action) in [
+            ("B", ComposerFormatAction::Bold),
+            ("I", ComposerFormatAction::Italic),
+            ("U", ComposerFormatAction::Underline),
+            ("S", ComposerFormatAction::Strikethrough),
+            ("• List", ComposerFormatAction::UnorderedList),
+            ("1. List", ComposerFormatAction::OrderedList),
+            ("Quote", ComposerFormatAction::Quote),
+            ("Code", ComposerFormatAction::CodeBlock),
+        ] {
+            if ui.button(label).clicked() {
+                model.chat_composer.apply_format_action(action);
+            }
+        }
+    });
 }
 
 // ── Drag-and-drop handling ──────────────────────────────────────────────

@@ -1,7 +1,7 @@
 use crate::ui::theme;
 use cosmic_text::{
-    Action, Attrs, Buffer, BufferRef, Color, Edit, Editor, FontSystem, Metrics, Motion,
-    PhysicalGlyph, Renderer, Shaping, SwashCache, SwashContent,
+    Action, Attrs, Buffer, BufferRef, Color, Editor, FontSystem, Metrics, Motion, PhysicalGlyph,
+    Renderer, Shaping, SwashCache, SwashContent,
 };
 use eframe::egui;
 
@@ -9,8 +9,20 @@ const FONT_SIZE: f32 = 16.0;
 const LINE_HEIGHT: f32 = 20.0;
 const PADDING_X: f32 = 10.0;
 const PADDING_Y: f32 = 8.0;
-const MIN_HEIGHT: f32 = 36.0;
+const MIN_HEIGHT: f32 = 40.0;
 const MAX_HEIGHT: f32 = 96.0;
+
+#[derive(Debug, Clone, Copy)]
+pub enum ComposerFormatAction {
+    Bold,
+    Italic,
+    Underline,
+    Strikethrough,
+    OrderedList,
+    UnorderedList,
+    Quote,
+    CodeBlock,
+}
 
 #[derive(Default)]
 pub struct ChatComposerUiResult {
@@ -75,6 +87,50 @@ impl ChatComposer {
 
     pub fn clear(&mut self) {
         self.set_text("");
+    }
+
+    pub fn apply_format_action(&mut self, action: ComposerFormatAction) {
+        match action {
+            ComposerFormatAction::Bold => self.wrap_selection_or_insert("**", "**", "bold text"),
+            ComposerFormatAction::Italic => self.wrap_selection_or_insert("*", "*", "italic text"),
+            ComposerFormatAction::Underline => {
+                self.wrap_selection_or_insert("<u>", "</u>", "underlined text")
+            }
+            ComposerFormatAction::Strikethrough => {
+                self.wrap_selection_or_insert("~~", "~~", "strikethrough")
+            }
+            ComposerFormatAction::OrderedList => {
+                self.insert_string("1. First item\n2. Second item")
+            }
+            ComposerFormatAction::UnorderedList => {
+                self.insert_string("- First item\n- Second item")
+            }
+            ComposerFormatAction::Quote => self.insert_string("> quoted text"),
+            ComposerFormatAction::CodeBlock => {
+                self.wrap_selection_or_insert("```\n", "\n```", "code")
+            }
+        }
+        self.dirty = true;
+    }
+
+    fn insert_string(&mut self, text: &str) {
+        self.editor.insert_string(text, None);
+    }
+
+    fn wrap_selection_or_insert(&mut self, prefix: &str, suffix: &str, fallback: &str) {
+        if let Some(selected) = self.editor.copy_selection() {
+            if !selected.is_empty() {
+                self.editor.delete_selection();
+                self.insert_string(&format!("{prefix}{selected}{suffix}"));
+                return;
+            }
+        }
+
+        self.insert_string(&format!("{prefix}{fallback}{suffix}"));
+        for _ in 0..(suffix.chars().count() + fallback.chars().count()) {
+            self.editor
+                .action(&mut self.font_system, Action::Motion(Motion::Left));
+        }
     }
 
     pub fn ui(
