@@ -1,5 +1,7 @@
 use anyhow::{anyhow, Context, Result};
-use wasapi::{Device, DeviceEnumerator, DeviceState, Direction};
+use wasapi::{
+    AudioClient, Device, DeviceEnumerator, DeviceState, Direction, ShareMode, WaveFormat,
+};
 
 pub struct ComGuard {
     initialized: bool,
@@ -99,4 +101,96 @@ pub fn open_device(direction: Direction, preferred_id: Option<&str>) -> Result<D
     }
 
     Ok(default_device)
+}
+
+pub fn negotiate_shared_voice_format(
+    audio_client: &AudioClient,
+    mix: &WaveFormat,
+    preferred_rate: u32,
+    preferred_channels: &[usize],
+    log_prefix: &str,
+) -> WaveFormat {
+    let mix_rate = mix.get_samplespersec();
+    let mix_channels = mix.get_nchannels().max(1) as usize;
+    let bits_per_sample = mix.get_bitspersample() as usize;
+    let valid_bits = mix.get_validbitspersample().max(1) as usize;
+    let sample_type = match mix.get_subformat() {
+        Ok(sample_type) => sample_type,
+        Err(error) => {
+            tracing::debug!(
+                "[{log_prefix}] could not read mix subformat ({error:#}); using mix format"
+            );
+            return mix.clone();
+        }
+    };
+
+    let mut candidate_channels = Vec::with_capacity(preferred_channels.len() + 1);
+    for &channels in preferred_channels {
+        if channels > 0 && !candidate_channels.contains(&channels) {
+            candidate_channels.push(channels);
+        }
+    }
+    if !candidate_channels.contains(&mix_channels) {
+        candidate_channels.push(mix_channels);
+    }
+
+    let mut closest_fallback: Option<WaveFormat> = None;
+    for channels in candidate_channels {
+        let requested = WaveFormat::new(
+            bits_per_sample,
+            valid_bits,
+            &sample_type,
+            preferred_rate as usize,
+            channels,
+            None,
+        );
+
+        match audio_client.is_supported(&requested, &ShareMode::Shared) {
+            Ok(None) => {
+                tracing::info!(
+                    "[{log_prefix}] using negotiated shared voice format {}Hz {}ch",
+                    preferred_rate,
+                    channels
+                );
+                return requested;
+            }
+            Ok(Some(closest)) => {
+                tracing::debug!(
+                    "[{log_prefix}] requested {}Hz {}ch not directly supported; closest is {}Hz {}ch",
+                    preferred_rate,
+                    channels,
+                    closest.get_samplespersec(),
+                    closest.get_nchannels().max(1)
+                );
+                if closest_fallback.is_none() {
+                    closest_fallback = Some(closest);
+                }
+            }
+            Err(error) => {
+                tracing::debug!(
+                    "[{log_prefix}] shared support query for {}Hz {}ch failed ({error:#})",
+                    preferred_rate,
+                    channels
+                );
+            }
+        }
+    }
+
+    if let Some(closest) = closest_fallback {
+        tracing::info!(
+            "[{log_prefix}] falling back to closest shared voice format {}Hz {}ch (mix is {}Hz {}ch)",
+            closest.get_samplespersec(),
+            closest.get_nchannels().max(1),
+            mix_rate,
+            mix_channels
+        );
+        closest
+    } else {
+        tracing::info!(
+            "[{log_prefix}] keeping mix format {}Hz {}ch (no preferred 48k mono/stereo format available)",
+            mix_rate,
+            mix_channels
+        );
+        mix.clone()
+    }
 }

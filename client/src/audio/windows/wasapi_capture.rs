@@ -15,7 +15,9 @@ use crate::ui::{
     UiEvent,
 };
 
-use super::wasapi_common::{default_endpoint_id, enumerate_endpoints, open_device, ComGuard};
+use super::wasapi_common::{
+    default_endpoint_id, enumerate_endpoints, negotiate_shared_voice_format, open_device, ComGuard,
+};
 
 const STALL_AFTER: Duration = Duration::from_secs(5);
 
@@ -161,23 +163,33 @@ fn run_capture_thread(
     let mix = audio_client
         .get_mixformat()
         .context("get WASAPI mix format")?;
-    let device_rate = mix.get_samplespersec();
-    let device_channels = mix.get_nchannels().max(1) as usize;
-    let block_align = mix.get_blockalign() as usize;
-    let bits_per_sample = mix.get_bitspersample() as u16;
-    let valid_bits = mix.get_validbitspersample() as u16;
+    let mix_rate = mix.get_samplespersec();
+    let mix_channels = mix.get_nchannels().max(1) as usize;
+
+    let stream_format =
+        negotiate_shared_voice_format(&audio_client, &mix, sample_rate, &[1, 2], "wasapi capture");
+
+    let device_rate = stream_format.get_samplespersec();
+    let device_channels = stream_format.get_nchannels().max(1) as usize;
+    let block_align = stream_format.get_blockalign() as usize;
+    let bits_per_sample = stream_format.get_bitspersample() as u16;
+    let valid_bits = stream_format.get_validbitspersample() as u16;
     let effective_valid_bits = match valid_bits {
         0 => bits_per_sample,
         _ => valid_bits,
     }
     .clamp(1, 32);
-    let sample_type = mix.get_subformat().context("get WASAPI sample type")?;
+    let sample_type = stream_format
+        .get_subformat()
+        .context("get WASAPI sample type")?;
     let bytes_per_sample = block_align / device_channels;
 
     info!(
-        "[wasapi capture] open device id={} name={} mix: {}Hz {}ch block_align={} bits={} valid={} effective_valid={} type={:?}",
+        "[wasapi capture] open device id={} name={} mix: {}Hz {}ch; stream: {}Hz {}ch block_align={} bits={} valid={} effective_valid={} type={:?}",
         endpoint_id,
         friendly_name,
+        mix_rate,
+        mix_channels,
         device_rate,
         device_channels,
         block_align,
@@ -202,7 +214,7 @@ fn run_capture_thread(
         buffer_duration_hns: 200_000,
     };
     audio_client
-        .initialize_client(&mix, &Direction::Capture, &mode)
+        .initialize_client(&stream_format, &Direction::Capture, &mode)
         .map_err(|error| {
             tracing::error!("[wasapi capture] initialize_client failed: {error:#}");
             error
