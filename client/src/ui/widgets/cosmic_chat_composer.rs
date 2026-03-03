@@ -90,20 +90,17 @@ impl ChatComposer {
     }
 
     fn select_all(&mut self) {
-        let Some((end_line, end_col)) = self.editor.with_buffer(|buffer| {
-            if buffer.lines.is_empty() {
-                return None;
-            }
+        let end_cursor = self.editor.with_buffer(|buffer| {
+            let last_line = buffer.lines.len().saturating_sub(1);
+            let last_col = buffer
+                .lines
+                .get(last_line)
+                .map(|line| line.text().chars().count())
+                .unwrap_or(0);
+            cosmic_text::Cursor::new(last_line, last_col)
+        });
 
-            let last_line = buffer.lines.len() - 1;
-            let last_col = buffer.lines[last_line].text().chars().count();
-            Some((last_line, last_col))
-        }) else {
-            return;
-        };
-
-        self.editor
-            .set_cursor(cosmic_text::Cursor::new(end_line, end_col));
+        self.editor.set_cursor(end_cursor);
         self.editor
             .set_selection(cosmic_text::Selection::Normal(cosmic_text::Cursor::new(
                 0, 0,
