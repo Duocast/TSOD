@@ -923,7 +923,17 @@ fn render_linkified_text(ui: &mut egui::Ui, text: &str) {
                     });
                 }
                 MessageSegment::Url(url) => {
-                    let response = ui.add(egui::Hyperlink::from_label_and_url(url.clone(), &url));
+                    let response = ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(url.clone())
+                                .color(theme::COLOR_LINK)
+                                .underline(),
+                        )
+                        .sense(egui::Sense::click()),
+                    );
+                    if response.clicked() {
+                        let _ = open::that(url.clone());
+                    }
                     response.context_menu(|ui| {
                         if ui.button("Copy").clicked() {
                             ui.ctx().copy_text(url.clone());
