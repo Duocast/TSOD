@@ -124,6 +124,7 @@ struct VoiceTelemetryCounters {
     tx_oversized_payload_drops: AtomicU64,
     jitter_buffer_depth: AtomicU64,
     peak_stream_level_bits: AtomicU32,
+    playout_delay_ms: AtomicU32,
 }
 
 #[derive(Default)]
@@ -2412,6 +2413,7 @@ async fn connect_and_run_session(
         audio_runtime.clone(),
         voice_counters.clone(),
         network_telemetry.clone(),
+        send_queue_drop_count.clone(),
         local_user_id.clone(),
         voice_die_tx.clone(),
     ));
@@ -4021,15 +4023,15 @@ async fn emit_telemetry_loop(
             .jitter_ms
             .store(jitter_ms, Ordering::Relaxed);
 
-        let vad_probability = if dsp_enabled.load(Ordering::Relaxed) {
+        let (agc_gain_db, vad_probability) = if dsp_enabled.load(Ordering::Relaxed) {
             if let Some(ref dsp) = capture_dsp {
                 let d = dsp.lock().await;
-                d.last_vad_probability()
+                (d.agc_gain_db(), d.last_vad_probability())
             } else {
-                0.0
+                (0.0, 0.0)
             }
         } else {
-            0.0
+            (0.0, 0.0)
         };
 
         let _ = tx_event.send(UiEvent::TelemetryUpdate(ui::model::TelemetryData {
@@ -4046,8 +4048,9 @@ async fn emit_telemetry_loop(
             concealment_frames: conceal_delta,
             peak_stream_level,
             send_queue_drop_count: send_queue_drop_count.load(Ordering::Relaxed),
+            playout_delay_ms: counters.playout_delay_ms.load(Ordering::Relaxed),
+            agc_gain_db,
             vad_probability,
-            ..Default::default()
         }));
     }
 }
@@ -4121,6 +4124,7 @@ async fn voice_send_loop(
     audio_runtime: AudioRuntimeSettings,
     voice_counters: Arc<VoiceTelemetryCounters>,
     network_telemetry: Arc<SharedNetworkTelemetry>,
+    send_queue_drop_count: Arc<AtomicU32>,
     local_user_id: String,
     _voice_die_tx: watch::Sender<bool>,
 ) {
@@ -4327,6 +4331,7 @@ async fn voice_send_loop(
             .fetch_add(d.len() as u64, Ordering::Relaxed);
 
         if egress.enqueue_voice(d).is_err() {
+            send_queue_drop_count.fetch_add(1, Ordering::Relaxed);
             let _ = tx_event.send(UiEvent::AppendLog(
                 "[voice] egress queue full; dropped voice datagram".into(),
             ));
@@ -4557,6 +4562,11 @@ async fn voice_recv_loop(
                 voice_counters
                     .jitter_buffer_depth
                     .store(jitter_depth_max, Ordering::Relaxed);
+                let playout_delay_ms = jitter_depth_max
+                    .saturating_mul(frame_ms);
+                voice_counters
+                    .playout_delay_ms
+                    .store(playout_delay_ms, Ordering::Relaxed);
 
                 let speaking_streams = streams.values().filter(|s| s.speaking).count();
                 mixed_pcm.fill(0);
