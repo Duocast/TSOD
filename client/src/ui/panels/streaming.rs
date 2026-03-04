@@ -86,10 +86,19 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel) {
             if let Some((width, height, rgba)) = frame_decoded {
                 render_w = width;
                 render_h = height;
-                let image = egui::ColorImage::from_rgba_unmultiplied([width, height], rgba);
-                let texture =
-                    ui.ctx()
-                        .load_texture("streaming.latest", image, egui::TextureOptions::LINEAR);
+                let frame_key = model
+                    .latest_stream_frame
+                    .as_ref()
+                    .map(|frame| (frame.stream_tag, frame.frame_seq));
+                if model.latest_stream_frame_key != frame_key {
+                    let image = egui::ColorImage::from_rgba_unmultiplied([width, height], rgba);
+                    model.latest_stream_frame_texture = Some(ui.ctx().load_texture(
+                        "streaming.latest",
+                        image,
+                        egui::TextureOptions::LINEAR,
+                    ));
+                    model.latest_stream_frame_key = frame_key;
+                }
 
                 let aspect = width as f32 / height as f32;
                 let mut draw_size = video_rect.size();
@@ -99,8 +108,10 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel) {
                     draw_size.y = draw_size.x / aspect;
                 }
                 let draw_rect = egui::Rect::from_center_size(video_rect.center(), draw_size);
-                egui::Image::new((texture.id(), draw_size)).paint_at(ui, draw_rect);
-                rendered = true;
+                if let Some(texture) = &model.latest_stream_frame_texture {
+                    egui::Image::new((texture.id(), draw_size)).paint_at(ui, draw_rect);
+                    rendered = true;
+                }
             }
 
             if !rendered {
