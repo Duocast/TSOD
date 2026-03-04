@@ -70,6 +70,7 @@ pub struct Agc {
     min_gain: f32,
     noise_floor_rms: f32,
     noisy_max_gain: f32,
+    peak_target: f32,
 }
 
 impl Agc {
@@ -87,6 +88,7 @@ impl Agc {
             min_gain: 0.1,  // -20 dB max cut
             noise_floor_rms: 10.0,
             noisy_max_gain: 8.0, // +18 dB ceiling when background noise dominates
+            peak_target: 0.89 * 32767.0, // ~-1.0 dBFS peak ceiling
         }
     }
 
@@ -116,15 +118,23 @@ impl Agc {
             return;
         }
 
-        // Compute RMS of current frame
+        // Compute RMS and peak of current frame so gain can be capped by both
+        // average loudness target and instantaneous headroom.
         let sum_sq: f64 = pcm.iter().map(|&s| (s as f64) * (s as f64)).sum();
         let rms = (sum_sq / pcm.len() as f64).sqrt() as f32;
+        let peak = pcm.iter().map(|&s| (s as f32).abs()).fold(0.0f32, f32::max);
 
         self.update_noise_floor(rms);
 
         // Don't adjust gain for silence (avoids division by zero and pumping)
         if rms > 10.0 {
-            let desired_gain = self.target_rms / rms;
+            let rms_desired_gain = self.target_rms / rms;
+            let peak_limited_gain = if peak > 0.0 {
+                self.peak_target / peak
+            } else {
+                self.max_gain
+            };
+            let desired_gain = rms_desired_gain.min(peak_limited_gain);
             let adaptive_max_gain = self.adaptive_max_gain(rms);
             let desired_gain = desired_gain.clamp(self.min_gain, adaptive_max_gain);
 

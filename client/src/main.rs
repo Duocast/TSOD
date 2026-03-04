@@ -4226,7 +4226,15 @@ async fn voice_send_loop(
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
 
-        // Apply input gain
+        // Reserve fixed headroom on the capture/send path before any user gain so
+        // upstream boosts are less likely to clip before AGC/denoise processing.
+        const SEND_PATH_PRE_ATTENUATION: f32 = 0.5; // -6 dB
+
+        for s in pcm.iter_mut() {
+            *s = (*s as f32 * SEND_PATH_PRE_ATTENUATION).round() as i16;
+        }
+
+        // Apply user-configured input gain
         let gain = u32_to_f32(input_gain.load(Ordering::Relaxed));
         if (gain - 1.0).abs() > 0.001 {
             for s in pcm.iter_mut() {
