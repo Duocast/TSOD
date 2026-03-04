@@ -8,6 +8,26 @@ use eframe::egui;
 
 pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>) {
     ui.heading("Members");
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    {
+        ui.add_space(4.0);
+        egui::Frame::new()
+            .inner_margin(egui::Margin::same(8))
+            .corner_radius(egui::CornerRadius::same(6))
+            .fill(theme::COLOR_DANGER.gamma_multiply(0.15))
+            .stroke(egui::Stroke::new(1.0, theme::COLOR_DANGER.gamma_multiply(0.6)))
+            .show(ui, |ui| {
+                ui.label(
+                    egui::RichText::new(
+                        "⚠ Audio quality warning: we believe hardware acceleration is not behaving as expected on Windows and Linux clients, and this may degrade call quality.",
+                    )
+                    .small()
+                    .color(theme::COLOR_DANGER),
+                );
+            });
+    }
+
     ui.separator();
 
     let members = model.current_members().to_vec();
