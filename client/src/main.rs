@@ -575,26 +575,28 @@ fn select_gui_renderer() -> eframe::Renderer {
     match std::env::var("VP_GUI_RENDERER") {
         Ok(value) => {
             let normalized = value.trim().to_ascii_lowercase();
-            match normalized.as_str() {
-                "glow" | "gl" | "opengl" => {
-                    info!("[gui] forcing Glow renderer via VP_GUI_RENDERER={value}");
-                    eframe::Renderer::Glow
+            let alias = match normalized.as_str() {
+                "gl" | "opengl" => "glow",
+                "gpu" | "hardware" => "wgpu",
+                other => other,
+            };
+
+            match alias.parse::<eframe::Renderer>() {
+                Ok(renderer) => {
+                    info!("[gui] forcing {renderer} renderer via VP_GUI_RENDERER={value}");
+                    renderer
                 }
-                "wgpu" | "gpu" | "hardware" => {
-                    info!("[gui] forcing WGPU renderer via VP_GUI_RENDERER={value}");
-                    eframe::Renderer::Wgpu
-                }
-                _ => {
+                Err(_) => {
+                    let fallback = eframe::Renderer::default();
                     warn!(
-                        "[gui] unknown VP_GUI_RENDERER value '{value}'; defaulting to WGPU hardware renderer"
+                        "[gui] unsupported VP_GUI_RENDERER value '{value}'; falling back to default renderer ({fallback})"
                     );
-                    eframe::Renderer::Wgpu
+                    fallback
                 }
             }
         }
         Err(_) => {
-            // Prefer the native WGPU backend by default to keep GUI drawing hardware accelerated.
-            eframe::Renderer::Wgpu
+            eframe::Renderer::default()
         }
     }
 }
