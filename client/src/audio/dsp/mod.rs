@@ -113,6 +113,14 @@ impl CaptureDsp {
         self.denoiser.last_vad()
     }
 
+    pub fn agc_gain_db(&self) -> f32 {
+        if self.agc_enabled {
+            self.agc.gain_db()
+        } else {
+            0.0
+        }
+    }
+
     /// Enable or disable noise suppression (RNNoise).
     pub fn set_noise_suppression(&mut self, enabled: bool) {
         self.noise_suppression_enabled = enabled;
