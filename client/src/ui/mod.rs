@@ -15,6 +15,7 @@
 
 pub mod model;
 pub mod panels;
+pub mod sfx;
 pub mod theme;
 pub mod widgets;
 
