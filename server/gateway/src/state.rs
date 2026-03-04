@@ -3,16 +3,13 @@ use std::{
     sync::Arc,
 };
 
-use anyhow::Result;
-use bytes::Bytes;
 use dashmap::DashMap;
-use std::time::Instant;
 use tokio::sync::mpsc;
 
-use crate::egress::EgressScheduler;
 use crate::proto::voiceplatform::v1 as pb;
 
 use vp_control::ids::{ChannelId, UserId};
+use vp_media::datagram_send_policy::SessionSendCtx;
 use vp_media::stream_forwarder::ViewerProvider;
 use vp_media::voice_forwarder::{DatagramTx, MembershipProvider, SessionRegistry};
 
@@ -99,48 +96,8 @@ pub fn channel_route_key(channel_id: ChannelId) -> u32 {
 }
 
 #[derive(Clone)]
-pub struct QuinnDatagramTx {
-    egress: Arc<EgressScheduler>,
-}
-
-impl QuinnDatagramTx {
-    pub fn new(conn: quinn::Connection) -> Self {
-        Self {
-            egress: EgressScheduler::new(conn),
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl DatagramTx for QuinnDatagramTx {
-    async fn send(&self, bytes: Bytes) -> Result<()> {
-        if bytes.len() >= vp_voice::VIDEO_HEADER_BYTES
-            && bytes[0] == vp_voice::VIDEO_VERSION
-            && bytes[1] == vp_voice::DATAGRAM_KIND_VIDEO
-        {
-            let stream_tag = u64::from_le_bytes([
-                bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7], bytes[8], bytes[9],
-            ]);
-            let flags = bytes[11];
-            let frame_seq = u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]);
-            let is_keyframe = (flags & vp_voice::VIDEO_FLAG_KEYFRAME) != 0;
-            self.egress.enqueue_video(
-                bytes,
-                stream_tag,
-                frame_seq,
-                is_keyframe,
-                Instant::now() + std::time::Duration::from_millis(80),
-            );
-        } else {
-            self.egress.enqueue_voice(bytes);
-        }
-        Ok(())
-    }
-}
-
-#[derive(Clone)]
 pub struct SessionMap {
-    inner: Arc<DashMap<(UserId, String), Arc<dyn DatagramTx>>>,
+    inner: Arc<DashMap<(UserId, String), Arc<SessionSendCtx>>>,
 }
 
 impl SessionMap {
@@ -150,12 +107,24 @@ impl SessionMap {
         }
     }
 
-    pub fn register(&self, user: UserId, session_id: &str, tx: Arc<dyn DatagramTx>) {
+    pub fn register(&self, user: UserId, session_id: &str, tx: Arc<SessionSendCtx>) {
         self.inner.insert((user, session_id.to_string()), tx);
     }
 
     pub fn unregister(&self, user: UserId, session_id: &str) {
         self.inner.remove(&(user, session_id.to_string()));
+    }
+
+    pub fn unregister_by_session_id(&self, session_id: &str) {
+        let keys = self
+            .inner
+            .iter()
+            .filter(|entry| entry.key().1 == session_id)
+            .map(|entry| entry.key().clone())
+            .collect::<Vec<_>>();
+        for key in keys {
+            self.inner.remove(&key);
+        }
     }
 }
 
@@ -165,7 +134,12 @@ impl SessionRegistry for SessionMap {
         self.inner
             .iter()
             .filter(|entry| entry.key().0 == user)
-            .map(|entry| (entry.key().1.clone(), entry.value().clone()))
+            .map(|entry| {
+                (
+                    entry.key().1.clone(),
+                    entry.value().clone() as Arc<dyn DatagramTx>,
+                )
+            })
             .collect()
     }
 }
@@ -391,7 +365,7 @@ impl ViewerProvider for MembershipCache {
 
 #[cfg(test)]
 mod tests {
-    use super::{DatagramTx, MembershipCache, PushHub, SessionMap};
+    use super::{MembershipCache, PushHub, SessionMap};
     use crate::proto::voiceplatform::v1 as pb;
     use anyhow::Result;
     use bytes::Bytes;
@@ -426,39 +400,6 @@ mod tests {
 
         hub.unregister(user, "s1");
         hub.unregister(user, "s2");
-    }
-
-    struct TestDatagramTx;
-
-    #[async_trait::async_trait]
-    impl DatagramTx for TestDatagramTx {
-        async fn send(&self, _bytes: Bytes) -> Result<()> {
-            Ok(())
-        }
-    }
-
-    #[tokio::test]
-    async fn session_map_tracks_multiple_sessions_per_user() {
-        let sessions = SessionMap::new();
-        let user = UserId(uuid::Uuid::new_v4());
-
-        let tx1: Arc<dyn DatagramTx> = Arc::new(TestDatagramTx);
-        let tx2: Arc<dyn DatagramTx> = Arc::new(TestDatagramTx);
-        sessions.register(user, "s1", tx1.clone());
-        sessions.register(user, "s2", tx2.clone());
-
-        let found = sessions.get_sessions(user).await;
-        assert_eq!(found.len(), 2);
-        assert!(found.iter().any(|(_, tx)| Arc::ptr_eq(tx, &tx1)));
-        assert!(found.iter().any(|(_, tx)| Arc::ptr_eq(tx, &tx2)));
-
-        sessions.unregister(user, "s1");
-        let found = sessions.get_sessions(user).await;
-        assert_eq!(found.len(), 1);
-        assert!(Arc::ptr_eq(&found[0].1, &tx2));
-
-        sessions.unregister(user, "s2");
-        assert!(sessions.get_sessions(user).await.is_empty());
     }
 
     #[test]

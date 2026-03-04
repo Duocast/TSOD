@@ -977,6 +977,10 @@ mod tests {
             self.sent.fetch_add(1, Ordering::Relaxed);
             Ok(())
         }
+        fn session_id(&self) -> &str { "fake" }
+        fn max_datagram_size(&self) -> Option<usize> { Some(vp_voice::QUIC_MAX_DATAGRAM_BYTES) }
+        fn send_voice(&self, _now_ms: u64, _channel_id: ChannelId, _pkt: Bytes, _prune_tx: &tokio::sync::mpsc::Sender<crate::datagram_send_policy::PruneEvt>, _metrics: &dyn crate::datagram_send_policy::DatagramSendPolicyMetrics) {}
+        fn send_video_best_effort(&self, _now_ms: u64, _channel_id: ChannelId, _pkt: Bytes, _prune_tx: &tokio::sync::mpsc::Sender<crate::datagram_send_policy::PruneEvt>, _metrics: &dyn crate::datagram_send_policy::DatagramSendPolicyMetrics) {}
     }
 
     struct SlowTx {
@@ -991,6 +995,10 @@ mod tests {
             self.sent.fetch_add(1, Ordering::Relaxed);
             Ok(())
         }
+        fn session_id(&self) -> &str { "slow" }
+        fn max_datagram_size(&self) -> Option<usize> { Some(vp_voice::QUIC_MAX_DATAGRAM_BYTES) }
+        fn send_voice(&self, _now_ms: u64, _channel_id: ChannelId, _pkt: Bytes, _prune_tx: &tokio::sync::mpsc::Sender<crate::datagram_send_policy::PruneEvt>, _metrics: &dyn crate::datagram_send_policy::DatagramSendPolicyMetrics) {}
+        fn send_video_best_effort(&self, _now_ms: u64, _channel_id: ChannelId, _pkt: Bytes, _prune_tx: &tokio::sync::mpsc::Sender<crate::datagram_send_policy::PruneEvt>, _metrics: &dyn crate::datagram_send_policy::DatagramSendPolicyMetrics) {}
     }
 
     struct FakeSessions {

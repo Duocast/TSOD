@@ -19,15 +19,13 @@ use crate::{
     frame::{read_delimited, write_delimited},
     media::MediaService,
     proto::voiceplatform::v1 as pb,
-    state::{
-        MembershipCache, PushHub, QuinnDatagramTx, Sessions, VoiceTelemetryCache,
-        VoiceTelemetrySample,
-    },
+    state::{MembershipCache, PushHub, Sessions, VoiceTelemetryCache, VoiceTelemetrySample},
 };
 
 use vp_control::ids::{ChannelId, ServerId, UserId};
 use vp_control::model::{ChannelCreate, JoinChannel, SendMessage};
 use vp_control::{ControlError, ControlRepo, ControlService, PgControlRepo, RequestContext};
+use vp_media::datagram_send_policy::{PruneEvt, SessionSendCtx};
 use vp_media::stream_forwarder::StreamForwarder;
 use vp_media::voice_forwarder::VoiceForwarder;
 
@@ -46,6 +44,7 @@ pub struct Gateway {
     voice: Arc<VoiceForwarder>,
     video: Arc<StreamForwarder>,
     media: Arc<MediaService>,
+    prune_tx: mpsc::Sender<PruneEvt>,
 }
 
 impl Gateway {
@@ -61,6 +60,7 @@ impl Gateway {
         voice: Arc<VoiceForwarder>,
         video: Arc<StreamForwarder>,
         media: Arc<MediaService>,
+        prune_tx: mpsc::Sender<PruneEvt>,
     ) -> Self {
         Self {
             auth,
@@ -73,6 +73,7 @@ impl Gateway {
             voice,
             video,
             media,
+            prune_tx,
         }
     }
 
@@ -159,7 +160,7 @@ impl Gateway {
         self.sessions.register(
             user_id,
             &session_id,
-            Arc::new(QuinnDatagramTx::new(conn.clone())),
+            Arc::new(SessionSendCtx::new(session_id.clone(), conn.clone())),
         );
 
         let mut current_channel: Option<ChannelId> = None;
@@ -167,13 +168,6 @@ impl Gateway {
         let voice_forwarder = self.voice.clone();
         let video_forwarder = self.video.clone();
         defer! {
-            let voice_forwarder = voice_forwarder.clone();
-            let video_forwarder = video_forwarder.clone();
-            let loop_session_id = session_id.clone();
-            tokio::spawn(async move {
-                voice_forwarder.unregister_session(user_id, &loop_session_id).await;
-                video_forwarder.unregister_session(user_id, &loop_session_id).await;
-            });
             self.push.unregister(user_id, &session_id);
             self.sessions.unregister(user_id, &session_id);
             self.telemetry.remove(user_id);
