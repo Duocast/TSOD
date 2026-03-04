@@ -1,7 +1,7 @@
 //! DSP pipeline: RNNoise (noise suppression + VAD), AGC, and optional AEC.
 //!
 //! Processing chain (capture path):
-//!   Mic PCM → AGC (pre-amplify) → [AEC if enabled] → RNNoise (denoise + VAD) → output
+//!   Mic PCM → [AEC if enabled] → RNNoise (denoise + VAD) → AGC (leveling) → output
 //!
 //! Processing chain (playout path):
 //!   Network PCM → [Spatial mix if enabled] → AGC (normalize) → speaker
@@ -68,11 +68,6 @@ impl CaptureDsp {
     /// Frame must be exactly 480 samples (10ms at 48kHz) for RNNoise.
     /// For 20ms frames (960 samples), call twice with each half.
     pub fn process_frame(&mut self, pcm: &mut [i16]) -> f32 {
-        // Pre-amplify with AGC
-        if self.agc_enabled {
-            self.agc.process(pcm);
-        }
-
         #[cfg(feature = "aec")]
         if self.echo_cancellation_enabled {
             self.maybe_warn_if_reference_missing();
@@ -81,13 +76,21 @@ impl CaptureDsp {
             }
         }
 
-        // Denoise and get VAD
-        if self.noise_suppression_enabled {
+        // Denoise and get VAD first so AGC can react to post-denoise speech level.
+        let vad = if self.noise_suppression_enabled {
             self.denoiser.process_frame(pcm)
         } else {
             // Still run VAD for level reporting even if denoiser is off
             0.0
+        };
+
+        // Apply output leveling after denoise. Use VAD/noise-floor aware AGC behavior
+        // to avoid lifting residual background artifacts.
+        if self.agc_enabled {
+            self.agc.process(pcm);
         }
+
+        vad
     }
 
     /// Returns true if the last processed frame had voice activity.
