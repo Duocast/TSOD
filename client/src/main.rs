@@ -571,6 +571,34 @@ fn apply_resampler_mode(mode: DspMethod) {
     std::env::set_var("VP_AUDIO_RESAMPLER", mode.label());
 }
 
+fn select_gui_renderer() -> eframe::Renderer {
+    match std::env::var("VP_GUI_RENDERER") {
+        Ok(value) => {
+            let normalized = value.trim().to_ascii_lowercase();
+            match normalized.as_str() {
+                "glow" | "gl" | "opengl" => {
+                    info!("[gui] forcing Glow renderer via VP_GUI_RENDERER={value}");
+                    eframe::Renderer::Glow
+                }
+                "wgpu" | "gpu" | "hardware" => {
+                    info!("[gui] forcing WGPU renderer via VP_GUI_RENDERER={value}");
+                    eframe::Renderer::Wgpu
+                }
+                _ => {
+                    warn!(
+                        "[gui] unknown VP_GUI_RENDERER value '{value}'; defaulting to WGPU hardware renderer"
+                    );
+                    eframe::Renderer::Wgpu
+                }
+            }
+        }
+        Err(_) => {
+            // Prefer the native WGPU backend by default to keep GUI drawing hardware accelerated.
+            eframe::Renderer::Wgpu
+        }
+    }
+}
+
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env().add_directive(Level::INFO.into()))
@@ -623,6 +651,7 @@ fn main() -> Result<()> {
 
     // Run the eframe GUI on the main thread
     let native_options = eframe::NativeOptions {
+        renderer: select_gui_renderer(),
         viewport: egui::ViewportBuilder::default()
             .with_title("TSOD")
             .with_inner_size([1200.0, 800.0])
