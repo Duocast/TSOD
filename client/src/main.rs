@@ -902,6 +902,7 @@ async fn app_task(
             session_voice_active.clone(),
             voice_counters.clone(),
             network_telemetry.clone(),
+            send_queue_drop_count.clone(),
             audio_runtime.clone(),
             sample_rate,
             channels,
@@ -1715,6 +1716,7 @@ async fn connect_and_run_session(
     session_voice_active: Arc<AtomicBool>,
     voice_counters: Arc<VoiceTelemetryCounters>,
     network_telemetry: Arc<SharedNetworkTelemetry>,
+    send_queue_drop_count: Arc<AtomicU32>,
     audio_runtime: AudioRuntimeSettings,
     sample_rate: u32,
     channels: u16,
@@ -4621,10 +4623,10 @@ async fn voice_recv_loop(
                     .jitter_buffer_depth
                     .store(jitter_depth_max, Ordering::Relaxed);
                 let playout_delay_ms = jitter_depth_max
-                    .saturating_mul(frame_ms);
+                    .saturating_mul(frame_ms.into());
                 voice_counters
                     .playout_delay_ms
-                    .store(playout_delay_ms, Ordering::Relaxed);
+                    .store(playout_delay_ms as u32, Ordering::Relaxed);
 
                 let speaking_streams = streams.values().filter(|s| s.speaking).count();
                 mixed_pcm.fill(0);
