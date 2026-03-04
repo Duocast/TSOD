@@ -23,7 +23,7 @@ fn play_soft_url_tone_impl(volume: f32) -> Result<()> {
         .default_output_config()
         .context("default output config")?;
 
-    let sample_rate = config.sample_rate().0 as f32;
+    let sample_rate = config.sample_rate() as f32;
     let channels = config.channels() as usize;
     let total_samples = ((URL_TONE_DURATION_MS as f32 / 1000.0) * sample_rate) as usize;
 
