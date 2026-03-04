@@ -572,7 +572,7 @@ fn apply_resampler_mode(mode: DspMethod) {
 }
 
 fn select_gui_renderer() -> eframe::Renderer {
-    let default_renderer = eframe::Renderer::Wgpu;
+    let default_renderer = eframe::Renderer::default();
     match std::env::var("VP_GUI_RENDERER") {
         Ok(value) => {
             let normalized = value.trim().to_ascii_lowercase();
