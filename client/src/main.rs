@@ -2450,6 +2450,7 @@ async fn connect_and_run_session(
 
     let disp_keepalive = dispatcher.clone();
     let disp_health = dispatcher.clone();
+    let disp_voice_rr = dispatcher.clone();
     let ctl_keepalive = tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(10));
         loop {
@@ -2461,7 +2462,62 @@ async fn connect_and_run_session(
     });
 
     // Track the active channel (for SendChat and other channel-scoped operations)
+    let active_channel_for_reports =
+        Arc::new(tokio::sync::RwLock::new(selected_after_sync.clone()));
     let mut active_channel: Option<String> = selected_after_sync;
+
+    let mut voice_rr_die_rx = voice_die_rx.clone();
+    let rr_active_channel = active_channel_for_reports.clone();
+    let rr_voice_counters = voice_counters.clone();
+    let rr_network_telemetry = network_telemetry.clone();
+    let rr_tx_event = tx_event.clone();
+    let _voice_receiver_report = tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(1));
+        let mut prev_rx_bytes = rr_voice_counters.rx_bytes.load(Ordering::Relaxed);
+        loop {
+            tokio::select! {
+                _ = voice_rr_die_rx.changed() => {
+                    if *voice_rr_die_rx.borrow() {
+                        break;
+                    }
+                }
+                _ = tick.tick() => {
+                    let channel_id = rr_active_channel.read().await.clone();
+                    let Some(channel_id) = channel_id else {
+                        continue;
+                    };
+
+                    let rx_bytes = rr_voice_counters.rx_bytes.load(Ordering::Relaxed);
+                    let goodput_bps = rx_bytes
+                        .saturating_sub(prev_rx_bytes)
+                        .saturating_mul(8)
+                        .min(u32::MAX as u64) as u32;
+                    prev_rx_bytes = rx_bytes;
+
+                    let loss_rate = (rr_network_telemetry.loss_ppm.load(Ordering::Relaxed) as f32 / 1_000_000.0)
+                        .clamp(0.0, 1.0);
+                    let report = pb::VoiceReceiverReport {
+                        channel_id: Some(pb::ChannelId { value: channel_id }),
+                        loss_rate,
+                        rtt_ms: rr_network_telemetry.rtt_ms.load(Ordering::Relaxed),
+                        jitter_ms: rr_network_telemetry.jitter_ms.load(Ordering::Relaxed),
+                        goodput_bps,
+                        playout_delay_ms: rr_voice_counters.playout_delay_ms.load(Ordering::Relaxed),
+                    };
+
+                    if let Err(e) = disp_voice_rr
+                        .send_no_response(pb::client_to_server::Payload::VoiceReceiverReport(report))
+                        .await
+                    {
+                        let _ = rr_tx_event.send(UiEvent::AppendLog(format!(
+                            "[telemetry] voice receiver report send failed: {e:#}"
+                        )));
+                        break;
+                    }
+                }
+            }
+        }
+    });
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum ShareState {
         Idle,
@@ -2774,6 +2830,7 @@ async fn connect_and_run_session(
                                         );
                                     }
                                     active_channel = Some(channel_id.clone());
+                                    *active_channel_for_reports.write().await = active_channel.clone();
                                     if let Ok(mut mode) = active_channel_audio_mode.write() {
                                         *mode = ChannelAudioMode {
                                             opus_profile: state
@@ -2839,6 +2896,7 @@ async fn connect_and_run_session(
                                 }
                             }
                             active_channel = None;
+                            *active_channel_for_reports.write().await = None;
                             if let Ok(mut mode) = active_channel_audio_mode.write() {
                                 *mode = ChannelAudioMode::default();
                             }

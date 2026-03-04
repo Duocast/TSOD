@@ -102,6 +102,9 @@ enum Command {
         #[allow(dead_code)]
         timeout: Duration,
     },
+    SendNoResponse {
+        payload: pb::client_to_server::Payload,
+    },
     Shutdown,
 }
 
@@ -574,6 +577,14 @@ impl ControlDispatcher {
     pub async fn shutdown(&self) {
         let _ = self.inner.cmd_tx.send(Command::Shutdown).await;
     }
+
+    pub async fn send_no_response(&self, payload: pb::client_to_server::Payload) -> Result<()> {
+        self.inner
+            .cmd_tx
+            .send(Command::SendNoResponse { payload })
+            .await
+            .map_err(|_| anyhow!("dispatcher stopped"))
+    }
 }
 
 /// Dispatcher task: owns send/recv streams.
@@ -650,6 +661,21 @@ async fn dispatcher_task(
                         let session_id = inner.session_id.read().await.clone();
                         let msg = pb::ClientToServer {
                             request_id: Some(pb::RequestId { value: rid }),
+                            session_id,
+                            sent_at: Some(now_ts()),
+                            payload: Some(payload),
+                        };
+
+                        if let Err(e) = write_delimited(&mut send, &msg).await {
+                            let _ = ui_log_tx.send(format!("[dispatcher] exiting: control send failed ({e:?})"));
+                            fail_all_pending(&pending).await;
+                            break;
+                        }
+                    }
+                    Some(Command::SendNoResponse { payload }) => {
+                        let session_id = inner.session_id.read().await.clone();
+                        let msg = pb::ClientToServer {
+                            request_id: None,
                             session_id,
                             sent_at: Some(now_ts()),
                             payload: Some(payload),
