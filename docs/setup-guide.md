@@ -497,10 +497,22 @@ sudo apt install -y \
   libssl-dev \
   libopus-dev \
   libasound2-dev \
+  pipewire \
+  pipewire-audio \
+  wireplumber \
   protobuf-compiler \
   git \
   curl
 ```
+
+> **PipeWire requirement:** Desktop Linux audio capture/playback should run through
+> PipeWire. If your distro uses PulseAudio by default, install PipeWire and
+> ensure the user audio session is active:
+>
+> ```bash
+> systemctl --user --now enable pipewire pipewire-pulse wireplumber
+> systemctl --user status pipewire wireplumber --no-pager
+> ```
 
 Install Rust:
 
