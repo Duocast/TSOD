@@ -215,9 +215,9 @@ impl eframe::App for VpApp {
         // Drain backend events
         self.drain_events();
 
-        // Request continuous repaint for real-time views (connection telemetry or mic test)
+        // Request continuous repaint for real-time views (voice meters, telemetry, mic test)
         if self.model.connected || self.model.loopback_active {
-            ctx.request_repaint_after(std::time::Duration::from_millis(33));
+            ctx.request_repaint_after(std::time::Duration::from_millis(16));
         }
 
         // Apply UI scale from settings.
