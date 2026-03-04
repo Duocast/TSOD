@@ -144,7 +144,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                 } else {
                     theme::text_color()
                 };
-                let mute_icon = if model.self_muted { "🎤" } else { "🎙" };
+                let mute_icon = "🎤";
 
                 let mute_btn = ui.add_enabled_ui(in_voice_channel, |ui| {
                     ui.add_sized(
