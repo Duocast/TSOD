@@ -572,12 +572,14 @@ fn apply_resampler_mode(mode: DspMethod) {
 }
 
 fn select_gui_renderer() -> eframe::Renderer {
+    let default_renderer = eframe::Renderer::Wgpu;
     match std::env::var("VP_GUI_RENDERER") {
         Ok(value) => {
             let normalized = value.trim().to_ascii_lowercase();
             let alias = match normalized.as_str() {
                 "gl" | "opengl" => "glow",
                 "gpu" | "hardware" => "wgpu",
+                "auto" | "default" => "wgpu",
                 other => other,
             };
 
@@ -587,17 +589,14 @@ fn select_gui_renderer() -> eframe::Renderer {
                     renderer
                 }
                 Err(_) => {
-                    let fallback = eframe::Renderer::default();
                     warn!(
-                        "[gui] unsupported VP_GUI_RENDERER value '{value}'; falling back to default renderer ({fallback})"
+                        "[gui] unsupported VP_GUI_RENDERER value '{value}'; falling back to renderer ({default_renderer})"
                     );
-                    fallback
+                    default_renderer
                 }
             }
         }
-        Err(_) => {
-            eframe::Renderer::default()
-        }
+        Err(_) => default_renderer,
     }
 }
 
