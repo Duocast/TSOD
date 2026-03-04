@@ -198,6 +198,7 @@ message ServerToClient {
 
     // Telemetry
     Pong pong = 55;
+    VoiceTelemetryPush voice_telemetry_push = 56;
 
     // Server-side guidance
     ServerHint server_hint = 70;

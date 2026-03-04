@@ -3,6 +3,7 @@ syntax = "proto3";
 package voiceplatform.v1;
 
 import "common.proto";
+import "user.proto";
 
 option go_package = "github.com/yourorg/voiceplatform/proto/gen/go/voiceplatform/v1;voiceplatformv1";
 
@@ -51,4 +52,15 @@ message StreamReceiverReport {
   uint32 frames_decoded = 8;
   uint32 frames_dropped = 9;
   uint32 freeze_events = 10;
+}
+
+message VoiceTelemetryPush {
+  UserId user_id = 1;
+  ChannelId channel_id = 2;
+  float loss_rate = 3;
+  uint32 rtt_ms = 4;
+  uint32 jitter_ms = 5;
+  uint32 goodput_bps = 6;
+  uint32 playout_delay_ms = 7;
+  Timestamp observed_at = 8;
 }

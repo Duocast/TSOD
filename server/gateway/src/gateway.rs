@@ -19,7 +19,10 @@ use crate::{
     frame::{read_delimited, write_delimited},
     media::MediaService,
     proto::voiceplatform::v1 as pb,
-    state::{MembershipCache, PushHub, QuinnDatagramTx, Sessions},
+    state::{
+        MembershipCache, PushHub, QuinnDatagramTx, Sessions, VoiceTelemetryCache,
+        VoiceTelemetrySample,
+    },
 };
 
 use vp_control::ids::{ChannelId, ServerId, UserId};
@@ -39,6 +42,7 @@ pub struct Gateway {
     sessions: Sessions,
     push: PushHub,
     membership: MembershipCache,
+    telemetry: VoiceTelemetryCache,
     voice: Arc<VoiceForwarder>,
     video: Arc<StreamForwarder>,
     media: Arc<MediaService>,
@@ -53,6 +57,7 @@ impl Gateway {
         sessions: Sessions,
         push: PushHub,
         membership: MembershipCache,
+        telemetry: VoiceTelemetryCache,
         voice: Arc<VoiceForwarder>,
         video: Arc<StreamForwarder>,
         media: Arc<MediaService>,
@@ -64,6 +69,7 @@ impl Gateway {
             sessions,
             push,
             membership,
+            telemetry,
             voice,
             video,
             media,
@@ -170,6 +176,7 @@ impl Gateway {
             });
             self.push.unregister(user_id, &session_id);
             self.sessions.unregister(user_id, &session_id);
+            self.telemetry.remove(user_id);
         }
 
         // Datagram recv loop: dispatch voice vs video by kind byte.
@@ -1099,6 +1106,40 @@ impl Gateway {
                                 error: None,
                                 event_seq: 0,
                                 payload: Some(pb::server_to_client::Payload::RequestRecovery(pb::RequestRecovery { stream_tag: r.stream_tag })),
+                            }).await;
+                        }
+                    }
+                }
+                Some(pb::client_to_server::Payload::VoiceReceiverReport(r)) => {
+                    let channel_id = parse_channel_id(r.channel_id.as_ref())?;
+                    let observed_at = now_ts();
+                    let sample = VoiceTelemetrySample {
+                        loss_rate: r.loss_rate.clamp(0.0, 1.0),
+                        rtt_ms: r.rtt_ms,
+                        jitter_ms: r.jitter_ms,
+                        goodput_bps: r.goodput_bps,
+                        playout_delay_ms: r.playout_delay_ms,
+                    };
+                    self.telemetry.upsert(user_id, sample.clone());
+
+                    if let Some(members) = self.membership.members_of(channel_id) {
+                        for target_user in members {
+                            self.push.send_to(target_user, pb::ServerToClient {
+                                request_id: None,
+                                session_id: None,
+                                sent_at: Some(now_ts()),
+                                error: None,
+                                event_seq: 0,
+                                payload: Some(pb::server_to_client::Payload::VoiceTelemetryPush(pb::VoiceTelemetryPush {
+                                    user_id: Some(pb::UserId { value: user_id.0.to_string() }),
+                                    channel_id: Some(pb::ChannelId { value: channel_id.0.to_string() }),
+                                    loss_rate: sample.loss_rate,
+                                    rtt_ms: sample.rtt_ms,
+                                    jitter_ms: sample.jitter_ms,
+                                    goodput_bps: sample.goodput_bps,
+                                    playout_delay_ms: sample.playout_delay_ms,
+                                    observed_at: Some(observed_at),
+                                })),
                             }).await;
                         }
                     }
