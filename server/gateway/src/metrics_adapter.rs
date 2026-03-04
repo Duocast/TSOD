@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use vp_media::{
+    datagram_send_policy::DatagramSendPolicyMetrics,
     stream_forwarder::{StreamDropReason, StreamMetrics},
     voice_forwarder::VoiceMetrics,
 };
@@ -46,6 +47,26 @@ impl VoiceMetrics for GatewayVoiceMetrics {
     }
 }
 
+impl DatagramSendPolicyMetrics for GatewayVoiceMetrics {
+    fn inc_no_datagrams(&self) {
+        self.inner.drop_reason("no_datagrams");
+    }
+    fn inc_oversize_drop(&self) {
+        self.inner.drop_reason("oversize_drop");
+    }
+    fn inc_conn_lost(&self) {
+        self.inner.drop_reason("conn_lost");
+    }
+    fn inc_send_err_other(&self) {
+        self.inner.drop_reason("send_err_other");
+    }
+    fn inc_prune_evt_dropped(&self) {
+        self.inner.drop_reason("prune_evt_dropped");
+    }
+    fn inc_video_dropped_due_to_space(&self) {
+        self.inner.drop_reason("video_dropped_due_to_space");
+    }
+}
 pub fn stream_metrics() -> Arc<dyn StreamMetrics> {
     Arc::new(GatewayStreamMetrics {
         inner: StreamMetricsImpl::new("vp", LabelPolicy::default()),

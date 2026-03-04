@@ -30,8 +30,8 @@ use crate::metrics_adapter::{stream_metrics, voice_metrics};
 use crate::outbox_dispatch::{run_outbox_dispatcher, OutboxDispatcherConfig};
 use crate::state::{MembershipCache, PushHub, Sessions, VoiceTelemetryCache};
 
-const QUIC_DATAGRAM_RECV_BUFFER_SIZE: usize = vp_voice::APP_MEDIA_MTU;
-const QUIC_DATAGRAM_SEND_BUFFER_SIZE: usize = 1024 * 1024;
+const QUIC_DATAGRAM_RECV_BUFFER_SIZE: usize = vp_voice::QUIC_MAX_DATAGRAM_BYTES;
+const QUIC_DATAGRAM_SEND_BUFFER_SIZE: usize = 128 * 1024; // keep explicit latency budget; avoid turning send buffer into hidden queue latency
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -82,12 +82,15 @@ async fn main() -> Result<()> {
     let membership = MembershipCache::new();
     let telemetry = VoiceTelemetryCache::new();
 
+    let (prune_tx, _prune_rx) = tokio::sync::mpsc::channel(1024);
+
     // Voice forwarder
     let forwarder = Arc::new(vp_media::voice_forwarder::VoiceForwarder::new(
         vp_media::voice_forwarder::VoiceForwarderConfig::default(),
         Arc::new(sessions.clone()),
         Arc::new(membership.clone()),
         voice_metrics(),
+        prune_tx.clone(),
     ));
 
     // Video/screenshare stream forwarder (SFU)
@@ -186,6 +189,7 @@ async fn main() -> Result<()> {
         forwarder,
         stream_forwarder,
         media,
+        prune_tx,
     );
 
     tokio::select! {

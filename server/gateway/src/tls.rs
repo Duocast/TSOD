@@ -74,5 +74,8 @@ fn generate_self_signed(extra_self_signed_sans: &[String]) -> Result<rcgen::Cert
 
     let key_pair = KeyPair::generate()?;
     let cert = params.self_signed(&key_pair)?;
-    Ok(rcgen::CertifiedKey { cert, signing_key: key_pair })
+    Ok(rcgen::CertifiedKey {
+        cert,
+        signing_key: key_pair,
+    })
 }

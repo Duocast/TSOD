@@ -9,6 +9,7 @@ async-trait = "0.1.89"
 bytes = "1.11.1"
 tokio = { version = "1.49", features = ["rt-multi-thread", "macros", "time", "sync"] }
 tracing = "0.1.44"
+quinn = "0.11.9"
 
 vp-control = { path = "../control" }
 vp-voice = { path = "../../shared/voice" }
