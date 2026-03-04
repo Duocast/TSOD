@@ -53,6 +53,10 @@ pub enum PushEvent {
         hint: pb::ServerHint,
         event_seq: u64,
     },
+    VoiceTelemetry {
+        event: pb::VoiceTelemetryPush,
+        event_seq: u64,
+    },
     Poke {
         event: pb::PokeEvent,
         event_seq: u64,
@@ -719,6 +723,12 @@ fn classify_push(msg: pb::ServerToClient) -> PushEvent {
             hint: h,
             event_seq: msg.event_seq,
         },
+        Some(pb::server_to_client::Payload::VoiceTelemetryPush(event)) => {
+            PushEvent::VoiceTelemetry {
+                event,
+                event_seq: msg.event_seq,
+            }
+        }
         Some(pb::server_to_client::Payload::PokeEvent(e)) => PushEvent::Poke {
             event: e,
             event_seq: msg.event_seq,

@@ -2181,6 +2181,25 @@ async fn connect_and_run_session(
                             });
                         }
                     }
+                    PushEvent::VoiceTelemetry { event, event_seq } => {
+                        maybe_note_event_gap(&tx_event, event_seq);
+                        if !should_apply_event_seq(&tx_event, &mut last_event_seq, event_seq) {
+                            continue;
+                        }
+                        if let Some(user_id) = event.user_id {
+                            let _ = tx_event.send(UiEvent::MemberTelemetryUpdate {
+                                user_id: user_id.value,
+                                telemetry: ui::model::TelemetryData {
+                                    rtt_ms: event.rtt_ms,
+                                    loss_rate: event.loss_rate,
+                                    jitter_ms: event.jitter_ms,
+                                    rx_bitrate_bps: event.goodput_bps,
+                                    playout_delay_ms: event.playout_delay_ms,
+                                    ..Default::default()
+                                },
+                            });
+                        }
+                    }
                     PushEvent::ServerHint { hint: h, event_seq } => {
                         maybe_note_event_gap(&tx_event, event_seq);
                         if !should_apply_event_seq(&tx_event, &mut last_event_seq, event_seq) {

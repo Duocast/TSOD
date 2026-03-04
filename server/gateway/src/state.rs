@@ -64,6 +64,36 @@ impl PushHub {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct VoiceTelemetrySample {
+    pub loss_rate: f32,
+    pub rtt_ms: u32,
+    pub jitter_ms: u32,
+    pub goodput_bps: u32,
+    pub playout_delay_ms: u32,
+}
+
+#[derive(Clone)]
+pub struct VoiceTelemetryCache {
+    inner: Arc<DashMap<UserId, VoiceTelemetrySample>>,
+}
+
+impl VoiceTelemetryCache {
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(DashMap::new()),
+        }
+    }
+
+    pub fn upsert(&self, user_id: UserId, sample: VoiceTelemetrySample) {
+        self.inner.insert(user_id, sample);
+    }
+
+    pub fn remove(&self, user_id: UserId) {
+        self.inner.remove(&user_id);
+    }
+}
+
 pub fn channel_route_key(channel_id: ChannelId) -> u32 {
     vp_route_hash::channel_route_hash(channel_id.0)
 }

@@ -252,6 +252,10 @@ pub enum UiEvent {
 
     // Telemetry
     TelemetryUpdate(TelemetryData),
+    MemberTelemetryUpdate {
+        user_id: String,
+        telemetry: TelemetryData,
+    },
 
     // Poke
     PokeReceived {
@@ -1311,6 +1315,7 @@ pub struct UiModel {
 
     // Telemetry
     pub telemetry: TelemetryData,
+    pub member_telemetry: HashMap<String, TelemetryData>,
 
     // UI toggles
     pub show_settings: bool,
@@ -1629,6 +1634,7 @@ impl Default for UiModel {
             member_last_active_at: HashMap::new(),
             log: VecDeque::new(),
             telemetry: TelemetryData::default(),
+            member_telemetry: HashMap::new(),
             show_settings: false,
             show_telemetry: false,
             show_connections: false,
@@ -1754,11 +1760,16 @@ impl UiModel {
     }
 
     pub fn open_member_connection_info_window(&mut self, user_id: String, display_name: String) {
+        let telemetry = self
+            .member_telemetry
+            .get(&user_id)
+            .cloned()
+            .unwrap_or_else(|| self.telemetry.clone());
         self.member_connection_info_windows
             .push(MemberConnectionInfoWindow {
                 user_id,
                 display_name,
-                telemetry: self.telemetry.clone(),
+                telemetry,
                 connection_host: self.connection_host_draft.clone(),
             });
     }
@@ -1989,6 +2000,7 @@ impl UiModel {
                 if let Some(members) = self.members.get_mut(&channel_id) {
                     members.retain(|m| m.user_id != user_id);
                 }
+                self.member_telemetry.remove(&user_id);
                 if user_id == self.user_id
                     && self
                         .selected_channel
@@ -2047,9 +2059,15 @@ impl UiModel {
                 self.voice_levels.insert(user_id, level.clamp(0.0, 1.0));
             }
             UiEvent::TelemetryUpdate(t) => {
-                self.telemetry = t.clone();
+                self.telemetry = t;
+            }
+            UiEvent::MemberTelemetryUpdate { user_id, telemetry } => {
+                self.member_telemetry
+                    .insert(user_id.clone(), telemetry.clone());
                 for window in &mut self.member_connection_info_windows {
-                    window.telemetry = t.clone();
+                    if window.user_id == user_id {
+                        window.telemetry = telemetry.clone();
+                    }
                 }
             }
             UiEvent::PokeReceived { from_name, message } => {
@@ -2423,7 +2441,7 @@ mod tests {
     }
 
     #[test]
-    fn telemetry_update_refreshes_open_member_connection_info_windows() {
+    fn member_telemetry_update_refreshes_open_member_connection_info_windows() {
         let mut model = UiModel::new();
         model.open_member_connection_info_window("user-a".into(), "Alice".into());
 
@@ -2432,10 +2450,14 @@ mod tests {
         update.loss_rate = 0.125;
         update.jitter_ms = 11;
 
-        model.apply_event(UiEvent::TelemetryUpdate(update.clone()));
+        model.apply_event(UiEvent::MemberTelemetryUpdate {
+            user_id: "user-a".into(),
+            telemetry: update.clone(),
+        });
 
-        assert_eq!(model.telemetry.rtt_ms, 77);
-        assert_eq!(model.telemetry.loss_rate, 0.125);
+        assert_eq!(model.telemetry.rtt_ms, 0);
+        assert_eq!(model.telemetry.loss_rate, 0.0);
+        assert_eq!(model.member_telemetry["user-a"].rtt_ms, 77);
         assert_eq!(model.member_connection_info_windows.len(), 1);
         assert_eq!(model.member_connection_info_windows[0].telemetry.rtt_ms, 77);
         assert_eq!(

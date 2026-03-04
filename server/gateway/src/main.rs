@@ -28,7 +28,7 @@ use vp_metrics::{MetricsConfig, MetricsServer};
 use crate::auth::DeviceAuthProvider;
 use crate::metrics_adapter::{stream_metrics, voice_metrics};
 use crate::outbox_dispatch::{run_outbox_dispatcher, OutboxDispatcherConfig};
-use crate::state::{MembershipCache, PushHub, Sessions};
+use crate::state::{MembershipCache, PushHub, Sessions, VoiceTelemetryCache};
 
 const QUIC_DATAGRAM_RECV_BUFFER_SIZE: usize = vp_voice::APP_MEDIA_MTU;
 const QUIC_DATAGRAM_SEND_BUFFER_SIZE: usize = 1024 * 1024;
@@ -80,6 +80,7 @@ async fn main() -> Result<()> {
     let push = PushHub::new();
     let sessions = Sessions::new();
     let membership = MembershipCache::new();
+    let telemetry = VoiceTelemetryCache::new();
 
     // Voice forwarder
     let forwarder = Arc::new(vp_media::voice_forwarder::VoiceForwarder::new(
@@ -181,6 +182,7 @@ async fn main() -> Result<()> {
         sessions,
         push,
         membership,
+        telemetry,
         forwarder,
         stream_forwarder,
         media,
