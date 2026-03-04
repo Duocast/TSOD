@@ -204,12 +204,10 @@ impl VpApp {
 }
 
 impl eframe::App for VpApp {
-    fn on_exit(&mut self) {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.persist_settings_if_dirty();
         self.signal_quit();
     }
-
-    fn ui(&mut self, _ui: &mut egui::Ui, _frame: &mut eframe::Frame) {}
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Drain backend events
