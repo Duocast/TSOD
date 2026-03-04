@@ -8,6 +8,7 @@ use eframe::egui;
 
 pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>) {
     ui.heading("Members");
+
     ui.separator();
 
     let members = model.current_members().to_vec();
