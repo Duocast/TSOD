@@ -40,7 +40,7 @@ use std::sync::{
 #[cfg(debug_assertions)]
 use std::sync::{Mutex as StdMutex, OnceLock};
 use tokio::sync::{mpsc, watch, Mutex, RwLock};
-use tokio::time::{sleep, Duration, Instant};
+use tokio::time::{sleep, Duration, Instant, MissedTickBehavior};
 use tracing::{debug, info, warn, Level};
 use tracing_subscriber::EnvFilter;
 use ui::model::AudioDeviceId;
@@ -4432,6 +4432,9 @@ async fn voice_recv_loop(
 
     let mut streams = HashMap::<StreamKey, InboundStreamState>::new();
     let mut tick = tokio::time::interval(Duration::from_millis(frame_ms as u64));
+    // Prevent long scheduler pauses from triggering a catch-up burst of immediate
+    // ticks, which can drain the jitter buffer and inflate apparent packet loss.
+    tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut mix_out = vec![0f32; frame_samples];
     let mut mixed_pcm = vec![0i16; frame_samples];
     let mut last_logged_fec_mode = None::<FecMode>;
