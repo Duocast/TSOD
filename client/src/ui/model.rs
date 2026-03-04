@@ -5,6 +5,7 @@ use tracing::debug;
 
 use crate::audio::dsp::agc::AgcPreset;
 use crate::ui::widgets::cosmic_chat_composer::ChatComposer;
+use eframe::egui;
 
 /// Maximum number of chat messages to retain per channel.
 const MAX_MESSAGES_PER_CHANNEL: usize = 500;
@@ -1369,6 +1370,8 @@ pub struct UiModel {
     pub start_share_in_flight: bool,
     pub stream_debug: StreamDebugView,
     pub latest_stream_frame: Option<StreamFrameView>,
+    pub latest_stream_frame_texture: Option<egui::TextureHandle>,
+    pub latest_stream_frame_key: Option<(u64, u32)>,
     pub show_stream_stats: bool,
     pub avatar_path_draft: String,
     pub show_poke_dialog: bool,
@@ -1675,6 +1678,8 @@ impl Default for UiModel {
             start_share_in_flight: false,
             stream_debug: StreamDebugView::default(),
             latest_stream_frame: None,
+            latest_stream_frame_texture: None,
+            latest_stream_frame_key: None,
             show_stream_stats: false,
             avatar_path_draft: String::new(),
             show_poke_dialog: false,
@@ -1812,6 +1817,7 @@ impl UiModel {
             }
             UiEvent::StreamFrame(frame) => {
                 self.latest_stream_frame = Some(frame);
+                self.latest_stream_frame_key = None;
             }
             UiEvent::SetAwayMessage(message) => {
                 self.away_message = message.clone();
