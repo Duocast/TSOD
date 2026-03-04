@@ -91,7 +91,7 @@ impl Playout {
         let _ = &self.backend;
         let mut prod = self.prod.lock();
         for &s in pcm {
-            let _ = prod.try_push(s);
+            prod.push_overwrite(s);
         }
     }
 
