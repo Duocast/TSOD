@@ -205,14 +205,7 @@ impl VpApp {
 }
 
 impl eframe::App for VpApp {
-    #[cfg(feature = "glow")]
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        self.persist_settings_if_dirty();
-        self.signal_quit();
-    }
-
-    #[cfg(not(feature = "glow"))]
-    fn on_exit(&mut self) {
         self.persist_settings_if_dirty();
         self.signal_quit();
     }
