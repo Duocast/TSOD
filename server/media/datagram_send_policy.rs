@@ -1,20 +1,49 @@
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering},
     OnceLock,
 };
 use std::time::Instant;
 
 use bytes::Bytes;
 use tokio::sync::mpsc;
-use vp_control::ids::ChannelId;
+use vp_control::ids::{ChannelId, UserId};
 
 pub const PRUNE_DEBOUNCE_MS: u64 = 1_000;
 pub const VIDEO_HEADROOM: usize = 1200;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PruneEvt {
-    pub channel_id: ChannelId,
-    pub session_id: String,
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PruneReason {
+    Backpressure = 1,
+    ProtocolError = 2,
+    HeartbeatTimeout = 3,
+    TransportClosed = 4,
+}
+
+impl PruneReason {
+    pub fn is_definitive(self) -> bool {
+        matches!(self, Self::HeartbeatTimeout | Self::TransportClosed)
+    }
+}
+
+pub struct PruneState {
+    pub pending: AtomicBool,
+    pub reason: AtomicU8,
+    pub epoch: AtomicU64,
+    pub suspect_since_ms: AtomicU64,
+    pub last_log_ms: AtomicU64,
+}
+
+impl Default for PruneState {
+    fn default() -> Self {
+        Self {
+            pending: AtomicBool::new(false),
+            reason: AtomicU8::new(PruneReason::Backpressure as u8),
+            epoch: AtomicU64::new(0),
+            suspect_since_ms: AtomicU64::new(0),
+            last_log_ms: AtomicU64::new(0),
+        }
+    }
 }
 
 pub trait DatagramSendPolicyMetrics: Send + Sync {
@@ -27,17 +56,21 @@ pub trait DatagramSendPolicyMetrics: Send + Sync {
 }
 
 pub struct SessionSendCtx {
+    pub user_id: UserId,
     pub session_id: String,
     pub conn: quinn::Connection,
     pub last_prune_ms: AtomicU64,
+    pub prune: PruneState,
 }
 
 impl SessionSendCtx {
-    pub fn new(session_id: String, conn: quinn::Connection) -> Self {
+    pub fn new(user_id: UserId, session_id: String, conn: quinn::Connection) -> Self {
         Self {
+            user_id,
             session_id,
             conn,
             last_prune_ms: AtomicU64::new(0),
+            prune: PruneState::default(),
         }
     }
 
@@ -46,10 +79,10 @@ impl SessionSendCtx {
         now_ms: u64,
         channel_id: ChannelId,
         pkt: Bytes,
-        prune_tx: &mpsc::Sender<PruneEvt>,
+        prune_wake_tx: &mpsc::Sender<()>,
         metrics: &dyn DatagramSendPolicyMetrics,
     ) {
-        self.send_inner(now_ms, channel_id, pkt, prune_tx, metrics);
+        self.send_inner(now_ms, channel_id, pkt, prune_wake_tx, metrics);
     }
 
     pub fn send_video_best_effort(
@@ -57,14 +90,14 @@ impl SessionSendCtx {
         now_ms: u64,
         channel_id: ChannelId,
         pkt: Bytes,
-        prune_tx: &mpsc::Sender<PruneEvt>,
+        prune_wake_tx: &mpsc::Sender<()>,
         metrics: &dyn DatagramSendPolicyMetrics,
     ) {
         if self.conn.datagram_send_buffer_space() < pkt.len().saturating_add(VIDEO_HEADROOM) {
             metrics.inc_video_dropped_due_to_space();
             return;
         }
-        self.send_inner(now_ms, channel_id, pkt, prune_tx, metrics);
+        self.send_inner(now_ms, channel_id, pkt, prune_wake_tx, metrics);
     }
 
     fn send_inner(
@@ -72,7 +105,7 @@ impl SessionSendCtx {
         now_ms: u64,
         channel_id: ChannelId,
         pkt: Bytes,
-        prune_tx: &mpsc::Sender<PruneEvt>,
+        prune_wake_tx: &mpsc::Sender<()>,
         metrics: &dyn DatagramSendPolicyMetrics,
     ) {
         let Some(max) = self.conn.max_datagram_size() else {
@@ -89,12 +122,64 @@ impl SessionSendCtx {
             Err(quinn::SendDatagramError::TooLarge) => metrics.inc_oversize_drop(),
             Err(quinn::SendDatagramError::ConnectionLost(_)) => {
                 metrics.inc_conn_lost();
-                maybe_prune(self, now_ms, channel_id, prune_tx, metrics);
+                maybe_prune(
+                    self,
+                    now_ms,
+                    channel_id,
+                    PruneReason::TransportClosed,
+                    prune_wake_tx,
+                    metrics,
+                );
             }
             Err(_) => {
                 metrics.inc_send_err_other();
-                maybe_prune(self, now_ms, channel_id, prune_tx, metrics);
+                maybe_prune(
+                    self,
+                    now_ms,
+                    channel_id,
+                    PruneReason::Backpressure,
+                    prune_wake_tx,
+                    metrics,
+                );
             }
+        }
+    }
+
+    pub fn request_prune(
+        &self,
+        now_ms: u64,
+        reason: PruneReason,
+        prune_wake_tx: &mpsc::Sender<()>,
+        metrics: &dyn DatagramSendPolicyMetrics,
+    ) {
+        loop {
+            let current = self.prune.reason.load(Ordering::Relaxed);
+            if current >= reason as u8 {
+                break;
+            }
+            if self
+                .prune
+                .reason
+                .compare_exchange(current, reason as u8, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
+                break;
+            }
+        }
+        self.prune.epoch.fetch_add(1, Ordering::Relaxed);
+        let prev_log = self.prune.last_log_ms.load(Ordering::Relaxed);
+        if now_ms.saturating_sub(prev_log) >= 10_000
+            && self
+                .prune
+                .last_log_ms
+                .compare_exchange(prev_log, now_ms, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+        {
+            tracing::debug!(session_id = %self.session_id, user_id = %self.user_id.0, ?reason, "prune hint requested");
+        }
+        if !self.prune.pending.swap(true, Ordering::Relaxed) && prune_wake_tx.try_send(()).is_err()
+        {
+            metrics.inc_prune_evt_dropped();
         }
     }
 }
@@ -117,22 +202,15 @@ pub fn should_prune(last_prune_ms: &AtomicU64, now_ms: u64) -> bool {
 pub fn maybe_prune(
     ctx: &SessionSendCtx,
     now_ms: u64,
-    channel_id: ChannelId,
-    prune_tx: &mpsc::Sender<PruneEvt>,
+    _channel_id: ChannelId,
+    reason: PruneReason,
+    prune_wake_tx: &mpsc::Sender<()>,
     metrics: &dyn DatagramSendPolicyMetrics,
 ) {
     if !should_prune(&ctx.last_prune_ms, now_ms) {
         return;
     }
-    if prune_tx
-        .try_send(PruneEvt {
-            channel_id,
-            session_id: ctx.session_id.clone(),
-        })
-        .is_err()
-    {
-        metrics.inc_prune_evt_dropped();
-    }
+    ctx.request_prune(now_ms, reason, prune_wake_tx, metrics);
 }
 
 pub fn now_ms() -> u64 {
@@ -175,12 +253,14 @@ mod tests {
 
     #[tokio::test]
     async fn maybe_prune_try_send_failure_does_not_panic() {
-        let metrics = TestMetrics { dropped: AtomicU64::new(0) };
+        let metrics = TestMetrics {
+            dropped: AtomicU64::new(0),
+        };
         let (tx, rx) = mpsc::channel(1);
         drop(rx);
         let last = AtomicU64::new(0);
         if should_prune(&last, PRUNE_DEBOUNCE_MS) {
-            let _ = tx.try_send(PruneEvt { channel_id: ChannelId::new(), session_id: "s".into() });
+            let _ = tx.try_send(());
         }
         assert_eq!(metrics.dropped.load(Ordering::Relaxed), 0);
     }

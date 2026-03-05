@@ -126,6 +126,44 @@ impl SessionMap {
             self.inner.remove(&key);
         }
     }
+
+    pub fn pending_sessions(&self, max: usize) -> Vec<(UserId, String, Arc<SessionSendCtx>)> {
+        self.inner
+            .iter()
+            .filter(|entry| {
+                entry
+                    .value()
+                    .prune
+                    .pending
+                    .load(std::sync::atomic::Ordering::Relaxed)
+            })
+            .take(max)
+            .map(|entry| (entry.key().0, entry.key().1.clone(), entry.value().clone()))
+            .collect()
+    }
+
+    pub fn has_pending(&self) -> bool {
+        self.inner.iter().any(|entry| {
+            entry
+                .value()
+                .prune
+                .pending
+                .load(std::sync::atomic::Ordering::Relaxed)
+        })
+    }
+
+    pub fn pending_count(&self) -> usize {
+        self.inner
+            .iter()
+            .filter(|entry| {
+                entry
+                    .value()
+                    .prune
+                    .pending
+                    .load(std::sync::atomic::Ordering::Relaxed)
+            })
+            .count()
+    }
 }
 
 #[async_trait::async_trait]

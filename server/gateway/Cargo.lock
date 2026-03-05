@@ -2946,6 +2946,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "infer",
+ "metrics",
  "prost",
  "prost-build",
  "quinn",
