@@ -3290,8 +3290,17 @@ async fn connect_and_run_session(
                                                         if let Err(e) = sender.send_frame_async(ts_ms, frame_idx % 60 == 0, &synthetic, |dg| {
                                                             let dg_len = dg.len() as u64;
                                                             let _ = dg_len;
-                                                            if egress_send.enqueue_video_fragment(stream_tag, frame_idx, frame_idx % 60 == 0, std::time::Instant::now(), dg).is_ok() {
-                                                                video_counters.video_tx_datagrams.fetch_add(1, Ordering::Relaxed);
+                                                            match egress_send.enqueue_video_fragment(stream_tag, frame_idx, frame_idx % 60 == 0, std::time::Instant::now(), dg) {
+                                                                Ok(report) => {
+                                                                    video_counters.video_tx_datagrams.fetch_add(1, Ordering::Relaxed);
+                                                                    if let Some(dropped) = report.dropped {
+                                                                        video_counters.video_tx_drop_queue_full.fetch_add(dropped.count as u64, Ordering::Relaxed);
+                                                                    }
+                                                                }
+                                                                Err(reason) => {
+                                                                    video_counters.video_tx_drop_deadline.fetch_add(1, Ordering::Relaxed);
+                                                                    warn!(?reason, stream_tag, frame_idx, "[video] enqueue rejected");
+                                                                }
                                                             }
                                                         }).await {
                                                             video_counters.sender_frame_errors.fetch_add(1, Ordering::Relaxed);
@@ -4400,11 +4409,19 @@ async fn voice_send_loop(
             .tx_bytes
             .fetch_add(d.len() as u64, Ordering::Relaxed);
 
-        if egress.enqueue_voice(d).is_err() {
-            send_queue_drop_count.fetch_add(1, Ordering::Relaxed);
-            let _ = tx_event.send(UiEvent::AppendLog(
-                "[voice] egress queue full; dropped voice datagram".into(),
-            ));
+        match egress.enqueue_voice(d) {
+            Ok(report) => {
+                if let Some(dropped) = report.dropped {
+                    send_queue_drop_count.fetch_add(dropped.count, Ordering::Relaxed);
+                }
+            }
+            Err(reason) => {
+                send_queue_drop_count.fetch_add(1, Ordering::Relaxed);
+                let _ = tx_event.send(UiEvent::AppendLog(format!(
+                    "[voice] egress enqueue rejected: {:?}",
+                    reason
+                )));
+            }
         }
     }
 }

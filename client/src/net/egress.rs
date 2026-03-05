@@ -60,6 +60,19 @@ pub enum DropReason {
     QueueFullVoice,
     QueueFullVideo,
     DeadlineVideo,
+    RejectedVideoBounds,
+    VoiceQueueDisabled,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct DroppedDatagrams {
+    pub reason: DropReason,
+    pub count: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct EnqueueReport {
+    pub dropped: Option<DroppedDatagrams>,
 }
 
 #[derive(Default)]
@@ -72,6 +85,8 @@ pub struct EgressStats {
     pub blocked_events: AtomicU64,
     pub drop_queue_full_voice: AtomicU64,
     pub drop_queue_full_video: AtomicU64,
+    pub drop_voice_queue_disabled: AtomicU64,
+    pub drop_rejected_video_bounds: AtomicU64,
     pub drop_deadline_video: AtomicU64,
     pub drop_too_large_voice: AtomicU64,
     pub drop_too_large_video: AtomicU64,
@@ -93,6 +108,12 @@ struct VideoFrameQueue {
     total_frags: usize,
     max_frames: usize,
     max_frags: usize,
+}
+
+#[derive(Default)]
+struct BoundsReport {
+    dropped_total_frags: usize,
+    dropped_inserted_frags: usize,
 }
 
 impl VideoFrameQueue {
@@ -134,8 +155,8 @@ impl VideoFrameQueue {
         }
     }
 
-    fn enforce_bounds(&mut self) -> usize {
-        let mut dropped = 0;
+    fn enforce_bounds(&mut self, inserted: FrameKey) -> BoundsReport {
+        let mut report = BoundsReport::default();
         while self.frames.len() > self.max_frames || self.total_frags > self.max_frags {
             let key = self
                 .order
@@ -144,12 +165,16 @@ impl VideoFrameQueue {
                 .find(|k| self.frames.get(k).map(|f| !f.is_keyframe).unwrap_or(false))
                 .or_else(|| self.order.front().copied());
             if let Some(k) = key {
-                dropped += self.drop_frame(k);
+                let dropped = self.drop_frame(k);
+                report.dropped_total_frags += dropped;
+                if k == inserted {
+                    report.dropped_inserted_frags += dropped;
+                }
             } else {
                 break;
             }
         }
-        dropped
+        report
     }
 
     fn drop_expired(&mut self, now: Instant) -> usize {
@@ -243,18 +268,34 @@ impl EgressScheduler {
         self.stats.clone()
     }
 
-    pub fn enqueue_voice(&self, bytes: Bytes) -> Result<(), DropReason> {
+    pub fn enqueue_voice(&self, bytes: Bytes) -> Result<EnqueueReport, DropReason> {
+        if self.cfg.max_queue_voice == 0 {
+            self.stats
+                .drop_voice_queue_disabled
+                .fetch_add(1, Ordering::Relaxed);
+            return Err(DropReason::VoiceQueueDisabled);
+        }
+
         let mut state = self.state.lock().expect("egress queue poisoned");
-        if state.voice.len() >= self.cfg.max_queue_voice {
+        let mut dropped = 0u32;
+        while state.voice.len() >= self.cfg.max_queue_voice {
             state.voice.pop_front();
+            dropped = dropped.saturating_add(1);
+        }
+        if dropped > 0 {
             self.stats
                 .drop_queue_full_voice
-                .fetch_add(1, Ordering::Relaxed);
+                .fetch_add(dropped as u64, Ordering::Relaxed);
         }
         state.voice.push_back(bytes);
         drop(state);
         self.notify.notify_one();
-        Ok(())
+        Ok(EnqueueReport {
+            dropped: (dropped > 0).then_some(DroppedDatagrams {
+                reason: DropReason::QueueFullVoice,
+                count: dropped,
+            }),
+        })
     }
 
     pub fn enqueue_video_fragment(
@@ -264,7 +305,7 @@ impl EgressScheduler {
         is_keyframe: bool,
         capture_ts: Instant,
         bytes: Bytes,
-    ) -> Result<(), DropReason> {
+    ) -> Result<EnqueueReport, DropReason> {
         let deadline = capture_ts + Duration::from_millis(self.cfg.frame_deadline_ms);
         if deadline <= Instant::now() {
             self.stats
@@ -273,18 +314,33 @@ impl EgressScheduler {
             return Err(DropReason::DeadlineVideo);
         }
         let mut state = self.state.lock().expect("egress queue poisoned");
+        let inserted = (stream_tag, frame_seq);
         state
             .video
             .push(stream_tag, frame_seq, is_keyframe, deadline, bytes);
-        let dropped = state.video.enforce_bounds();
-        if dropped > 0 {
+        let bounds = state.video.enforce_bounds(inserted);
+        if bounds.dropped_total_frags > 0 {
             self.stats
                 .drop_queue_full_video
-                .fetch_add(dropped as u64, Ordering::Relaxed);
+                .fetch_add(bounds.dropped_total_frags as u64, Ordering::Relaxed);
         }
         drop(state);
+        let report = EnqueueReport {
+            dropped: (bounds.dropped_total_frags > 0).then_some(DroppedDatagrams {
+                reason: DropReason::QueueFullVideo,
+                count: bounds.dropped_total_frags as u32,
+            }),
+        };
+        // Err(RejectedVideoBounds) may have side-effects: other frames may have been evicted
+        // during bounds enforcement before the inserted frame was rejected.
+        if bounds.dropped_inserted_frags > 0 {
+            self.stats
+                .drop_rejected_video_bounds
+                .fetch_add(bounds.dropped_inserted_frags as u64, Ordering::Relaxed);
+            return Err(DropReason::RejectedVideoBounds);
+        }
         self.notify.notify_one();
-        Ok(())
+        Ok(report)
     }
 
     fn next_item(&self) -> Option<EgressItem> {
@@ -471,7 +527,7 @@ mod tests {
         q.push(1, 1, true, now, Bytes::from_static(b"k"));
         q.push(1, 2, false, now, Bytes::from_static(b"n"));
         q.push(1, 3, true, now, Bytes::from_static(b"k2"));
-        q.enforce_bounds();
+        q.enforce_bounds((1, 3));
         assert!(q.frames.contains_key(&(1, 1)));
         assert!(q.frames.contains_key(&(1, 3)));
         assert!(!q.frames.contains_key(&(1, 2)));
@@ -507,7 +563,7 @@ mod tests {
         q.push(1, 1, false, now, Bytes::from_static(b"a"));
         q.push(1, 1, false, now, Bytes::from_static(b"b"));
         q.push(1, 2, false, now, Bytes::from_static(b"c"));
-        q.enforce_bounds();
+        q.enforce_bounds((1, 2));
         assert!(q.frames.len() <= 2);
         assert!(q.total_frags <= 2);
     }
