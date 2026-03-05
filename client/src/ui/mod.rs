@@ -24,6 +24,8 @@ pub use model::{ConnectionStage, UiEvent, UiIntent, UiModel};
 use crossbeam_channel::{Receiver, Sender};
 use eframe::egui;
 
+use crate::BUILD_VERSION;
+
 fn share_source_card(
     ui: &mut egui::Ui,
     source_id: &str,
@@ -232,7 +234,8 @@ impl eframe::App for VpApp {
         egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.label(egui::RichText::new("TSOD").strong().size(16.0));
-                ui.separator();
+                ui.label(egui::RichText::new(BUILD_VERSION).size(12.0).monospace());
+                ui.add_sized([6.0, 18.0], egui::Separator::default().vertical());
 
                 let conn_text = if self.model.connected {
                     "Connected"
