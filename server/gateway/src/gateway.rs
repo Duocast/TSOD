@@ -30,10 +30,7 @@ use vp_media::datagram_send_policy::SessionSendCtx;
 use vp_media::stream_forwarder::StreamForwarder;
 use vp_media::voice_forwarder::VoiceForwarder;
 
-const CONTROL_STREAM_MAX_MSG: usize = crate::frame::MAX_CONTROL_FRAME_LEN;
-const CONTROL_STREAM_PREFACE_MAGIC: &[u8; 4] = b"CTRL";
-const CONTROL_STREAM_PREFACE_VERSION: u16 = 1;
-const CONTROL_STREAM_HIGH_PRIORITY: i32 = 10;
+const CONTROL_STREAM_MAX_MSG: usize = 256 * 1024; // 256KB
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const VOICE_INGRESS_CAP: usize = 16; // Do not increase without justification; latency risk.
 const VOICE_MAX_AGE: Duration = Duration::from_millis(250);
@@ -133,9 +130,6 @@ impl Gateway {
             .await
             .context("control accept_bi timeout")?
             .context("accept_bi failed")?;
-        send.set_priority(CONTROL_STREAM_HIGH_PRIORITY)
-            .context("set control stream priority")?;
-        read_control_preface(&mut recv).await?;
 
         let (session_id, _hello_caps, auth_challenge) = self.do_hello(&mut send, &mut recv).await?;
         let identity = self
@@ -302,12 +296,10 @@ impl Gateway {
                             video_drops
                         );
                     }
-                    if voice_evictions > 0 || voice_stale > 0 || voice_drain > 0 {
-                        info!(
-                            "[voice] server ingress overflow_evictions/sec={} stale_drops/sec={} drain_drops/sec={} queue_len={}",
-                            voice_evictions, voice_stale, voice_drain, voice_len
-                        );
-                    }
+                    info!(
+                        "[voice] server ingress overflow_evictions/sec={} stale_drops/sec={} drain_drops/sec={} queue_len={}",
+                        voice_evictions, voice_stale, voice_drain, voice_len
+                    );
                     if video_closed > 0 {
                         warn!(
                             video_queue_closed_drops = video_closed,
@@ -357,8 +349,7 @@ impl Gateway {
         let media = self.media.clone();
         let conn_media = conn.clone();
         tokio::spawn(async move {
-            while let Ok((mut send_s, recv_s)) = conn_media.accept_bi().await {
-                let _ = send_s.set_priority(0);
+            while let Ok((send_s, recv_s)) = conn_media.accept_bi().await {
                 let media = media.clone();
                 tokio::spawn(async move {
                     if let Err(e) = media.handle_stream(send_s, recv_s, user_id).await {
@@ -376,7 +367,7 @@ impl Gateway {
                     match push {
                         Some(push_msg) => {
                             debug!(user_id=%user_id.0, "sending server push to client session");
-                            if let Err(e) = write_control_response(&mut send, push_msg).await {
+                            if let Err(e) = write_delimited(&mut send, &push_msg).await {
                                 warn!("control push write failed: {:#}", e);
                                 break;
                             }
@@ -385,21 +376,7 @@ impl Gateway {
                         None => break,
                     }
                 }
-                read = read_delimited(&mut recv, CONTROL_STREAM_MAX_MSG) => {
-                    let env: pb::ControlEnvelope = read?;
-                    match env.payload {
-                        Some(pb::control_envelope::Payload::ControlRequest(msg)) => {
-                            if env.request_id != 0 && env.request_id != msg.request_id.as_ref().map(|r| r.value).unwrap_or(0) {
-                                return Err(anyhow!("control envelope/request_id mismatch"));
-                            }
-                            if let Some(rid) = msg.request_id.as_ref().map(|r| r.value) {
-                                write_control_ack(&mut send, rid).await?;
-                            }
-                            msg
-                        }
-                        _ => return Err(anyhow!("expected ControlRequest envelope")),
-                    }
-                },
+                read = read_delimited(&mut recv, CONTROL_STREAM_MAX_MSG) => read?,
             };
 
             // Ping
@@ -417,7 +394,7 @@ impl Gateway {
                         server_time: Some(now_ts()),
                     })),
                 };
-                if let Err(e) = write_control_response(&mut send, resp).await {
+                if let Err(e) = write_delimited(&mut send, &resp).await {
                     warn!("control write failed: {:#}", e);
                     break;
                 }
@@ -527,7 +504,7 @@ impl Gateway {
                             pb::JoinChannelResponse { state: Some(state) },
                         )),
                     };
-                    if let Err(e) = write_control_response(&mut send, resp).await {
+                    if let Err(e) = write_delimited(&mut send, &resp).await {
                         warn!("control write failed: {:#}", e);
                         break;
                     }
@@ -563,7 +540,7 @@ impl Gateway {
                             },
                         )),
                     };
-                    if let Err(e) = write_control_response(&mut send, resp).await {
+                    if let Err(e) = write_delimited(&mut send, &resp).await {
                         warn!("control write failed: {:#}", e);
                         break;
                     }
@@ -633,7 +610,7 @@ impl Gateway {
                             pb::CreateChannelResponse { state: Some(state) },
                         )),
                     };
-                    if let Err(e) = write_control_response(&mut send, resp).await {
+                    if let Err(e) = write_delimited(&mut send, &resp).await {
                         warn!("control write failed: {:#}", e);
                         break;
                     }
@@ -671,7 +648,7 @@ impl Gateway {
                             },
                         )),
                     };
-                    if let Err(e) = write_control_response(&mut send, resp).await {
+                    if let Err(e) = write_delimited(&mut send, &resp).await {
                         warn!("control write failed: {:#}", e);
                         break;
                     }
@@ -695,7 +672,7 @@ impl Gateway {
                             },
                         )),
                     };
-                    if let Err(e) = write_control_response(&mut send, resp).await {
+                    if let Err(e) = write_delimited(&mut send, &resp).await {
                         warn!("control write failed: {:#}", e);
                         break;
                     }
@@ -742,7 +719,7 @@ impl Gateway {
                         event_seq: 0,
                         payload: None,
                     };
-                    if let Err(e) = write_control_response(&mut send, resp).await {
+                    if let Err(e) = write_delimited(&mut send, &resp).await {
                         warn!("control write failed: {:#}", e);
                         break;
                     }
@@ -795,7 +772,7 @@ impl Gateway {
                         event_seq: 0,
                         payload: None,
                     };
-                    if let Err(e) = write_control_response(&mut send, resp).await {
+                    if let Err(e) = write_delimited(&mut send, &resp).await {
                         warn!("control write failed: {:#}", e);
                         break;
                     }
@@ -823,7 +800,7 @@ impl Gateway {
                             pb::PokeResponse {},
                         )),
                     };
-                    if let Err(e) = write_control_response(&mut send, resp).await {
+                    if let Err(e) = write_delimited(&mut send, &resp).await {
                         warn!("control write failed: {:#}", e);
                         break;
                     }
@@ -852,7 +829,7 @@ impl Gateway {
                             snapshot,
                         )),
                     };
-                    if let Err(e) = write_control_response(&mut send, resp).await {
+                    if let Err(e) = write_delimited(&mut send, &resp).await {
                         warn!("control write failed: {:#}", e);
                         break;
                     }
@@ -870,7 +847,7 @@ impl Gateway {
                             roles_with_caps: vec![],
                         })),
                     };
-                    if let Err(e) = write_control_response(&mut send, resp).await { warn!("control write failed: {:#}", e); break; }
+                    if let Err(e) = write_delimited(&mut send, &resp).await { warn!("control write failed: {:#}", e); break; }
                 }
                 Some(pb::client_to_server::Payload::PermUpsertRole(r)) => {
                     let role = self.control.perm_upsert_role(&ctx, (!r.role_id.is_empty()).then_some(r.role_id.as_str()), &r.name, r.color as i32, r.position as i32).await?;
@@ -882,7 +859,7 @@ impl Gateway {
                         event_seq: 0,
                         payload: Some(pb::server_to_client::Payload::PermUpsertRole(pb::PermUpsertRoleResponse { role: Some(pb::PermRole { role_id: role.role_id, name: role.name, color: role.color.max(0) as u32, position: role.role_position.max(0) as u32, is_everyone: role.is_everyone, is_system: false }) })),
                     };
-                    if let Err(e) = write_control_response(&mut send, resp).await { warn!("control write failed: {:#}", e); break; }
+                    if let Err(e) = write_delimited(&mut send, &resp).await { warn!("control write failed: {:#}", e); break; }
                 }
                 Some(pb::client_to_server::Payload::PermDeleteRole(r)) => {
                     self.control.perm_delete_role(&ctx, &r.role_id).await?;
@@ -894,19 +871,19 @@ impl Gateway {
                         event_seq: 0,
                         payload: Some(pb::server_to_client::Payload::PermDeleteRole(pb::PermDeleteRoleResponse {})),
                     };
-                    if let Err(e) = write_control_response(&mut send, resp).await { warn!("control write failed: {:#}", e); break; }
+                    if let Err(e) = write_delimited(&mut send, &resp).await { warn!("control write failed: {:#}", e); break; }
                 }
                 Some(pb::client_to_server::Payload::PermSetRoleCaps(r)) => {
                     let caps = r.caps.into_iter().map(|c| (c.cap, c.effect)).collect::<Vec<_>>();
                     self.control.perm_set_role_caps(&ctx, &r.role_id, &caps).await?;
                     let resp = pb::ServerToClient { request_id: req_id, session_id: Some(pb::SessionId { value: session_id.clone() }), sent_at: Some(now_ts()), error: None, event_seq: 0, payload: Some(pb::server_to_client::Payload::PermSetRoleCaps(pb::PermSetRoleCapsResponse {})) };
-                    if let Err(e) = write_control_response(&mut send, resp).await { warn!("control write failed: {:#}", e); break; }
+                    if let Err(e) = write_delimited(&mut send, &resp).await { warn!("control write failed: {:#}", e); break; }
                 }
                 Some(pb::client_to_server::Payload::PermAssignRoles(r)) => {
                     let target = parse_user_id(r.user_id.as_ref())?;
                     self.control.perm_assign_roles(&ctx, target, &r.role_ids).await?;
                     let resp = pb::ServerToClient { request_id: req_id, session_id: Some(pb::SessionId { value: session_id.clone() }), sent_at: Some(now_ts()), error: None, event_seq: 0, payload: Some(pb::server_to_client::Payload::PermAssignRoles(pb::PermAssignRolesResponse { role_ids: r.role_ids.clone() })) };
-                    if let Err(e) = write_control_response(&mut send, resp).await { warn!("control write failed: {:#}", e); break; }
+                    if let Err(e) = write_delimited(&mut send, &resp).await { warn!("control write failed: {:#}", e); break; }
                 }
                 Some(pb::client_to_server::Payload::PermListChanOvr(r)) => {
                     let channel_id = parse_channel_id(r.channel_id.as_ref())?;
@@ -916,7 +893,7 @@ impl Gateway {
                         pb::PermChannelOverride { channel_id: Some(pb::ChannelId { value: row.channel_id.0.to_string() }), target: Some(target), cap: row.cap, effect: row.effect }
                     }).collect();
                     let resp = pb::ServerToClient { request_id: req_id, session_id: Some(pb::SessionId { value: session_id.clone() }), sent_at: Some(now_ts()), error: None, event_seq: 0, payload: Some(pb::server_to_client::Payload::PermListChanOvr(pb::PermListChannelOverridesResponse { overrides, role_overrides: vec![], user_overrides: vec![] })) };
-                    if let Err(e) = write_control_response(&mut send, resp).await { warn!("control write failed: {:#}", e); break; }
+                    if let Err(e) = write_delimited(&mut send, &resp).await { warn!("control write failed: {:#}", e); break; }
                 }
                 Some(pb::client_to_server::Payload::PermSetChanOvr(r)) => {
                     let o = r.r#override.ok_or(ControlError::InvalidArgument("override missing"))?;
@@ -929,19 +906,19 @@ impl Gateway {
                     let rec = vp_control::PermChannelOverrideRecord { channel_id, role_id, user_id, cap: o.cap, effect: o.effect };
                     self.control.perm_set_channel_override(&ctx, &rec).await?;
                     let resp = pb::ServerToClient { request_id: req_id, session_id: Some(pb::SessionId { value: session_id.clone() }), sent_at: Some(now_ts()), error: None, event_seq: 0, payload: Some(pb::server_to_client::Payload::PermSetChanOvr(pb::PermSetChannelOverrideResponse {})) };
-                    if let Err(e) = write_control_response(&mut send, resp).await { warn!("control write failed: {:#}", e); break; }
+                    if let Err(e) = write_delimited(&mut send, &resp).await { warn!("control write failed: {:#}", e); break; }
                 }
                 Some(pb::client_to_server::Payload::PermAuditQuery(r)) => {
                     let rows = self.control.perm_audit_query(&ctx, r.limit as i64).await?;
                     let resp = pb::ServerToClient { request_id: req_id, session_id: Some(pb::SessionId { value: session_id.clone() }), sent_at: Some(now_ts()), error: None, event_seq: 0, payload: Some(pb::server_to_client::Payload::PermAuditQuery(pb::PermAuditQueryResponse { rows: rows.into_iter().map(|row| pb::PermAuditRow { action: row.action, target_type: row.target_type, target_id: row.target_id, created_at: Some(pb::Timestamp { unix_millis: row.created_at.timestamp_millis() }) }).collect() })) };
-                    if let Err(e) = write_control_response(&mut send, resp).await { warn!("control write failed: {:#}", e); break; }
+                    if let Err(e) = write_delimited(&mut send, &resp).await { warn!("control write failed: {:#}", e); break; }
                 }
                 Some(pb::client_to_server::Payload::PermEvalEffective(r)) => {
                     let target = parse_user_id(r.user_id.as_ref())?;
                     let channel_id = if let Some(ch) = r.channel_id.as_ref() { Some(parse_channel_id(Some(ch))?) } else { None };
                     let entries = self.control.perm_eval_effective(&ctx, target, channel_id, &r.caps).await?;
                     let resp = pb::ServerToClient { request_id: req_id, session_id: Some(pb::SessionId { value: session_id.clone() }), sent_at: Some(now_ts()), error: None, event_seq: 0, payload: Some(pb::server_to_client::Payload::PermEvalEffective(pb::PermEvaluateEffectiveResponse { entries: entries.into_iter().map(|(cap,allowed)| pb::PermEvaluateEntry { cap, allowed }).collect(), explain: vec![] })) };
-                    if let Err(e) = write_control_response(&mut send, resp).await { warn!("control write failed: {:#}", e); break; }
+                    if let Err(e) = write_delimited(&mut send, &resp).await { warn!("control write failed: {:#}", e); break; }
                 }
                 Some(pb::client_to_server::Payload::PermListUsers(_)) => {
                     let (users, editor_highest_role_position, editor_is_admin) =
@@ -979,7 +956,7 @@ impl Gateway {
                             },
                         )),
                     };
-                    if let Err(e) = write_control_response(&mut send, resp).await {
+                    if let Err(e) = write_delimited(&mut send, &resp).await {
                         warn!("control write failed: {:#}", e);
                         break;
                     }
@@ -1072,7 +1049,7 @@ impl Gateway {
                             },
                         )),
                     };
-                    if let Err(e) = write_control_response(&mut send, resp).await {
+                    if let Err(e) = write_delimited(&mut send, &resp).await {
                         warn!("control write failed: {:#}", e);
                         break;
                     }
@@ -1105,7 +1082,7 @@ impl Gateway {
                             pb::StopScreenShareResponse {},
                         )),
                     };
-                    if let Err(e) = write_control_response(&mut send, resp).await {
+                    if let Err(e) = write_delimited(&mut send, &resp).await {
                         warn!("control write failed: {:#}", e);
                         break;
                     }
@@ -1122,7 +1099,7 @@ impl Gateway {
                         event_seq: 0,
                         payload: Some(pb::server_to_client::Payload::CapabilitiesUpdateAck(pb::CapabilitiesUpdateAck {})),
                     };
-                    if let Err(e) = write_control_response(&mut send, resp).await {
+                    if let Err(e) = write_delimited(&mut send, &resp).await {
                         warn!("control write failed: {:#}", e);
                         break;
                     }
@@ -1217,7 +1194,7 @@ impl Gateway {
                     payload: None,
                 };
 
-                if let Err(e) = write_control_response(&mut send, resp).await {
+                if let Err(e) = write_delimited(&mut send, &resp).await {
                     warn!("control write failed: {:#}", e);
                     break;
                 }
@@ -1256,13 +1233,9 @@ impl Gateway {
         send: &mut quinn::SendStream,
         recv: &mut quinn::RecvStream,
     ) -> Result<(String, Option<pb::ClientCaps>, Vec<u8>)> {
-        let env: pb::ControlEnvelope = read_delimited(recv, CONTROL_STREAM_MAX_MSG)
+        let req: pb::ClientToServer = read_delimited(recv, CONTROL_STREAM_MAX_MSG)
             .await
             .context("read Hello envelope")?;
-        let req = match env.payload {
-            Some(pb::control_envelope::Payload::ControlRequest(req)) => req,
-            _ => return Err(anyhow!("expected ControlRequest envelope for hello")),
-        };
 
         let hello = match req.payload {
             Some(pb::client_to_server::Payload::Hello(h)) => h,
@@ -1297,7 +1270,7 @@ impl Gateway {
             payload: Some(pb::server_to_client::Payload::HelloAck(ack)),
         };
 
-        write_control_response(send, resp)
+        write_delimited(send, &resp)
             .await
             .context("write HelloAck")?;
         Ok((session_id, hello.caps, auth_challenge.to_vec()))
@@ -1310,13 +1283,9 @@ impl Gateway {
         session_id: &str,
         auth_challenge: &[u8],
     ) -> Result<AuthedIdentity> {
-        let env: pb::ControlEnvelope = read_delimited(recv, CONTROL_STREAM_MAX_MSG)
+        let req: pb::ClientToServer = read_delimited(recv, CONTROL_STREAM_MAX_MSG)
             .await
             .context("read Auth envelope")?;
-        let req = match env.payload {
-            Some(pb::control_envelope::Payload::ControlRequest(req)) => req,
-            _ => return Err(anyhow!("expected ControlRequest envelope for auth")),
-        };
 
         let auth_req = match req.payload {
             Some(pb::client_to_server::Payload::AuthRequest(a)) => a,
@@ -1354,7 +1323,7 @@ impl Gateway {
             payload: Some(pb::server_to_client::Payload::AuthResponse(auth_resp)),
         };
 
-        write_control_response(send, resp)
+        write_delimited(send, &resp)
             .await
             .context("write AuthResponse")?;
         Ok(identity)
@@ -1653,47 +1622,6 @@ fn error_from_anyhow(err: &anyhow::Error) -> pb::Error {
         message: message.to_string(),
         detail: format!("{:#}", err),
     }
-}
-
-async fn read_control_preface(recv: &mut quinn::RecvStream) -> Result<()> {
-    let mut magic = [0u8; 4];
-    recv.read_exact(&mut magic).await?;
-    if &magic != CONTROL_STREAM_PREFACE_MAGIC {
-        return Err(anyhow!("invalid control stream preface magic"));
-    }
-    let mut v = [0u8; 2];
-    recv.read_exact(&mut v).await?;
-    let version = u16::from_be_bytes(v);
-    if version != CONTROL_STREAM_PREFACE_VERSION {
-        return Err(anyhow!(
-            "unsupported control stream preface version: {}",
-            version
-        ));
-    }
-    Ok(())
-}
-
-async fn write_control_response(
-    send: &mut quinn::SendStream,
-    resp: pb::ServerToClient,
-) -> Result<()> {
-    let rid = resp.request_id.as_ref().map(|r| r.value).unwrap_or(0);
-    let env = pb::ControlEnvelope {
-        request_id: rid,
-        payload: Some(pb::control_envelope::Payload::ControlResponse(resp)),
-    };
-    write_delimited(send, &env).await
-}
-
-async fn write_control_ack(send: &mut quinn::SendStream, request_id: u64) -> Result<()> {
-    // Ack semantics: confirms request receipt and handler dispatch has started.
-    let env = pb::ControlEnvelope {
-        request_id,
-        payload: Some(pb::control_envelope::Payload::ControlAck(pb::ControlAck {
-            request_id,
-        })),
-    };
-    write_delimited(send, &env).await
 }
 
 fn now_ts() -> pb::Timestamp {
