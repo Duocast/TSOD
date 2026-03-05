@@ -190,5 +190,5 @@ pub fn apply_theme(ctx: &egui::Context, theme_name: &str) {
     style.spacing.item_spacing = egui::vec2(8.0, 4.0);
     style.spacing.window_margin = egui::Margin::same(12);
 
-    ctx.set_style(style);
+    ctx.set_global_style(style);
 }
