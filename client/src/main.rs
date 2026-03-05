@@ -50,6 +50,8 @@ use ui::{UiEvent, UiIntent, VpApp};
 #[cfg(debug_assertions)]
 static DEBUG_SEEN_AUTH_USER_IDS: OnceLock<StdMutex<HashSet<String>>> = OnceLock::new();
 
+pub const BUILD_VERSION: &str = env!("VP_CLIENT_BUILD_VERSION");
+
 #[derive(Clone)]
 struct AudioRuntimeSettings {
     output_auto_level: Arc<AtomicBool>,
