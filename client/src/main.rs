@@ -1952,7 +1952,6 @@ async fn connect_and_run_session(
                                         "received message_posted push event"
                                     );
 
-                                    let _ = tx_event.send(UiEvent::PlayChatMessageSfx);
                                     let _ = tx_event.send(UiEvent::MessageReceived(
                                         ui::model::ChatMessage {
                                             message_id,
@@ -2762,7 +2761,6 @@ async fn connect_and_run_session(
                         }
                         UiIntent::SendChat { text, attachments } => {
                             if let Some(ref ch) = active_channel {
-                                let _ = tx_event.send(UiEvent::PlayChatMessageSfx);
                                 // Optimistic local echo
                                 let now_ms = unix_ms() as i64;
                                 let local_message_id = format!("local-{now_ms}");
