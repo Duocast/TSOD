@@ -232,6 +232,8 @@ impl eframe::App for VpApp {
         egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.label(egui::RichText::new("TSOD").strong().size(16.0));
+                ui.add_space(2.0);
+                ui.label(egui::RichText::new(crate::BUILD_VERSION).small());
                 ui.separator();
 
                 let conn_text = if self.model.connected {

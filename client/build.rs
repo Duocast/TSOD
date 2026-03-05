@@ -3,6 +3,9 @@ use std::{env, path::PathBuf};
 include!("../proto/proto_files.rs");
 
 fn main() {
+    let build_version = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    println!("cargo:rustc-env=VP_CLIENT_BUILD_VERSION={build_version}");
+
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let proto_dir = env::var("PROTO_DIR")
         .map(PathBuf::from)
