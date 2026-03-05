@@ -192,6 +192,7 @@ pub enum UiEvent {
     },
 
     // Chat
+    PlayChatMessageSfx,
     MessageReceived(ChatMessage),
     MessageEdited {
         channel_id: String,
@@ -1931,12 +1932,13 @@ impl UiModel {
                     channel_id = %msg.channel_id,
                     "chat dedupe miss (appending message)"
                 );
-                let should_play_message_notification = self.settings.notify_chat_message;
                 msgs.push_back(msg);
                 if msgs.len() > MAX_MESSAGES_PER_CHANNEL {
                     msgs.pop_front();
                 }
-                if should_play_message_notification {
+            }
+            UiEvent::PlayChatMessageSfx => {
+                if self.settings.notify_chat_message {
                     sfx::play_soft_url_tone(self.settings.notification_volume);
                 }
             }
