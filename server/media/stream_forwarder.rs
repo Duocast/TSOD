@@ -365,8 +365,8 @@ pub struct StreamForwarder {
     /// Per stream subscriber set.
     subscriptions: RwLock<HashMap<u64, HashSet<UserId>>>,
 
-    /// Per-viewer send loops: (user_id, session_id) → enqueue handle.
-    viewer_loops: RwLock<HashMap<(UserId, String), ViewerLoopHandle>>,
+    /// Per-viewer send loops: (user_id, session_id) → enqueue handle + lifecycle state.
+    viewer_loops: RwLock<HashMap<(UserId, String), ViewerLoopEntry>>,
     forwarded_fragments: AtomicU64,
     dropped_queue_full: AtomicU64,
     dropped_malformed: AtomicU64,
@@ -376,11 +376,14 @@ pub struct StreamForwarder {
     dropped_sessions_empty_for_viewer: AtomicU64,
 }
 
-#[derive(Clone)]
-struct ViewerLoopHandle {
+struct ViewerLoopEntry {
     tx: mpsc::Sender<EnqueuedFragment>,
     cancel: CancellationToken,
-    handle: Arc<JoinHandle<()>>,
+    handle: JoinHandle<()>,
+    /// Activity timestamp for idle pruning (input-side liveness); avoids congestion false positives.
+    last_activity_ms: Arc<AtomicU64>,
+    /// Send-progress timestamp for observability/transport health (not idle pruning by default).
+    #[allow(dead_code)]
     last_sent_ms: Arc<AtomicU64>,
 }
 
@@ -491,11 +494,7 @@ impl StreamForwarder {
 
     /// Remove viewer queues for a disconnecting session.
     pub async fn unregister_session(&self, user: UserId, session_id: &str) {
-        let removed = self
-            .viewer_loops
-            .write()
-            .await
-            .remove(&(user, session_id.to_string()));
+        let removed = self.viewer_loops.write().await.remove(&(user, session_id.to_string()));
 
         if let Some(entry) = removed {
             entry.cancel.cancel();
@@ -704,10 +703,10 @@ impl StreamForwarder {
         };
 
         for attempt in 0..2 {
-            let handle = self
+            let tx = self
                 .get_or_spawn_viewer_loop_handle(&key, dtx.clone())
                 .await;
-            match handle.tx.try_send(fragment) {
+            match tx.try_send(fragment) {
                 Ok(()) => {
                     return EnqueueOutcome::Enqueued;
                 }
@@ -739,38 +738,48 @@ impl StreamForwarder {
         &self,
         key: &(UserId, String),
         dtx: Arc<dyn DatagramTx>,
-    ) -> ViewerLoopHandle {
-        if let Some(handle) = self.viewer_loops.read().await.get(key).cloned() {
-            if !handle.tx.is_closed() {
-                return handle;
+    ) -> mpsc::Sender<EnqueuedFragment> {
+        if let Some(tx) = self
+            .viewer_loops
+            .read()
+            .await
+            .get(key)
+            .map(|entry| entry.tx.clone())
+        {
+            if !tx.is_closed() {
+                return tx;
             }
         }
 
         let mut loops = self.viewer_loops.write().await;
-        if let Some(handle) = loops.get(key).cloned() {
-            if !handle.tx.is_closed() {
-                return handle;
+        if let Some(tx) = loops.get(key).map(|entry| entry.tx.clone()) {
+            if !tx.is_closed() {
+                return tx;
             }
         }
 
         loops.remove(key);
-        let handle = self.spawn_viewer_loop(key.clone(), dtx);
-        loops.insert(key.clone(), handle.clone());
-        handle
+        let entry = self.spawn_viewer_loop(key.clone(), dtx);
+        let tx = entry.tx.clone();
+        loops.insert(key.clone(), entry);
+        tx
     }
 
     fn spawn_viewer_loop(
         &self,
         key: (UserId, String),
         dtx: Arc<dyn DatagramTx>,
-    ) -> ViewerLoopHandle {
+    ) -> ViewerLoopEntry {
         let cfg = self.cfg.clone();
         let cap = cfg.per_viewer_queue_fragments.max(1024);
         let (tx, mut rx) = mpsc::channel::<EnqueuedFragment>(cap);
         let metrics = self.metrics.clone();
         let cancel = CancellationToken::new();
         let cancel_task = cancel.clone();
-        let last_sent_ms = Arc::new(AtomicU64::new(Self::now_ms()));
+        let now_ms = Self::now_ms();
+        let last_activity_ms = Arc::new(AtomicU64::new(now_ms));
+        let last_activity_ms_task = last_activity_ms.clone();
+        let last_sent_ms = Arc::new(AtomicU64::new(now_ms));
         let last_sent_ms_task = last_sent_ms.clone();
 
         let handle = tokio::spawn(async move {
@@ -787,9 +796,13 @@ impl StreamForwarder {
                     }
                     _ = interval.tick() => {
                         let mut rx_closed = false;
+                        // Activity must be updated on both receive paths. For drain path,
+                        // coalesce many fragments into one atomic store.
+                        let mut saw_fragment = false;
                         loop {
                             match rx.try_recv() {
                                 Ok(fragment) => {
+                                    saw_fragment = true;
                                     let outcome = queue.push(fragment.datagram, &fragment.hdr);
                                     if outcome.evicted_frames > 0 {
                                         metrics.inc_frames_evicted(outcome.evicted_frames);
@@ -805,6 +818,10 @@ impl StreamForwarder {
                                     break;
                                 }
                             }
+                        }
+
+                        if saw_fragment {
+                            last_activity_ms_task.store(Self::now_ms(), Ordering::Relaxed);
                         }
 
                         if queue.len() > 0 {
@@ -824,6 +841,8 @@ impl StreamForwarder {
                     }
                     maybe_fragment = rx.recv() => {
                         let Some(fragment) = maybe_fragment else { break; };
+                        // Activity timestamp is used for idle pruning.
+                        last_activity_ms_task.store(Self::now_ms(), Ordering::Relaxed);
                         let outcome = queue.push(fragment.datagram, &fragment.hdr);
                         if outcome.evicted_frames > 0 {
                             metrics.inc_frames_evicted(outcome.evicted_frames);
@@ -837,32 +856,45 @@ impl StreamForwarder {
             }
         });
 
-        ViewerLoopHandle {
+        ViewerLoopEntry {
             tx,
             cancel,
-            handle: Arc::new(handle),
+            handle,
+            last_activity_ms,
             last_sent_ms,
         }
     }
 
     /// Periodic cleanup of stale viewer queues (call from a background timer).
     pub async fn cleanup_stale_viewers(&self, max_idle: std::time::Duration) {
-        let mut removed = Vec::new();
         let mut loops = self.viewer_loops.write().await;
-        let cutoff_ms =
-            Self::now_ms().saturating_sub(max_idle.as_millis().try_into().unwrap_or(u64::MAX));
-        loops.retain(|_key, egress| {
-            let stale = egress.last_sent_ms.load(Ordering::Relaxed) < cutoff_ms;
-            let finished = egress.handle.is_finished();
-            if stale || finished {
-                removed.push(egress.clone());
-                return false;
+        let now_ms = Self::now_ms();
+        let max_idle_ms: u64 = max_idle.as_millis().try_into().unwrap_or(u64::MAX);
+        let keys_to_remove: Vec<(UserId, String)> = loops
+            .iter()
+            .filter_map(|(key, entry)| {
+                // last_activity_ms is the default idle criterion; last_sent_ms is for health visibility.
+                let idle = now_ms.saturating_sub(entry.last_activity_ms.load(Ordering::Relaxed))
+                    > max_idle_ms;
+                let finished = entry.handle.is_finished();
+                let closed = entry.tx.is_closed();
+                if idle || finished || closed {
+                    Some(key.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let mut removed_entries = Vec::with_capacity(keys_to_remove.len());
+        for key in keys_to_remove {
+            if let Some(entry) = loops.remove(&key) {
+                removed_entries.push(entry);
             }
-            true
-        });
+        }
         drop(loops);
 
-        for entry in removed {
+        for entry in removed_entries {
             entry.cancel.cancel();
             entry.handle.abort();
         }
