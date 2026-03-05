@@ -290,6 +290,26 @@ message ServerToClient {
   }
 }
 
+
+message ControlAck {
+  uint64 request_id = 1;
+}
+
+message ControlError {
+  uint64 request_id = 1;
+  string message = 2;
+}
+
+message ControlEnvelope {
+  uint64 request_id = 1;
+  oneof payload {
+    ClientToServer control_request = 2;
+    ServerToClient control_response = 3;
+    ControlAck control_ack = 4;
+    ControlError control_error = 5;
+  }
+}
+
 message GetInitialStateSnapshotRequest {}
 
 message InitialStateSnapshot {
