@@ -23,6 +23,8 @@ use std::{
 use bytes::Bytes;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, RwLock};
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
 use vp_control::ids::{ChannelId, UserId};
@@ -377,7 +379,9 @@ pub struct StreamForwarder {
 #[derive(Clone)]
 struct ViewerLoopHandle {
     tx: mpsc::Sender<EnqueuedFragment>,
-    last_active_ms: Arc<AtomicU64>,
+    cancel: CancellationToken,
+    handle: Arc<JoinHandle<()>>,
+    last_sent_ms: Arc<AtomicU64>,
 }
 
 #[derive(Clone)]
@@ -487,10 +491,16 @@ impl StreamForwarder {
 
     /// Remove viewer queues for a disconnecting session.
     pub async fn unregister_session(&self, user: UserId, session_id: &str) {
-        self.viewer_loops
+        let removed = self
+            .viewer_loops
             .write()
             .await
             .remove(&(user, session_id.to_string()));
+
+        if let Some(entry) = removed {
+            entry.cancel.cancel();
+            entry.handle.abort();
+        }
     }
 
     // ── Datagram handling (hot path) ──────────────────────────────────
@@ -699,9 +709,6 @@ impl StreamForwarder {
                 .await;
             match handle.tx.try_send(fragment) {
                 Ok(()) => {
-                    handle
-                        .last_active_ms
-                        .store(Self::now_ms(), Ordering::Relaxed);
                     return EnqueueOutcome::Enqueued;
                 }
                 Err(TrySendError::Full(msg)) => {
@@ -712,7 +719,10 @@ impl StreamForwarder {
                     fragment = msg;
                     let mut loops = self.viewer_loops.write().await;
                     if loops.get(&key).is_some_and(|h| h.tx.is_closed()) {
-                        loops.remove(&key);
+                        if let Some(stale) = loops.remove(&key) {
+                            stale.cancel.cancel();
+                            stale.handle.abort();
+                        }
                     }
 
                     if attempt == 1 {
@@ -744,11 +754,7 @@ impl StreamForwarder {
         }
 
         loops.remove(key);
-        let tx = self.spawn_viewer_loop(key.clone(), dtx);
-        let handle = ViewerLoopHandle {
-            tx,
-            last_active_ms: Arc::new(AtomicU64::new(Self::now_ms())),
-        };
+        let handle = self.spawn_viewer_loop(key.clone(), dtx);
         loops.insert(key.clone(), handle.clone());
         handle
     }
@@ -757,13 +763,17 @@ impl StreamForwarder {
         &self,
         key: (UserId, String),
         dtx: Arc<dyn DatagramTx>,
-    ) -> mpsc::Sender<EnqueuedFragment> {
+    ) -> ViewerLoopHandle {
         let cfg = self.cfg.clone();
         let cap = cfg.per_viewer_queue_fragments.max(1024);
         let (tx, mut rx) = mpsc::channel::<EnqueuedFragment>(cap);
         let metrics = self.metrics.clone();
+        let cancel = CancellationToken::new();
+        let cancel_task = cancel.clone();
+        let last_sent_ms = Arc::new(AtomicU64::new(Self::now_ms()));
+        let last_sent_ms_task = last_sent_ms.clone();
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut queue =
                 ViewerQueue::new(cfg.per_viewer_queue_fragments, cfg.per_viewer_max_frames);
             let mut interval = tokio::time::interval(cfg.flush_interval);
@@ -772,6 +782,9 @@ impl StreamForwarder {
             loop {
                 tokio::select! {
                     biased;
+                    _ = cancel_task.cancelled() => {
+                        break;
+                    }
                     _ = interval.tick() => {
                         let mut rx_closed = false;
                         loop {
@@ -801,6 +814,7 @@ impl StreamForwarder {
                                     debug!(error = %e, viewer = %key.0.0, session_id = %key.1, "viewer session send loop ended");
                                     return;
                                 }
+                                last_sent_ms_task.store(Self::now_ms(), Ordering::Relaxed);
                             }
                         }
 
@@ -823,15 +837,35 @@ impl StreamForwarder {
             }
         });
 
-        tx
+        ViewerLoopHandle {
+            tx,
+            cancel,
+            handle: Arc::new(handle),
+            last_sent_ms,
+        }
     }
 
     /// Periodic cleanup of stale viewer queues (call from a background timer).
     pub async fn cleanup_stale_viewers(&self, max_idle: std::time::Duration) {
+        let mut removed = Vec::new();
         let mut loops = self.viewer_loops.write().await;
         let cutoff_ms =
             Self::now_ms().saturating_sub(max_idle.as_millis().try_into().unwrap_or(u64::MAX));
-        loops.retain(|_key, egress| egress.last_active_ms.load(Ordering::Relaxed) >= cutoff_ms);
+        loops.retain(|_key, egress| {
+            let stale = egress.last_sent_ms.load(Ordering::Relaxed) < cutoff_ms;
+            let finished = egress.handle.is_finished();
+            if stale || finished {
+                removed.push(egress.clone());
+                return false;
+            }
+            true
+        });
+        drop(loops);
+
+        for entry in removed {
+            entry.cancel.cancel();
+            entry.handle.abort();
+        }
     }
 }
 

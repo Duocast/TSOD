@@ -165,12 +165,16 @@ impl Gateway {
 
         let mut current_channel: Option<ChannelId> = None;
         let mut recovery_forwarded_at: HashMap<u64, Instant> = HashMap::new();
-        let voice_forwarder = self.voice.clone();
         let video_forwarder = self.video.clone();
         defer! {
             self.push.unregister(user_id, &session_id);
             self.sessions.unregister(user_id, &session_id);
             self.telemetry.remove(user_id);
+            let vf = video_forwarder.clone();
+            let sid = session_id.clone();
+            tokio::spawn(async move {
+                vf.unregister_session(user_id, &sid).await;
+            });
         }
 
         // Datagram recv loop: dispatch voice vs video by kind byte.
