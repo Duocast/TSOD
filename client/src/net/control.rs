@@ -7,8 +7,7 @@ use crate::{
     proto::voiceplatform::v1 as pb,
 };
 
-const MAX_CTRL_MSG: usize = crate::net::frame::MAX_CONTROL_FRAME_LEN;
-const ACK_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_CTRL_MSG: usize = 256 * 1024;
 
 pub struct ControlClient {
     pub session_id: Option<pb::SessionId>,
@@ -117,32 +116,10 @@ impl ControlClient {
             sent_at: Some(now_ts()),
             payload: Some(payload),
         };
-        let env = pb::ControlEnvelope {
-            request_id: req_id,
-            payload: Some(pb::control_envelope::Payload::ControlRequest(msg)),
-        };
-        write_delimited(&mut self.send, &env).await?;
-        let ack = timeout(ACK_TIMEOUT, self.read_envelope()).await??;
-        match ack.payload {
-            Some(pb::control_envelope::Payload::ControlAck(a)) if a.request_id == req_id => Ok(()),
-            _ => Err(anyhow!(
-                "missing or invalid control ack for request {req_id}"
-            )),
-        }
+        write_delimited(&mut self.send, &msg).await
     }
 
     async fn read_resp(&mut self) -> Result<pb::ServerToClient> {
-        let env = self.read_envelope().await?;
-        match env.payload {
-            Some(pb::control_envelope::Payload::ControlResponse(resp)) => Ok(resp),
-            Some(pb::control_envelope::Payload::ControlError(err)) => {
-                Err(anyhow!("control error: {}", err.message))
-            }
-            _ => Err(anyhow!("unexpected control envelope payload")),
-        }
-    }
-
-    async fn read_envelope(&mut self) -> Result<pb::ControlEnvelope> {
         read_delimited(&mut self.recv, MAX_CTRL_MSG).await
     }
 }
