@@ -24,6 +24,7 @@ use crossbeam_channel::{bounded, Receiver, Sender};
 use identity::DeviceIdentity;
 use net::dispatcher::{ControlDispatcher, PushEvent};
 use net::egress::EgressScheduler;
+use net::overwrite_queue::{pop_voice_realtime, OverwriteQueue, StampedBytes};
 use net::video_datagram::VideoHeader;
 use net::video_transport::{VideoReceiver, VideoSender, VideoStreamProfile};
 use net::voice_datagram::{
@@ -51,6 +52,10 @@ use ui::{UiEvent, UiIntent, VpApp};
 static DEBUG_SEEN_AUTH_USER_IDS: OnceLock<StdMutex<HashSet<String>>> = OnceLock::new();
 
 pub const BUILD_VERSION: &str = env!("VP_CLIENT_BUILD_VERSION");
+
+const VOICE_INGRESS_CAP: usize = 16; // Do not increase without justification; latency risk.
+const VOICE_MAX_AGE: Duration = Duration::from_millis(250);
+const VOICE_DRAIN_KEEP_LATEST: usize = 4;
 
 #[derive(Clone)]
 struct AudioRuntimeSettings {
@@ -250,6 +255,8 @@ struct VideoRuntimeCounters {
     video_tx_drop_deadline: AtomicU64,
     voice_tx_drop_queue_full: AtomicU64,
     rx_oversized_datagram_drops: AtomicU64,
+    voice_rx_stale_drops: AtomicU64,
+    voice_rx_drain_drops: AtomicU64,
 
     completed_frames: AtomicU64,
     dropped_no_subscription: AtomicU64,
@@ -296,15 +303,19 @@ fn is_video_datagram(datagram: &Bytes) -> bool {
 
 async fn datagram_demux_loop(
     conn: quinn::Connection,
-    voice_tx: mpsc::Sender<Bytes>,
+    voice_ingress_q: Arc<OverwriteQueue<StampedBytes>>,
     video_tx: mpsc::Sender<Bytes>,
     counters: Arc<VideoRuntimeCounters>,
+    voice_stale_drops_total: Arc<AtomicU64>,
+    voice_drain_drops_total: Arc<AtomicU64>,
     voice_die_tx: watch::Sender<bool>,
 ) {
+    let mut last_log = Instant::now();
     loop {
         let datagram = match conn.read_datagram().await {
             Ok(d) => d,
             Err(_) => {
+                voice_ingress_q.close();
                 let _ = voice_die_tx.send(true);
                 return;
             }
@@ -317,17 +328,27 @@ async fn datagram_demux_loop(
             continue;
         }
 
-        let is_video = is_video_datagram(&datagram);
-        let target = if is_video { &video_tx } else { &voice_tx };
-        if let Err(_e) = target.try_send(datagram) {
-            if is_video {
+        if is_video_datagram(&datagram) {
+            if let Err(_e) = video_tx.try_send(datagram) {
                 counters
                     .dropped_channel_full
                     .fetch_add(1, Ordering::Relaxed);
                 warn!("[video] dropping datagram because video channel is full");
-            } else {
-                warn!("[voice] dropping datagram because voice channel is full");
             }
+        } else {
+            voice_ingress_q.push((Instant::now(), datagram));
+        }
+
+        if last_log.elapsed() >= Duration::from_secs(1) {
+            let overflow = voice_ingress_q.overflow_evictions_swap();
+            let stale = voice_stale_drops_total.swap(0, Ordering::Relaxed);
+            let drain = voice_drain_drops_total.swap(0, Ordering::Relaxed);
+            let queue_len = voice_ingress_q.len();
+            info!(
+                "[voice] client ingress overflow_evictions/sec={} stale_drops/sec={} drain_drops/sec={} queue_len={}",
+                overflow, stale, drain, queue_len
+            );
+            last_log = Instant::now();
         }
     }
 }
@@ -2425,19 +2446,23 @@ async fn connect_and_run_session(
     // End-to-end screenshare flow:
     // UI intent -> control StartScreenShareRequest -> stream_tag -> sender task ->
     // datagrams -> demux loop -> VideoReceiver -> UI StreamDebugUpdate panel.
-    let (voice_rx_tx, voice_rx_rx) = mpsc::channel::<Bytes>(256);
+    let voice_ingress_q = Arc::new(OverwriteQueue::<StampedBytes>::new(VOICE_INGRESS_CAP));
+    let voice_stale_drops_total = Arc::new(AtomicU64::new(0));
+    let voice_drain_drops_total = Arc::new(AtomicU64::new(0));
     let (video_rx_tx, video_rx_rx) = mpsc::channel::<Bytes>(512);
 
     let _datagram_demux = tokio::spawn(datagram_demux_loop(
         conn.clone(),
-        voice_rx_tx,
+        voice_ingress_q.clone(),
         video_rx_tx,
         stream_state.counters.clone(),
+        voice_stale_drops_total.clone(),
+        voice_drain_drops_total.clone(),
         voice_die_tx.clone(),
     ));
 
     let _voice_recv = tokio::spawn(voice_recv_loop(
-        voice_rx_rx,
+        voice_ingress_q,
         playout.clone(),
         capture_dsp.clone(),
         self_deafened.clone(),
@@ -2447,6 +2472,8 @@ async fn connect_and_run_session(
         audio_runtime.clone(),
         tx_event.clone(),
         voice_counters.clone(),
+        voice_stale_drops_total.clone(),
+        voice_drain_drops_total.clone(),
         voice_die_tx.clone(),
     ));
 
@@ -4427,7 +4454,7 @@ async fn voice_send_loop(
 }
 
 async fn voice_recv_loop(
-    mut voice_rx: mpsc::Receiver<Bytes>,
+    voice_ingress_q: Arc<OverwriteQueue<StampedBytes>>,
     playout: Arc<RwLock<Arc<audio::playout::Playout>>>,
     capture_dsp: Option<Arc<Mutex<audio::dsp::CaptureDsp>>>,
     self_deafened: Arc<AtomicBool>,
@@ -4437,6 +4464,8 @@ async fn voice_recv_loop(
     audio_runtime: AudioRuntimeSettings,
     tx_event: Sender<UiEvent>,
     voice_counters: Arc<VoiceTelemetryCounters>,
+    voice_stale_drops_total: Arc<AtomicU64>,
+    voice_drain_drops_total: Arc<AtomicU64>,
     voice_die_tx: watch::Sender<bool>,
 ) {
     const SPEAKING_HANGOVER_MS: u64 = 350;
@@ -4460,7 +4489,14 @@ async fn voice_recv_loop(
 
     loop {
         tokio::select! {
-            maybe_d = voice_rx.recv() => {
+            maybe_d = pop_voice_realtime(
+                &voice_ingress_q,
+                VOICE_MAX_AGE,
+                VOICE_DRAIN_KEEP_LATEST,
+                VOICE_MAX_AGE / 2,
+                &voice_stale_drops_total,
+                &voice_drain_drops_total,
+            ) => {
                 let d = match maybe_d {
                     Some(d) => d,
                     None => {
@@ -5280,5 +5316,10 @@ mod tests {
                     && members[0].user_id == "user-2"
                     && members[0].display_name == "Alice"
         )));
+    }
+    #[test]
+    fn voice_ingress_cap_guardrail() {
+        // Do not increase without justification; latency risk.
+        assert!(super::VOICE_INGRESS_CAP <= 64);
     }
 }

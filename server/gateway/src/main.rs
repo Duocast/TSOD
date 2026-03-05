@@ -7,6 +7,7 @@ mod gateway;
 mod media;
 mod metrics_adapter;
 mod outbox_dispatch;
+mod overwrite_queue;
 mod prune;
 mod state;
 mod tls;

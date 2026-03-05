@@ -18,6 +18,7 @@ use crate::{
     auth::{AuthProvider, AuthedIdentity},
     frame::{read_delimited, write_delimited},
     media::MediaService,
+    overwrite_queue::{pop_voice_realtime, OverwriteQueue, StampedBytes},
     proto::voiceplatform::v1 as pb,
     state::{MembershipCache, PushHub, Sessions, VoiceTelemetryCache, VoiceTelemetrySample},
 };
@@ -31,6 +32,9 @@ use vp_media::voice_forwarder::VoiceForwarder;
 
 const CONTROL_STREAM_MAX_MSG: usize = 256 * 1024; // 256KB
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const VOICE_INGRESS_CAP: usize = 16; // Do not increase without justification; latency risk.
+const VOICE_MAX_AGE: Duration = Duration::from_millis(250);
+const VOICE_DRAIN_KEEP_LATEST: usize = 4;
 
 #[derive(Clone)]
 pub struct Gateway {
@@ -184,20 +188,18 @@ impl Gateway {
         let user_for_dg = user_id;
         let conn_dg = conn.clone();
         tokio::spawn(async move {
-            const VOICE_DATAGRAM_QUEUE_CAPACITY: usize = 1024;
             const VIDEO_DATAGRAM_QUEUE_CAPACITY: usize = 8192;
             const VIDEO_DATAGRAM_WORKERS: usize = 2;
 
             let oversized_drops = Arc::new(AtomicU64::new(0));
-            let voice_queue_full_drops = Arc::new(AtomicU64::new(0));
-            let voice_queue_closed_drops = Arc::new(AtomicU64::new(0));
+            let voice_stale_drops = Arc::new(AtomicU64::new(0));
+            let voice_drain_drops = Arc::new(AtomicU64::new(0));
             let video_queue_full_drops = Arc::new(AtomicU64::new(0));
             let video_queue_closed_drops = Arc::new(AtomicU64::new(0));
             let video_rx_count = Arc::new(AtomicU64::new(0));
             let video_rx_bytes = Arc::new(AtomicU64::new(0));
 
-            let (voice_dg_tx, mut voice_dg_rx) =
-                mpsc::channel::<bytes::Bytes>(VOICE_DATAGRAM_QUEUE_CAPACITY);
+            let voice_q = Arc::new(OverwriteQueue::<StampedBytes>::new(VOICE_INGRESS_CAP));
             let mut video_senders = Vec::with_capacity(VIDEO_DATAGRAM_WORKERS);
             for _ in 0..VIDEO_DATAGRAM_WORKERS {
                 let (video_dg_tx, mut video_dg_rx) =
@@ -215,9 +217,24 @@ impl Gateway {
 
             let voice_for_worker = voice.clone();
             let user_for_voice = user_for_dg;
+            let voice_for_worker_q = voice_q.clone();
+            let stale_for_worker = voice_stale_drops.clone();
+            let drain_for_worker = voice_drain_drops.clone();
             tokio::spawn(async move {
-                while let Some(d) = voice_dg_rx.recv().await {
-                    voice_for_worker.handle_incoming(user_for_voice, d).await;
+                loop {
+                    match pop_voice_realtime(
+                        &voice_for_worker_q,
+                        VOICE_MAX_AGE,
+                        VOICE_DRAIN_KEEP_LATEST,
+                        VOICE_MAX_AGE / 2,
+                        &stale_for_worker,
+                        &drain_for_worker,
+                    )
+                    .await
+                    {
+                        Some(d) => voice_for_worker.handle_incoming(user_for_voice, d).await,
+                        None => break,
+                    }
                 }
             });
 
@@ -236,7 +253,6 @@ impl Gateway {
                     continue;
                 }
 
-                // Dispatch: byte[1] == 0x02 → video, otherwise → voice.
                 if is_video_datagram(&d) {
                     video_rx_count.fetch_add(1, Ordering::Relaxed);
                     video_rx_bytes.fetch_add(d.len() as u64, Ordering::Relaxed);
@@ -254,15 +270,8 @@ impl Gateway {
                             }
                         }
                     }
-                } else if let Err(err) = voice_dg_tx.try_send(d) {
-                    match err {
-                        mpsc::error::TrySendError::Full(_) => {
-                            voice_queue_full_drops.fetch_add(1, Ordering::Relaxed);
-                        }
-                        mpsc::error::TrySendError::Closed(_) => {
-                            voice_queue_closed_drops.fetch_add(1, Ordering::Relaxed);
-                        }
-                    }
+                } else {
+                    voice_q.push((Instant::now(), d));
                 }
 
                 if last_log.elapsed() >= Duration::from_secs(1) {
@@ -270,6 +279,10 @@ impl Gateway {
                     let b = video_rx_bytes.swap(0, Ordering::Relaxed);
                     let video_drops = video_queue_full_drops.swap(0, Ordering::Relaxed);
                     let video_closed = video_queue_closed_drops.swap(0, Ordering::Relaxed);
+                    let voice_evictions = voice_q.overflow_evictions_swap();
+                    let voice_stale = voice_stale_drops.swap(0, Ordering::Relaxed);
+                    let voice_drain = voice_drain_drops.swap(0, Ordering::Relaxed);
+                    let voice_len = voice_q.len();
                     if c > 0 {
                         info!(
                             "[video] server rx datagrams/sec={} bytes/sec={} queue_full_drops/sec={}",
@@ -281,17 +294,14 @@ impl Gateway {
                             video_drops
                         );
                     }
+                    info!(
+                        "[voice] server ingress overflow_evictions/sec={} stale_drops/sec={} drain_drops/sec={} queue_len={}",
+                        voice_evictions, voice_stale, voice_drain, voice_len
+                    );
                     if video_closed > 0 {
                         warn!(
                             video_queue_closed_drops = video_closed,
                             "[video] datagram worker channel closed"
-                        );
-                    }
-                    let voice_closed = voice_queue_closed_drops.swap(0, Ordering::Relaxed);
-                    if voice_closed > 0 {
-                        warn!(
-                            voice_queue_closed_drops = voice_closed,
-                            "[voice] datagram worker channel closed"
                         );
                     }
                     let drops = oversized_drops.swap(0, Ordering::Relaxed);
@@ -302,21 +312,25 @@ impl Gateway {
                 }
             }
 
+            voice_q.close();
             let oversized = oversized_drops.load(Ordering::Relaxed);
-            let voice_drops = voice_queue_full_drops.load(Ordering::Relaxed);
-            let voice_closed = voice_queue_closed_drops.load(Ordering::Relaxed);
+            let voice_evictions = voice_q.overflow_evictions_total();
+            let voice_stale = voice_stale_drops.load(Ordering::Relaxed);
+            let voice_drain = voice_drain_drops.load(Ordering::Relaxed);
             let video_drops = video_queue_full_drops.load(Ordering::Relaxed);
             let video_closed = video_queue_closed_drops.load(Ordering::Relaxed);
             if oversized > 0
-                || voice_drops > 0
-                || voice_closed > 0
+                || voice_evictions > 0
+                || voice_stale > 0
+                || voice_drain > 0
                 || video_drops > 0
                 || video_closed > 0
             {
                 warn!(
                     oversized,
-                    voice_drops,
-                    voice_closed,
+                    voice_evictions,
+                    voice_stale,
+                    voice_drain,
                     video_drops,
                     video_closed,
                     "datagram recv loop ended with dropped datagrams"
@@ -1765,5 +1779,10 @@ mod tests {
         let long = "x".repeat(80);
         let normalized = normalize_preferred_display_name(&long).unwrap();
         assert_eq!(normalized.len(), 64);
+    }
+    #[test]
+    fn voice_ingress_cap_guardrail() {
+        // Do not increase without justification; latency risk.
+        assert!(super::VOICE_INGRESS_CAP <= 64);
     }
 }

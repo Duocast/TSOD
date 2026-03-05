@@ -42,3 +42,6 @@ vp-voice = { path = "../../shared/voice" }
 
 [build-dependencies]
 prost-build = "0.14.3"
+
+[dev-dependencies]
+tokio = { version = "1.49", features = ["test-util"] }
