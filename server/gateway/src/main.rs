@@ -7,6 +7,7 @@ mod gateway;
 mod media;
 mod metrics_adapter;
 mod outbox_dispatch;
+mod prune;
 mod state;
 mod tls;
 
@@ -83,7 +84,7 @@ async fn main() -> Result<()> {
     let membership = MembershipCache::new();
     let telemetry = VoiceTelemetryCache::new();
 
-    let (prune_tx, _prune_rx) = tokio::sync::mpsc::channel(1024);
+    let (prune_wake_tx, prune_wake_rx) = tokio::sync::mpsc::channel(1);
 
     // Voice forwarder
     let forwarder = Arc::new(vp_media::voice_forwarder::VoiceForwarder::new(
@@ -91,7 +92,7 @@ async fn main() -> Result<()> {
         Arc::new(sessions.clone()),
         Arc::new(membership.clone()),
         voice_metrics(),
-        prune_tx.clone(),
+        prune_wake_tx.clone(),
     ));
 
     // Video/screenshare stream forwarder (SFU)
@@ -113,6 +114,20 @@ async fn main() -> Result<()> {
                     .cleanup_stale_viewers(Duration::from_secs(120))
                     .await;
             }
+        });
+    }
+
+    {
+        let sessions_for_pruner = sessions.clone();
+        let stream_forwarder_for_pruner = stream_forwarder.clone();
+        tokio::spawn(async move {
+            prune::run_pruner(
+                sessions_for_pruner,
+                stream_forwarder_for_pruner,
+                prune_wake_tx.clone(),
+                prune_wake_rx,
+            )
+            .await;
         });
     }
 
@@ -204,7 +219,6 @@ async fn main() -> Result<()> {
         forwarder,
         stream_forwarder,
         media,
-        prune_tx,
     );
 
     tokio::select! {

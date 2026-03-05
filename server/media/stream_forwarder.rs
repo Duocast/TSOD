@@ -494,7 +494,11 @@ impl StreamForwarder {
 
     /// Remove viewer queues for a disconnecting session.
     pub async fn unregister_session(&self, user: UserId, session_id: &str) {
-        let removed = self.viewer_loops.write().await.remove(&(user, session_id.to_string()));
+        let removed = self
+            .viewer_loops
+            .write()
+            .await
+            .remove(&(user, session_id.to_string()));
 
         if let Some(entry) = removed {
             entry.cancel.cancel();
@@ -1109,7 +1113,7 @@ mod tests {
             _now_ms: u64,
             _channel_id: ChannelId,
             _pkt: Bytes,
-            _prune_tx: &tokio::sync::mpsc::Sender<crate::datagram_send_policy::PruneEvt>,
+            _prune_tx: &tokio::sync::mpsc::Sender<()>,
             _metrics: &dyn crate::datagram_send_policy::DatagramSendPolicyMetrics,
         ) {
         }
@@ -1118,7 +1122,7 @@ mod tests {
             _now_ms: u64,
             _channel_id: ChannelId,
             _pkt: Bytes,
-            _prune_tx: &tokio::sync::mpsc::Sender<crate::datagram_send_policy::PruneEvt>,
+            _prune_tx: &tokio::sync::mpsc::Sender<()>,
             _metrics: &dyn crate::datagram_send_policy::DatagramSendPolicyMetrics,
         ) {
         }
@@ -1147,7 +1151,7 @@ mod tests {
             _now_ms: u64,
             _channel_id: ChannelId,
             _pkt: Bytes,
-            _prune_tx: &tokio::sync::mpsc::Sender<crate::datagram_send_policy::PruneEvt>,
+            _prune_tx: &tokio::sync::mpsc::Sender<()>,
             _metrics: &dyn crate::datagram_send_policy::DatagramSendPolicyMetrics,
         ) {
         }
@@ -1156,7 +1160,7 @@ mod tests {
             _now_ms: u64,
             _channel_id: ChannelId,
             _pkt: Bytes,
-            _prune_tx: &tokio::sync::mpsc::Sender<crate::datagram_send_policy::PruneEvt>,
+            _prune_tx: &tokio::sync::mpsc::Sender<()>,
             _metrics: &dyn crate::datagram_send_policy::DatagramSendPolicyMetrics,
         ) {
         }
