@@ -604,7 +604,7 @@ impl ControlDispatcher {
             .await
             .map_err(|_| anyhow!("request timed out waiting for response"))?
             .map_err(|_| anyhow!("dispatcher dropped response"))?
-            .map_err(|err| anyhow!(err))?)
+            .map_err(|err| anyhow!(err)))
     }
 
     pub async fn shutdown(&self) {
