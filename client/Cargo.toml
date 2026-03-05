@@ -88,14 +88,14 @@ windows = { version = "0.62.2", features = [
 [patch.crates-io]
 wasapi = { path = "../vendor/wasapi" }
 
-ecolor      = { git = "https://github.com/Duocast/egui_winit-0.31-beta2", branch = "main" }
-emath       = { git = "https://github.com/Duocast/egui_winit-0.31-beta2", branch = "main" }
-epaint      = { git = "https://github.com/Duocast/egui_winit-0.31-beta2", branch = "main" }
+#ecolor      = { git = "https://github.com/Duocast/egui_winit-0.31-beta2", branch = "main" }
+#emath       = { git = "https://github.com/Duocast/egui_winit-0.31-beta2", branch = "main" }
+#epaint      = { git = "https://github.com/Duocast/egui_winit-0.31-beta2", branch = "main" }
 
-egui        = { git = "https://github.com/Duocast/egui_winit-0.31-beta2", branch = "main" }
-egui-winit  = { git = "https://github.com/Duocast/egui_winit-0.31-beta2", branch = "main" }
-eframe      = { git = "https://github.com/Duocast/egui_winit-0.31-beta2", branch = "main" }
+#egui        = { git = "https://github.com/Duocast/egui_winit-0.31-beta2", branch = "main" }
+#egui-winit  = { git = "https://github.com/Duocast/egui_winit-0.31-beta2", branch = "main" }
+#eframe      = { git = "https://github.com/Duocast/egui_winit-0.31-beta2", branch = "main" }
 
-egui_extras = { git = "https://github.com/Duocast/egui_winit-0.31-beta2", branch = "main" }
-egui_glow   = { git = "https://github.com/Duocast/egui_winit-0.31-beta2", branch = "main" }
-egui-wgpu   = { git = "https://github.com/Duocast/egui_winit-0.31-beta2", branch = "main" }
+#egui_extras = { git = "https://github.com/Duocast/egui_winit-0.31-beta2", branch = "main" }
+#egui_glow   = { git = "https://github.com/Duocast/egui_winit-0.31-beta2", branch = "main" }
+#egui-wgpu   = { git = "https://github.com/Duocast/egui_winit-0.31-beta2", branch = "main" }
