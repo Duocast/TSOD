@@ -1,8 +1,9 @@
 pub const QUIC_MAX_DATAGRAM_BYTES: usize = 1200;
+/// Application-level media MTU enforced by demux loops; larger datagrams are dropped.
 pub const APP_MEDIA_MTU: usize = 1152;
 pub const FORWARDER_ADDED_HEADER_BYTES: usize = 32;
-pub const MAX_INBOUND_VOICE_DATAGRAM_BYTES: usize =
-    QUIC_MAX_DATAGRAM_BYTES - FORWARDER_ADDED_HEADER_BYTES;
+/// Max client->server voice datagram size so forwarded metadata still fits APP_MEDIA_MTU.
+pub const MAX_INBOUND_VOICE_DATAGRAM_BYTES: usize = APP_MEDIA_MTU - FORWARDER_ADDED_HEADER_BYTES;
 pub const CLIENT_VOICE_HEADER_BYTES: usize = 20;
 pub const FORWARDED_VOICE_HEADER_BYTES: usize =
     CLIENT_VOICE_HEADER_BYTES + FORWARDER_ADDED_HEADER_BYTES;
@@ -64,6 +65,19 @@ mod tests {
         assert_eq!(
             MAX_OPUS_PAYLOAD_BYTES + CLIENT_VOICE_HEADER_BYTES,
             MAX_INBOUND_VOICE_DATAGRAM_BYTES
+        );
+    }
+
+    #[test]
+    fn voice_forwarding_headroom_matches_app_mtu() {
+        assert!(APP_MEDIA_MTU <= QUIC_MAX_DATAGRAM_BYTES);
+        assert_eq!(
+            MAX_INBOUND_VOICE_DATAGRAM_BYTES + FORWARDER_ADDED_HEADER_BYTES,
+            APP_MEDIA_MTU
+        );
+        assert_eq!(
+            MAX_OPUS_PAYLOAD_BYTES + FORWARDED_VOICE_HEADER_BYTES,
+            APP_MEDIA_MTU
         );
     }
 

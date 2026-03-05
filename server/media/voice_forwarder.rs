@@ -319,7 +319,9 @@ pub fn build_forwarded_voice_datagram(
 ) -> Option<Bytes> {
     let payload = &datagram[vp_voice::CLIENT_VOICE_HEADER_BYTES..];
     let total = vp_voice::FORWARDED_VOICE_HEADER_BYTES + payload.len();
-    if total > max_wire {
+    // Receivers enforce APP_MEDIA_MTU regardless of advertised QUIC datagram max.
+    let max_app = max_wire.min(vp_voice::APP_MEDIA_MTU);
+    if total > max_app {
         return None;
     }
     let mut out = BytesMut::with_capacity(total);
