@@ -21,6 +21,7 @@ use quinn::{Endpoint, ServerConfig, TransportConfig};
 use rustls::ServerConfig as RustlsServerConfig;
 use sqlx::postgres::PgPoolOptions;
 use std::{net::SocketAddr, sync::Arc};
+use tokio::time::{Duration, MissedTickBehavior};
 use tracing::{info, Level};
 use tracing_subscriber::EnvFilter;
 use vp_metrics::{MetricsConfig, MetricsServer};
@@ -100,6 +101,20 @@ async fn main() -> Result<()> {
         Arc::new(membership.clone()),
         stream_metrics(),
     ));
+
+    {
+        let stream_forwarder = stream_forwarder.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(30));
+            interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                stream_forwarder
+                    .cleanup_stale_viewers(Duration::from_secs(120))
+                    .await;
+            }
+        });
+    }
 
     // Outbox dispatcher (push fanout)
     let server_id = vp_control::ids::ServerId(uuid::Uuid::parse_str(&cfg.default_server_id)?);
