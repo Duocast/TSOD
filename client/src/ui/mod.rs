@@ -205,16 +205,12 @@ impl VpApp {
 }
 
 impl eframe::App for VpApp {
-    fn on_exit(&mut self) {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.persist_settings_if_dirty();
         self.signal_quit();
     }
 
-    fn ui(&mut self, _ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        // All rendering is done via ctx-level panels in `logic`.
-    }
-
-    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Drain backend events
         self.drain_events();
 
@@ -233,11 +229,9 @@ impl eframe::App for VpApp {
         theme::apply_theme(ctx, &self.model.settings.theme);
 
         // Top menu bar
-        egui::Panel::top("top_bar").show(ctx, |ui| {
+        egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.label(egui::RichText::new("TSOD").strong().size(16.0));
-                ui.add_space(2.0);
-                ui.label(egui::RichText::new(crate::BUILD_VERSION).small());
                 ui.separator();
 
                 let conn_text = if self.model.connected {
@@ -296,8 +290,8 @@ impl eframe::App for VpApp {
         });
 
         // Status bar at bottom (simplified — user panel moved to left sidebar)
-        egui::Panel::bottom("status_bar")
-            .max_size(24.0)
+        egui::TopBottomPanel::bottom("status_bar")
+            .max_height(24.0)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(
@@ -352,9 +346,9 @@ impl eframe::App for VpApp {
             });
 
         // Left panel: server/channel tree + user panel at bottom
-        egui::Panel::left("server_tree")
-            .default_size(220.0)
-            .min_size(180.0)
+        egui::SidePanel::left("server_tree")
+            .default_width(220.0)
+            .min_width(180.0)
             .show(ctx, |ui| {
                 let total_height = ui.available_height();
                 let user_panel_height = 100.0;
@@ -379,9 +373,9 @@ impl eframe::App for VpApp {
             });
 
         // Right panel: member list
-        egui::Panel::right("members_panel")
-            .default_size(200.0)
-            .min_size(150.0)
+        egui::SidePanel::right("members_panel")
+            .default_width(200.0)
+            .min_width(150.0)
             .show(ctx, |ui| {
                 panels::members::show(ui, &mut self.model, &self.tx_intent);
             });
@@ -784,7 +778,7 @@ impl eframe::App for VpApp {
         panels::permissions_center::show_permissions_center(ctx, &mut self.model, &self.tx_intent);
 
         // Central panel: connection status + chat messages + input
-        egui::Panel::center("center").show(ctx, |ui| {
+        egui::CentralPanel::default().show(ctx, |ui| {
             let stage = self.model.connection_stage;
             let panel_visible = stage.is_in_progress()
                 || stage == ConnectionStage::Failed
