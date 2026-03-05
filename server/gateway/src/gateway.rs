@@ -1269,6 +1269,12 @@ impl Gateway {
             _ => return Err(anyhow!("expected Hello as first message")),
         };
 
+        if let Some(rid) = req.request_id.as_ref().map(|r| r.value) {
+            write_control_ack(send, rid)
+                .await
+                .context("write Hello ack")?;
+        }
+
         let session_id = uuid::Uuid::new_v4().to_string();
 
         let mut auth_challenge = [0u8; 32];
@@ -1322,6 +1328,12 @@ impl Gateway {
             Some(pb::client_to_server::Payload::AuthRequest(a)) => a,
             _ => return Err(anyhow!("expected AuthRequest as second message")),
         };
+
+        if let Some(rid) = req.request_id.as_ref().map(|r| r.value) {
+            write_control_ack(send, rid)
+                .await
+                .context("write Auth ack")?;
+        }
 
         let mut identity = self
             .auth
