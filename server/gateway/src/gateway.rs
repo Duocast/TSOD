@@ -302,10 +302,12 @@ impl Gateway {
                             video_drops
                         );
                     }
-                    info!(
-                        "[voice] server ingress overflow_evictions/sec={} stale_drops/sec={} drain_drops/sec={} queue_len={}",
-                        voice_evictions, voice_stale, voice_drain, voice_len
-                    );
+                    if voice_evictions > 0 || voice_stale > 0 || voice_drain > 0 {
+                        info!(
+                            "[voice] server ingress overflow_evictions/sec={} stale_drops/sec={} drain_drops/sec={} queue_len={}",
+                            voice_evictions, voice_stale, voice_drain, voice_len
+                        );
+                    }
                     if video_closed > 0 {
                         warn!(
                             video_queue_closed_drops = video_closed,
