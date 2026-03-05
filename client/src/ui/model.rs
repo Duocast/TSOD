@@ -1931,14 +1931,12 @@ impl UiModel {
                     channel_id = %msg.channel_id,
                     "chat dedupe miss (appending message)"
                 );
-                let should_play_url_notification = self.settings.notify_chat_message
-                    && msg.author_id != self.user_id
-                    && message_contains_url(&msg.text);
+                let should_play_message_notification = self.settings.notify_chat_message;
                 msgs.push_back(msg);
                 if msgs.len() > MAX_MESSAGES_PER_CHANNEL {
                     msgs.pop_front();
                 }
-                if should_play_url_notification {
+                if should_play_message_notification {
                     sfx::play_soft_url_tone(self.settings.notification_volume);
                 }
             }
@@ -2371,20 +2369,9 @@ impl UiModel {
     }
 }
 
-fn message_contains_url(text: &str) -> bool {
-    text.contains("http://") || text.contains("https://")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn message_contains_url_detects_http_and_https() {
-        assert!(message_contains_url("visit https://example.com"));
-        assert!(message_contains_url("http://example.com works"));
-        assert!(!message_contains_url("plain text only"));
-    }
 
     #[test]
     fn can_start_screen_share_is_debounced() {
