@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -19,7 +19,7 @@ use crate::{
     proto::voiceplatform::v1 as pb,
 };
 
-const MAX_CTRL_MSG: usize = 256 * 1024;
+const ACK_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Server-push events emitted by the dispatcher.
 /// Keep this fairly low-level; app layer can transform into UI state.
@@ -596,34 +596,57 @@ async fn dispatcher_task(
     mut shutdown_rx: watch::Receiver<bool>,
     ui_log_tx: UiLogTx,
 ) {
+    let max_ctrl_msg = crate::net::frame::MAX_CONTROL_FRAME_LEN;
     let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<pb::ServerToClient>>>>> =
         Arc::new(Mutex::new(HashMap::new()));
+    let ack_pending: Arc<Mutex<HashMap<u64, oneshot::Sender<()>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+    let acked: Arc<Mutex<HashSet<u64>>> = Arc::new(Mutex::new(HashSet::new()));
     let next_req: Arc<Mutex<u64>> = Arc::new(Mutex::new(1));
 
     // Spawn reader task
     let reader_pending = pending.clone();
+    let reader_ack_pending = ack_pending.clone();
+    let reader_acked = acked.clone();
     let reader_inner = inner.clone();
     let reader_ui_log_tx = ui_log_tx.clone();
     let reader = tokio::spawn(async move {
         loop {
-            let msg: pb::ServerToClient = match read_delimited(&mut recv, MAX_CTRL_MSG).await {
+            let env: pb::ControlEnvelope = match read_delimited(&mut recv, max_ctrl_msg).await {
                 Ok(m) => m,
                 Err(e) => {
-                    let _ = reader_ui_log_tx.send(format!("[dispatcher] exiting: control read/decode failed for ServerToClient ({e:?})"));
+                    let _ = reader_ui_log_tx.send(format!("[dispatcher] exiting: control read/decode failed for ControlEnvelope ({e:?})"));
                     return Err::<(), anyhow::Error>(e);
                 }
             };
 
-            if let Some(rid) = msg.request_id.as_ref().map(|x| x.value) {
-                if let Some(tx) = reader_pending.lock().await.remove(&rid) {
-                    let _ = tx.send(Ok(msg));
-                    continue;
+            match env.payload {
+                Some(pb::control_envelope::Payload::ControlAck(ack)) => {
+                    if let Some(tx) = reader_ack_pending.lock().await.remove(&ack.request_id) {
+                        let _ = tx.send(());
+                    } else {
+                        reader_acked.lock().await.insert(ack.request_id);
+                    }
                 }
-            }
+                Some(pb::control_envelope::Payload::ControlResponse(msg)) => {
+                    if let Some(rid) = msg.request_id.as_ref().map(|x| x.value) {
+                        if let Some(tx) = reader_pending.lock().await.remove(&rid) {
+                            let _ = tx.send(Ok(msg));
+                            continue;
+                        }
+                    }
 
-            let ev = classify_push(msg);
-            if reader_inner.push_tx.try_send(ev).is_err() {
-                // drop if full
+                    let ev = classify_push(msg);
+                    let _ = reader_inner.push_tx.try_send(ev);
+                }
+                Some(pb::control_envelope::Payload::ControlError(err)) => {
+                    if let Some(tx) = reader_pending.lock().await.remove(&err.request_id) {
+                        let _ = tx.send(Err(anyhow!("control error: {}", err.message)));
+                    }
+                }
+                _ => {
+                    return Err(anyhow!("unexpected control envelope payload from server"));
+                }
             }
         }
     });
@@ -657,6 +680,8 @@ async fn dispatcher_task(
                         };
 
                         pending.lock().await.insert(rid, resp_tx);
+                        let (ack_tx, ack_rx) = oneshot::channel();
+                        ack_pending.lock().await.insert(rid, ack_tx);
 
                         let session_id = inner.session_id.read().await.clone();
                         let msg = pb::ClientToServer {
@@ -665,11 +690,21 @@ async fn dispatcher_task(
                             sent_at: Some(now_ts()),
                             payload: Some(payload),
                         };
+                        let env = pb::ControlEnvelope {
+                            request_id: rid,
+                            payload: Some(pb::control_envelope::Payload::ControlRequest(msg)),
+                        };
 
-                        if let Err(e) = write_delimited(&mut send, &msg).await {
+                        if let Err(e) = write_delimited(&mut send, &env).await {
                             let _ = ui_log_tx.send(format!("[dispatcher] exiting: control send failed ({e:?})"));
                             fail_all_pending(&pending).await;
                             break;
+                        }
+
+                        if let Err(e) = wait_for_ack(rid, &acked, ack_rx).await {
+                            if let Some(tx) = pending.lock().await.remove(&rid) {
+                                let _ = tx.send(Err(e));
+                            }
                         }
                     }
                     Some(Command::SendNoResponse { payload }) => {
@@ -680,8 +715,12 @@ async fn dispatcher_task(
                             sent_at: Some(now_ts()),
                             payload: Some(payload),
                         };
+                        let env = pb::ControlEnvelope {
+                            request_id: 0,
+                            payload: Some(pb::control_envelope::Payload::ControlRequest(msg)),
+                        };
 
-                        if let Err(e) = write_delimited(&mut send, &msg).await {
+                        if let Err(e) = write_delimited(&mut send, &env).await {
                             let _ = ui_log_tx.send(format!("[dispatcher] exiting: control send failed ({e:?})"));
                             fail_all_pending(&pending).await;
                             break;
@@ -708,6 +747,26 @@ async fn dispatcher_task(
     }
 
     fail_all_pending(&pending).await;
+}
+
+async fn wait_for_ack(
+    rid: u64,
+    acked: &Arc<Mutex<HashSet<u64>>>,
+    ack_rx: oneshot::Receiver<()>,
+) -> Result<()> {
+    if acked.lock().await.remove(&rid) {
+        return Ok(());
+    }
+    timeout(ACK_TIMEOUT, ack_rx)
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "control request {rid} ack timed out after {:?}",
+                ACK_TIMEOUT
+            )
+        })?
+        .map_err(|_| anyhow!("control request {rid} ack channel dropped"))?;
+    Ok(())
 }
 
 async fn fail_all_pending(
@@ -882,5 +941,30 @@ fn default_caps(alpn: &str) -> pb::ClientCaps {
             supports_system_audio: false,
         }),
         camera_video: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn ack_resolves_pending_request() {
+        let acked: Arc<Mutex<HashSet<u64>>> = Arc::new(Mutex::new(HashSet::new()));
+        let (tx, rx) = oneshot::channel();
+        let _ = tx.send(());
+        wait_for_ack(42, &acked, rx)
+            .await
+            .expect("ack should resolve");
+    }
+
+    #[tokio::test]
+    async fn ack_timeout_returns_error() {
+        let acked: Arc<Mutex<HashSet<u64>>> = Arc::new(Mutex::new(HashSet::new()));
+        let (_tx, rx) = oneshot::channel::<()>();
+        let err = wait_for_ack(7, &acked, rx)
+            .await
+            .expect_err("ack should timeout");
+        assert!(format!("{err:#}").contains("ack timed out"));
     }
 }

@@ -1797,7 +1797,19 @@ async fn connect_and_run_session(
         }
     });
 
-    let (send, recv) = conn.open_bi().await.context("open control stream")?;
+    let (mut send, recv) = conn.open_bi().await.context("open control stream")?;
+    send.set_priority(CONTROL_STREAM_HIGH_PRIORITY)
+        .context("set control stream priority")?;
+    let mut preface = [0u8; 6];
+    preface[..4].copy_from_slice(CONTROL_STREAM_PREFACE_MAGIC);
+    preface[4..].copy_from_slice(&CONTROL_STREAM_PREFACE_VERSION.to_be_bytes());
+    send.write_all(&preface)
+        .await
+        .context("write control stream preface")?;
+    // TODO(latency): consider QUIC DATAGRAM for latest-wins toggles (mute/PTT) with
+    // sequence numbers + periodic refresh once control protocol negotiation is in place.
+    // TODO(latency): if heavy streaming saturates this connection, isolate bulk transfer
+    // onto a second QUIC connection and keep control-only traffic here.
     let dispatcher = ControlDispatcher::start(send, recv, shutdown_rx.clone(), ui_log_tx.clone());
 
     set_connection_stage(
@@ -3996,6 +4008,7 @@ async fn upload_attachment_quic(
     use tokio::io::AsyncReadExt;
 
     let (mut send, mut recv) = conn.open_bi().await.context("open media stream")?;
+    let _ = send.set_priority(0);
     let mut file = tokio::fs::File::open(&attachment.asset_id)
         .await
         .with_context(|| format!("open attachment: {}", attachment.asset_id))?;
@@ -5323,3 +5336,6 @@ mod tests {
         assert!(super::VOICE_INGRESS_CAP <= 64);
     }
 }
+const CONTROL_STREAM_PREFACE_MAGIC: &[u8; 4] = b"CTRL";
+const CONTROL_STREAM_PREFACE_VERSION: u16 = 1;
+const CONTROL_STREAM_HIGH_PRIORITY: i32 = 10;
