@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use futures_util::StreamExt;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     error::Error as StdError,
     fmt,
     sync::Arc,
@@ -22,8 +22,6 @@ use crate::{
     },
     proto::voiceplatform::v1 as pb,
 };
-
-const ACK_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Server-push events emitted by the dispatcher.
 /// Keep this fairly low-level; app layer can transform into UI state.
@@ -637,15 +635,10 @@ async fn dispatcher_task(
     let max_ctrl_msg = crate::net::frame::MAX_CONTROL_FRAME_LEN;
     let mut pending: HashMap<u64, PendingEntry> = HashMap::new();
     let mut timeouts: DelayQueue<u64> = DelayQueue::new();
-    let ack_pending: Arc<Mutex<HashMap<u64, oneshot::Sender<()>>>> =
-        Arc::new(Mutex::new(HashMap::new()));
-    let acked: Arc<Mutex<HashSet<u64>>> = Arc::new(Mutex::new(HashSet::new()));
     let mut next_req: u64 = 1;
     let (reader_event_tx, mut reader_event_rx) = mpsc::channel::<ReaderEvent>(1024);
 
     // Spawn reader task
-    let reader_ack_pending = ack_pending.clone();
-    let reader_acked = acked.clone();
     let reader_inner = inner.clone();
     let reader_ui_log_tx = ui_log_tx.clone();
     let reader = tokio::spawn(async move {
@@ -660,11 +653,7 @@ async fn dispatcher_task(
 
             match env.payload {
                 Some(pb::control_envelope::Payload::ControlAck(ack)) => {
-                    if let Some(tx) = reader_ack_pending.lock().await.remove(&ack.request_id) {
-                        let _ = tx.send(());
-                    } else {
-                        reader_acked.lock().await.insert(ack.request_id);
-                    }
+                    debug!(request_id = ack.request_id, "received control ack");
                 }
                 Some(pb::control_envelope::Payload::ControlResponse(msg)) => {
                     if msg.request_id.is_some() {
@@ -760,8 +749,6 @@ async fn dispatcher_task(
 
                         let timeout_key = timeouts.insert(rid, timeout);
                         pending.insert(rid, PendingEntry { resp_tx, timeout_key });
-                        let (ack_tx, ack_rx) = oneshot::channel();
-                        ack_pending.lock().await.insert(rid, ack_tx);
 
                         let session_id = inner.session_id.read().await.clone();
                         let msg = pb::ClientToServer {
@@ -779,16 +766,6 @@ async fn dispatcher_task(
                             let _ = ui_log_tx.send(format!("[dispatcher] exiting: control send failed ({e:?})"));
                             fail_all_pending(&mut pending).await;
                             break;
-                        }
-
-                        if let Err(e) = wait_for_ack(rid, &acked, ack_rx).await {
-                            if let Some(entry) = pending.remove(&rid) {
-                                let _ = timeouts.remove(&entry.timeout_key);
-                                let _ = entry.resp_tx.send(Err(DispatcherRequestError::Server {
-                                    request_id: rid,
-                                    message: e.to_string(),
-                                }));
-                            }
                         }
                     }
                     Some(Command::SendNoResponse { payload }) => {
@@ -831,26 +808,6 @@ async fn dispatcher_task(
     }
 
     fail_all_pending(&mut pending).await;
-}
-
-async fn wait_for_ack(
-    rid: u64,
-    acked: &Arc<Mutex<HashSet<u64>>>,
-    ack_rx: oneshot::Receiver<()>,
-) -> Result<()> {
-    if acked.lock().await.remove(&rid) {
-        return Ok(());
-    }
-    timeout(ACK_TIMEOUT, ack_rx)
-        .await
-        .map_err(|_| {
-            anyhow!(
-                "control request {rid} ack timed out after {:?}",
-                ACK_TIMEOUT
-            )
-        })?
-        .map_err(|_| anyhow!("control request {rid} ack channel dropped"))?;
-    Ok(())
 }
 
 async fn fail_all_pending(pending: &mut HashMap<u64, PendingEntry>) {
@@ -1024,30 +981,5 @@ fn default_caps(alpn: &str) -> pb::ClientCaps {
             supports_system_audio: false,
         }),
         camera_video: None,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn ack_resolves_pending_request() {
-        let acked: Arc<Mutex<HashSet<u64>>> = Arc::new(Mutex::new(HashSet::new()));
-        let (tx, rx) = oneshot::channel();
-        let _ = tx.send(());
-        wait_for_ack(42, &acked, rx)
-            .await
-            .expect("ack should resolve");
-    }
-
-    #[tokio::test]
-    async fn ack_timeout_returns_error() {
-        let acked: Arc<Mutex<HashSet<u64>>> = Arc::new(Mutex::new(HashSet::new()));
-        let (_tx, rx) = oneshot::channel::<()>();
-        let err = wait_for_ack(7, &acked, rx)
-            .await
-            .expect_err("ack should timeout");
-        assert!(format!("{err:#}").contains("ack timed out"));
     }
 }
