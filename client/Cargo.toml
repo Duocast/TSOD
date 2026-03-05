@@ -21,8 +21,6 @@ clap = { version = "4.5.60", features = ["derive", "env"] }
 prost = "0.14.3"
 rand = "0.10"
 tokio = { version = "1.49", features = ["rt-multi-thread", "macros", "time", "signal", "io-util", "sync", "fs"] }
-tokio-util = { version = "0.7", features = ["time"] }
-futures-util = "0.3"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 uuid = { version = "1.21", features = ["v4"] }
