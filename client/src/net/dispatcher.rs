@@ -1,6 +1,9 @@
 use anyhow::{anyhow, Context, Result};
+use futures_util::StreamExt;
 use std::{
     collections::{HashMap, HashSet},
+    error::Error as StdError,
+    fmt,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -8,7 +11,8 @@ use tokio::{
     sync::{mpsc, oneshot, watch, Mutex, RwLock},
     time::timeout,
 };
-use tracing::info;
+use tokio_util::time::{delay_queue::Key as DelayKey, DelayQueue};
+use tracing::{debug, info};
 
 use crate::{
     identity::DeviceIdentity,
@@ -93,13 +97,41 @@ pub struct JoinChannelState {
     pub info: Option<pb::ChannelInfo>,
 }
 
+#[derive(Debug)]
+enum DispatcherRequestError {
+    Timeout { request_id: u64 },
+    Disconnected,
+    Server { request_id: u64, message: String },
+}
+
+impl fmt::Display for DispatcherRequestError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Timeout { request_id } => write!(f, "request {request_id} timed out"),
+            Self::Disconnected => write!(f, "dispatcher transport closed"),
+            Self::Server {
+                request_id,
+                message,
+            } => {
+                write!(f, "control error for request {request_id}: {message}")
+            }
+        }
+    }
+}
+
+impl StdError for DispatcherRequestError {}
+
+struct PendingEntry {
+    resp_tx: oneshot::Sender<std::result::Result<pb::ServerToClient, DispatcherRequestError>>,
+    timeout_key: DelayKey,
+}
+
 /// Commands into the dispatcher (outgoing requests).
 #[derive(Debug)]
 enum Command {
     Send {
         payload: pb::client_to_server::Payload,
-        resp_tx: oneshot::Sender<Result<pb::ServerToClient>>,
-        #[allow(dead_code)]
+        resp_tx: oneshot::Sender<std::result::Result<pb::ServerToClient, DispatcherRequestError>>,
         timeout: Duration,
     },
     SendNoResponse {
@@ -571,7 +603,8 @@ impl ControlDispatcher {
         Ok(timeout(timeout_dur + Duration::from_millis(250), resp_rx)
             .await
             .map_err(|_| anyhow!("request timed out waiting for response"))?
-            .map_err(|_| anyhow!("dispatcher dropped response"))?)
+            .map_err(|_| anyhow!("dispatcher dropped response"))?
+            .map_err(|err| anyhow!(err))?)
     }
 
     pub async fn shutdown(&self) {
@@ -596,16 +629,21 @@ async fn dispatcher_task(
     mut shutdown_rx: watch::Receiver<bool>,
     ui_log_tx: UiLogTx,
 ) {
+    enum ReaderEvent {
+        Response(pb::ServerToClient),
+        Error { request_id: u64, message: String },
+    }
+
     let max_ctrl_msg = crate::net::frame::MAX_CONTROL_FRAME_LEN;
-    let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<pb::ServerToClient>>>>> =
-        Arc::new(Mutex::new(HashMap::new()));
+    let mut pending: HashMap<u64, PendingEntry> = HashMap::new();
+    let mut timeouts: DelayQueue<u64> = DelayQueue::new();
     let ack_pending: Arc<Mutex<HashMap<u64, oneshot::Sender<()>>>> =
         Arc::new(Mutex::new(HashMap::new()));
     let acked: Arc<Mutex<HashSet<u64>>> = Arc::new(Mutex::new(HashSet::new()));
-    let next_req: Arc<Mutex<u64>> = Arc::new(Mutex::new(1));
+    let mut next_req: u64 = 1;
+    let (reader_event_tx, mut reader_event_rx) = mpsc::channel::<ReaderEvent>(1024);
 
     // Spawn reader task
-    let reader_pending = pending.clone();
     let reader_ack_pending = ack_pending.clone();
     let reader_acked = acked.clone();
     let reader_inner = inner.clone();
@@ -629,19 +667,29 @@ async fn dispatcher_task(
                     }
                 }
                 Some(pb::control_envelope::Payload::ControlResponse(msg)) => {
-                    if let Some(rid) = msg.request_id.as_ref().map(|x| x.value) {
-                        if let Some(tx) = reader_pending.lock().await.remove(&rid) {
-                            let _ = tx.send(Ok(msg));
-                            continue;
+                    if msg.request_id.is_some() {
+                        if reader_event_tx
+                            .send(ReaderEvent::Response(msg))
+                            .await
+                            .is_err()
+                        {
+                            return Ok(());
                         }
+                    } else {
+                        let ev = classify_push(msg);
+                        let _ = reader_inner.push_tx.try_send(ev);
                     }
-
-                    let ev = classify_push(msg);
-                    let _ = reader_inner.push_tx.try_send(ev);
                 }
                 Some(pb::control_envelope::Payload::ControlError(err)) => {
-                    if let Some(tx) = reader_pending.lock().await.remove(&err.request_id) {
-                        let _ = tx.send(Err(anyhow!("control error: {}", err.message)));
+                    if reader_event_tx
+                        .send(ReaderEvent::Error {
+                            request_id: err.request_id,
+                            message: err.message,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        return Ok(());
                     }
                 }
                 _ => {
@@ -661,6 +709,41 @@ async fn dispatcher_task(
                     break;
                 }
             }
+            expired = timeouts.next() => {
+                if let Some(expired) = expired {
+                    let rid = expired.into_inner();
+                    if let Some(entry) = pending.remove(&rid) {
+                        let _ = entry.resp_tx.send(Err(DispatcherRequestError::Timeout { request_id: rid }));
+                    }
+                }
+            }
+            evt = reader_event_rx.recv() => {
+                match evt {
+                    Some(ReaderEvent::Response(msg)) => {
+                        let Some(rid) = msg.request_id.as_ref().map(|x| x.value) else {
+                            continue;
+                        };
+
+                        if let Some(entry) = pending.remove(&rid) {
+                            let _ = timeouts.remove(&entry.timeout_key);
+                            let _ = entry.resp_tx.send(Ok(msg));
+                        } else {
+                            debug!(request_id = rid, "ignoring late/unmatched response id");
+                        }
+                    }
+                    Some(ReaderEvent::Error { request_id, message }) => {
+                        if let Some(entry) = pending.remove(&request_id) {
+                            let _ = timeouts.remove(&entry.timeout_key);
+                            let _ = entry
+                                .resp_tx
+                                .send(Err(DispatcherRequestError::Server { request_id, message }));
+                        } else {
+                            debug!(request_id, "ignoring late/unmatched control error id");
+                        }
+                    }
+                    None => break,
+                }
+            }
             cmd = cmd_rx.recv() => {
                 match cmd {
                     None => {
@@ -671,15 +754,12 @@ async fn dispatcher_task(
                         let _ = ui_log_tx.send("[dispatcher] exiting: shutdown command received".to_string());
                         break;
                     }
-                    Some(Command::Send { payload, resp_tx, timeout: _ }) => {
-                        let rid = {
-                            let mut g = next_req.lock().await;
-                            let v = *g;
-                            *g += 1;
-                            v
-                        };
+                    Some(Command::Send { payload, resp_tx, timeout }) => {
+                        let rid = next_req;
+                        next_req += 1;
 
-                        pending.lock().await.insert(rid, resp_tx);
+                        let timeout_key = timeouts.insert(rid, timeout);
+                        pending.insert(rid, PendingEntry { resp_tx, timeout_key });
                         let (ack_tx, ack_rx) = oneshot::channel();
                         ack_pending.lock().await.insert(rid, ack_tx);
 
@@ -697,13 +777,17 @@ async fn dispatcher_task(
 
                         if let Err(e) = write_delimited(&mut send, &env).await {
                             let _ = ui_log_tx.send(format!("[dispatcher] exiting: control send failed ({e:?})"));
-                            fail_all_pending(&pending).await;
+                            fail_all_pending(&mut pending).await;
                             break;
                         }
 
                         if let Err(e) = wait_for_ack(rid, &acked, ack_rx).await {
-                            if let Some(tx) = pending.lock().await.remove(&rid) {
-                                let _ = tx.send(Err(e));
+                            if let Some(entry) = pending.remove(&rid) {
+                                let _ = timeouts.remove(&entry.timeout_key);
+                                let _ = entry.resp_tx.send(Err(DispatcherRequestError::Server {
+                                    request_id: rid,
+                                    message: e.to_string(),
+                                }));
                             }
                         }
                     }
@@ -722,7 +806,7 @@ async fn dispatcher_task(
 
                         if let Err(e) = write_delimited(&mut send, &env).await {
                             let _ = ui_log_tx.send(format!("[dispatcher] exiting: control send failed ({e:?})"));
-                            fail_all_pending(&pending).await;
+                            fail_all_pending(&mut pending).await;
                             break;
                         }
                     }
@@ -740,13 +824,13 @@ async fn dispatcher_task(
                         let _ = ui_log_tx.send(format!("[dispatcher] exiting: control reader join error ({e:?})"));
                     }
                 }
-                fail_all_pending(&pending).await;
+                fail_all_pending(&mut pending).await;
                 break;
             }
         }
     }
 
-    fail_all_pending(&pending).await;
+    fail_all_pending(&mut pending).await;
 }
 
 async fn wait_for_ack(
@@ -769,12 +853,11 @@ async fn wait_for_ack(
     Ok(())
 }
 
-async fn fail_all_pending(
-    pending: &Arc<Mutex<HashMap<u64, oneshot::Sender<Result<pb::ServerToClient>>>>>,
-) {
-    let mut map = pending.lock().await;
-    for (_, tx) in map.drain() {
-        let _ = tx.send(Err(anyhow!("dispatcher shutdown")));
+async fn fail_all_pending(pending: &mut HashMap<u64, PendingEntry>) {
+    for (_, entry) in pending.drain() {
+        let _ = entry
+            .resp_tx
+            .send(Err(DispatcherRequestError::Disconnected));
     }
 }
 
