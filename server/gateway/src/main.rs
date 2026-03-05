@@ -33,7 +33,6 @@ use crate::metrics_adapter::{stream_metrics, voice_metrics};
 use crate::outbox_dispatch::{run_outbox_dispatcher, OutboxDispatcherConfig};
 use crate::state::{MembershipCache, PushHub, Sessions, VoiceTelemetryCache};
 
-const QUIC_DATAGRAM_RECV_BUFFER_SIZE: usize = vp_voice::QUIC_MAX_DATAGRAM_BYTES;
 const QUIC_DATAGRAM_SEND_BUFFER_SIZE: usize = 128 * 1024; // keep explicit latency budget; avoid turning send buffer into hidden queue latency
 
 #[tokio::main]
@@ -174,10 +173,19 @@ async fn main() -> Result<()> {
     let mut transport = TransportConfig::default();
     transport.max_concurrent_bidi_streams(64u32.into());
     transport.max_concurrent_uni_streams(64u32.into());
+    let dg_recv_buf = cfg
+        .quic_datagram_recv_buffer_bytes
+        .clamp(vp_voice::APP_MEDIA_MTU, 256 * 1024);
     // In quinn 0.11, max_datagram_frame_size is advertised from datagram_receive_buffer_size.
-    transport.datagram_receive_buffer_size(Some(QUIC_DATAGRAM_RECV_BUFFER_SIZE));
+    transport.datagram_receive_buffer_size(Some(dg_recv_buf));
     transport.datagram_send_buffer_size(QUIC_DATAGRAM_SEND_BUFFER_SIZE);
     transport.keep_alive_interval(Some(std::time::Duration::from_secs(10)));
+    info!(
+        quic_datagram_recv_buffer_bytes = dg_recv_buf,
+        app_media_mtu = vp_voice::APP_MEDIA_MTU,
+        "configured QUIC datagram receive buffer; app-level MTU enforcement remains active"
+    );
+
     server_config.transport_config(Arc::new(transport));
 
     let endpoint = Endpoint::server(server_config, addr)?;
