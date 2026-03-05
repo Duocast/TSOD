@@ -17,10 +17,11 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     sync::atomic::{AtomicU64, Ordering},
     sync::Arc,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use bytes::Bytes;
+use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, info};
 
@@ -111,6 +112,7 @@ pub struct StreamRegistration {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StreamDropReason {
     QueueFull,
+    ViewerLoopClosed,
     EvictedOldestFrame,
     Malformed,
     Unauthorized,
@@ -120,6 +122,7 @@ impl StreamDropReason {
     pub fn as_label(self) -> &'static str {
         match self {
             Self::QueueFull => "queue_full",
+            Self::ViewerLoopClosed => "viewer_loop_closed",
             Self::EvictedOldestFrame => "evicted_oldest_frame",
             Self::Malformed => "malformed",
             Self::Unauthorized => "unauthorized",
@@ -366,6 +369,7 @@ pub struct StreamForwarder {
     dropped_queue_full: AtomicU64,
     dropped_malformed: AtomicU64,
     dropped_unauthorized: AtomicU64,
+    dropped_viewer_loop_closed: AtomicU64,
     dropped_viewer_ids_empty: AtomicU64,
     dropped_sessions_empty_for_viewer: AtomicU64,
 }
@@ -381,6 +385,13 @@ struct EnqueuedFragment {
     datagram: Bytes,
     hdr: VideoHeader,
     codec: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EnqueueOutcome {
+    Enqueued,
+    QueueFull,
+    ViewerLoopClosed,
 }
 
 impl StreamForwarder {
@@ -402,6 +413,7 @@ impl StreamForwarder {
             dropped_queue_full: AtomicU64::new(0),
             dropped_malformed: AtomicU64::new(0),
             dropped_unauthorized: AtomicU64::new(0),
+            dropped_viewer_loop_closed: AtomicU64::new(0),
             dropped_viewer_ids_empty: AtomicU64::new(0),
             dropped_sessions_empty_for_viewer: AtomicU64::new(0),
         }
@@ -581,17 +593,30 @@ impl StreamForwarder {
                 let outcome = self
                     .enqueue_to_viewer(viewer_id, session_id, dtx, &datagram, &hdr, reg.codec)
                     .await;
-                if outcome {
-                    forwarded += 1;
-                    self.forwarded_fragments.fetch_add(1, Ordering::Relaxed);
-                    self.metrics.inc_forwarded_bytes(datagram.len());
-                    self.metrics
-                        .inc_forwarded_bytes_codec(datagram.len(), reg.codec);
-                } else {
-                    self.dropped_queue_full.fetch_add(1, Ordering::Relaxed);
-                    self.metrics.inc_drop_by_reason(StreamDropReason::QueueFull);
-                    self.metrics
-                        .inc_drop_by_reason_codec(StreamDropReason::QueueFull, reg.codec);
+                match outcome {
+                    EnqueueOutcome::Enqueued => {
+                        forwarded += 1;
+                        self.forwarded_fragments.fetch_add(1, Ordering::Relaxed);
+                        self.metrics.inc_forwarded_bytes(datagram.len());
+                        self.metrics
+                            .inc_forwarded_bytes_codec(datagram.len(), reg.codec);
+                    }
+                    EnqueueOutcome::QueueFull => {
+                        self.dropped_queue_full.fetch_add(1, Ordering::Relaxed);
+                        self.metrics.inc_drop_by_reason(StreamDropReason::QueueFull);
+                        self.metrics
+                            .inc_drop_by_reason_codec(StreamDropReason::QueueFull, reg.codec);
+                    }
+                    EnqueueOutcome::ViewerLoopClosed => {
+                        self.dropped_viewer_loop_closed
+                            .fetch_add(1, Ordering::Relaxed);
+                        self.metrics
+                            .inc_drop_by_reason(StreamDropReason::ViewerLoopClosed);
+                        self.metrics.inc_drop_by_reason_codec(
+                            StreamDropReason::ViewerLoopClosed,
+                            reg.codec,
+                        );
+                    }
                 }
             }
         }
@@ -620,6 +645,7 @@ impl StreamForwarder {
 
         let forwarded = self.forwarded_fragments.swap(0, Ordering::AcqRel);
         let dropped = self.dropped_queue_full.swap(0, Ordering::AcqRel);
+        let viewer_loop_closed = self.dropped_viewer_loop_closed.swap(0, Ordering::AcqRel);
         let malformed = self.dropped_malformed.swap(0, Ordering::AcqRel);
         let unauthorized = self.dropped_unauthorized.swap(0, Ordering::AcqRel);
         let viewer_ids_empty = self.dropped_viewer_ids_empty.swap(0, Ordering::AcqRel);
@@ -628,9 +654,10 @@ impl StreamForwarder {
             .swap(0, Ordering::AcqRel);
         info!(
             target: "video",
-            "forwarded_datagrams/sec={} dropped_queue_full/sec={} malformed/sec={} unauthorized/sec={} viewer_ids_empty/sec={} sessions_empty_for_viewer/sec={}",
+            "forwarded_datagrams/sec={} dropped_queue_full/sec={} dropped_viewer_loop_closed/sec={} malformed/sec={} unauthorized/sec={} viewer_ids_empty/sec={} sessions_empty_for_viewer/sec={}",
             forwarded,
             dropped,
+            viewer_loop_closed,
             malformed,
             unauthorized,
             viewer_ids_empty,
@@ -656,47 +683,74 @@ impl StreamForwarder {
         datagram: &Bytes,
         hdr: &VideoHeader,
         codec: i32,
-    ) -> bool {
+    ) -> EnqueueOutcome {
         let key = (viewer, session_id);
-        if let Some((tx, last_active_ms)) = self
-            .viewer_loops
-            .read()
-            .await
-            .get(&key)
-            .map(|h| (h.tx.clone(), h.last_active_ms.clone()))
-        {
-            if tx
-                .try_send(EnqueuedFragment {
-                    datagram: datagram.clone(),
-                    hdr: *hdr,
-                    codec,
-                })
-                .is_ok()
-            {
-                last_active_ms.store(Self::now_ms(), Ordering::Relaxed);
-                return true;
+        // If try_send() sees Closed, we must remove stale sender + respawn immediately.
+        // Otherwise a dead loop can stay in the map and leave viewers permanently black.
+        let mut fragment = EnqueuedFragment {
+            datagram: datagram.clone(),
+            hdr: *hdr,
+            codec,
+        };
+
+        for attempt in 0..2 {
+            let handle = self
+                .get_or_spawn_viewer_loop_handle(&key, dtx.clone())
+                .await;
+            match handle.tx.try_send(fragment) {
+                Ok(()) => {
+                    handle
+                        .last_active_ms
+                        .store(Self::now_ms(), Ordering::Relaxed);
+                    return EnqueueOutcome::Enqueued;
+                }
+                Err(TrySendError::Full(msg)) => {
+                    let _ = msg;
+                    return EnqueueOutcome::QueueFull;
+                }
+                Err(TrySendError::Closed(msg)) => {
+                    fragment = msg;
+                    let mut loops = self.viewer_loops.write().await;
+                    if loops.get(&key).is_some_and(|h| h.tx.is_closed()) {
+                        loops.remove(&key);
+                    }
+
+                    if attempt == 1 {
+                        return EnqueueOutcome::ViewerLoopClosed;
+                    }
+                }
             }
-            return false;
         }
 
-        let tx = self.spawn_viewer_loop(key.clone(), dtx);
-        let last_active_ms = Arc::new(AtomicU64::new(Self::now_ms()));
-        if tx
-            .try_send(EnqueuedFragment {
-                datagram: datagram.clone(),
-                hdr: *hdr,
-                codec,
-            })
-            .is_ok()
-        {
-            self.viewer_loops
-                .write()
-                .await
-                .insert(key, ViewerLoopHandle { tx, last_active_ms });
-            true
-        } else {
-            false
+        EnqueueOutcome::ViewerLoopClosed
+    }
+
+    async fn get_or_spawn_viewer_loop_handle(
+        &self,
+        key: &(UserId, String),
+        dtx: Arc<dyn DatagramTx>,
+    ) -> ViewerLoopHandle {
+        if let Some(handle) = self.viewer_loops.read().await.get(key).cloned() {
+            if !handle.tx.is_closed() {
+                return handle;
+            }
         }
+
+        let mut loops = self.viewer_loops.write().await;
+        if let Some(handle) = loops.get(key).cloned() {
+            if !handle.tx.is_closed() {
+                return handle;
+            }
+        }
+
+        loops.remove(key);
+        let tx = self.spawn_viewer_loop(key.clone(), dtx);
+        let handle = ViewerLoopHandle {
+            tx,
+            last_active_ms: Arc::new(AtomicU64::new(Self::now_ms())),
+        };
+        loops.insert(key.clone(), handle.clone());
+        handle
     }
 
     fn spawn_viewer_loop(
@@ -787,6 +841,7 @@ impl StreamForwarder {
 mod tests {
     use super::*;
     use bytes::{BufMut, BytesMut};
+    use std::time::Instant;
 
     fn make_test_datagram(
         stream_tag: u64,
@@ -977,10 +1032,30 @@ mod tests {
             self.sent.fetch_add(1, Ordering::Relaxed);
             Ok(())
         }
-        fn session_id(&self) -> &str { "fake" }
-        fn max_datagram_size(&self) -> Option<usize> { Some(vp_voice::QUIC_MAX_DATAGRAM_BYTES) }
-        fn send_voice(&self, _now_ms: u64, _channel_id: ChannelId, _pkt: Bytes, _prune_tx: &tokio::sync::mpsc::Sender<crate::datagram_send_policy::PruneEvt>, _metrics: &dyn crate::datagram_send_policy::DatagramSendPolicyMetrics) {}
-        fn send_video_best_effort(&self, _now_ms: u64, _channel_id: ChannelId, _pkt: Bytes, _prune_tx: &tokio::sync::mpsc::Sender<crate::datagram_send_policy::PruneEvt>, _metrics: &dyn crate::datagram_send_policy::DatagramSendPolicyMetrics) {}
+        fn session_id(&self) -> &str {
+            "fake"
+        }
+        fn max_datagram_size(&self) -> Option<usize> {
+            Some(vp_voice::QUIC_MAX_DATAGRAM_BYTES)
+        }
+        fn send_voice(
+            &self,
+            _now_ms: u64,
+            _channel_id: ChannelId,
+            _pkt: Bytes,
+            _prune_tx: &tokio::sync::mpsc::Sender<crate::datagram_send_policy::PruneEvt>,
+            _metrics: &dyn crate::datagram_send_policy::DatagramSendPolicyMetrics,
+        ) {
+        }
+        fn send_video_best_effort(
+            &self,
+            _now_ms: u64,
+            _channel_id: ChannelId,
+            _pkt: Bytes,
+            _prune_tx: &tokio::sync::mpsc::Sender<crate::datagram_send_policy::PruneEvt>,
+            _metrics: &dyn crate::datagram_send_policy::DatagramSendPolicyMetrics,
+        ) {
+        }
     }
 
     struct SlowTx {
@@ -995,10 +1070,30 @@ mod tests {
             self.sent.fetch_add(1, Ordering::Relaxed);
             Ok(())
         }
-        fn session_id(&self) -> &str { "slow" }
-        fn max_datagram_size(&self) -> Option<usize> { Some(vp_voice::QUIC_MAX_DATAGRAM_BYTES) }
-        fn send_voice(&self, _now_ms: u64, _channel_id: ChannelId, _pkt: Bytes, _prune_tx: &tokio::sync::mpsc::Sender<crate::datagram_send_policy::PruneEvt>, _metrics: &dyn crate::datagram_send_policy::DatagramSendPolicyMetrics) {}
-        fn send_video_best_effort(&self, _now_ms: u64, _channel_id: ChannelId, _pkt: Bytes, _prune_tx: &tokio::sync::mpsc::Sender<crate::datagram_send_policy::PruneEvt>, _metrics: &dyn crate::datagram_send_policy::DatagramSendPolicyMetrics) {}
+        fn session_id(&self) -> &str {
+            "slow"
+        }
+        fn max_datagram_size(&self) -> Option<usize> {
+            Some(vp_voice::QUIC_MAX_DATAGRAM_BYTES)
+        }
+        fn send_voice(
+            &self,
+            _now_ms: u64,
+            _channel_id: ChannelId,
+            _pkt: Bytes,
+            _prune_tx: &tokio::sync::mpsc::Sender<crate::datagram_send_policy::PruneEvt>,
+            _metrics: &dyn crate::datagram_send_policy::DatagramSendPolicyMetrics,
+        ) {
+        }
+        fn send_video_best_effort(
+            &self,
+            _now_ms: u64,
+            _channel_id: ChannelId,
+            _pkt: Bytes,
+            _prune_tx: &tokio::sync::mpsc::Sender<crate::datagram_send_policy::PruneEvt>,
+            _metrics: &dyn crate::datagram_send_policy::DatagramSendPolicyMetrics,
+        ) {
+        }
     }
 
     struct FakeSessions {
