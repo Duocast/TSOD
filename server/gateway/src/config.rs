@@ -70,6 +70,18 @@ pub struct Config {
     /// Max concurrent connections (soft limit)
     #[arg(long, default_value_t = 10_000)]
     pub max_connections: usize,
+
+    /// Quinn per-connection total bytes buffered for received-but-not-yet-consumed datagrams.
+    ///
+    /// In quinn 0.11 this also influences the peer-advertised max datagram frame size.
+    /// We still enforce vp_voice::APP_MEDIA_MTU as the real accepted media MTU at the app
+    /// layer. Larger values absorb microbursts but can mask stalls; start at 32KiB.
+    #[arg(
+        long = "quic-datagram-recv-buffer-bytes",
+        env = "VP_QUIC_DG_RECV_BUF_BYTES",
+        default_value_t = 32 * 1024
+    )]
+    pub quic_datagram_recv_buffer_bytes: usize,
 }
 
 fn default_owner_bootstrap_policy() -> OwnerBootstrapPolicy {
@@ -77,5 +89,17 @@ fn default_owner_bootstrap_policy() -> OwnerBootstrapPolicy {
         OwnerBootstrapPolicy::FirstLoginWins
     } else {
         OwnerBootstrapPolicy::ConfigOnly
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Config;
+    use clap::Parser;
+
+    #[test]
+    fn quic_datagram_recv_buffer_default_is_32kib() {
+        let cfg = Config::parse_from(["vp-gateway", "--database-url", "postgres://dummy"]);
+        assert_eq!(cfg.quic_datagram_recv_buffer_bytes, 32 * 1024);
     }
 }

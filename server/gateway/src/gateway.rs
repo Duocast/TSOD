@@ -240,6 +240,8 @@ impl Gateway {
 
             let mut video_rr = 0usize;
             let mut last_log = Instant::now();
+            // Fast-path only: read datagram -> classify -> enqueue/drop.
+            // Keep heavy decoding/mixing work in downstream workers.
             while let Ok(d) = conn_dg.read_datagram().await {
                 if d.len() > vp_voice::APP_MEDIA_MTU {
                     oversized_drops.fetch_add(1, Ordering::Relaxed);
