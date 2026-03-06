@@ -2206,7 +2206,7 @@ async fn connect_and_run_session(
                                             message_id,
                                             channel_id,
                                             author_name: author_id.clone(),
-                                            author_id,
+                                            author_id: author_id.clone(),
                                             text: mp.text.clone(),
                                             timestamp,
                                             attachments: mp
