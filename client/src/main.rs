@@ -45,7 +45,7 @@ use tokio::time::{sleep, Duration, Instant, MissedTickBehavior};
 use tracing::{debug, info, warn, Level};
 use tracing_subscriber::EnvFilter;
 use ui::model::AudioDeviceId;
-use ui::model::{DspMethod, FecMode, PerUserAudioSettings};
+use ui::model::{DspMethod, FecMode, PerUserAudioSettings, ShareSourceSelection};
 use ui::{UiEvent, UiIntent, VpApp};
 
 #[cfg(debug_assertions)]
@@ -59,9 +59,10 @@ const VOICE_DRAIN_KEEP_LATEST: usize = 4;
 
 #[derive(Debug, Clone)]
 pub enum ShareSource {
-    Display(String),
-    Window(String),
-    PortalSession(String),
+    WindowsDisplay(String),
+    WindowsWindow(String),
+    LinuxPortal(String),
+    X11Window(u64),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -207,7 +208,7 @@ impl ScrapCapture {
     fn from_source(source: &ShareSource) -> anyhow::Result<Self> {
         let displays = scrap::Display::all().context("enumerate displays")?;
         let display = match source {
-            ShareSource::Display(id) => {
+            ShareSource::WindowsDisplay(id) => {
                 let n = id
                     .strip_prefix("screen-")
                     .and_then(|v| v.parse::<usize>().ok())
@@ -218,11 +219,15 @@ impl ScrapCapture {
                     .nth(n - 1)
                     .ok_or_else(|| anyhow!("display source not found: {id}"))?
             }
-            ShareSource::Window(id) => {
+            ShareSource::WindowsWindow(id) => {
                 let _ = id;
                 scrap::Display::primary().context("resolve primary display")?
             }
-            ShareSource::PortalSession(id) => {
+            ShareSource::LinuxPortal(id) => {
+                let _ = id;
+                scrap::Display::primary().context("resolve primary display")?
+            }
+            ShareSource::X11Window(id) => {
                 let _ = id;
                 scrap::Display::primary().context("resolve primary display")?
             }
@@ -263,13 +268,12 @@ impl ScreenCapture for ScrapCapture {
     }
 }
 
-fn parse_share_source(source_id: &str) -> ShareSource {
-    if source_id.starts_with("window-") {
-        ShareSource::Window(source_id.to_string())
-    } else if source_id.starts_with("portal-") {
-        ShareSource::PortalSession(source_id.to_string())
-    } else {
-        ShareSource::Display(source_id.to_string())
+fn map_share_selection(selection: ShareSourceSelection) -> ShareSource {
+    match selection {
+        ShareSourceSelection::WindowsDisplay(id) => ShareSource::WindowsDisplay(id),
+        ShareSourceSelection::WindowsWindow(id) => ShareSource::WindowsWindow(id),
+        ShareSourceSelection::LinuxPortal(token) => ShareSource::LinuxPortal(token),
+        ShareSourceSelection::X11Window(window_id) => ShareSource::X11Window(window_id),
     }
 }
 
@@ -288,7 +292,7 @@ fn build_screen_capture(source: &ShareSource) -> anyhow::Result<Box<dyn ScreenCa
     }
 
     #[cfg(target_os = "linux")]
-    if matches!(source, ShareSource::PortalSession(_)) {
+    if matches!(source, ShareSource::LinuxPortal(_)) {
         return Err(anyhow!(
             "Wayland screen capture requires xdg-desktop-portal/PipeWire integration"
         ));
@@ -3473,14 +3477,14 @@ async fn connect_and_run_session(
                                 format!("[audio] loopback: {new}"),
                             ));
                         }
-                        UiIntent::StartScreenShare { source_id } => {
+                        UiIntent::StartScreenShare { selection } => {
                             if !matches!(share_state, ShareState::Idle) {
                                 let _ = tx_event.send(UiEvent::AppendLog(format!(
                                     "[video] start share ignored (state={share_state:?})"
                                 )));
                                 continue;
                             }
-                            let source = parse_share_source(&source_id);
+                            let source = map_share_selection(selection);
                             let include_audio = saved_settings.screen_share_capture_audio
                                 && platform_supports_system_audio();
                             let available_codecs = net::dispatcher::available_screen_share_codecs();
@@ -3554,7 +3558,7 @@ async fn connect_and_run_session(
                                             }
                                         }
                                         let _ = tx_event.send(UiEvent::AppendLog(format!(
-                                            "[video] StartScreenShareRequest ok stream_tag={stream_tag} source={source_id} include_audio={include_audio}"
+                                            "[video] StartScreenShareRequest ok stream_tag={stream_tag} source={source:?} include_audio={include_audio}"
                                         )));
                                         share_state = ShareState::Active;
                                         let (share_stop_tx, share_stop_rx) = watch::channel(false);

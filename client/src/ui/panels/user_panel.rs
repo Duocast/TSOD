@@ -250,7 +250,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                             !model
                                 .share_sources
                                 .iter()
-                                .any(|source| &source.id == selected)
+                                .any(|source| &source.selection == selected)
                         })
                     {
                         model.selected_share_source = None;

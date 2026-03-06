@@ -458,7 +458,7 @@ pub enum UiIntent {
     },
     ToggleLoopback,
     StartScreenShare {
-        source_id: String,
+        selection: ShareSourceSelection,
     },
     StopScreenShare,
 
@@ -1127,21 +1127,20 @@ pub enum ShareSourceKind {
     Window,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShareSourceSelection {
+    WindowsDisplay(String),
+    WindowsWindow(String),
+    LinuxPortal(String),
+    X11Window(u64),
+}
+
 #[derive(Debug, Clone)]
 pub struct ShareSourceOption {
-    pub id: String,
+    pub selection: ShareSourceSelection,
     pub title: String,
     pub subtitle: String,
     pub kind: ShareSourceKind,
-}
-
-fn fallback_share_sources() -> Vec<ShareSourceOption> {
-    vec![ShareSourceOption {
-        id: "screen-1".into(),
-        title: "Screen 1".into(),
-        subtitle: "Primary display".into(),
-        kind: ShareSourceKind::Screen,
-    }]
 }
 
 #[cfg(target_os = "windows")]
@@ -1205,7 +1204,7 @@ pub fn enumerate_share_sources() -> Vec<ShareSourceOption> {
             let monitor_name = String::from_utf16_lossy(&info.szDevice[..name_len]);
             let id = SCREEN_COUNTER.fetch_add(1, AtomicOrdering::Relaxed) + 1;
             screens.push(ShareSourceOption {
-                id: format!("screen-{id}"),
+                selection: ShareSourceSelection::WindowsDisplay(format!("screen-{id}")),
                 title: format!("Screen {id}"),
                 subtitle: monitor_name,
                 kind: ShareSourceKind::Screen,
@@ -1252,23 +1251,19 @@ pub fn enumerate_share_sources() -> Vec<ShareSourceOption> {
         windows_found
             .into_iter()
             .map(|(id, title)| ShareSourceOption {
-                id,
+                selection: ShareSourceSelection::WindowsWindow(id),
                 title,
                 subtitle: "Application window".into(),
                 kind: ShareSourceKind::Window,
             }),
     );
 
-    if sources.is_empty() {
-        fallback_share_sources()
-    } else {
-        sources
-    }
+    sources
 }
 
 #[cfg(not(target_os = "windows"))]
 pub fn enumerate_share_sources() -> Vec<ShareSourceOption> {
-    fallback_share_sources()
+    Vec::new()
 }
 
 // ── Main UI model ──────────────────────────────────────────────────────
@@ -1377,7 +1372,7 @@ pub struct UiModel {
     pub share_include_audio: bool,
     pub share_presenter_mode: usize,
     pub share_sources: Vec<ShareSourceOption>,
-    pub selected_share_source: Option<String>,
+    pub selected_share_source: Option<ShareSourceSelection>,
     pub sharing_active: bool,
     pub start_share_in_flight: bool,
     pub stream_debug: StreamDebugView,
