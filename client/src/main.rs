@@ -57,6 +57,244 @@ const VOICE_INGRESS_CAP: usize = 16; // Do not increase without justification; l
 const VOICE_MAX_AGE: Duration = Duration::from_millis(250);
 const VOICE_DRAIN_KEEP_LATEST: usize = 4;
 
+#[derive(Debug, Clone)]
+pub enum ShareSource {
+    Display(String),
+    Window(String),
+    PortalSession(String),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum PixelFormat {
+    Bgra,
+    Nv12,
+}
+
+#[derive(Debug)]
+pub enum FrameData {
+    Cpu(Bytes),
+}
+
+#[derive(Debug)]
+pub struct CapturedFrame {
+    pub width: u32,
+    pub height: u32,
+    pub stride: u32,
+    pub ts_ms: u32,
+    pub format: PixelFormat,
+    pub data: FrameData,
+}
+
+pub trait ScreenCapture: Send {
+    fn next_frame(&mut self) -> anyhow::Result<CapturedFrame>;
+}
+
+#[derive(Debug)]
+pub struct EncodedFrame {
+    pub ts_ms: u32,
+    pub is_keyframe: bool,
+    pub data: bytes::Bytes,
+}
+
+trait ScreenEncoder: Send {
+    fn encode(&mut self, frame: CapturedFrame) -> anyhow::Result<EncodedFrame>;
+}
+
+struct RawBgraEncoder {
+    frame_seq: u32,
+}
+
+impl RawBgraEncoder {
+    fn new() -> Self {
+        Self { frame_seq: 0 }
+    }
+}
+
+impl ScreenEncoder for RawBgraEncoder {
+    fn encode(&mut self, frame: CapturedFrame) -> anyhow::Result<EncodedFrame> {
+        let FrameData::Cpu(src) = frame.data;
+        let width = frame.width as usize;
+        let height = frame.height as usize;
+        let stride = frame.stride as usize;
+        let mut out = vec![0_u8; 8 + width * height * 4];
+        out[0..2].copy_from_slice(&(frame.width as u16).to_le_bytes());
+        out[2..4].copy_from_slice(&(frame.height as u16).to_le_bytes());
+        out[4..8].copy_from_slice(&(frame.width.saturating_mul(4)).to_le_bytes());
+        let dst = &mut out[8..];
+        match frame.format {
+            PixelFormat::Bgra => {
+                for y in 0..height {
+                    let src_row = &src[y * stride..(y * stride) + width * 4];
+                    let dst_row = &mut dst[y * width * 4..(y + 1) * width * 4];
+                    for x in 0..width {
+                        let si = x * 4;
+                        let di = x * 4;
+                        dst_row[di] = src_row[si + 2];
+                        dst_row[di + 1] = src_row[si + 1];
+                        dst_row[di + 2] = src_row[si];
+                        dst_row[di + 3] = 255;
+                    }
+                }
+            }
+            PixelFormat::Nv12 => return Err(anyhow!("NV12 screen encoding is not implemented")),
+        }
+        let encoded = EncodedFrame {
+            ts_ms: frame.ts_ms,
+            is_keyframe: self.frame_seq % 60 == 0,
+            data: Bytes::from(out),
+        };
+        self.frame_seq = self.frame_seq.wrapping_add(1);
+        Ok(encoded)
+    }
+}
+
+#[cfg(feature = "dev-synthetic-stream")]
+struct SyntheticCapture {
+    width: u32,
+    height: u32,
+    frame_idx: u32,
+}
+
+#[cfg(feature = "dev-synthetic-stream")]
+impl SyntheticCapture {
+    fn new() -> Self {
+        Self {
+            width: 1280,
+            height: 720,
+            frame_idx: 0,
+        }
+    }
+}
+
+#[cfg(feature = "dev-synthetic-stream")]
+impl ScreenCapture for SyntheticCapture {
+    fn next_frame(&mut self) -> anyhow::Result<CapturedFrame> {
+        let mut rgba = vec![0_u8; (self.width * self.height * 4) as usize];
+        for y in 0..self.height as usize {
+            for x in 0..self.width as usize {
+                let idx = (y * self.width as usize + x) * 4;
+                rgba[idx] = ((x as u32 + self.frame_idx) & 0xff) as u8;
+                rgba[idx + 1] = ((y as u32 + self.frame_idx * 2) & 0xff) as u8;
+                rgba[idx + 2] = (self.frame_idx & 0xff) as u8;
+                rgba[idx + 3] = 255;
+            }
+        }
+        self.frame_idx = self.frame_idx.wrapping_add(1);
+        Ok(CapturedFrame {
+            width: self.width,
+            height: self.height,
+            stride: self.width * 4,
+            ts_ms: unix_ms() as u32,
+            format: PixelFormat::Bgra,
+            data: FrameData::Cpu(Bytes::from(rgba)),
+        })
+    }
+}
+
+struct ScrapCapture {
+    capturer: scrap::Capturer,
+    width: u32,
+    height: u32,
+}
+
+impl ScrapCapture {
+    fn from_source(source: &ShareSource) -> anyhow::Result<Self> {
+        let displays = scrap::Display::all().context("enumerate displays")?;
+        let display = match source {
+            ShareSource::Display(id) => {
+                let n = id
+                    .strip_prefix("screen-")
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .unwrap_or(1)
+                    .max(1);
+                displays
+                    .into_iter()
+                    .nth(n - 1)
+                    .ok_or_else(|| anyhow!("display source not found: {id}"))?
+            }
+            ShareSource::Window(id) => {
+                let _ = id;
+                scrap::Display::primary().context("resolve primary display")?
+            }
+            ShareSource::PortalSession(id) => {
+                let _ = id;
+                scrap::Display::primary().context("resolve primary display")?
+            }
+        };
+
+        let width = display.width() as u32;
+        let height = display.height() as u32;
+        let capturer = scrap::Capturer::new(display).context("create screen capturer")?;
+        Ok(Self {
+            capturer,
+            width,
+            height,
+        })
+    }
+}
+
+impl ScreenCapture for ScrapCapture {
+    fn next_frame(&mut self) -> anyhow::Result<CapturedFrame> {
+        loop {
+            match self.capturer.frame() {
+                Ok(frame) => {
+                    let stride = (frame.len() / self.height as usize) as u32;
+                    return Ok(CapturedFrame {
+                        width: self.width,
+                        height: self.height,
+                        stride,
+                        ts_ms: unix_ms() as u32,
+                        format: PixelFormat::Bgra,
+                        data: FrameData::Cpu(Bytes::copy_from_slice(&frame)),
+                    });
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(e) => return Err(e).context("read captured screen frame"),
+            }
+        }
+    }
+}
+
+fn parse_share_source(source_id: &str) -> ShareSource {
+    if source_id.starts_with("window-") {
+        ShareSource::Window(source_id.to_string())
+    } else if source_id.starts_with("portal-") {
+        ShareSource::PortalSession(source_id.to_string())
+    } else {
+        ShareSource::Display(source_id.to_string())
+    }
+}
+
+fn platform_supports_system_audio() -> bool {
+    cfg!(target_os = "windows")
+}
+
+fn build_screen_capture(source: &ShareSource) -> anyhow::Result<Box<dyn ScreenCapture>> {
+    #[cfg(feature = "dev-synthetic-stream")]
+    if std::env::var("VP_USE_SYNTHETIC_SCREEN_CAPTURE")
+        .ok()
+        .as_deref()
+        == Some("1")
+    {
+        return Ok(Box::new(SyntheticCapture::new()));
+    }
+
+    #[cfg(target_os = "linux")]
+    if matches!(source, ShareSource::PortalSession(_)) {
+        return Err(anyhow!(
+            "Wayland screen capture requires xdg-desktop-portal/PipeWire integration"
+        ));
+    }
+
+    Ok(Box::new(ScrapCapture::from_source(source)?))
+}
+
+fn build_screen_encoder(_codec: &str, _profile: &str) -> anyhow::Result<Box<dyn ScreenEncoder>> {
+    Ok(Box::new(RawBgraEncoder::new()))
+}
+
 #[derive(Clone)]
 struct AudioRuntimeSettings {
     output_auto_level: Arc<AtomicBool>,
@@ -3217,13 +3455,15 @@ async fn connect_and_run_session(
                             ));
                         }
                         UiIntent::StartScreenShare { source_id } => {
-                            let _ = source_id;
                             if !matches!(share_state, ShareState::Idle) {
                                 let _ = tx_event.send(UiEvent::AppendLog(format!(
                                     "[video] start share ignored (state={share_state:?})"
                                 )));
                                 continue;
                             }
+                            let source = parse_share_source(&source_id);
+                            let include_audio = saved_settings.screen_share_capture_audio
+                                && platform_supports_system_audio();
                             let preferred_codec = match saved_settings.screen_share_codec.as_str() {
                                 "AV1" => pb::video_caps::Codec::Av1,
                                 _ => pb::video_caps::Codec::Vp9,
@@ -3249,7 +3489,7 @@ async fn connect_and_run_session(
                                 channel_id: active_channel.as_ref().map(|id| pb::ChannelId { value: id.clone() }),
                                 codec: preferred_codec as i32,
                                 layers: vec![profile_layer],
-                                include_audio: false,
+                                include_audio,
                             };
                             match dispatcher
                                 .send_request(pb::client_to_server::Payload::StartScreenShareRequest(req), Duration::from_secs(5))
@@ -3278,66 +3518,120 @@ async fn connect_and_run_session(
                                                 }
                                             }
                                         }
-                                        let _ = tx_event.send(UiEvent::AppendLog(format!("[video] StartScreenShareRequest ok stream_tag={stream_tag}")));
-                                        let (share_stop_tx, mut share_stop_rx) = watch::channel(false);
-                                        active_share_stop = Some(share_stop_tx);
+                                        let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                            "[video] StartScreenShareRequest ok stream_tag={stream_tag} source={source_id} include_audio={include_audio}"
+                                        )));
                                         share_state = ShareState::Active;
+                                        let (share_stop_tx, share_stop_rx) = watch::channel(false);
+                                        active_share_stop = Some(share_stop_tx);
+
                                         let egress_send = egress.clone();
                                         let video_counters = stream_state.counters.clone();
+                                        let selected_codec = saved_settings.screen_share_codec.clone();
+                                        let selected_profile = saved_settings.screen_share_profile.clone();
                                         tokio::spawn(async move {
                                             let mut sender = VideoSender::new(stream_tag, 0, sender_profile, mtu);
                                             sender.set_pacing_enabled(false);
-                                            const WIDTH: u16 = 160;
-                                            const HEIGHT: u16 = 90;
-                                            const STRIDE_BYTES: u32 = WIDTH as u32 * 4;
-                                            let mut frame_idx = 0u32;
-                                            let mut rgba = vec![0u8; WIDTH as usize * HEIGHT as usize * 4];
-                                            let mut synthetic = vec![0u8; 8 + rgba.len()];
-                                            synthetic[0..2].copy_from_slice(&WIDTH.to_le_bytes());
-                                            synthetic[2..4].copy_from_slice(&HEIGHT.to_le_bytes());
-                                            synthetic[4..8].copy_from_slice(&STRIDE_BYTES.to_le_bytes());
-                                            let mut frame_tick = tokio::time::interval(Duration::from_millis(33));
-                                            loop {
-                                                tokio::select! {
-                                                    _ = share_stop_rx.changed() => {
-                                                        if *share_stop_rx.borrow() { break; }
-                                                    }
-                                                    _ = frame_tick.tick() => {
-                                                        for y in 0..HEIGHT as usize {
-                                                            for x in 0..WIDTH as usize {
-                                                                let idx = (y * WIDTH as usize + x) * 4;
-                                                                rgba[idx] = ((x as u32 + frame_idx) & 0xff) as u8;
-                                                                rgba[idx + 1] = ((y as u32 + frame_idx * 2) & 0xff) as u8;
-                                                                rgba[idx + 2] = (frame_idx & 0xff) as u8;
-                                                                rgba[idx + 3] = 255;
-                                                            }
-                                                        }
-                                                        synthetic[8..].copy_from_slice(&rgba);
-                                                        let ts_ms = unix_ms() as u32;
-                                                        if let Err(e) = sender.send_frame_async(ts_ms, frame_idx % 60 == 0, &synthetic, |dg| {
-                                                            let dg_len = dg.len() as u64;
-                                                            let _ = dg_len;
-                                                            match egress_send.enqueue_video_fragment(stream_tag, frame_idx, frame_idx % 60 == 0, std::time::Instant::now(), dg) {
-                                                                Ok(report) => {
-                                                                    video_counters.video_tx_datagrams.fetch_add(1, Ordering::Relaxed);
-                                                                    if let Some(dropped) = report.dropped {
-                                                                        video_counters.video_tx_drop_queue_full.fetch_add(dropped.count as u64, Ordering::Relaxed);
-                                                                    }
-                                                                }
-                                                                Err(reason) => {
-                                                                    video_counters.video_tx_drop_deadline.fetch_add(1, Ordering::Relaxed);
-                                                                    warn!(?reason, stream_tag, frame_idx, "[video] enqueue rejected");
-                                                                }
-                                                            }
-                                                        }).await {
-                                                            video_counters.sender_frame_errors.fetch_add(1, Ordering::Relaxed);
-                                                            warn!(error=?e, frame_size=synthetic.len(), "[video] send_frame failed");
-                                                            break;
-                                                        }
-                                                        frame_idx = frame_idx.wrapping_add(1);
+
+                                            let (capture_tx, mut capture_rx) = mpsc::channel::<CapturedFrame>(4);
+                                            let (encoded_tx, mut encoded_rx) = mpsc::channel::<EncodedFrame>(4);
+                                            let stop_flag = Arc::new(AtomicBool::new(false));
+
+                                            let watcher_flag = stop_flag.clone();
+                                            let mut stop_watch = share_stop_rx.clone();
+                                            let stop_watch_task = tokio::spawn(async move {
+                                                while stop_watch.changed().await.is_ok() {
+                                                    if *stop_watch.borrow() {
+                                                        watcher_flag.store(true, Ordering::Relaxed);
+                                                        break;
                                                     }
                                                 }
+                                            });
+
+                                            let capture_source = source.clone();
+                                            let capture_stop = stop_flag.clone();
+                                            let capture_task = tokio::task::spawn_blocking(move || {
+                                                let mut cap = match build_screen_capture(&capture_source) {
+                                                    Ok(cap) => cap,
+                                                    Err(e) => {
+                                                        warn!(error=?e, "[video] failed to build screen capture backend");
+                                                        return;
+                                                    }
+                                                };
+                                                while !capture_stop.load(Ordering::Relaxed) {
+                                                    match cap.next_frame() {
+                                                        Ok(frame) => {
+                                                            let _ = capture_tx.try_send(frame);
+                                                        }
+                                                        Err(e) => {
+                                                            warn!(error=?e, "[video] capture frame failed");
+                                                            break;
+                                                        }
+                                                    }
+                                                }
+                                            });
+
+                                            let encode_task = tokio::spawn(async move {
+                                                let mut encoder = match build_screen_encoder(&selected_codec, &selected_profile) {
+                                                    Ok(enc) => enc,
+                                                    Err(e) => {
+                                                        warn!(error=?e, "[video] failed to build screen encoder");
+                                                        return;
+                                                    }
+                                                };
+                                                while let Some(mut frame) = capture_rx.recv().await {
+                                                    while let Ok(next) = capture_rx.try_recv() {
+                                                        frame = next;
+                                                    }
+                                                    match encoder.encode(frame) {
+                                                        Ok(encoded) => {
+                                                            let _ = encoded_tx.try_send(encoded);
+                                                        }
+                                                        Err(e) => {
+                                                            warn!(error=?e, "[video] encode failed");
+                                                        }
+                                                    }
+                                                }
+                                            });
+
+                                            let send_task = tokio::spawn(async move {
+                                                let mut frame_idx = 0_u32;
+                                                while let Some(mut encoded) = encoded_rx.recv().await {
+                                                    while let Ok(next) = encoded_rx.try_recv() {
+                                                        encoded = next;
+                                                    }
+                                                    if let Err(e) = sender.send_frame_async(encoded.ts_ms, encoded.is_keyframe, &encoded.data, |dg| {
+                                                        match egress_send.enqueue_video_fragment(stream_tag, frame_idx, encoded.is_keyframe, std::time::Instant::now(), dg) {
+                                                            Ok(report) => {
+                                                                video_counters.video_tx_datagrams.fetch_add(1, Ordering::Relaxed);
+                                                                if let Some(dropped) = report.dropped {
+                                                                    video_counters.video_tx_drop_queue_full.fetch_add(dropped.count as u64, Ordering::Relaxed);
+                                                                }
+                                                            }
+                                                            Err(reason) => {
+                                                                video_counters.video_tx_drop_deadline.fetch_add(1, Ordering::Relaxed);
+                                                                warn!(?reason, stream_tag, frame_idx, "[video] enqueue rejected");
+                                                            }
+                                                        }
+                                                    }).await {
+                                                        video_counters.sender_frame_errors.fetch_add(1, Ordering::Relaxed);
+                                                        warn!(error=?e, frame_size=encoded.data.len(), "[video] send_frame failed");
+                                                        break;
+                                                    }
+                                                    frame_idx = frame_idx.wrapping_add(1);
+                                                }
+                                            });
+
+                                            if include_audio {
+                                                tokio::spawn(async move {
+                                                    warn!("[audio] system audio capture task placeholder started (parallel path)");
+                                                });
                                             }
+
+                                            let _ = stop_watch_task.await;
+                                            let _ = capture_task.await;
+                                            let _ = encode_task.await;
+                                            let _ = send_task.await;
                                         });
                                     } else {
                                         share_state = ShareState::Idle;

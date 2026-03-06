@@ -1575,11 +1575,13 @@ fn page_screen_share(ui: &mut egui::Ui, s: &mut AppSettings) -> bool {
     );
     hint(ui, "Higher bitrate = better quality. Adaptive bitrate reduces quality if network is constrained.");
 
+    let audio_caption = if cfg!(target_os = "windows") {
+        "Include system audio in the stream"
+    } else {
+        "Include system audio in the stream (if platform-supported)"
+    };
     if ui
-        .checkbox(
-            &mut s.screen_share_capture_audio,
-            "Include system audio in the stream",
-        )
+        .checkbox(&mut s.screen_share_capture_audio, audio_caption)
         .changed()
     {
         dirty = true;
