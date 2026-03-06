@@ -63,30 +63,108 @@ pub fn show_permissions_center(
         .min_width(860.0)
         .show(ctx, |ui| {
             with_compact_ui(ui, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    for tab in PermissionsTab::ALL {
-                        if ui
-                            .selectable_label(model.permissions_tab == tab, tab.label())
-                            .clicked()
-                        {
-                            model.permissions_tab = tab;
-                        }
-                    }
-                });
-                ui.separator();
+                ui.horizontal_top(|ui| {
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(180.0, ui.available_height()),
+                        egui::Layout::top_down(egui::Align::LEFT),
+                        |ui| {
+                            ui.add_space(4.0);
+                            for tab in PermissionsTab::ALL {
+                                let selected = model.permissions_tab == tab;
+                                let text = egui::RichText::new(tab.label()).size(13.0);
+                                let text = if selected {
+                                    text.strong().color(if theme::is_light_mode() {
+                                        egui::Color32::from_rgb(36, 41, 47)
+                                    } else {
+                                        egui::Color32::WHITE
+                                    })
+                                } else {
+                                    text.color(theme::text_dim())
+                                };
 
-                match model.permissions_tab {
-                    PermissionsTab::Roles => show_roles_tab(ui, model, tx_intent),
-                    PermissionsTab::Channels => show_channels_tab(ui, model, tx_intent),
-                    PermissionsTab::Members => show_members_tab(ui, model, tx_intent),
-                    PermissionsTab::AuditLog => show_audit_tab(ui, model),
-                    PermissionsTab::Advanced => show_advanced_tab(ui, model),
-                }
+                                let btn = egui::Button::new(text)
+                                    .fill(if selected {
+                                        theme::COLOR_ACCENT.linear_multiply(0.3)
+                                    } else {
+                                        egui::Color32::TRANSPARENT
+                                    })
+                                    .corner_radius(4.0)
+                                    .min_size(egui::vec2(168.0, 28.0));
+
+                                if ui.add(btn).clicked() {
+                                    model.permissions_tab = tab;
+                                }
+                            }
+
+                            ui.add_space(12.0);
+                            ui.separator();
+                            ui.add_space(4.0);
+                            ui.label(
+                                egui::RichText::new("Tip")
+                                    .small()
+                                    .color(theme::text_muted()),
+                            );
+                            ui.label(
+                                egui::RichText::new(
+                                    "Use Roles → Channels → Members for the safest workflow.",
+                                )
+                                .small()
+                                .color(theme::text_muted()),
+                            );
+                        },
+                    );
+
+                    ui.separator();
+
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(ui.available_width(), ui.available_height()),
+                        egui::Layout::top_down(egui::Align::LEFT),
+                        |ui| {
+                            ui.heading(model.permissions_tab.label());
+                            ui.colored_label(
+                                theme::text_muted(),
+                                permissions_tab_subtitle(model.permissions_tab),
+                            );
+                            ui.add_space(4.0);
+                            ui.separator();
+
+                            egui::ScrollArea::vertical()
+                                .id_salt("permissions_content")
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| {
+                                    ui.set_min_width(ui.available_width().max(520.0));
+                                    match model.permissions_tab {
+                                        PermissionsTab::Roles => {
+                                            show_roles_tab(ui, model, tx_intent)
+                                        }
+                                        PermissionsTab::Channels => {
+                                            show_channels_tab(ui, model, tx_intent)
+                                        }
+                                        PermissionsTab::Members => {
+                                            show_members_tab(ui, model, tx_intent)
+                                        }
+                                        PermissionsTab::AuditLog => show_audit_tab(ui, model),
+                                        PermissionsTab::Advanced => show_advanced_tab(ui, model),
+                                    }
+                                });
+                        },
+                    );
+                });
             });
         });
 
     if !open {
         model.show_permissions_center = false;
+    }
+}
+
+fn permissions_tab_subtitle(tab: PermissionsTab) -> &'static str {
+    match tab {
+        PermissionsTab::Roles => "Define baseline permissions and role hierarchy.",
+        PermissionsTab::Channels => "Apply channel-specific overrides and test effective access.",
+        PermissionsTab::Members => "Assign roles and perform member-level moderation checks.",
+        PermissionsTab::AuditLog => "Review recent permission mutations and their targets.",
+        PermissionsTab::Advanced => "Tune power-based controls for advanced administration.",
     }
 }
 
