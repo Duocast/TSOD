@@ -181,10 +181,10 @@ fn show_input_options_toolbar(ui: &mut egui::Ui, model: &mut UiModel) {
             ("I", "Italic", ComposerFormatAction::Italic),
             ("U", "Underline", ComposerFormatAction::Underline),
             ("S", "Strikethrough", ComposerFormatAction::Strikethrough),
-            ("•≡", "Bullet list", ComposerFormatAction::UnorderedList),
-            ("1≡", "Numbered list", ComposerFormatAction::OrderedList),
+            ("•", "Bullet list", ComposerFormatAction::UnorderedList),
+            ("#", "Numbered list", ComposerFormatAction::OrderedList),
             ("❝❞", "Quote", ComposerFormatAction::Quote),
-            ("{ }", "Code block", ComposerFormatAction::CodeBlock),
+            ("</>", "Code block", ComposerFormatAction::CodeBlock),
         ];
 
         for &(icon, tooltip, action) in buttons {
