@@ -2230,6 +2230,9 @@ async fn connect_and_run_session(
                                             edited: mp.edited_at.is_some(),
                                         },
                                     ));
+                                    if author_id != local_user_id {
+                                        let _ = tx_event.send(UiEvent::PlayChatMessageSfx);
+                                    }
                                 }
                                 pb::chat_event::Kind::MessageEdited(me) => {
                                     let _ = tx_event.send(UiEvent::MessageEdited {
@@ -3067,6 +3070,7 @@ async fn connect_and_run_session(
                                         edited: false,
                                     },
                                 ));
+                                let _ = tx_event.send(UiEvent::PlayChatMessageSfx);
                                 let pb_attachments = uploaded_attachments
                                     .into_iter()
                                     .map(|a| pb::AttachmentRef {
