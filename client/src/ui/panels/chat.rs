@@ -183,7 +183,7 @@ fn show_input_options_toolbar(ui: &mut egui::Ui, model: &mut UiModel) {
             ("S", "Strikethrough", ComposerFormatAction::Strikethrough),
             ("•", "Bullet list", ComposerFormatAction::UnorderedList),
             ("#", "Numbered list", ComposerFormatAction::OrderedList),
-            ("""", "Quote", ComposerFormatAction::Quote),
+            ("Q", "Quote", ComposerFormatAction::Quote),
             ("</>", "Code block", ComposerFormatAction::CodeBlock),
         ];
 
