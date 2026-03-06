@@ -183,7 +183,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel) {
                     egui::UiBuilder::new().max_rect(stats_rect.shrink(10.0)),
                     |ui| {
                         ui.label(
-                            egui::RichText::new("Stats for nerds")
+                            egui::RichText::new("Stats")
                                 .color(theme::text_color())
                                 .strong(),
                         );
