@@ -28,12 +28,12 @@ use crate::BUILD_VERSION;
 
 fn share_source_card(
     ui: &mut egui::Ui,
-    source_id: &str,
+    selection: &model::ShareSourceSelection,
     title: &str,
     subtitle: &str,
-    selected_share_source: &mut Option<String>,
+    selected_share_source: &mut Option<model::ShareSourceSelection>,
 ) -> bool {
-    let is_selected = selected_share_source.as_deref() == Some(source_id);
+    let is_selected = selected_share_source.as_ref() == Some(selection);
     let stroke = if is_selected {
         egui::Stroke::new(1.5, theme::COLOR_ONLINE)
     } else {
@@ -67,7 +67,7 @@ fn share_source_card(
         .interact(egui::Sense::click());
 
     if response.clicked() {
-        *selected_share_source = Some(source_id.to_string());
+        *selected_share_source = Some(selection.clone());
         true
     } else {
         false
@@ -691,7 +691,7 @@ impl eframe::App for VpApp {
                             ui.add_space(4.0);
                             let _ = share_source_card(
                                 ui,
-                                &source.id,
+                                &source.selection,
                                 &source.title,
                                 &source.subtitle,
                                 &mut self.model.selected_share_source,
@@ -724,7 +724,7 @@ impl eframe::App for VpApp {
                                                 ui.add_space(4.0);
                                                 let _ = share_source_card(
                                                     ui,
-                                                    &source.id,
+                                                    &source.selection,
                                                     &source.title,
                                                     &source.subtitle,
                                                     &mut self.model.selected_share_source,
@@ -748,12 +748,12 @@ impl eframe::App for VpApp {
                         );
                         if start_btn.clicked() {
                             if self.model.can_start_screen_share() {
-                                if let Some(source_id) = selected {
+                                if let Some(selection) = selected {
                                     self.model.start_share_in_flight = true;
                                     self.model.sharing_active = true;
                                     let _ = self
                                         .tx_intent
-                                        .send(UiIntent::StartScreenShare { source_id });
+                                        .send(UiIntent::StartScreenShare { selection });
                                     self.model.show_share_content_dialog = false;
                                 }
                             }
