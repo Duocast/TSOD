@@ -547,7 +547,6 @@ pub struct AppSettings {
     pub capture_device: AudioDeviceId,
     pub capture_backend_mode: String,
     pub capture_mode: CaptureMode,
-    pub ptt_key: String,
     pub ptt_delay_ms: u32,
     pub vad_threshold: f32,
     pub input_gain: f32,
@@ -599,7 +598,8 @@ pub struct AppSettings {
     pub chat_log_directory: String,
 
     // ─── Hotkeys ───
-    pub hotkeys: Vec<HotkeyBinding>,
+    #[serde(default, deserialize_with = "deserialize_hotkey_map")]
+    pub hotkeys: HotkeyMap,
 
     // ─── Whisper ───
     pub whisper_allow_all: bool,
@@ -649,7 +649,6 @@ impl Default for AppSettings {
             capture_device: AudioDeviceId::default_input(),
             capture_backend_mode: "Automatically use best mode".into(),
             capture_mode: CaptureMode::PushToTalk,
-            ptt_key: "Space".into(),
             ptt_delay_ms: 300,
             vad_threshold: 0.5,
             input_gain: 1.0,
@@ -695,7 +694,7 @@ impl Default for AppSettings {
             chat_log_directory: String::new(),
 
             // Hotkeys
-            hotkeys: default_hotkeys(),
+            hotkeys: HotkeyMap::default(),
 
             // Whisper
             whisper_allow_all: true,
@@ -879,11 +878,122 @@ impl CaptureMode {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct HotkeyBinding {
     pub action: HotkeyAction,
-    pub key: String,
+    pub keybind: Option<Keybind>,
     pub enabled: bool,
+}
+
+impl<'de> serde::Deserialize<'de> for HotkeyBinding {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        struct RawBinding {
+            action: HotkeyAction,
+            #[serde(default)]
+            keybind: Option<Keybind>,
+            #[serde(default)]
+            key: Option<String>,
+            #[serde(default = "default_hotkey_enabled")]
+            enabled: bool,
+        }
+
+        let raw = RawBinding::deserialize(deserializer)?;
+        let keybind = raw
+            .keybind
+            .or_else(|| raw.key.as_deref().and_then(parse_keybind));
+        Ok(Self {
+            action: raw.action,
+            keybind,
+            enabled: raw.enabled,
+        })
+    }
+}
+
+const fn default_hotkey_enabled() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Keybind {
+    pub key: egui::Key,
+    pub ctrl: bool,
+    pub alt: bool,
+    pub shift: bool,
+    pub command: bool,
+}
+
+impl serde::Serialize for Keybind {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("Keybind", 5)?;
+        state.serialize_field("key", self.key.name())?;
+        state.serialize_field("ctrl", &self.ctrl)?;
+        state.serialize_field("alt", &self.alt)?;
+        state.serialize_field("shift", &self.shift)?;
+        state.serialize_field("command", &self.command)?;
+        state.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Keybind {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        struct RawKeybind {
+            key: String,
+            #[serde(default)]
+            ctrl: bool,
+            #[serde(default)]
+            alt: bool,
+            #[serde(default)]
+            shift: bool,
+            #[serde(default)]
+            command: bool,
+        }
+
+        let raw = RawKeybind::deserialize(deserializer)?;
+        let key = parse_key_name(&raw.key).ok_or_else(|| {
+            serde::de::Error::custom(format!("unsupported key in keybind: {}", raw.key))
+        })?;
+        Ok(Self {
+            key,
+            ctrl: raw.ctrl,
+            alt: raw.alt,
+            shift: raw.shift,
+            command: raw.command,
+        })
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct HotkeyMap {
+    pub toggle_mute: Option<Keybind>,
+    pub toggle_deafen: Option<Keybind>,
+    pub ptt: Option<Keybind>,
+    pub toggle_screen_share: Option<Keybind>,
+    pub toggle_video: Option<Keybind>,
+}
+
+impl Default for HotkeyMap {
+    fn default() -> Self {
+        Self {
+            toggle_mute: parse_keybind("Ctrl+M"),
+            toggle_deafen: parse_keybind("Ctrl+D"),
+            ptt: parse_keybind("Space"),
+            toggle_screen_share: parse_keybind("Ctrl+Shift+S"),
+            toggle_video: parse_keybind("Ctrl+Shift+V"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -931,40 +1041,149 @@ pub fn default_hotkeys() -> Vec<HotkeyBinding> {
     vec![
         HotkeyBinding {
             action: HotkeyAction::ToggleMute,
-            key: "Ctrl+M".into(),
+            keybind: parse_keybind("Ctrl+M"),
             enabled: true,
         },
         HotkeyBinding {
             action: HotkeyAction::ToggleDeafen,
-            key: "Ctrl+D".into(),
+            keybind: parse_keybind("Ctrl+D"),
             enabled: true,
         },
         HotkeyBinding {
             action: HotkeyAction::PushToTalk,
-            key: "Space".into(),
+            keybind: parse_keybind("Space"),
             enabled: true,
         },
         HotkeyBinding {
             action: HotkeyAction::ToggleScreenShare,
-            key: "Ctrl+Shift+S".into(),
+            keybind: parse_keybind("Ctrl+Shift+S"),
             enabled: true,
         },
         HotkeyBinding {
             action: HotkeyAction::ToggleVideo,
-            key: "Ctrl+Shift+V".into(),
+            keybind: parse_keybind("Ctrl+Shift+V"),
             enabled: true,
         },
         HotkeyBinding {
             action: HotkeyAction::FocusChat,
-            key: "Ctrl+T".into(),
+            keybind: parse_keybind("Ctrl+T"),
             enabled: true,
         },
         HotkeyBinding {
             action: HotkeyAction::Disconnect,
-            key: "Ctrl+Q".into(),
+            keybind: parse_keybind("Ctrl+Q"),
             enabled: true,
         },
     ]
+}
+
+fn deserialize_hotkey_map<'de, D>(deserializer: D) -> Result<HotkeyMap, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum HotkeysRepr {
+        Map(HotkeyMap),
+        Legacy(Vec<HotkeyBinding>),
+    }
+
+    match Option::<HotkeysRepr>::deserialize(deserializer)? {
+        Some(HotkeysRepr::Map(map)) => Ok(map),
+        Some(HotkeysRepr::Legacy(bindings)) => {
+            let mut map = HotkeyMap::default();
+            for binding in bindings.into_iter().filter(|b| b.enabled) {
+                match binding.action {
+                    HotkeyAction::ToggleMute => map.toggle_mute = binding.keybind,
+                    HotkeyAction::ToggleDeafen => map.toggle_deafen = binding.keybind,
+                    HotkeyAction::PushToTalk => map.ptt = binding.keybind,
+                    HotkeyAction::ToggleScreenShare => map.toggle_screen_share = binding.keybind,
+                    HotkeyAction::ToggleVideo => map.toggle_video = binding.keybind,
+                    HotkeyAction::FocusChat | HotkeyAction::Disconnect => {}
+                }
+            }
+            Ok(map)
+        }
+        None => Ok(HotkeyMap::default()),
+    }
+}
+
+pub fn parse_keybind(text: &str) -> Option<Keybind> {
+    let mut ctrl = false;
+    let mut alt = false;
+    let mut shift = false;
+    let mut command = false;
+    let mut key = None;
+    for token in text.split('+').map(str::trim).filter(|s| !s.is_empty()) {
+        match token.to_ascii_lowercase().as_str() {
+            "ctrl" | "control" => ctrl = true,
+            "alt" => alt = true,
+            "shift" => shift = true,
+            "cmd" | "command" | "super" | "meta" => command = true,
+            other => key = parse_key_name(other),
+        }
+    }
+    key.map(|key| Keybind {
+        key,
+        ctrl,
+        alt,
+        shift,
+        command,
+    })
+}
+
+pub fn keybind_to_string(bind: Option<Keybind>) -> String {
+    let Some(bind) = bind else {
+        return String::new();
+    };
+    let mut parts = Vec::new();
+    if bind.ctrl {
+        parts.push("Ctrl".to_string());
+    }
+    if bind.alt {
+        parts.push("Alt".to_string());
+    }
+    if bind.shift {
+        parts.push("Shift".to_string());
+    }
+    if bind.command {
+        parts.push("Command".to_string());
+    }
+    parts.push(bind.key.name().to_string());
+    parts.join("+")
+}
+
+pub fn parse_key_name(name: &str) -> Option<egui::Key> {
+    match name.to_ascii_uppercase().as_str() {
+        "SPACE" => Some(egui::Key::Space),
+        "A" => Some(egui::Key::A),
+        "B" => Some(egui::Key::B),
+        "C" => Some(egui::Key::C),
+        "D" => Some(egui::Key::D),
+        "E" => Some(egui::Key::E),
+        "F" => Some(egui::Key::F),
+        "G" => Some(egui::Key::G),
+        "H" => Some(egui::Key::H),
+        "I" => Some(egui::Key::I),
+        "J" => Some(egui::Key::J),
+        "K" => Some(egui::Key::K),
+        "L" => Some(egui::Key::L),
+        "M" => Some(egui::Key::M),
+        "N" => Some(egui::Key::N),
+        "O" => Some(egui::Key::O),
+        "P" => Some(egui::Key::P),
+        "Q" => Some(egui::Key::Q),
+        "R" => Some(egui::Key::R),
+        "S" => Some(egui::Key::S),
+        "T" => Some(egui::Key::T),
+        "U" => Some(egui::Key::U),
+        "V" => Some(egui::Key::V),
+        "W" => Some(egui::Key::W),
+        "X" => Some(egui::Key::X),
+        "Y" => Some(egui::Key::Y),
+        "Z" => Some(egui::Key::Z),
+        _ => None,
+    }
 }
 
 // ── Settings page enum ────────────────────────────────────────────────

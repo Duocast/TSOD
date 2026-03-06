@@ -58,6 +58,12 @@ const VOICE_MAX_AGE: Duration = Duration::from_millis(250);
 const VOICE_DRAIN_KEEP_LATEST: usize = 4;
 
 #[derive(Debug, Clone)]
+struct PttState {
+    pressed: bool,
+    release_deadline: Option<Instant>,
+}
+
+#[derive(Debug, Clone)]
 pub enum ShareSource {
     WindowsDisplay(String),
     WindowsWindow(String),
@@ -1042,10 +1048,24 @@ async fn app_task(
     }
     let _ = tx_event.send(UiEvent::SettingsLoaded(Box::new(saved_settings.clone())));
 
+    #[cfg(target_os = "linux")]
+    {
+        if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+            let _ = tx_event.send(UiEvent::AppendLog(
+                "[hotkeys] Global PTT hotkeys are disabled on Wayland in this build (compositor integration is required)."
+                    .to_string(),
+            ));
+        }
+    }
+
     ptt_active.store(
         saved_settings.capture_mode != ui::model::CaptureMode::PushToTalk,
         Ordering::Relaxed,
     );
+    let mut ptt_state = PttState {
+        pressed: false,
+        release_deadline: None,
+    };
     let capture_mode = Arc::new(AtomicU8::new(capture_mode_to_u8(
         saved_settings.capture_mode,
     )));
@@ -2959,6 +2979,15 @@ async fn connect_and_run_session(
             }
             // Check for UI intents (non-blocking poll from crossbeam)
             _ = tokio::time::sleep(Duration::from_millis(10)) => {
+                if ptt_state.pressed {
+                    ptt_state.release_deadline = None;
+                } else if let Some(deadline) = ptt_state.release_deadline {
+                    if Instant::now() >= deadline {
+                        ptt_active.store(false, Ordering::Relaxed);
+                        ptt_state.release_deadline = None;
+                    }
+                }
+
                 while let Ok(intent) = rx_intent.try_recv() {
                     match intent {
                         UiIntent::Quit => return Ok(()),
@@ -2985,16 +3014,26 @@ async fn connect_and_run_session(
                             if active_voice_channel_route.load(Ordering::Relaxed) != 0 {
                                 let new = !ptt_active.load(Ordering::Relaxed);
                                 ptt_active.store(new, Ordering::Relaxed);
+                                ptt_state.pressed = new;
+                                if new {
+                                    ptt_state.release_deadline = None;
+                                }
                             }
                         }
                         UiIntent::PttDown => {
                             if active_voice_channel_route.load(Ordering::Relaxed) != 0 {
+                                ptt_state.pressed = true;
+                                ptt_state.release_deadline = None;
                                 ptt_active.store(true, Ordering::Relaxed);
                             }
                         }
                         UiIntent::PttUp => {
                             if active_voice_channel_route.load(Ordering::Relaxed) != 0 {
-                                ptt_active.store(false, Ordering::Relaxed);
+                                ptt_state.pressed = false;
+                                ptt_state.release_deadline = Some(
+                                    Instant::now()
+                                        + Duration::from_millis(saved_settings.ptt_delay_ms as u64),
+                                );
                             }
                         }
                         UiIntent::ToggleSelfMute => {
@@ -3883,6 +3922,10 @@ async fn connect_and_run_session(
                             // Update PTT mode
                             let is_ptt = settings.capture_mode == ui::model::CaptureMode::PushToTalk;
                             ptt_active.store(!is_ptt, Ordering::Relaxed);
+                            ptt_state.pressed = !is_ptt;
+                            if !is_ptt {
+                                ptt_state.release_deadline = None;
+                            }
                             capture_mode.store(
                                 capture_mode_to_u8(settings.capture_mode),
                                 Ordering::Relaxed,
