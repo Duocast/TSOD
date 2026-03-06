@@ -1,6 +1,7 @@
 //! Application state model for the GUI.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use serde::Deserialize;
 use tracing::debug;
 
 use crate::audio::dsp::agc::AgcPreset;
