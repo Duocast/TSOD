@@ -7,6 +7,9 @@ use chrono::{Local, TimeZone};
 use crossbeam_channel::Sender;
 use eframe::egui;
 
+const COMPACT_ITEM_SPACING: egui::Vec2 = egui::vec2(6.0, 4.0);
+const COMPACT_BUTTON_PADDING: egui::Vec2 = egui::vec2(8.0, 4.0);
+
 const PERMISSION_GROUPS: &[(&str, &[&str])] = &[
     (
         "Voice",
@@ -55,29 +58,31 @@ pub fn show_permissions_center(
         .open(&mut open)
         .collapsible(false)
         .resizable(true)
-        .default_width(1180.0)
-        .default_height(700.0)
-        .min_width(920.0)
+        .default_width(1080.0)
+        .default_height(660.0)
+        .min_width(860.0)
         .show(ctx, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                for tab in PermissionsTab::ALL {
-                    if ui
-                        .selectable_label(model.permissions_tab == tab, tab.label())
-                        .clicked()
-                    {
-                        model.permissions_tab = tab;
+            with_compact_ui(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    for tab in PermissionsTab::ALL {
+                        if ui
+                            .selectable_label(model.permissions_tab == tab, tab.label())
+                            .clicked()
+                        {
+                            model.permissions_tab = tab;
+                        }
                     }
+                });
+                ui.separator();
+
+                match model.permissions_tab {
+                    PermissionsTab::Roles => show_roles_tab(ui, model, tx_intent),
+                    PermissionsTab::Channels => show_channels_tab(ui, model, tx_intent),
+                    PermissionsTab::Members => show_members_tab(ui, model, tx_intent),
+                    PermissionsTab::AuditLog => show_audit_tab(ui, model),
+                    PermissionsTab::Advanced => show_advanced_tab(ui, model),
                 }
             });
-            ui.separator();
-
-            match model.permissions_tab {
-                PermissionsTab::Roles => show_roles_tab(ui, model, tx_intent),
-                PermissionsTab::Channels => show_channels_tab(ui, model, tx_intent),
-                PermissionsTab::Members => show_members_tab(ui, model, tx_intent),
-                PermissionsTab::AuditLog => show_audit_tab(ui, model),
-                PermissionsTab::Advanced => show_advanced_tab(ui, model),
-            }
         });
 
     if !open {
@@ -120,28 +125,30 @@ fn show_roles_tab(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiI
         left.separator();
 
         let role_count = model.permissions_roles.len();
-        for idx in 0..role_count {
-            let color = parse_hex_color(&model.permissions_roles[idx].color_hex);
-            let label_text = format!(
-                "{} ({})",
-                model.permissions_roles[idx].name, model.permissions_roles[idx].member_count
-            );
-            let selected = model.permissions_selected_role == idx;
-            left.horizontal(|ui| {
-                ui.colored_label(color, "■");
-                if ui.selectable_label(selected, label_text).clicked() {
-                    model.permissions_selected_role = idx;
-                }
-                if idx > 0 && ui.small_button("↑").clicked() {
-                    model.permissions_roles.swap(idx, idx - 1);
-                    model.permissions_selected_role = idx - 1;
-                }
-                if idx + 1 < role_count && ui.small_button("↓").clicked() {
-                    model.permissions_roles.swap(idx, idx + 1);
-                    model.permissions_selected_role = idx + 1;
-                }
-            });
-        }
+        egui::ScrollArea::vertical().show(left, |ui| {
+            for idx in 0..role_count {
+                let color = parse_hex_color(&model.permissions_roles[idx].color_hex);
+                let label_text = format!(
+                    "{} ({})",
+                    model.permissions_roles[idx].name, model.permissions_roles[idx].member_count
+                );
+                let selected = model.permissions_selected_role == idx;
+                ui.horizontal(|ui| {
+                    ui.colored_label(color, "■");
+                    if ui.selectable_label(selected, label_text).clicked() {
+                        model.permissions_selected_role = idx;
+                    }
+                    if idx > 0 && ui.small_button("↑").clicked() {
+                        model.permissions_roles.swap(idx, idx - 1);
+                        model.permissions_selected_role = idx - 1;
+                    }
+                    if idx + 1 < role_count && ui.small_button("↓").clicked() {
+                        model.permissions_roles.swap(idx, idx + 1);
+                        model.permissions_selected_role = idx + 1;
+                    }
+                });
+            }
+        });
 
         right.heading("Role Editor");
         right.separator();
@@ -174,8 +181,14 @@ fn show_roles_tab(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiI
             right.checkbox(&mut role.mentionable, "Allow anyone to mention this role");
 
             right.separator();
-            right.label("Permissions");
-            right.text_edit_singleline(&mut model.permissions_search);
+            right.horizontal(|ui| {
+                ui.label("Permissions");
+                ui.add_sized(
+                    [220.0, 22.0],
+                    egui::TextEdit::singleline(&mut model.permissions_search)
+                        .hint_text("Filter permissions…"),
+                );
+            });
 
             let filter = model.permissions_search.trim().to_ascii_lowercase();
             for (group, perms) in PERMISSION_GROUPS {
@@ -338,7 +351,7 @@ fn show_overrides_editor(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sen
                 model.permissions_selected_channel_id.clone(),
                 tx_intent,
             );
-            ui.add_space(4.0);
+            ui.add_space(2.0);
         }
     });
 
@@ -363,38 +376,45 @@ fn show_override_row(
     tx_intent: &Sender<UiIntent>,
 ) {
     ui.group(|ui| {
-        ui.horizontal_wrapped(|ui| {
+        ui.horizontal(|ui| {
             ui.label("Role/User");
-            ui.text_edit_singleline(&mut row.subject_name);
+            ui.add_sized(
+                [180.0, 22.0],
+                egui::TextEdit::singleline(&mut row.subject_name),
+            );
             if ui.small_button("Reset").clicked() {
                 row.capabilities.fill(PermissionValue::Inherit);
             }
         });
 
-        for (idx, cap) in CHANNEL_CAPABILITIES.iter().enumerate() {
-            ui.horizontal(|ui| {
-                ui.label(*cap);
-                if idx >= row.capabilities.len() {
-                    row.capabilities.push(PermissionValue::Inherit);
-                }
-                if tri_state_button(ui, &mut row.capabilities[idx], *cap) {
-                    if let Some(channel_id) = &selected_channel_id {
-                        let _ = tx_intent.send(UiIntent::PermsSetChannelOverride {
-                            channel_id: channel_id.clone(),
-                            role_id: row.role_id.clone(),
-                            user_id: row.user_id.clone(),
-                            cap: cap.to_ascii_lowercase().replace(' ', "_"),
-                            effect: match row.capabilities[idx] {
-                                PermissionValue::Allow => "grant",
-                                PermissionValue::Deny => "deny",
-                                PermissionValue::Inherit => "inherit",
+        ui.horizontal_wrapped(|ui| {
+            for (idx, cap) in CHANNEL_CAPABILITIES.iter().enumerate() {
+                ui.group(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(*cap);
+                        if idx >= row.capabilities.len() {
+                            row.capabilities.push(PermissionValue::Inherit);
+                        }
+                        if tri_state_button(ui, &mut row.capabilities[idx], *cap) {
+                            if let Some(channel_id) = &selected_channel_id {
+                                let _ = tx_intent.send(UiIntent::PermsSetChannelOverride {
+                                    channel_id: channel_id.clone(),
+                                    role_id: row.role_id.clone(),
+                                    user_id: row.user_id.clone(),
+                                    cap: cap.to_ascii_lowercase().replace(' ', "_"),
+                                    effect: match row.capabilities[idx] {
+                                        PermissionValue::Allow => "grant",
+                                        PermissionValue::Deny => "deny",
+                                        PermissionValue::Inherit => "inherit",
+                                    }
+                                    .into(),
+                                });
                             }
-                            .into(),
-                        });
-                    }
-                }
-            });
-        }
+                        }
+                    });
+                });
+            }
+        });
     });
 }
 
@@ -416,7 +436,7 @@ fn tri_state_button(ui: &mut egui::Ui, value: &mut PermissionValue, capability: 
     let response = ui.add(
         egui::Button::new(text)
             .fill(fill)
-            .min_size(egui::vec2(24.0, 20.0)),
+            .min_size(egui::vec2(20.0, 18.0)),
     );
     if response.clicked() {
         *value = value.cycle();
@@ -424,6 +444,15 @@ fn tri_state_button(ui: &mut egui::Ui, value: &mut PermissionValue, capability: 
     }
     response.on_hover_text(format!("{}\nSource: {}", capability, source));
     false
+}
+
+fn with_compact_ui<R>(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let spacing_backup = ui.spacing().clone();
+    ui.spacing_mut().item_spacing = COMPACT_ITEM_SPACING;
+    ui.spacing_mut().button_padding = COMPACT_BUTTON_PADDING;
+    let out = add_contents(ui);
+    *ui.spacing_mut() = spacing_backup;
+    out
 }
 
 fn ui_view_as_panel(ui: &mut egui::Ui, model: &mut UiModel) {
