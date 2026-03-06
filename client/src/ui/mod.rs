@@ -387,6 +387,7 @@ impl eframe::App for VpApp {
         if self.model.show_settings {
             let mut open = true;
             egui::Window::new("Options")
+                .constrain(false)
                 .open(&mut open)
                 .default_width(750.0)
                 .default_height(550.0)
@@ -418,6 +419,7 @@ impl eframe::App for VpApp {
         if self.model.show_connections {
             let mut open = true;
             egui::Window::new("Connections")
+                .constrain(false)
                 .open(&mut open)
                 .default_width(360.0)
                 .resizable(false)
@@ -512,6 +514,7 @@ impl eframe::App for VpApp {
         if self.model.show_telemetry {
             let mut open = true;
             egui::Window::new("Connection Telemetry")
+                .constrain(false)
                 .open(&mut open)
                 .default_width(400.0)
                 .show(ctx, |ui| {
@@ -526,6 +529,7 @@ impl eframe::App for VpApp {
         if self.model.show_away_message_dialog {
             let mut open = true;
             egui::Window::new("Set Away Message")
+                .constrain(false)
                 .open(&mut open)
                 .default_width(360.0)
                 .min_width(320.0)
@@ -584,6 +588,7 @@ impl eframe::App for VpApp {
         if self.model.show_set_avatar_dialog {
             let mut open = true;
             egui::Window::new("Set Avatar")
+                .constrain(false)
                 .open(&mut open)
                 .default_width(420.0)
                 .min_width(380.0)
@@ -622,6 +627,7 @@ impl eframe::App for VpApp {
         if self.model.show_share_content_dialog {
             let mut open = true;
             egui::Window::new("Share content")
+                .constrain(false)
                 .open(&mut open)
                 .default_width(760.0)
                 .min_width(680.0)
