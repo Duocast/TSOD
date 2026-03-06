@@ -793,15 +793,36 @@ fn now_ts() -> pb::Timestamp {
     pb::Timestamp { unix_millis: ms }
 }
 
-fn default_media_capabilities() -> pb::ClientMediaCapabilities {
-    let mut codecs = Vec::with_capacity(3);
+pub fn available_screen_share_codecs() -> Vec<&'static str> {
+    available_video_codecs()
+        .into_iter()
+        .filter_map(|codec| match codec {
+            pb::VideoCodec::Av1 => Some("AV1"),
+            pb::VideoCodec::Vp9 => Some("VP9"),
+            pb::VideoCodec::Vp8 => Some("VP8"),
+            _ => None,
+        })
+        .collect()
+}
+
+fn available_video_codecs() -> Vec<pb::VideoCodec> {
+    let mut codecs = Vec::with_capacity(2);
     if cfg!(feature = "video-av1") {
-        codecs.push(pb::VideoCodec::Av1 as i32);
+        codecs.push(pb::VideoCodec::Av1);
     }
     if cfg!(feature = "video-vp9") {
-        codecs.push(pb::VideoCodec::Vp9 as i32);
+        codecs.push(pb::VideoCodec::Vp9);
     }
-    codecs.push(pb::VideoCodec::Vp8 as i32);
+    let decodable = crate::net::video_decode::available_decodable_codecs();
+    codecs.retain(|codec| decodable.contains(codec));
+    codecs
+}
+
+fn default_media_capabilities() -> pb::ClientMediaCapabilities {
+    let codecs: Vec<i32> = available_video_codecs()
+        .into_iter()
+        .map(|codec| codec as i32)
+        .collect();
 
     pb::ClientMediaCapabilities {
         decode: codecs.clone(),
@@ -815,6 +836,14 @@ fn default_media_capabilities() -> pb::ClientMediaCapabilities {
     }
 }
 
+fn platform_has_capture_backend() -> bool {
+    cfg!(any(
+        target_os = "windows",
+        target_os = "linux",
+        target_os = "macos"
+    ))
+}
+
 fn default_caps(alpn: &str) -> pb::ClientCaps {
     let media_caps = default_media_capabilities();
     let screen_video_codecs: Vec<i32> = media_caps
@@ -826,10 +855,7 @@ fn default_caps(alpn: &str) -> pb::ClientCaps {
             _ => None,
         })
         .collect();
-    let preferred_screenshare_codec = screen_video_codecs
-        .first()
-        .copied()
-        .unwrap_or(pb::video_caps::Codec::Vp9 as i32);
+    let preferred_screenshare_codec = screen_video_codecs.first().copied();
 
     pb::ClientCaps {
         build: Some(pb::BuildInfo {
@@ -844,7 +870,10 @@ fn default_caps(alpn: &str) -> pb::ClientCaps {
             supports_streaming: cfg!(feature = "screen-share") || cfg!(feature = "video-call"),
             supports_drag_drop_upload: true,
             supports_relay_mode: false,
-            supports_screen_share: cfg!(feature = "screen-share"),
+            supports_screen_share: cfg!(feature = "screen-share")
+                && platform_has_capture_backend()
+                && !media_caps.encode.is_empty()
+                && !media_caps.decode.is_empty(),
             supports_video_call: cfg!(feature = "video-call"),
             supports_e2ee: false,
             supports_spatial_audio: false,
@@ -872,8 +901,8 @@ fn default_caps(alpn: &str) -> pb::ClientCaps {
         caps_hash: Some(pb::CapabilityHash {
             sha256: alpn.as_bytes().to_vec(),
         }),
-        screen_share: Some(pb::ScreenShareCaps {
-            codec: preferred_screenshare_codec,
+        screen_share: preferred_screenshare_codec.map(|codec| pb::ScreenShareCaps {
+            codec,
             max_width: 1920,
             max_height: 1080,
             max_fps: 60,

@@ -100,32 +100,32 @@ trait ScreenEncoder: Send {
     fn encode(&mut self, frame: CapturedFrame) -> anyhow::Result<EncodedFrame>;
 }
 
-struct RawBgraEncoder {
+struct Av1AvifEncoder {
     frame_seq: u32,
 }
 
-impl RawBgraEncoder {
+impl Av1AvifEncoder {
     fn new() -> Self {
         Self { frame_seq: 0 }
     }
 }
 
-impl ScreenEncoder for RawBgraEncoder {
+impl ScreenEncoder for Av1AvifEncoder {
     fn encode(&mut self, frame: CapturedFrame) -> anyhow::Result<EncodedFrame> {
+        use image::codecs::avif::AvifEncoder;
+        use image::{ColorType, ImageEncoder};
+
         let FrameData::Cpu(src) = frame.data;
         let width = frame.width as usize;
         let height = frame.height as usize;
         let stride = frame.stride as usize;
-        let mut out = vec![0_u8; 8 + width * height * 4];
-        out[0..2].copy_from_slice(&(frame.width as u16).to_le_bytes());
-        out[2..4].copy_from_slice(&(frame.height as u16).to_le_bytes());
-        out[4..8].copy_from_slice(&(frame.width.saturating_mul(4)).to_le_bytes());
-        let dst = &mut out[8..];
+        let mut rgba = vec![0_u8; width * height * 4];
+
         match frame.format {
             PixelFormat::Bgra => {
                 for y in 0..height {
                     let src_row = &src[y * stride..(y * stride) + width * 4];
-                    let dst_row = &mut dst[y * width * 4..(y + 1) * width * 4];
+                    let dst_row = &mut rgba[y * width * 4..(y + 1) * width * 4];
                     for x in 0..width {
                         let si = x * 4;
                         let di = x * 4;
@@ -138,10 +138,16 @@ impl ScreenEncoder for RawBgraEncoder {
             }
             PixelFormat::Nv12 => return Err(anyhow!("NV12 screen encoding is not implemented")),
         }
+
+        let mut encoded = Vec::new();
+        AvifEncoder::new(&mut encoded)
+            .write_image(&rgba, frame.width, frame.height, ColorType::Rgba8.into())
+            .context("encode AV1/AVIF frame")?;
+
         let encoded = EncodedFrame {
             ts_ms: frame.ts_ms,
             is_keyframe: self.frame_seq % 60 == 0,
-            data: Bytes::from(out),
+            data: Bytes::from(encoded),
         };
         self.frame_seq = self.frame_seq.wrapping_add(1);
         Ok(encoded)
@@ -291,8 +297,11 @@ fn build_screen_capture(source: &ShareSource) -> anyhow::Result<Box<dyn ScreenCa
     Ok(Box::new(ScrapCapture::from_source(source)?))
 }
 
-fn build_screen_encoder(_codec: &str, _profile: &str) -> anyhow::Result<Box<dyn ScreenEncoder>> {
-    Ok(Box::new(RawBgraEncoder::new()))
+fn build_screen_encoder(codec: &str, _profile: &str) -> anyhow::Result<Box<dyn ScreenEncoder>> {
+    match codec {
+        "AV1" if cfg!(feature = "video-av1") => Ok(Box::new(Av1AvifEncoder::new())),
+        _ => Err(anyhow!("no screen encoder available for codec {codec}")),
+    }
 }
 
 #[derive(Clone)]
@@ -642,6 +651,13 @@ async fn video_recv_loop(mut video_rx: mpsc::Receiver<Bytes>, state: SharedStrea
                     stream_tag: frame.stream_tag,
                     frame_seq: frame.frame_seq,
                     ts_ms: frame.ts_ms,
+                    codec: state
+                        .stream_codecs
+                        .read()
+                        .await
+                        .get(&frame.stream_tag)
+                        .copied()
+                        .unwrap_or(pb::VideoCodec::Unspecified) as i32,
                     payload: frame.payload.to_vec(),
                 });
             }
@@ -3464,8 +3480,24 @@ async fn connect_and_run_session(
                             let source = parse_share_source(&source_id);
                             let include_audio = saved_settings.screen_share_capture_audio
                                 && platform_supports_system_audio();
-                            let preferred_codec = match saved_settings.screen_share_codec.as_str() {
+                            let available_codecs = net::dispatcher::available_screen_share_codecs();
+                            if available_codecs.is_empty() {
+                                let _ = tx_event.send(UiEvent::AppendLog(
+                                    "[video] start share aborted: no supported codecs available".into(),
+                                ));
+                                continue;
+                            }
+                            let selected_codec = if available_codecs
+                                .iter()
+                                .any(|codec| *codec == saved_settings.screen_share_codec)
+                            {
+                                saved_settings.screen_share_codec.clone()
+                            } else {
+                                available_codecs.first().copied().unwrap_or("VP9").to_string()
+                            };
+                            let preferred_codec = match selected_codec.as_str() {
                                 "AV1" => pb::video_caps::Codec::Av1,
+                                "VP8" => pb::video_caps::Codec::Vp8,
                                 _ => pb::video_caps::Codec::Vp9,
                             };
                             let (profile_layer, sender_profile) = if saved_settings.screen_share_profile == "1440p60" {
@@ -3527,7 +3559,7 @@ async fn connect_and_run_session(
 
                                         let egress_send = egress.clone();
                                         let video_counters = stream_state.counters.clone();
-                                        let selected_codec = saved_settings.screen_share_codec.clone();
+                                        let selected_codec = selected_codec.clone();
                                         let selected_profile = saved_settings.screen_share_profile.clone();
                                         tokio::spawn(async move {
                                             let mut sender = VideoSender::new(stream_tag, 0, sender_profile, mtu);

@@ -527,6 +527,7 @@ pub struct StreamFrameView {
     pub stream_tag: u64,
     pub frame_seq: u32,
     pub ts_ms: u32,
+    pub codec: i32,
     pub payload: Vec<u8>,
 }
 
@@ -718,7 +719,11 @@ impl Default for AppSettings {
             // Screen Share
             screen_share_fps: 30,
             screen_share_max_bitrate_kbps: 3000,
-            screen_share_codec: "AV1".into(),
+            screen_share_codec: crate::net::dispatcher::available_screen_share_codecs()
+                .first()
+                .copied()
+                .unwrap_or("VP9")
+                .to_string(),
             screen_share_profile: "1080p60".into(),
             screen_share_capture_audio: true,
 
@@ -1758,7 +1763,9 @@ impl UiModel {
     }
 
     pub fn can_start_screen_share(&self) -> bool {
-        !self.start_share_in_flight && !self.sharing_active
+        !self.start_share_in_flight
+            && !self.sharing_active
+            && !crate::net::dispatcher::available_screen_share_codecs().is_empty()
     }
 
     pub fn open_member_connection_info_window(&mut self, user_id: String, display_name: String) {
@@ -2378,7 +2385,8 @@ mod tests {
     #[test]
     fn can_start_screen_share_is_debounced() {
         let mut model = UiModel::default();
-        assert!(model.can_start_screen_share());
+        let has_codecs = !crate::net::dispatcher::available_screen_share_codecs().is_empty();
+        assert_eq!(model.can_start_screen_share(), has_codecs);
         model.start_share_in_flight = true;
         assert!(!model.can_start_screen_share());
         model.start_share_in_flight = false;
