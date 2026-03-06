@@ -1,6 +1,8 @@
 //! Chat panel: message display, input bar, typing indicators, Discord-like drag overlay.
 
-use crate::ui::model::{AttachmentData, ChatMessage, PendingAttachment, UiIntent, UiModel};
+use crate::ui::model::{
+    AttachmentData, ChannelType, ChatMessage, PendingAttachment, UiIntent, UiModel,
+};
 use crate::ui::theme;
 use crate::ui::widgets::cosmic_chat_composer::ComposerFormatAction;
 use chrono::{Days, Local, NaiveDate, TimeZone};
@@ -32,18 +34,30 @@ const PREVIEW_CARD_HEIGHT: f32 = 86.0;
 pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>) {
     let chat_rect = ui.max_rect();
     let shift_held = ui.ctx().input(|i| i.modifiers.shift);
-    
+
     // Handle drag-and-drop (overlay state + file collection + shift-drop)
     handle_drag_and_drop(ui.ctx(), model, tx_intent, chat_rect, shift_held);
-    
+
     // Channel header
     ui.horizontal(|ui| {
+        let channel_type = model.current_channel_type();
         let ch_name = if model.selected_channel_name.is_empty() {
-            "Select a channel"
+            match channel_type {
+                Some(ChannelType::Voice) => "Audio",
+                Some(ChannelType::Streaming) => "Streaming",
+                _ => "Select a channel",
+            }
         } else {
             &model.selected_channel_name
         };
-        ui.heading(egui::RichText::new(format!("# {ch_name}")).color(theme::text_color()));
+        let channel_prefix = match channel_type {
+            Some(ChannelType::Voice) => "🔊",
+            Some(ChannelType::Streaming) => "📺",
+            _ => "#",
+        };
+        ui.heading(
+            egui::RichText::new(format!("{channel_prefix} {ch_name}")).color(theme::text_color()),
+        );
     });
     ui.separator();
 
@@ -190,7 +204,9 @@ fn show_input_options_toolbar(ui: &mut egui::Ui, model: &mut UiModel) {
         for &(icon, tooltip, action) in buttons {
             let btn = ui.add(
                 egui::Button::new(
-                    egui::RichText::new(icon).size(16.0).color(theme::text_color()),
+                    egui::RichText::new(icon)
+                        .size(16.0)
+                        .color(theme::text_color()),
                 )
                 .min_size(egui::vec2(30.0, 26.0))
                 .fill(theme::bg_light())
@@ -203,8 +219,6 @@ fn show_input_options_toolbar(ui: &mut egui::Ui, model: &mut UiModel) {
         }
     });
 }
-
-
 
 // ── Drag-and-drop handling ──────────────────────────────────────────────
 
@@ -1062,8 +1076,8 @@ fn format_size(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        detect_mime_type, format_day_label, format_timestamp, linkify_message,
-        truncate_filename, MessageSegment,
+        detect_mime_type, format_day_label, format_timestamp, linkify_message, truncate_filename,
+        MessageSegment,
     };
     use chrono::{Days, Local, TimeZone};
 
