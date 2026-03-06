@@ -284,10 +284,6 @@ impl eframe::App for VpApp {
                     if ui.button("Telemetry").clicked() {
                         self.model.show_telemetry = !self.model.show_telemetry;
                     }
-                    if ui.button("Connections").clicked() {
-                        self.model.show_connections = !self.model.show_connections;
-                        self.model.connection_error.clear();
-                    }
                 });
             });
         });
