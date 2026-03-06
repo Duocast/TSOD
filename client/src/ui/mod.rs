@@ -176,93 +176,6 @@ impl VpApp {
         }
     }
 
-    fn render_settings_ui(&mut self, ui: &mut egui::Ui) {
-        panels::settings::show(ui, &mut self.model, &self.tx_intent);
-    }
-
-    fn render_connections_ui(&mut self, ui: &mut egui::Ui) {
-        ui.label("Server address:");
-        ui.horizontal(|ui| {
-            ui.label("IP / Host");
-            ui.add_sized(
-                [ui.available_width() - 70.0, 24.0],
-                egui::TextEdit::singleline(&mut self.model.connection_host_draft),
-            );
-        });
-        ui.horizontal(|ui| {
-            ui.label("Port");
-            ui.add_sized(
-                [80.0, 24.0],
-                egui::TextEdit::singleline(&mut self.model.connection_port_draft),
-            );
-        });
-        ui.horizontal(|ui| {
-            ui.label("Nickname");
-            ui.add_sized(
-                [ui.available_width() - 70.0, 24.0],
-                egui::TextEdit::singleline(&mut self.model.connection_nickname_draft)
-                    .hint_text("Nickname used when connecting/joining channels"),
-            );
-        });
-        ui.label(
-            egui::RichText::new("Nickname used when connecting/joining channels")
-                .small()
-                .color(theme::text_muted()),
-        );
-        ui.label(
-            egui::RichText::new("Changes apply immediately when you press Connect.")
-                .small()
-                .color(theme::text_dim()),
-        );
-
-        if !self.model.connection_error.is_empty() {
-            ui.colored_label(theme::COLOR_DANGER, &self.model.connection_error);
-        }
-
-        ui.add_space(8.0);
-        let stage_color = if self.model.connection_stage == ConnectionStage::Failed {
-            theme::COLOR_DANGER
-        } else if self.model.connection_stage == ConnectionStage::Connected {
-            theme::COLOR_ONLINE
-        } else {
-            theme::text_muted()
-        };
-        ui.label(
-            egui::RichText::new(format!("Status: {}", self.model.connection_stage.label()))
-                .small()
-                .color(stage_color),
-        );
-
-        let connect_label = if self.model.connection_stage.is_in_progress() {
-            "Reconnect"
-        } else {
-            "Connect"
-        };
-        let connect_clicked = ui.button(connect_label).clicked();
-        if connect_clicked {
-            self.launch_connect_attempt(true);
-        }
-
-        ui.add_space(6.0);
-        ui.collapsing("Connection details", |ui| {
-            if self.model.connection_details.is_empty() {
-                ui.label(
-                    egui::RichText::new("No connection attempts yet.")
-                        .small()
-                        .color(theme::text_muted()),
-                );
-            } else {
-                for line in self.model.connection_details.iter().rev().take(8) {
-                    ui.label(egui::RichText::new(line).small());
-                }
-            }
-        });
-    }
-
-    fn render_telemetry_ui(&self, ui: &mut egui::Ui) {
-        panels::telemetry::show(ui, &self.model);
-    }
-
     fn copy_connection_details(&mut self, ctx: &egui::Context) {
         let mut lines = Vec::new();
         lines.push(format!(
@@ -470,7 +383,7 @@ impl eframe::App for VpApp {
                 panels::members::show(ui, &mut self.model, &self.tx_intent);
             });
 
-        // Settings window (separate viewport when supported)
+        // Settings window (floating, TS3-style Options dialog)
         if self.model.show_settings {
             let mut open = true;
             egui::Window::new("Options")
@@ -502,7 +415,7 @@ impl eframe::App for VpApp {
             }
         }
 
-        // Connections window (separate viewport when supported)
+        // Connections window (floating)
         if self.model.show_connections {
             let mut open = true;
             egui::Window::new("Connections")
@@ -511,16 +424,93 @@ impl eframe::App for VpApp {
                 .default_width(360.0)
                 .resizable(false)
                 .show(ctx, |ui| {
-                    self.render_connections_ui(ui);
-                });
+                    ui.label("Server address:");
+                    ui.horizontal(|ui| {
+                        ui.label("IP / Host");
+                        ui.add_sized(
+                            [ui.available_width() - 70.0, 24.0],
+                            egui::TextEdit::singleline(&mut self.model.connection_host_draft),
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Port");
+                        ui.add_sized(
+                            [80.0, 24.0],
+                            egui::TextEdit::singleline(&mut self.model.connection_port_draft),
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Nickname");
+                        ui.add_sized(
+                            [ui.available_width() - 70.0, 24.0],
+                            egui::TextEdit::singleline(&mut self.model.connection_nickname_draft)
+                                .hint_text("Nickname used when connecting/joining channels"),
+                        );
+                    });
+                    ui.label(
+                        egui::RichText::new("Nickname used when connecting/joining channels")
+                            .small()
+                            .color(theme::text_muted()),
+                    );
+                    ui.label(
+                        egui::RichText::new("Changes apply immediately when you press Connect.")
+                            .small()
+                            .color(theme::text_dim()),
+                    );
 
+                    if !self.model.connection_error.is_empty() {
+                        ui.colored_label(theme::COLOR_DANGER, &self.model.connection_error);
+                    }
+
+                    ui.add_space(8.0);
+                    let stage_color = if self.model.connection_stage == ConnectionStage::Failed {
+                        theme::COLOR_DANGER
+                    } else if self.model.connection_stage == ConnectionStage::Connected {
+                        theme::COLOR_ONLINE
+                    } else {
+                        theme::text_muted()
+                    };
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "Status: {}",
+                            self.model.connection_stage.label()
+                        ))
+                        .small()
+                        .color(stage_color),
+                    );
+
+                    let connect_label = if self.model.connection_stage.is_in_progress() {
+                        "Reconnect"
+                    } else {
+                        "Connect"
+                    };
+                    let connect_clicked = ui.button(connect_label).clicked();
+                    if connect_clicked {
+                        self.launch_connect_attempt(true);
+                    }
+
+                    ui.add_space(6.0);
+                    ui.collapsing("Connection details", |ui| {
+                        if self.model.connection_details.is_empty() {
+                            ui.label(
+                                egui::RichText::new("No connection attempts yet.")
+                                    .small()
+                                    .color(theme::text_muted()),
+                            );
+                        } else {
+                            for line in self.model.connection_details.iter().rev().take(8) {
+                                ui.label(egui::RichText::new(line).small());
+                            }
+                        }
+                    });
+                });
             if !open {
                 self.model.show_connections = false;
                 self.model.connection_error.clear();
             }
         }
 
-        // Telemetry window (separate viewport when supported)
+        // Telemetry window (floating)
         if self.model.show_telemetry {
             let mut open = true;
             egui::Window::new("Connection Telemetry")
