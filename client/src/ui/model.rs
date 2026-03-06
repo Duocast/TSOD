@@ -208,6 +208,10 @@ pub enum UiEvent {
         path: String,
         error: String,
     },
+    AttachmentCached {
+        asset_id: String,
+        path: String,
+    },
     MemberVoiceStateUpdated {
         channel_id: String,
         user_id: String,
@@ -377,6 +381,9 @@ pub enum UiIntent {
         emoji: String,
     },
     SendTyping,
+    OpenAttachment {
+        asset_id: String,
+    },
 
     // Moderation
     KickUser {
@@ -1070,13 +1077,20 @@ pub struct ChatMessage {
 }
 
 #[derive(Debug, Clone)]
+pub enum AttachmentLocator {
+    LocalPath(std::path::PathBuf),
+    RemoteAssetId(String),
+    CachedPath(std::path::PathBuf),
+}
+
+#[derive(Debug, Clone)]
 pub struct AttachmentData {
-    pub asset_id: String,
+    pub locator: AttachmentLocator,
+    pub asset_id: Option<String>,
     pub filename: String,
     pub mime_type: String,
     pub size_bytes: u64,
-    pub download_url: String,
-    pub thumbnail_url: Option<String>,
+    pub thumbnail: Option<AttachmentLocator>,
 }
 
 #[derive(Debug, Clone)]
@@ -1987,6 +2001,18 @@ impl UiModel {
                     created: std::time::Instant::now(),
                     kind: NotificationKind::Error,
                 });
+            }
+            UiEvent::AttachmentCached { asset_id, path } => {
+                for msgs in self.messages.values_mut() {
+                    for msg in msgs.iter_mut() {
+                        for att in &mut msg.attachments {
+                            if att.asset_id.as_deref() == Some(asset_id.as_str()) {
+                                att.locator =
+                                    AttachmentLocator::CachedPath(std::path::PathBuf::from(&path));
+                            }
+                        }
+                    }
+                }
             }
             UiEvent::TypingIndicator {
                 channel_id,
