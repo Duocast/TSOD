@@ -4374,8 +4374,12 @@ async fn upload_attachment_quic(
             filename: done.filename,
             mime_type: done.mime,
             size_bytes: done.size_bytes,
-            download_url: String::new(),
-            thumbnail_url: None,
+            download_url: done.download_uri,
+            thumbnail_url: if done.thumbnail_uri.is_empty() {
+                None
+            } else {
+                Some(done.thumbnail_uri)
+            },
         }),
         Some(pb::media_response::Payload::Error(e)) => {
             Err(anyhow!("media upload failed: {}", e.message))

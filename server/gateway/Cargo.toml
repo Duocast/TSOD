@@ -19,7 +19,7 @@ hyper-util = { version = "0.1.2", features = ["tokio"] }
 hyper = { version = "1.8.1", features = ["server", "http1"] }
 serde = { version = "1.0.228", features = ["derive"] }
 scopeguard = "1.2"
-tokio = { version = "1.49", features = ["rt-multi-thread", "macros", "time", "signal", "sync", "fs", "io-util"] }
+tokio = { version = "1.49", features = ["rt-multi-thread", "macros", "time", "signal", "sync", "fs", "io-util", "process"] }
 metrics = "0.24.3"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["fmt", "env-filter"] }
@@ -31,6 +31,7 @@ ring = "0.17.14"
 sha2 = "0.10.9"
 hex = "0.4.3"
 infer = "0.19"
+image = { version = "0.25.8", default-features = false, features = ["jpeg", "png", "webp", "gif", "avif"] }
 
 sqlx = { version = "0.8.6", features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json", "macros", "migrate"] }
 
