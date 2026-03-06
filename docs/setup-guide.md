@@ -497,6 +497,9 @@ sudo apt install -y \
   libssl-dev \
   libopus-dev \
   libasound2-dev \
+  libxcb1-dev \
+  libxcb-randr0-dev \
+  libxcb-shm0-dev \
   pipewire \
   pipewire-audio \
   wireplumber \
@@ -793,6 +796,9 @@ openssl s_client -connect 127.0.0.1:4433 -CAfile /etc/tsod/tls/ca.crt 2>/dev/nul
   `VCPKGRS_DYNAMIC=1`
 - **Opus linking errors (Linux)**: Install `libopus-dev`:
   `sudo apt install libopus-dev`
+- **`rust-lld: unable to find library -lxcb-shm` / `-lxcb-randr` (Linux client)**:
+  Install XCB development packages required by `winit`/`eframe`:
+  `sudo apt install libxcb1-dev libxcb-randr0-dev libxcb-shm0-dev`
 - **ALSA errors (Linux server)**: Install `libasound2-dev`:
   `sudo apt install libasound2-dev`
 
