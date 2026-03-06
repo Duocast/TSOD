@@ -1,6 +1,8 @@
 //! Chat panel: message display, input bar, typing indicators, Discord-like drag overlay.
 
-use crate::ui::model::{AttachmentData, ChatMessage, PendingAttachment, UiIntent, UiModel};
+use crate::ui::model::{
+    AttachmentData, AttachmentLocator, ChatMessage, PendingAttachment, UiIntent, UiModel,
+};
 use crate::ui::theme;
 use crate::ui::widgets::cosmic_chat_composer::ComposerFormatAction;
 use chrono::{Days, Local, NaiveDate, TimeZone};
@@ -32,10 +34,10 @@ const PREVIEW_CARD_HEIGHT: f32 = 86.0;
 pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>) {
     let chat_rect = ui.max_rect();
     let shift_held = ui.ctx().input(|i| i.modifiers.shift);
-    
+
     // Handle drag-and-drop (overlay state + file collection + shift-drop)
     handle_drag_and_drop(ui.ctx(), model, tx_intent, chat_rect, shift_held);
-    
+
     // Channel header
     ui.horizontal(|ui| {
         let ch_name = if model.selected_channel_name.is_empty() {
@@ -177,20 +179,38 @@ fn show_input_options_toolbar(ui: &mut egui::Ui, model: &mut UiModel) {
 
         // (icon, tooltip, action)
         let buttons: &[(&str, &str, ComposerFormatAction)] = &[
-            ("\u{1D401}", "Bold",          ComposerFormatAction::Bold),           // 𝐁
-            ("\u{1D43C}", "Italic",        ComposerFormatAction::Italic),         // 𝐼
-            ("\u{0055}\u{0332}", "Underline",     ComposerFormatAction::Underline),      // U̲
-            ("\u{0053}\u{0336}", "Strikethrough", ComposerFormatAction::Strikethrough),  // S̶
-            ("\u{2022}",  "Bullet list",   ComposerFormatAction::UnorderedList),  // •
-            ("\u{0031}.",  "Numbered list", ComposerFormatAction::OrderedList),    // 1.
-            ("\u{275D}",  "Quote",         ComposerFormatAction::Quote),          // ❝
-            ("</>",       "Code block",    ComposerFormatAction::CodeBlock),      // </>
+            ("\u{1D401}", "Bold", ComposerFormatAction::Bold), // 𝐁
+            ("\u{1D43C}", "Italic", ComposerFormatAction::Italic), // 𝐼
+            (
+                "\u{0055}\u{0332}",
+                "Underline",
+                ComposerFormatAction::Underline,
+            ), // U̲
+            (
+                "\u{0053}\u{0336}",
+                "Strikethrough",
+                ComposerFormatAction::Strikethrough,
+            ), // S̶
+            (
+                "\u{2022}",
+                "Bullet list",
+                ComposerFormatAction::UnorderedList,
+            ), // •
+            (
+                "\u{0031}.",
+                "Numbered list",
+                ComposerFormatAction::OrderedList,
+            ), // 1.
+            ("\u{275D}", "Quote", ComposerFormatAction::Quote), // ❝
+            ("</>", "Code block", ComposerFormatAction::CodeBlock), // </>
         ];
 
         for &(icon, tooltip, action) in buttons {
             let btn = ui.add(
                 egui::Button::new(
-                    egui::RichText::new(icon).size(16.0).color(theme::text_color()),
+                    egui::RichText::new(icon)
+                        .size(16.0)
+                        .color(theme::text_color()),
                 )
                 .min_size(egui::vec2(30.0, 26.0))
                 .fill(theme::bg_light())
@@ -203,8 +223,6 @@ fn show_input_options_toolbar(ui: &mut egui::Ui, model: &mut UiModel) {
         }
     });
 }
-
-
 
 // ── Drag-and-drop handling ──────────────────────────────────────────────
 
@@ -694,12 +712,12 @@ fn send_chat_from_input(model: &mut UiModel, tx_intent: &Sender<UiIntent>) {
         .pending_attachments
         .iter()
         .map(|a| AttachmentData {
-            asset_id: a.path.clone(),
+            locator: AttachmentLocator::LocalPath(std::path::PathBuf::from(&a.path)),
+            asset_id: None,
             filename: a.filename.clone(),
             mime_type: a.mime_type.clone(),
             size_bytes: a.size_bytes,
-            download_url: String::new(),
-            thumbnail_url: None,
+            thumbnail: None,
         })
         .collect::<Vec<_>>();
 
@@ -805,9 +823,9 @@ fn show_message_content(ui: &mut egui::Ui, msg: &ChatMessage, tx_intent: &Sender
 
     for att in &msg.attachments {
         if att.mime_type.starts_with("image/") {
-            show_image_attachment(ui, att);
+            show_image_attachment(ui, att, tx_intent);
         } else {
-            show_file_attachment(ui, att, "\u{1F39E}");
+            show_file_attachment(ui, att, "\u{1F39E}", tx_intent);
         }
     }
 
@@ -843,11 +861,12 @@ fn show_message_content(ui: &mut egui::Ui, msg: &ChatMessage, tx_intent: &Sender
     }
 }
 
-fn show_image_attachment(ui: &mut egui::Ui, att: &AttachmentData) {
-    let uri = if !att.download_url.is_empty() {
-        att.download_url.clone()
-    } else {
-        format!("file://{}", att.asset_id)
+fn show_image_attachment(ui: &mut egui::Ui, att: &AttachmentData, tx_intent: &Sender<UiIntent>) {
+    let local_path = match &att.locator {
+        AttachmentLocator::LocalPath(path) | AttachmentLocator::CachedPath(path) => {
+            Some(path.clone())
+        }
+        AttachmentLocator::RemoteAssetId(_) => None,
     };
     ui.horizontal(|ui| {
         ui.label("\u{1F5BC}");
@@ -864,30 +883,50 @@ fn show_image_attachment(ui: &mut egui::Ui, att: &AttachmentData) {
             .sense(egui::Sense::click()),
         );
         if response.clicked() {
-            let _ = open::that(uri.clone());
+            if let Some(asset_id) = &att.asset_id {
+                let _ = tx_intent.send(UiIntent::OpenAttachment {
+                    asset_id: asset_id.clone(),
+                });
+            } else if let Some(path) = &local_path {
+                let _ = open::that(path);
+            }
         }
     });
 
-    let image = egui::Image::from_uri(uri.clone())
-        .max_width(MAX_PREVIEW_IMAGE_SIZE)
-        .max_height(MAX_PREVIEW_IMAGE_SIZE)
-        .maintain_aspect_ratio(true)
-        .sense(egui::Sense::click());
-    let response = ui.add(image);
-    if response.clicked() {
-        let _ = open::that(uri);
-    }
-    if response.hovered() {
-        response.on_hover_text("Click to open full image");
+    if let Some(path) = &local_path {
+        let image = egui::Image::from_uri(format!("file://{}", path.display()))
+            .max_width(MAX_PREVIEW_IMAGE_SIZE)
+            .max_height(MAX_PREVIEW_IMAGE_SIZE)
+            .maintain_aspect_ratio(true)
+            .sense(egui::Sense::click());
+        let response = ui.add(image);
+        if response.clicked() {
+            if let Some(asset_id) = &att.asset_id {
+                let _ = tx_intent.send(UiIntent::OpenAttachment {
+                    asset_id: asset_id.clone(),
+                });
+            } else {
+                let _ = open::that(path);
+            }
+        }
+        if response.hovered() {
+            response.on_hover_text("Click to open full image");
+        }
+    } else {
+        ui.label(
+            egui::RichText::new("Preview unavailable (remote asset)")
+                .small()
+                .italics(),
+        );
     }
 }
 
-fn show_file_attachment(ui: &mut egui::Ui, att: &AttachmentData, icon: &str) {
-    let uri = if !att.download_url.is_empty() {
-        att.download_url.clone()
-    } else {
-        format!("file://{}", att.asset_id)
-    };
+fn show_file_attachment(
+    ui: &mut egui::Ui,
+    att: &AttachmentData,
+    icon: &str,
+    tx_intent: &Sender<UiIntent>,
+) {
     ui.horizontal(|ui| {
         ui.label(icon);
         let response = ui.add(
@@ -903,7 +942,18 @@ fn show_file_attachment(ui: &mut egui::Ui, att: &AttachmentData, icon: &str) {
             .sense(egui::Sense::click()),
         );
         if response.clicked() {
-            let _ = open::that(uri);
+            if let Some(asset_id) = &att.asset_id {
+                let _ = tx_intent.send(UiIntent::OpenAttachment {
+                    asset_id: asset_id.clone(),
+                });
+            } else {
+                match &att.locator {
+                    AttachmentLocator::LocalPath(path) | AttachmentLocator::CachedPath(path) => {
+                        let _ = open::that(path);
+                    }
+                    AttachmentLocator::RemoteAssetId(_) => {}
+                }
+            }
         }
     });
 }
@@ -1062,8 +1112,8 @@ fn format_size(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        detect_mime_type, format_day_label, format_timestamp, linkify_message,
-        truncate_filename, MessageSegment,
+        detect_mime_type, format_day_label, format_timestamp, linkify_message, truncate_filename,
+        MessageSegment,
     };
     use chrono::{Days, Local, TimeZone};
 

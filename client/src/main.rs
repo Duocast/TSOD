@@ -2212,16 +2212,21 @@ async fn connect_and_run_session(
                                             attachments: mp
                                                 .attachments
                                                 .into_iter()
-                                                .map(|a| ui::model::AttachmentData {
-                                                    asset_id: a
+                                                .map(|a| {
+                                                    let remote_asset_id = a
                                                         .asset_id
                                                         .map(|x| x.value)
-                                                        .unwrap_or_default(),
-                                                    filename: a.filename,
-                                                    mime_type: a.mime_type,
-                                                    size_bytes: a.size_bytes,
-                                                    download_url: String::new(),
-                                                    thumbnail_url: None,
+                                                        .unwrap_or_default();
+                                                    ui::model::AttachmentData {
+                                                        locator: ui::model::AttachmentLocator::RemoteAssetId(
+                                                            remote_asset_id.clone(),
+                                                        ),
+                                                        asset_id: Some(remote_asset_id),
+                                                        filename: a.filename,
+                                                        mime_type: a.mime_type,
+                                                        size_bytes: a.size_bytes,
+                                                        thumbnail: None,
+                                                    }
                                                 })
                                                 .collect(),
                                             reply_to: mp.reply_to_message_id.map(|r| r.value),
@@ -3023,7 +3028,7 @@ async fn connect_and_run_session(
                                 let mut upload_failed = false;
                                 for attachment in &attachments {
                                     let result: anyhow::Result<()> = async {
-                                        if attachment.asset_id.starts_with('/') {
+                                        if matches!(attachment.locator, ui::model::AttachmentLocator::LocalPath(_)) {
                                             let uploaded = upload_attachment_quic(
                                                 &conn,
                                                 ch,
@@ -3037,8 +3042,17 @@ async fn connect_and_run_session(
                                         Ok(())
                                     }.await;
                                     if let Err(e) = result {
+                                        let failed_path = match &attachment.locator {
+                                            ui::model::AttachmentLocator::LocalPath(path)
+                                            | ui::model::AttachmentLocator::CachedPath(path) => {
+                                                path.to_string_lossy().to_string()
+                                            }
+                                            ui::model::AttachmentLocator::RemoteAssetId(_) => {
+                                                attachment.filename.clone()
+                                            }
+                                        };
                                         let _ = tx_event.send(UiEvent::AttachmentUploadError {
-                                            path: attachment.asset_id.clone(),
+                                            path: failed_path,
                                             error: e.to_string(),
                                         });
                                         let _ = tx_event.send(UiEvent::AppendLog(format!("[upload] failed: {e:#}")));
@@ -3069,13 +3083,15 @@ async fn connect_and_run_session(
                                 ));
                                 let pb_attachments = uploaded_attachments
                                     .into_iter()
-                                    .map(|a| pb::AttachmentRef {
-                                        asset_id: Some(pb::AssetId { value: a.asset_id }),
-                                        filename: a.filename,
-                                        mime_type: a.mime_type,
-                                        size_bytes: a.size_bytes,
-                                        sha256: String::new(),
-                                        ..Default::default()
+                                    .filter_map(|a| {
+                                        a.asset_id.map(|asset_id| pb::AttachmentRef {
+                                            asset_id: Some(pb::AssetId { value: asset_id }),
+                                            filename: a.filename,
+                                            mime_type: a.mime_type,
+                                            size_bytes: a.size_bytes,
+                                            sha256: String::new(),
+                                            ..Default::default()
+                                        })
                                     })
                                     .collect();
                                 if let Err(e) = dispatcher.send_chat(ch, &text, pb_attachments).await {
@@ -3089,6 +3105,22 @@ async fn connect_and_run_session(
                                 let _ = tx_event.send(UiEvent::AppendLog(
                                     "[ctl] no channel selected, cannot send message".into(),
                                 ));
+                            }
+                        }
+                        UiIntent::OpenAttachment { asset_id } => {
+                            match download_attachment_to_cache(&conn, &asset_id).await {
+                                Ok(path) => {
+                                    let _ = tx_event.send(UiEvent::AttachmentCached {
+                                        asset_id: asset_id.clone(),
+                                        path: path.to_string_lossy().to_string(),
+                                    });
+                                    let _ = open::that(&path);
+                                }
+                                Err(e) => {
+                                    let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                        "[media] open attachment failed ({asset_id}): {e:#}"
+                                    )));
+                                }
                             }
                         }
                         UiIntent::JoinChannel { channel_id } => {
@@ -4324,6 +4356,62 @@ async fn connect_and_run_session(
     }
 }
 
+async fn download_attachment_to_cache(
+    conn: &quinn::Connection,
+    asset_id: &str,
+) -> anyhow::Result<std::path::PathBuf> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut cache_dir = std::env::temp_dir();
+    cache_dir.push("tsod");
+    cache_dir.push("attachment-cache");
+    tokio::fs::create_dir_all(&cache_dir)
+        .await
+        .context("create attachment cache directory")?;
+
+    let path = cache_dir.join(asset_id);
+    if tokio::fs::metadata(&path).await.is_ok() {
+        return Ok(path);
+    }
+
+    let (mut send, mut recv) = conn.open_bi().await.context("open media stream")?;
+    let req = pb::MediaRequest {
+        payload: Some(pb::media_request::Payload::DownloadRequest(
+            pb::DownloadRequest {
+                attachment_id: Some(pb::AssetId {
+                    value: asset_id.to_string(),
+                }),
+            },
+        )),
+    };
+    net::frame::write_delimited(&mut send, &req).await?;
+
+    let meta: pb::MediaResponse = net::frame::read_delimited(&mut recv, 64 * 1024).await?;
+    match meta.payload {
+        Some(pb::media_response::Payload::DownloadMeta(_)) => {}
+        Some(pb::media_response::Payload::Error(e)) => {
+            return Err(anyhow!("media download rejected: {}", e.message))
+        }
+        _ => return Err(anyhow!("unexpected media download response")),
+    }
+
+    let mut out = tokio::fs::File::create(&path)
+        .await
+        .with_context(|| format!("create cache file: {}", path.display()))?;
+    let mut buf = vec![0u8; 16 * 1024];
+    loop {
+        match recv.read(&mut buf).await {
+            Ok(Some(n)) => {
+                out.write_all(&buf[..n]).await?;
+            }
+            Ok(None) => break,
+            Err(e) => return Err(e).context("read media stream"),
+        }
+    }
+    out.flush().await?;
+    Ok(path)
+}
+
 async fn upload_attachment_quic(
     conn: &quinn::Connection,
     channel_id: &str,
@@ -4332,9 +4420,13 @@ async fn upload_attachment_quic(
     use tokio::io::AsyncReadExt;
 
     let (mut send, mut recv) = conn.open_bi().await.context("open media stream")?;
-    let mut file = tokio::fs::File::open(&attachment.asset_id)
+    let local_path = match &attachment.locator {
+        ui::model::AttachmentLocator::LocalPath(path) => path,
+        _ => return Err(anyhow!("attachment upload expects local path locator")),
+    };
+    let mut file = tokio::fs::File::open(local_path)
         .await
-        .with_context(|| format!("open attachment: {}", attachment.asset_id))?;
+        .with_context(|| format!("open attachment: {}", local_path.display()))?;
     let size_bytes = file.metadata().await?.len();
 
     let init = pb::MediaRequest {
@@ -4369,14 +4461,17 @@ async fn upload_attachment_quic(
 
     let complete: pb::MediaResponse = net::frame::read_delimited(&mut recv, 64 * 1024).await?;
     match complete.payload {
-        Some(pb::media_response::Payload::UploadComplete(done)) => Ok(ui::model::AttachmentData {
-            asset_id: done.attachment_id.map(|a| a.value).unwrap_or_default(),
-            filename: done.filename,
-            mime_type: done.mime,
-            size_bytes: done.size_bytes,
-            download_url: String::new(),
-            thumbnail_url: None,
-        }),
+        Some(pb::media_response::Payload::UploadComplete(done)) => {
+            let asset_id = done.attachment_id.map(|a| a.value).unwrap_or_default();
+            Ok(ui::model::AttachmentData {
+                locator: ui::model::AttachmentLocator::RemoteAssetId(asset_id.clone()),
+                asset_id: Some(asset_id),
+                filename: done.filename,
+                mime_type: done.mime,
+                size_bytes: done.size_bytes,
+                thumbnail: None,
+            })
+        }
         Some(pb::media_response::Payload::Error(e)) => {
             Err(anyhow!("media upload failed: {}", e.message))
         }
