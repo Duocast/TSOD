@@ -511,65 +511,10 @@ impl eframe::App for VpApp {
                 .default_width(360.0)
                 .resizable(false)
                 .show(ctx, |ui| {
-                    ui.label("Server address:");
-                    ui.horizontal(|ui| {
-                        ui.label("IP / Host");
-                        ui.add_sized(
-                            [ui.available_width() - 70.0, 24.0],
-                            egui::TextEdit::singleline(&mut self.model.connection_host_draft),
-                        );
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Port");
-                        ui.add_sized(
-                            [80.0, 24.0],
-                            egui::TextEdit::singleline(&mut self.model.connection_port_draft),
-                        );
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Nickname");
-                        ui.add_sized(
-                            [ui.available_width() - 70.0, 24.0],
-                            egui::TextEdit::singleline(&mut self.model.connection_nickname_draft)
-                                .hint_text("Nickname used when connecting/joining channels"),
-                        );
-                    });
-                    ui.label(
-                        egui::RichText::new("Nickname used when connecting/joining channels")
-                            .small()
-                            .color(theme::text_muted()),
-                    );
-                    ui.label(
-                        egui::RichText::new("Changes apply immediately when you press Connect.")
-                            .small()
-                            .color(theme::text_dim()),
-                    );
+                    self.render_connections_ui(ui);
+                });
 
-                    if !self.model.connection_error.is_empty() {
-                        ui.colored_label(theme::COLOR_DANGER, &self.model.connection_error);
-                    }
-
-                    if viewport_class == egui::ViewportClass::Embedded {
-                        let mut open = true;
-                        egui::Window::new("Connections")
-                            .open(&mut open)
-                            .default_width(360.0)
-                            .resizable(false)
-                            .show(ctx, |ui| {
-                                self.render_connections_ui(ui);
-                            });
-                        if !open {
-                            close_connections = true;
-                        }
-                    } else {
-                        egui::CentralPanel::default().show(ctx, |ui| {
-                            self.render_connections_ui(ui);
-                        });
-                    }
-                },
-            );
-
-            if close_connections {
+            if !open {
                 self.model.show_connections = false;
                 self.model.connection_error.clear();
             }
