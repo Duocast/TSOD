@@ -31,7 +31,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel) {
             };
             let response = ui
                 .add(egui::Button::new(stats_text))
-                .on_hover_text("Toggle stream diagnostics overlay (Stats for nerds)");
+                .on_hover_text("Toggle stream diagnostics overlay");
             if response.clicked() {
                 model.show_stream_stats = !model.show_stream_stats;
             }
