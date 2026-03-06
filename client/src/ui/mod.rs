@@ -472,65 +472,81 @@ impl eframe::App for VpApp {
 
         // Settings window (separate viewport when supported)
         if self.model.show_settings {
-            let mut close_settings = false;
-            let settings_viewport = egui::ViewportId::from_hash_of("settings_viewport");
-            let settings_builder = egui::ViewportBuilder::default()
-                .with_title("Options")
-                .with_inner_size([750.0, 550.0])
-                .with_min_inner_size([600.0, 400.0]);
-            ctx.show_viewport_immediate(
-                settings_viewport,
-                settings_builder,
-                |ctx, viewport_class| {
-                    if ctx.input(|i| i.viewport().close_requested()) {
-                        close_settings = true;
-                        return;
-                    }
-
-                    if viewport_class == egui::ViewportClass::Embedded {
-                        let mut open = true;
-                        egui::Window::new("Options")
-                            .open(&mut open)
-                            .default_width(750.0)
-                            .default_height(550.0)
-                            .min_width(600.0)
-                            .min_height(400.0)
-                            .collapsible(false)
-                            .show(ctx, |ui| {
-                                self.render_settings_ui(ui);
-                            });
-                        if !open {
-                            close_settings = true;
-                        }
-                    } else {
-                        egui::CentralPanel::default().show(ctx, |ui| {
-                            self.render_settings_ui(ui);
-                        });
-                    }
-                },
-            );
-
-            if close_settings {
-                self.persist_settings_if_dirty();
+            let mut open = true;
+            egui::Window::new("Options")
+                .constrain(false)
+                .open(&mut open)
+                .default_width(750.0)
+                .default_height(550.0)
+                .min_width(600.0)
+                .min_height(400.0)
+                .collapsible(false)
+                .show(ctx, |ui| {
+                    panels::settings::show(ui, &mut self.model, &self.tx_intent);
+                });
+            if !open {
+                // Auto-apply pending settings when closing the window.
+                if self.model.settings_dirty {
+                    self.model.settings = self.model.settings_draft.clone();
+                    self.model.settings_dirty = false;
+                    self.model.sync_settings_to_runtime();
+                    let _ = self.tx_intent.send(UiIntent::ApplySettings(Box::new(
+                        self.model.settings.clone(),
+                    )));
+                    let _ = self.tx_intent.send(UiIntent::SaveSettings(Box::new(
+                        self.model.settings.clone(),
+                    )));
+                    let _ = crate::settings_io::save_settings(&self.model.settings);
+                }
                 self.model.show_settings = false;
             }
         }
 
         // Connections window (separate viewport when supported)
         if self.model.show_connections {
-            let mut close_connections = false;
-            let connections_viewport = egui::ViewportId::from_hash_of("connections_viewport");
-            let connections_builder = egui::ViewportBuilder::default()
-                .with_title("Connections")
-                .with_inner_size([360.0, 340.0])
-                .with_resizable(false);
-            ctx.show_viewport_immediate(
-                connections_viewport,
-                connections_builder,
-                |ctx, viewport_class| {
-                    if ctx.input(|i| i.viewport().close_requested()) {
-                        close_connections = true;
-                        return;
+            let mut open = true;
+            egui::Window::new("Connections")
+                .constrain(false)
+                .open(&mut open)
+                .default_width(360.0)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.label("Server address:");
+                    ui.horizontal(|ui| {
+                        ui.label("IP / Host");
+                        ui.add_sized(
+                            [ui.available_width() - 70.0, 24.0],
+                            egui::TextEdit::singleline(&mut self.model.connection_host_draft),
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Port");
+                        ui.add_sized(
+                            [80.0, 24.0],
+                            egui::TextEdit::singleline(&mut self.model.connection_port_draft),
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Nickname");
+                        ui.add_sized(
+                            [ui.available_width() - 70.0, 24.0],
+                            egui::TextEdit::singleline(&mut self.model.connection_nickname_draft)
+                                .hint_text("Nickname used when connecting/joining channels"),
+                        );
+                    });
+                    ui.label(
+                        egui::RichText::new("Nickname used when connecting/joining channels")
+                            .small()
+                            .color(theme::text_muted()),
+                    );
+                    ui.label(
+                        egui::RichText::new("Changes apply immediately when you press Connect.")
+                            .small()
+                            .color(theme::text_dim()),
+                    );
+
+                    if !self.model.connection_error.is_empty() {
+                        ui.colored_label(theme::COLOR_DANGER, &self.model.connection_error);
                     }
 
                     if viewport_class == egui::ViewportClass::Embedded {
@@ -561,39 +577,15 @@ impl eframe::App for VpApp {
 
         // Telemetry window (separate viewport when supported)
         if self.model.show_telemetry {
-            let mut close_telemetry = false;
-            let telemetry_viewport = egui::ViewportId::from_hash_of("telemetry_viewport");
-            let telemetry_builder = egui::ViewportBuilder::default()
-                .with_title("Connection Telemetry")
-                .with_inner_size([400.0, 320.0]);
-            ctx.show_viewport_immediate(
-                telemetry_viewport,
-                telemetry_builder,
-                |ctx, viewport_class| {
-                    if ctx.input(|i| i.viewport().close_requested()) {
-                        close_telemetry = true;
-                        return;
-                    }
-
-                    if viewport_class == egui::ViewportClass::Embedded {
-                        let mut open = true;
-                        egui::Window::new("Connection Telemetry")
-                            .open(&mut open)
-                            .default_width(400.0)
-                            .show(ctx, |ui| {
-                                self.render_telemetry_ui(ui);
-                            });
-                        if !open {
-                            close_telemetry = true;
-                        }
-                    } else {
-                        egui::CentralPanel::default().show(ctx, |ui| {
-                            self.render_telemetry_ui(ui);
-                        });
-                    }
-                },
-            );
-            if close_telemetry {
+            let mut open = true;
+            egui::Window::new("Connection Telemetry")
+                .constrain(false)
+                .open(&mut open)
+                .default_width(400.0)
+                .show(ctx, |ui| {
+                    panels::telemetry::show(ui, &self.model);
+                });
+            if !open {
                 self.model.show_telemetry = false;
             }
         }
