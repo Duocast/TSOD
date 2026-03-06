@@ -235,6 +235,85 @@ impl<R: ControlRepo> ControlService<R> {
         Ok(renamed)
     }
 
+    pub async fn update_channel(
+        &self,
+        ctx: &RequestContext,
+        channel_id: ChannelId,
+        new_name: &str,
+        bitrate_bps: i32,
+        opus_profile: i32,
+    ) -> ControlResult<Channel> {
+        let name = new_name.trim();
+        if name.is_empty() {
+            return Err(ControlError::InvalidArgument("channel name empty"));
+        }
+        if name.len() > 64 {
+            return Err(ControlError::InvalidArgument("channel name too long"));
+        }
+
+        let mut tx = <R as ControlRepo>::tx(&self.repo).await?;
+        self.require(
+            &mut tx,
+            ctx,
+            Some(channel_id),
+            None,
+            Capability::CreateChannel,
+        )
+        .await?;
+
+        let updated = <R as ControlRepo>::update_channel(
+            &self.repo,
+            &mut tx,
+            ctx.server_id,
+            channel_id,
+            name,
+            bitrate_bps,
+            opus_profile,
+        )
+        .await?
+        .ok_or(ControlError::NotFound("channel"))?;
+
+        <R as ControlRepo>::insert_audit(
+            &self.repo,
+            &mut tx,
+            &AuditEntry::new(
+                ctx.server_id,
+                Some(ctx.user_id),
+                "channel.update",
+                "channel",
+                updated.id.0.to_string(),
+                json!({ "name": updated.name, "bitrate_bps": updated.bitrate_bps, "opus_profile": updated.opus_profile }),
+            ),
+        )
+        .await?;
+
+        <R as ControlRepo>::insert_outbox(
+            &self.repo,
+            &mut tx,
+            &OutboxEvent {
+                id: OutboxId(Uuid::new_v4()),
+                server_id: ctx.server_id,
+                topic: "channel.renamed".to_string(),
+                payload_json: json!({
+                    "server_id": ctx.server_id.0,
+                    "channel_id": updated.id.0,
+                    "name": updated.name,
+                    "parent_channel_id": updated.parent_id.map(|p| p.0),
+                    "max_members": updated.max_members,
+                    "channel_type": updated.channel_type,
+                    "description": updated.description,
+                    "bitrate_bps": updated.bitrate_bps,
+                    "opus_profile": updated.opus_profile,
+                    "updated_at": updated.updated_at,
+                }),
+            },
+        )
+        .await?;
+
+        tx.commit().await?;
+        Ok(updated)
+    }
+
     pub async fn delete_channel(
         &self,
         ctx: &RequestContext,

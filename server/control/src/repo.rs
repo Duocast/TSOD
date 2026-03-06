@@ -43,6 +43,15 @@ pub trait ControlRepo: Send + Sync {
         id: ChannelId,
         new_name: &str,
     ) -> ControlResult<Option<Channel>>;
+    async fn update_channel(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        server: ServerId,
+        id: ChannelId,
+        name: &str,
+        bitrate_bps: i32,
+        opus_profile: i32,
+    ) -> ControlResult<Option<Channel>>;
     async fn delete_channel(
         &self,
         tx: &mut Transaction<'_, Postgres>,
@@ -395,6 +404,48 @@ impl ControlRepo for PgControlRepo {
         .fetch_optional(&mut **tx)
         .await
         .context("rename channel")?;
+
+        Ok(row.map(|r| Channel {
+            id: ChannelId(r.get::<Uuid, _>("id")),
+            server_id: ServerId(r.get::<Uuid, _>("server_id")),
+            name: r.get::<String, _>("name"),
+            parent_id: r.get::<Option<Uuid>, _>("parent_id").map(ChannelId),
+            max_members: r.get::<Option<i32>, _>("max_members"),
+            max_talkers: r.get::<Option<i32>, _>("max_talkers"),
+            channel_type: r.get::<i32, _>("channel_type"),
+            description: r.get::<String, _>("description"),
+            bitrate_bps: r.get::<i32, _>("bitrate_bps"),
+            opus_profile: r.get::<i32, _>("opus_profile"),
+            created_at: r.get::<DateTime<Utc>, _>("created_at"),
+            updated_at: r.get::<DateTime<Utc>, _>("updated_at"),
+        }))
+    }
+
+    async fn update_channel(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        server: ServerId,
+        id: ChannelId,
+        name: &str,
+        bitrate_bps: i32,
+        opus_profile: i32,
+    ) -> ControlResult<Option<Channel>> {
+        let row = sqlx::query(
+            r#"
+            UPDATE channels
+            SET name = $3, bitrate_bps = $4, opus_profile = $5, updated_at = NOW()
+            WHERE server_id = $1 AND id = $2
+            RETURNING id, server_id, name, parent_id, max_members, max_talkers, channel_type, description, bitrate_bps, opus_profile, created_at, updated_at
+            "#,
+        )
+        .bind(server.0)
+        .bind(id.0)
+        .bind(name)
+        .bind(bitrate_bps)
+        .bind(opus_profile)
+        .fetch_optional(&mut **tx)
+        .await
+        .context("update channel")?;
 
         Ok(row.map(|r| Channel {
             id: ChannelId(r.get::<Uuid, _>("id")),

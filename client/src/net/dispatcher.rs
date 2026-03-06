@@ -398,21 +398,34 @@ impl ControlDispatcher {
         }
     }
 
-    pub async fn rename_channel(&self, channel_id: &str, new_name: &str) -> Result<()> {
-        let req = pb::RenameChannelRequest {
+    pub async fn rename_channel(
+        &self,
+        channel_id: &str,
+        new_name: &str,
+        codec: u8,
+        bitrate_bps: u32,
+    ) -> Result<()> {
+        let opus_profile = match codec {
+            1 => pb::OpusProfile::OpusMusic as i32,
+            _ => pb::OpusProfile::OpusVoice as i32,
+        };
+        let req = pb::UpdateChannelRequest {
             channel_id: Some(pb::ChannelId {
                 value: channel_id.into(),
             }),
-            new_name: new_name.into(),
+            name: new_name.into(),
+            bitrate: bitrate_bps,
+            opus_profile,
+            ..Default::default()
         };
         let resp = self
             .send_request(
-                pb::client_to_server::Payload::RenameChannelRequest(req),
+                pb::client_to_server::Payload::UpdateChannelRequest(req),
                 Duration::from_secs(5),
             )
             .await??;
         if let Some(err) = resp.error {
-            return Err(anyhow!("rename_channel error: {:?}", err));
+            return Err(anyhow!("update_channel error: {:?}", err));
         }
         Ok(())
     }
