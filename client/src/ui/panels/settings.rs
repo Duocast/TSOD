@@ -6,8 +6,8 @@
 use crate::audio::dsp::agc::AgcPreset;
 use crate::settings_io;
 use crate::ui::model::{
-    AppSettings, AudioDeviceInfo, CaptureMode, DspMethod, FecMode, SettingsPage, UiEvent, UiIntent,
-    UiModel, VoiceProcessingMode,
+    keybind_to_string, parse_keybind, AppSettings, AudioDeviceInfo, CaptureMode, DspMethod,
+    FecMode, SettingsPage, UiEvent, UiIntent, UiModel, VoiceProcessingMode,
 };
 use crate::ui::theme;
 use crossbeam_channel::Sender;
@@ -518,13 +518,15 @@ fn page_capture(
         CaptureMode::PushToTalk => {
             ui.horizontal(|ui: &mut egui::Ui| {
                 ui.label("Hotkey:");
-                let prev = s.ptt_key.clone();
+                let mut ptt_text = keybind_to_string(s.hotkeys.ptt);
                 ui.add(
-                    egui::TextEdit::singleline(&mut s.ptt_key)
+                    egui::TextEdit::singleline(&mut ptt_text)
                         .desired_width(120.0)
                         .hint_text("Press a key..."),
                 );
-                if s.ptt_key != prev {
+                let parsed = parse_keybind(&ptt_text);
+                if parsed != s.hotkeys.ptt {
+                    s.hotkeys.ptt = parsed;
                     dirty = true;
                 }
             });
@@ -1104,26 +1106,63 @@ fn page_hotkeys(ui: &mut egui::Ui, s: &mut AppSettings) -> bool {
             ui.label(egui::RichText::new("On").strong().size(12.0));
             ui.end_row();
 
-            for binding in s.hotkeys.iter_mut() {
+            for binding in crate::ui::model::default_hotkeys().iter() {
                 ui.label(
                     egui::RichText::new(binding.action.label())
                         .size(12.0)
                         .color(theme::text_color()),
                 );
 
-                let prev_key = binding.key.clone();
+                let mut text = match binding.action {
+                    crate::ui::model::HotkeyAction::ToggleMute => {
+                        keybind_to_string(s.hotkeys.toggle_mute)
+                    }
+                    crate::ui::model::HotkeyAction::ToggleDeafen => {
+                        keybind_to_string(s.hotkeys.toggle_deafen)
+                    }
+                    crate::ui::model::HotkeyAction::PushToTalk => keybind_to_string(s.hotkeys.ptt),
+                    crate::ui::model::HotkeyAction::ToggleScreenShare => {
+                        keybind_to_string(s.hotkeys.toggle_screen_share)
+                    }
+                    crate::ui::model::HotkeyAction::ToggleVideo => {
+                        keybind_to_string(s.hotkeys.toggle_video)
+                    }
+                    crate::ui::model::HotkeyAction::FocusChat
+                    | crate::ui::model::HotkeyAction::Disconnect => String::new(),
+                };
                 ui.add(
-                    egui::TextEdit::singleline(&mut binding.key)
+                    egui::TextEdit::singleline(&mut text)
                         .desired_width(140.0)
                         .hint_text("Key combo"),
                 );
-                if binding.key != prev_key {
+                let parsed = parse_keybind(&text);
+                let slot = match binding.action {
+                    crate::ui::model::HotkeyAction::ToggleMute => &mut s.hotkeys.toggle_mute,
+                    crate::ui::model::HotkeyAction::ToggleDeafen => &mut s.hotkeys.toggle_deafen,
+                    crate::ui::model::HotkeyAction::PushToTalk => &mut s.hotkeys.ptt,
+                    crate::ui::model::HotkeyAction::ToggleScreenShare => {
+                        &mut s.hotkeys.toggle_screen_share
+                    }
+                    crate::ui::model::HotkeyAction::ToggleVideo => &mut s.hotkeys.toggle_video,
+                    crate::ui::model::HotkeyAction::FocusChat
+                    | crate::ui::model::HotkeyAction::Disconnect => {
+                        ui.label("-");
+                        ui.end_row();
+                        continue;
+                    }
+                };
+                if *slot != parsed {
+                    *slot = parsed;
                     dirty = true;
                 }
 
-                let prev_enabled = binding.enabled;
-                ui.checkbox(&mut binding.enabled, "");
-                if binding.enabled != prev_enabled {
+                let mut enabled = slot.is_some();
+                if ui.checkbox(&mut enabled, "").changed() {
+                    if !enabled {
+                        *slot = None;
+                    } else if slot.is_none() {
+                        *slot = binding.keybind;
+                    }
                     dirty = true;
                 }
 
@@ -1134,7 +1173,7 @@ fn page_hotkeys(ui: &mut egui::Ui, s: &mut AppSettings) -> bool {
     ui.add_space(12.0);
 
     if ui.small_button("Reset to Defaults").clicked() {
-        s.hotkeys = crate::ui::model::default_hotkeys();
+        s.hotkeys = crate::ui::model::HotkeyMap::default();
         dirty = true;
     }
 

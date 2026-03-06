@@ -866,40 +866,50 @@ impl eframe::App for VpApp {
 }
 
 impl VpApp {
+    fn hotkey_pressed(ctx: &egui::Context, bind: Option<model::Keybind>) -> bool {
+        let Some(bind) = bind else {
+            return false;
+        };
+        ctx.input(|i| {
+            i.key_pressed(bind.key)
+                && i.modifiers.ctrl == bind.ctrl
+                && i.modifiers.alt == bind.alt
+                && i.modifiers.shift == bind.shift
+                && i.modifiers.command == bind.command
+        })
+    }
+
+    fn hotkey_released(ctx: &egui::Context, bind: Option<model::Keybind>) -> bool {
+        let Some(bind) = bind else {
+            return false;
+        };
+        ctx.input(|i| i.key_released(bind.key))
+    }
+
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
-        let input = ctx.input(|i| {
-            (
-                i.key_pressed(egui::Key::Space),
-                i.key_released(egui::Key::Space),
-                i.key_pressed(egui::Key::Escape),
-                i.modifiers.ctrl,
-                i.key_pressed(egui::Key::M),
-                i.key_pressed(egui::Key::D),
-            )
-        });
+        let esc_pressed = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+        let ptt_pressed = Self::hotkey_pressed(ctx, self.model.settings.hotkeys.ptt);
+        let ptt_released = Self::hotkey_released(ctx, self.model.settings.hotkeys.ptt);
+        let mute_pressed = Self::hotkey_pressed(ctx, self.model.settings.hotkeys.toggle_mute);
+        let deafen_pressed = Self::hotkey_pressed(ctx, self.model.settings.hotkeys.toggle_deafen);
 
-        let (space_pressed, space_released, esc_pressed, ctrl, m_pressed, d_pressed) = input;
-
-        // PTT: space down = talk, space up = stop
+        // PTT: down = talk, up handled by backend with release delay.
         if self.model.ptt_enabled {
-            if space_pressed && !self.model.chat_input_focused {
+            if ptt_pressed && !self.model.chat_input_focused {
                 let _ = self.tx_intent.send(UiIntent::PttDown);
                 self.model.ptt_active = true;
             }
-            if space_released && !self.model.chat_input_focused {
+            if ptt_released && !self.model.chat_input_focused {
                 let _ = self.tx_intent.send(UiIntent::PttUp);
-                self.model.ptt_active = false;
             }
         }
 
-        // Ctrl+M = toggle mute
-        if ctrl && m_pressed && !self.model.chat_input_focused {
+        if mute_pressed && !self.model.chat_input_focused {
             self.model.self_muted = !self.model.self_muted;
             let _ = self.tx_intent.send(UiIntent::ToggleSelfMute);
         }
 
-        // Ctrl+D = toggle deafen
-        if ctrl && d_pressed && !self.model.chat_input_focused {
+        if deafen_pressed && !self.model.chat_input_focused {
             self.model.self_deafened = !self.model.self_deafened;
             let _ = self.tx_intent.send(UiIntent::ToggleSelfDeafen);
         }
