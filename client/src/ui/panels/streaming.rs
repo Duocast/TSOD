@@ -1,23 +1,8 @@
+use crate::net::video_decode;
+use crate::proto::voiceplatform::v1 as pb;
 use crate::ui::model::UiModel;
 use crate::ui::theme;
 use eframe::egui;
-
-fn parse_raw_rgba(payload: &[u8]) -> Option<(usize, usize, &[u8])> {
-    if payload.len() < 8 {
-        return None;
-    }
-    let width = u16::from_le_bytes([payload[0], payload[1]]) as usize;
-    let height = u16::from_le_bytes([payload[2], payload[3]]) as usize;
-    let stride = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]) as usize;
-    if width == 0 || height == 0 || stride < width * 4 {
-        return None;
-    }
-    let needed = stride.checked_mul(height)?;
-    if payload.len() < 8 + needed {
-        return None;
-    }
-    Some((width, height, &payload[8..8 + needed]))
-}
 
 fn human_bytes(bytes: u64) -> String {
     if bytes >= 1024 * 1024 {
@@ -55,10 +40,6 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel) {
     ui.separator();
 
     let dbg = &model.stream_debug;
-    let frame_decoded = model
-        .latest_stream_frame
-        .as_ref()
-        .and_then(|frame| parse_raw_rgba(&frame.payload));
 
     egui::Frame::group(ui.style())
         .fill(theme::bg_dark())
@@ -83,34 +64,48 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel) {
             let mut rendered = false;
             let mut render_w = 0usize;
             let mut render_h = 0usize;
-            if let Some((width, height, rgba)) = frame_decoded {
-                render_w = width;
-                render_h = height;
-                let frame_key = model
-                    .latest_stream_frame
-                    .as_ref()
-                    .map(|frame| (frame.stream_tag, frame.frame_seq));
+            if let Some(frame) = model.latest_stream_frame.as_ref() {
+                let frame_key = Some((frame.stream_tag, frame.frame_seq));
                 if model.latest_stream_frame_key != frame_key {
-                    let image = egui::ColorImage::from_rgba_unmultiplied([width, height], rgba);
-                    model.latest_stream_frame_texture = Some(ui.ctx().load_texture(
-                        "streaming.latest",
-                        image,
-                        egui::TextureOptions::LINEAR,
-                    ));
-                    model.latest_stream_frame_key = frame_key;
+                    if let Ok(codec) = pb::VideoCodec::try_from(frame.codec) {
+                        if let Ok(decoded) = video_decode::decode_video_frame(codec, &frame.payload)
+                        {
+                            let image = egui::ColorImage::from_rgba_unmultiplied(
+                                [decoded.width, decoded.height],
+                                &decoded.rgba,
+                            );
+                            model.latest_stream_frame_texture = Some(ui.ctx().load_texture(
+                                "streaming.latest",
+                                image,
+                                egui::TextureOptions::LINEAR,
+                            ));
+                            render_w = decoded.width;
+                            render_h = decoded.height;
+                            model.latest_stream_frame_key = frame_key;
+                        }
+                    }
                 }
 
-                let aspect = width as f32 / height as f32;
-                let mut draw_size = video_rect.size();
-                if draw_size.x / draw_size.y > aspect {
-                    draw_size.x = draw_size.y * aspect;
-                } else {
-                    draw_size.y = draw_size.x / aspect;
+                if render_w == 0 || render_h == 0 {
+                    if let Some(texture) = &model.latest_stream_frame_texture {
+                        render_w = texture.size()[0];
+                        render_h = texture.size()[1];
+                    }
                 }
-                let draw_rect = egui::Rect::from_center_size(video_rect.center(), draw_size);
-                if let Some(texture) = &model.latest_stream_frame_texture {
-                    egui::Image::new((texture.id(), draw_size)).paint_at(ui, draw_rect);
-                    rendered = true;
+
+                if render_w > 0 && render_h > 0 {
+                    let aspect = render_w as f32 / render_h as f32;
+                    let mut draw_size = video_rect.size();
+                    if draw_size.x / draw_size.y > aspect {
+                        draw_size.x = draw_size.y * aspect;
+                    } else {
+                        draw_size.y = draw_size.x / aspect;
+                    }
+                    let draw_rect = egui::Rect::from_center_size(video_rect.center(), draw_size);
+                    if let Some(texture) = &model.latest_stream_frame_texture {
+                        egui::Image::new((texture.id(), draw_size)).paint_at(ui, draw_rect);
+                        rendered = true;
+                    }
                 }
             }
 

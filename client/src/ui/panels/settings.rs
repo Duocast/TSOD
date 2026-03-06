@@ -1455,6 +1455,7 @@ fn page_whisper(ui: &mut egui::Ui, s: &mut AppSettings) -> bool {
 
 fn page_screen_share(ui: &mut egui::Ui, s: &mut AppSettings) -> bool {
     let mut dirty = false;
+    let available_codecs = crate::net::dispatcher::available_screen_share_codecs();
 
     section(ui, "Screen Sharing");
 
@@ -1479,21 +1480,39 @@ fn page_screen_share(ui: &mut egui::Ui, s: &mut AppSettings) -> bool {
             if ui.button("📝 Presentation").clicked() {
                 s.screen_share_fps = 15;
                 s.screen_share_max_bitrate_kbps = 1800;
-                s.screen_share_codec = "VP9".into();
+                s.screen_share_codec = available_codecs
+                    .iter()
+                    .copied()
+                    .find(|codec| *codec == "VP9")
+                    .or_else(|| available_codecs.first().copied())
+                    .unwrap_or("VP9")
+                    .to_string();
                 s.screen_share_profile = "1080p60".into();
                 dirty = true;
             }
             if ui.button("⚖ Balanced").clicked() {
                 s.screen_share_fps = 30;
                 s.screen_share_max_bitrate_kbps = 3000;
-                s.screen_share_codec = "VP9".into();
+                s.screen_share_codec = available_codecs
+                    .iter()
+                    .copied()
+                    .find(|codec| *codec == "VP9")
+                    .or_else(|| available_codecs.first().copied())
+                    .unwrap_or("VP9")
+                    .to_string();
                 s.screen_share_profile = "1080p60".into();
                 dirty = true;
             }
             if ui.button("🎮 Motion").clicked() {
                 s.screen_share_fps = 60;
                 s.screen_share_max_bitrate_kbps = 6000;
-                s.screen_share_codec = "AV1".into();
+                s.screen_share_codec = available_codecs
+                    .iter()
+                    .copied()
+                    .find(|codec| *codec == "AV1")
+                    .or_else(|| available_codecs.first().copied())
+                    .unwrap_or("VP9")
+                    .to_string();
                 s.screen_share_profile = "1440p60".into();
                 dirty = true;
             }
@@ -1539,21 +1558,44 @@ fn page_screen_share(ui: &mut egui::Ui, s: &mut AppSettings) -> bool {
                 }
             });
         cols[0].label("Codec");
-        let codecs = ["AV1", "VP9"];
-        egui::ComboBox::from_id_salt("ss_codec")
-            .selected_text(&s.screen_share_codec)
-            .width(120.0)
-            .show_ui(&mut cols[1], |ui: &mut egui::Ui| {
-                for c in &codecs {
-                    if ui
-                        .selectable_value(&mut s.screen_share_codec, c.to_string(), *c)
-                        .changed()
-                    {
-                        dirty = true;
+        if available_codecs.is_empty() {
+            cols[1].label("No codecs available");
+        } else {
+            if !available_codecs
+                .iter()
+                .any(|codec| *codec == s.screen_share_codec)
+            {
+                s.screen_share_codec = available_codecs
+                    .first()
+                    .copied()
+                    .unwrap_or("VP9")
+                    .to_string();
+                dirty = true;
+            }
+            egui::ComboBox::from_id_salt("ss_codec")
+                .selected_text(&s.screen_share_codec)
+                .width(120.0)
+                .show_ui(&mut cols[1], |ui: &mut egui::Ui| {
+                    for c in &available_codecs {
+                        if ui
+                            .selectable_value(&mut s.screen_share_codec, c.to_string(), *c)
+                            .changed()
+                        {
+                            dirty = true;
+                        }
                     }
-                }
-            });
+                });
+        }
     });
+
+    if available_codecs.is_empty() {
+        ui.add_space(8.0);
+        ui.colored_label(
+            theme::COLOR_DANGER,
+            "Screen sharing is unavailable: no supported codecs are compiled.",
+        );
+        return dirty;
+    }
 
     ui.add_space(4.0);
     let quality_tier = if s.screen_share_max_bitrate_kbps < 2000 {
