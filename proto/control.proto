@@ -11,7 +11,6 @@ import "moderation.proto";
 import "telemetry.proto";
 import "user.proto";
 import "permissions.proto";
-import "upload.proto";
 import "audit.proto";
 import "poke.proto";
 import "whisper.proto";
@@ -83,11 +82,6 @@ message ClientToServer {
     RedeemPrivilegeKeyRequest redeem_privilege_key_request = 91;
     ListPrivilegeKeysRequest list_privilege_keys_request = 92;
     DeletePrivilegeKeyRequest delete_privilege_key_request = 93;
-
-    // File upload
-    CreateUploadRequest create_upload_request = 100;
-    CompleteUploadRequest complete_upload_request = 101;
-    GetQuotaRequest get_quota_request = 102;
 
     // Audit log
     GetAuditLogRequest get_audit_log_request = 110;
@@ -223,11 +217,6 @@ message ServerToClient {
     RedeemPrivilegeKeyResponse redeem_privilege_key_response = 91;
     ListPrivilegeKeysResponse list_privilege_keys_response = 92;
     DeletePrivilegeKeyResponse delete_privilege_key_response = 93;
-
-    // Upload responses
-    CreateUploadResponse create_upload_response = 100;
-    CompleteUploadResponse complete_upload_response = 101;
-    GetQuotaResponse get_quota_response = 102;
 
     // Audit log response
     GetAuditLogResponse get_audit_log_response = 110;
