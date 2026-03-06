@@ -85,7 +85,7 @@ pub struct CapturedFrame {
     pub data: FrameData,
 }
 
-pub trait ScreenCapture: Send {
+pub trait ScreenCapture {
     fn next_frame(&mut self) -> anyhow::Result<CapturedFrame>;
 }
 
@@ -630,6 +630,15 @@ async fn video_recv_loop(mut video_rx: mpsc::Receiver<Bytes>, state: SharedStrea
         let mut rx = receiver.lock().await;
         if let Some(frame) = rx.receive(&datagram) {
             let size = frame.payload.len();
+            let codec = {
+                state
+                    .stream_codecs
+                    .read()
+                    .await
+                    .get(&frame.stream_tag)
+                    .copied()
+                    .unwrap_or(pb::VideoCodec::Unspecified) as i32
+            };
             state
                 .counters
                 .completed_frames
@@ -651,13 +660,7 @@ async fn video_recv_loop(mut video_rx: mpsc::Receiver<Bytes>, state: SharedStrea
                     stream_tag: frame.stream_tag,
                     frame_seq: frame.frame_seq,
                     ts_ms: frame.ts_ms,
-                    codec: state
-                        .stream_codecs
-                        .read()
-                        .await
-                        .get(&frame.stream_tag)
-                        .copied()
-                        .unwrap_or(pb::VideoCodec::Unspecified) as i32,
+                    codec,
                     payload: frame.payload.to_vec(),
                 });
             }
