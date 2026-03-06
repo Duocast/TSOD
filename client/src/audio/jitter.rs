@@ -40,9 +40,10 @@ impl JitterBuffer {
         }
 
         if self.buf.len() >= self.max_frames {
-            // Drop farthest future to keep bounded
-            if let Some((&last, _)) = self.buf.iter().next_back() {
-                self.buf.remove(&last);
+            // Drop oldest (lowest seq) to keep bounded — real-time audio
+            // should prefer newer data over stale packets.
+            if let Some((&oldest, _)) = self.buf.iter().next() {
+                self.buf.remove(&oldest);
             }
         }
         self.buf.insert(seq, payload);

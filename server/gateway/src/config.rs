@@ -63,8 +63,8 @@ pub struct Config {
     #[arg(long, default_value_t = 30)]
     pub outbox_claim_ttl_s: i64,
 
-    /// Dev mode: accept dev token "dev"
-    #[arg(long, default_value_t = true)]
+    /// Dev mode: accept dev token "dev" (NEVER enable in production)
+    #[arg(long, default_value_t = default_dev_mode())]
     pub dev_mode: bool,
 
     /// Max concurrent connections (soft limit)
@@ -82,6 +82,10 @@ pub struct Config {
         default_value_t = 32 * 1024
     )]
     pub quic_datagram_recv_buffer_bytes: usize,
+}
+
+fn default_dev_mode() -> bool {
+    cfg!(debug_assertions)
 }
 
 fn default_owner_bootstrap_policy() -> OwnerBootstrapPolicy {

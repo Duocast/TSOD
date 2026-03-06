@@ -69,15 +69,8 @@ impl MediaService {
             Some(pb::media_request::Payload::DownloadRequest(req)) => {
                 self.handle_download(&mut send, req, user_id).await
             }
-            Some(pb::media_request::Payload::ThumbRequest(_)) => {
-                let resp = pb::MediaResponse {
-                    payload: Some(pb::media_response::Payload::Error(pb::MediaError {
-                        message: "thumbnail generation not implemented".into(),
-                    })),
-                };
-                write_delimited(&mut send, &resp).await?;
-                send.finish()?;
-                Ok(())
+            Some(pb::media_request::Payload::ThumbRequest(req)) => {
+                self.handle_thumbnail(&mut send, req, user_id).await
             }
             None => Err(anyhow!("empty media request")),
         }
@@ -246,6 +239,82 @@ impl MediaService {
         let mut file = fs::File::open(&storage_path)
             .await
             .context("open attachment file")?;
+        let mut buf = vec![0u8; DEFAULT_MAX_CHUNK];
+        loop {
+            let n = file.read(&mut buf).await?;
+            if n == 0 {
+                break;
+            }
+            send.write_all(&buf[..n]).await?;
+        }
+        send.finish()?;
+        Ok(())
+    }
+
+    async fn handle_thumbnail(
+        &self,
+        send: &mut quinn::SendStream,
+        req: pb::ThumbRequest,
+        user_id: UserId,
+    ) -> Result<()> {
+        let attachment_id = req
+            .attachment_id
+            .as_ref()
+            .ok_or_else(|| anyhow!("missing attachment id"))?
+            .value
+            .clone();
+        let id = Uuid::parse_str(&attachment_id).context("invalid attachment id")?;
+
+        let row = sqlx::query(
+            r#"SELECT channel_id, content_type, size_bytes, storage_path, quarantined
+               FROM attachments WHERE id=$1"#,
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let Some(row) = row else {
+            return self.write_error(send, "attachment not found").await;
+        };
+
+        let channel_id: Uuid = row.get("channel_id");
+        if !self.user_in_channel(channel_id, user_id.0).await? {
+            return self.write_error(send, "not authorized").await;
+        }
+        let quarantined: bool = row.get("quarantined");
+        if quarantined {
+            return self.write_error(send, "attachment quarantined").await;
+        }
+
+        let mime: String = row.get("content_type");
+        if !self.inline_safe_mime.contains(mime.as_str()) {
+            return self
+                .write_error(send, "thumbnail not available for this content type")
+                .await;
+        }
+
+        // For safe inline image types, serve the original file as the thumbnail.
+        // Client-side rendering handles scaling/display. A dedicated server-side
+        // resize pipeline can be added later without protocol changes.
+        let storage_path: String = row.get("storage_path");
+        let size_bytes: i64 = row.get("size_bytes");
+
+        let meta = pb::MediaResponse {
+            payload: Some(pb::media_response::Payload::DownloadMeta(
+                pb::DownloadMeta {
+                    mime: mime.clone(),
+                    filename: format!("thumb-{attachment_id}"),
+                    size_bytes: size_bytes as u64,
+                    sha256: String::new(),
+                    safe_inline: true,
+                },
+            )),
+        };
+        write_delimited(send, &meta).await?;
+
+        let mut file = fs::File::open(&storage_path)
+            .await
+            .context("open attachment file for thumbnail")?;
         let mut buf = vec![0u8; DEFAULT_MAX_CHUNK];
         loop {
             let n = file.read(&mut buf).await?;

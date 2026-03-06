@@ -80,8 +80,10 @@ impl CaptureDsp {
         let vad = if self.noise_suppression_enabled {
             self.denoiser.process_frame(pcm)
         } else {
-            // Still run VAD for level reporting even if denoiser is off
-            0.0
+            // Run energy-based VAD as fallback when RNNoise denoiser is off,
+            // so voice activation detection still functions.
+            let active = vad::energy_vad(pcm, -40.0);
+            if active { 0.85 } else { 0.05 }
         };
 
         // Apply output leveling after denoise. Use VAD/noise-floor aware AGC behavior
@@ -195,22 +197,17 @@ impl CaptureDsp {
 /// DSP pipeline for the playout (speaker) path.
 pub struct PlayoutDsp {
     agc: agc::Agc,
-    frame_scratch: Vec<i16>,
 }
 
 impl PlayoutDsp {
     pub fn new() -> Self {
         Self {
             agc: agc::Agc::with_preset(agc::AgcPreset::Balanced),
-            frame_scratch: Vec::with_capacity(960),
         }
     }
 
     /// Normalize playout volume.
     pub fn process_frame(&mut self, pcm: &mut [i16]) {
-        self.frame_scratch.clear();
-        self.frame_scratch.extend_from_slice(pcm);
-        self.agc.process(&mut self.frame_scratch);
-        pcm.copy_from_slice(&self.frame_scratch);
+        self.agc.process(pcm);
     }
 }

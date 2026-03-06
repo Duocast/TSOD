@@ -40,6 +40,7 @@ impl Capability {
             "manage_channel" => Capability::ManageChannel,
             "moderate_members" => Capability::ModerateMembers,
             "manage_roles" => Capability::ManageRoles,
+            "mute_voice" => Capability::MuteVoice,
             _ => return None,
         })
     }
@@ -73,7 +74,3 @@ pub enum Decision {
     Deny,
 }
 
-pub enum PermissionDecision {
-    Allow,
-    Deny,
-}
