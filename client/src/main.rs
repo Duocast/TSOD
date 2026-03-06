@@ -523,7 +523,7 @@ struct SharedStreamState {
     active_streams: Arc<RwLock<HashMap<u64, Arc<Mutex<VideoReceiver>>>>>,
     stream_codecs: Arc<RwLock<HashMap<u64, pb::VideoCodec>>>,
     counters: Arc<VideoRuntimeCounters>,
-    latest_frame: Arc<std::sync::RwLock<Option<ui::model::StreamFrameView>>>,
+    latest_frames: Arc<std::sync::RwLock<HashMap<u64, ui::model::StreamFrameView>>>,
 }
 
 impl SharedStreamState {
@@ -532,7 +532,7 @@ impl SharedStreamState {
             active_streams: Arc::new(RwLock::new(HashMap::new())),
             stream_codecs: Arc::new(RwLock::new(HashMap::new())),
             counters: Arc::new(VideoRuntimeCounters::default()),
-            latest_frame: Arc::new(std::sync::RwLock::new(None)),
+            latest_frames: Arc::new(std::sync::RwLock::new(HashMap::new())),
         }
     }
 }
@@ -659,14 +659,17 @@ async fn video_recv_loop(mut video_rx: mpsc::Receiver<Bytes>, state: SharedStrea
                 .counters
                 .last_frame_ts_ms
                 .store(frame.ts_ms, Ordering::Relaxed);
-            if let Ok(mut latest) = state.latest_frame.write() {
-                *latest = Some(ui::model::StreamFrameView {
-                    stream_tag: frame.stream_tag,
-                    frame_seq: frame.frame_seq,
-                    ts_ms: frame.ts_ms,
-                    codec,
-                    payload: frame.payload.to_vec(),
-                });
+            if let Ok(mut latest) = state.latest_frames.write() {
+                latest.insert(
+                    frame.stream_tag,
+                    ui::model::StreamFrameView {
+                        stream_tag: frame.stream_tag,
+                        frame_seq: frame.frame_seq,
+                        ts_ms: frame.ts_ms,
+                        codec,
+                        payload: frame.payload.to_vec(),
+                    },
+                );
             }
         }
     }
@@ -2582,6 +2585,12 @@ async fn connect_and_run_session(
                             let mut stream_codecs = stream_state.stream_codecs.write().await;
                             stream_codecs.remove(&event.stream_tag);
                         }
+                        if let Ok(mut latest) = stream_state.latest_frames.write() {
+                            latest.remove(&event.stream_tag);
+                        }
+                        let _ = tx_event.send(UiEvent::UnsubscribeStream {
+                            stream_tag: event.stream_tag,
+                        });
                         let _ = tx_event.send(UiEvent::AppendLog(format!(
                             "[video] unsubscribed stream_tag={}",
                             event.stream_tag
@@ -2602,10 +2611,18 @@ async fn connect_and_run_session(
                                 ))),
                             );
                         }
-                        if let Ok(codec) = pb::VideoCodec::try_from(event.codec) {
+                        let codec = pb::VideoCodec::try_from(event.codec)
+                            .unwrap_or(pb::VideoCodec::Unspecified);
+                        {
                             let mut stream_codecs = stream_state.stream_codecs.write().await;
                             stream_codecs.insert(event.stream_tag, codec);
                         }
+                        let _ = tx_event.send(UiEvent::SubscribeStream {
+                            stream_tag: event.stream_tag,
+                            codec,
+                            owner_user_id: None,
+                            channel_id: None,
+                        });
                         let _ = tx_event.send(UiEvent::AppendLog(format!(
                             "[video] subscribed stream_tag={} codec={}",
                             event.stream_tag, event.codec
@@ -2829,8 +2846,8 @@ async fn connect_and_run_session(
     loop {
         tokio::select! {
             _ = stream_ui_tick.tick() => {
-                if let Ok(frame) = stream_state.latest_frame.read() {
-                    if let Some(frame) = frame.clone() {
+                if let Ok(frames) = stream_state.latest_frames.read() {
+                    for frame in frames.values().cloned() {
                         let _ = tx_event.send(UiEvent::StreamFrame(frame));
                     }
                 }
