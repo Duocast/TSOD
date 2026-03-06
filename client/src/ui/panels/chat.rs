@@ -177,14 +177,14 @@ fn show_input_options_toolbar(ui: &mut egui::Ui, model: &mut UiModel) {
 
         // (icon, tooltip, action)
         let buttons: &[(&str, &str, ComposerFormatAction)] = &[
-            ("\u{1D401}", "Bold",          ComposerFormatAction::Bold),           // 𝐁
-            ("\u{1D43C}", "Italic",        ComposerFormatAction::Italic),         // 𝐼
-            ("\u{0055}\u{0332}", "Underline",     ComposerFormatAction::Underline),      // U̲
-            ("\u{0053}\u{0336}", "Strikethrough", ComposerFormatAction::Strikethrough),  // S̶
-            ("\u{2022}",  "Bullet list",   ComposerFormatAction::UnorderedList),  // •
-            ("\u{0031}.",  "Numbered list", ComposerFormatAction::OrderedList),    // 1.
-            ("\u{275D}",  "Quote",         ComposerFormatAction::Quote),          // ❝
-            ("</>",       "Code block",    ComposerFormatAction::CodeBlock),      // </>
+            ("B", "Bold", ComposerFormatAction::Bold),
+            ("I", "Italic", ComposerFormatAction::Italic),
+            ("U", "Underline", ComposerFormatAction::Underline),
+            ("S", "Strikethrough", ComposerFormatAction::Strikethrough),
+            ("•≡", "Bullet list", ComposerFormatAction::UnorderedList),
+            ("1≡", "Numbered list", ComposerFormatAction::OrderedList),
+            ("❝❞", "Quote", ComposerFormatAction::Quote),
+            ("{ }", "Code block", ComposerFormatAction::CodeBlock),
         ];
 
         for &(icon, tooltip, action) in buttons {
