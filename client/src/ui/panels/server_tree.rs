@@ -110,6 +110,13 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
 const CHANNEL_TYPE_LABELS: &[&str] = &["Voice", "Text", "Streaming"];
 const CODEC_LABELS: &[&str] = &["Opus Voice", "Opus Music"];
 
+fn codec_index_from_profile(opus_profile: i32) -> usize {
+    match pb::OpusProfile::try_from(opus_profile).ok() {
+        Some(pb::OpusProfile::OpusMusic) => 1,
+        _ => 0,
+    }
+}
+
 pub fn show_create_channel_dialog(
     ctx: &egui::Context,
     model: &mut UiModel,
@@ -208,8 +215,46 @@ pub fn show_channel_dialogs(
             .collapsible(false)
             .resizable(false)
             .show(ctx, |ui| {
-                ui.label("New channel name");
+                ui.label("Channel name");
                 ui.text_edit_singleline(&mut model.rename_channel_name);
+                ui.add_space(8.0);
+
+                ui.horizontal(|ui| {
+                    ui.label("Codec:");
+                    egui::ComboBox::from_id_salt("edit_ch_codec")
+                        .selected_text(
+                            *CODEC_LABELS
+                                .get(model.rename_channel_codec)
+                                .unwrap_or(&"Opus Voice"),
+                        )
+                        .width(160.0)
+                        .show_ui(ui, |ui| {
+                            for (i, label) in CODEC_LABELS.iter().enumerate() {
+                                ui.selectable_value(&mut model.rename_channel_codec, i, *label);
+                            }
+                        });
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Quality:");
+                    let range = match model.rename_channel_codec {
+                        0 => 8..=128,
+                        1 => 32..=510,
+                        _ => 8..=510,
+                    };
+                    let mut quality = model.rename_channel_quality as i32;
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut quality, range)
+                                .suffix(" kbps")
+                                .step_by(1.0),
+                        )
+                        .changed()
+                    {
+                        model.rename_channel_quality = quality as u32;
+                    }
+                });
+
                 ui.horizontal(|ui| {
                     if ui.button("Save").clicked() {
                         let new_name = model.rename_channel_name.trim().to_string();
@@ -218,6 +263,8 @@ pub fn show_channel_dialogs(
                                 let _ = tx_intent.send(UiIntent::RenameChannel {
                                     channel_id,
                                     new_name,
+                                    codec: model.rename_channel_codec as u8,
+                                    quality: model.rename_channel_quality,
                                 });
                             }
                             model.show_rename_channel = false;
@@ -400,6 +447,8 @@ fn show_channel(
         if ui.button("Edit Channel…").clicked() {
             model.rename_channel_target_id = Some(ch.id.clone());
             model.rename_channel_name = ch.name.clone();
+            model.rename_channel_codec = codec_index_from_profile(ch.opus_profile);
+            model.rename_channel_quality = (ch.bitrate_bps / 1000).max(8);
             model.show_rename_channel = true;
             ui.close();
         }

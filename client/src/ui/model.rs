@@ -338,6 +338,8 @@ pub enum UiIntent {
     RenameChannel {
         channel_id: String,
         new_name: String,
+        codec: u8,
+        quality: u32,
     },
     DeleteChannel {
         channel_id: String,
@@ -1355,6 +1357,8 @@ pub struct UiModel {
     pub create_channel_parent_id: Option<String>,
     pub rename_channel_target_id: Option<String>,
     pub rename_channel_name: String,
+    pub rename_channel_codec: usize,
+    pub rename_channel_quality: u32,
     pub show_rename_channel: bool,
     pub delete_channel_target_id: Option<String>,
     pub show_delete_channel_confirm: bool,
@@ -1666,6 +1670,8 @@ impl Default for UiModel {
             create_channel_parent_id: None,
             rename_channel_target_id: None,
             rename_channel_name: String::new(),
+            rename_channel_codec: 0,
+            rename_channel_quality: 64,
             show_rename_channel: false,
             delete_channel_target_id: None,
             show_delete_channel_confirm: false,

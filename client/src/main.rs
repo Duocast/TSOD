@@ -3210,8 +3210,11 @@ async fn connect_and_run_session(
                                 }
                             }
                         }
-                        UiIntent::RenameChannel { channel_id, new_name } => {
-                            match dispatcher.rename_channel(&channel_id, &new_name).await {
+                        UiIntent::RenameChannel { channel_id, new_name, codec, quality } => {
+                            match dispatcher
+                                .rename_channel(&channel_id, &new_name, codec, quality * 1000)
+                                .await
+                            {
                                 Ok(()) => {
                                     let _ = tx_event.send(UiEvent::AppendLog(
                                         format!("[ctl] renamed channel {channel_id} -> '{new_name}'"),

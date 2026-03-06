@@ -618,6 +618,52 @@ impl Gateway {
                     }
                     debug!(server_id=%server_id.0, channel_id=%created.id.0, user_id=%user_id.0, "create_channel response sent");
                 }
+                Some(pb::client_to_server::Payload::UpdateChannelRequest(r)) => {
+                    let ch = parse_channel_id(r.channel_id.as_ref())?;
+                    let updated = self
+                        .control
+                        .update_channel(
+                            &ctx,
+                            ch,
+                            &r.name,
+                            r.bitrate.max(8_000) as i32,
+                            r.opus_profile,
+                        )
+                        .await?;
+                    let resp = pb::ServerToClient {
+                        request_id: req_id,
+                        session_id: Some(pb::SessionId {
+                            value: session_id.clone(),
+                        }),
+                        sent_at: Some(now_ts()),
+                        error: None,
+                        event_seq: 0,
+                        payload: Some(pb::server_to_client::Payload::UpdateChannelResponse(
+                            pb::UpdateChannelResponse {
+                                info: Some(pb::ChannelInfo {
+                                    channel_id: Some(pb::ChannelId {
+                                        value: updated.id.0.to_string(),
+                                    }),
+                                    name: updated.name,
+                                    parent_channel_id: updated.parent_id.map(|pid| pb::ChannelId {
+                                        value: pid.0.to_string(),
+                                    }),
+                                    channel_type: updated.channel_type,
+                                    description: updated.description,
+                                    user_limit: updated.max_members.unwrap_or_default().max(0)
+                                        as u32,
+                                    bitrate: updated.bitrate_bps.max(0) as u32,
+                                    opus_profile: updated.opus_profile,
+                                    ..Default::default()
+                                }),
+                            },
+                        )),
+                    };
+                    if let Err(e) = write_delimited(&mut send, &resp).await {
+                        warn!("control write failed: {:#}", e);
+                        break;
+                    }
+                }
                 Some(pb::client_to_server::Payload::RenameChannelRequest(r)) => {
                     let ch = parse_channel_id(r.channel_id.as_ref())?;
                     let renamed = self.control.rename_channel(&ctx, ch, &r.new_name).await?;
