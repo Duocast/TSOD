@@ -4,9 +4,11 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use tracing::debug;
 
 use crate::audio::dsp::agc::AgcPreset;
+use crate::proto::voiceplatform::v1 as pb;
 use crate::ui::sfx;
 use crate::ui::widgets::cosmic_chat_composer::ChatComposer;
 use eframe::egui;
+use indexmap::IndexMap;
 
 /// Maximum number of chat messages to retain per channel.
 const MAX_MESSAGES_PER_CHANNEL: usize = 500;
@@ -251,6 +253,15 @@ pub enum UiEvent {
     },
     StreamDebugUpdate(StreamDebugView),
     StreamFrame(StreamFrameView),
+    SubscribeStream {
+        stream_tag: u64,
+        codec: pb::VideoCodec,
+        owner_user_id: Option<String>,
+        channel_id: Option<String>,
+    },
+    UnsubscribeStream {
+        stream_tag: u64,
+    },
 
     // Telemetry
     TelemetryUpdate(TelemetryData),
@@ -529,6 +540,18 @@ pub struct StreamFrameView {
     pub ts_ms: u32,
     pub codec: i32,
     pub payload: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+pub struct StreamView {
+    pub stream_tag: u64,
+    pub codec: pb::VideoCodec,
+    pub latest_frame: Option<StreamFrameView>,
+    pub texture: Option<egui::TextureHandle>,
+    pub texture_key: Option<(u64, u32)>,
+    pub owner_user_id: Option<String>,
+    pub channel_id: Option<String>,
+    pub last_frame_at_ms: u64,
 }
 
 // ── Persisted application settings ────────────────────────────────────
@@ -1376,9 +1399,8 @@ pub struct UiModel {
     pub sharing_active: bool,
     pub start_share_in_flight: bool,
     pub stream_debug: StreamDebugView,
-    pub latest_stream_frame: Option<StreamFrameView>,
-    pub latest_stream_frame_texture: Option<egui::TextureHandle>,
-    pub latest_stream_frame_key: Option<(u64, u32)>,
+    pub streams: IndexMap<u64, StreamView>,
+    pub focused_stream_tag: Option<u64>,
     pub show_stream_stats: bool,
     pub avatar_path_draft: String,
     pub show_poke_dialog: bool,
@@ -1685,9 +1707,8 @@ impl Default for UiModel {
             sharing_active: false,
             start_share_in_flight: false,
             stream_debug: StreamDebugView::default(),
-            latest_stream_frame: None,
-            latest_stream_frame_texture: None,
-            latest_stream_frame_key: None,
+            streams: IndexMap::new(),
+            focused_stream_tag: None,
             show_stream_stats: false,
             avatar_path_draft: String::new(),
             show_poke_dialog: false,
@@ -1831,8 +1852,58 @@ impl UiModel {
                 self.stream_debug = snapshot;
             }
             UiEvent::StreamFrame(frame) => {
-                self.latest_stream_frame = Some(frame);
-                self.latest_stream_frame_key = None;
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or_default();
+                let stream = self
+                    .streams
+                    .entry(frame.stream_tag)
+                    .or_insert_with(|| StreamView {
+                        stream_tag: frame.stream_tag,
+                        codec: pb::VideoCodec::try_from(frame.codec)
+                            .unwrap_or(pb::VideoCodec::Unspecified),
+                        latest_frame: None,
+                        texture: None,
+                        texture_key: None,
+                        owner_user_id: None,
+                        channel_id: None,
+                        last_frame_at_ms: 0,
+                    });
+                stream.codec =
+                    pb::VideoCodec::try_from(frame.codec).unwrap_or(pb::VideoCodec::Unspecified);
+                stream.latest_frame = Some(frame);
+                stream.texture_key = None;
+                stream.last_frame_at_ms = now;
+            }
+            UiEvent::SubscribeStream {
+                stream_tag,
+                codec,
+                owner_user_id,
+                channel_id,
+            } => {
+                self.streams.insert(
+                    stream_tag,
+                    StreamView {
+                        stream_tag,
+                        codec,
+                        latest_frame: None,
+                        texture: None,
+                        texture_key: None,
+                        owner_user_id,
+                        channel_id,
+                        last_frame_at_ms: 0,
+                    },
+                );
+                if self.focused_stream_tag.is_none() {
+                    self.focused_stream_tag = Some(stream_tag);
+                }
+            }
+            UiEvent::UnsubscribeStream { stream_tag } => {
+                self.streams.shift_remove(&stream_tag);
+                if self.focused_stream_tag == Some(stream_tag) {
+                    self.focused_stream_tag = self.streams.keys().next().copied();
+                }
             }
             UiEvent::SetAwayMessage(message) => {
                 self.away_message = message.clone();

@@ -1,6 +1,6 @@
 use crate::net::video_decode;
 use crate::proto::voiceplatform::v1 as pb;
-use crate::ui::model::UiModel;
+use crate::ui::model::{StreamView, UiModel};
 use crate::ui::theme;
 use eframe::egui;
 
@@ -14,223 +14,206 @@ fn human_bytes(bytes: u64) -> String {
     }
 }
 
+fn codec_label(codec: pb::VideoCodec) -> &'static str {
+    match codec {
+        pb::VideoCodec::Av1 => "AV1",
+        pb::VideoCodec::Vp9 => "VP9",
+        pb::VideoCodec::Vp8 => "VP8",
+        _ => "Unknown",
+    }
+}
+
+fn decode_texture(ui: &egui::Ui, stream: &mut StreamView) {
+    let Some(frame) = stream.latest_frame.as_ref() else {
+        return;
+    };
+    let frame_key = Some((frame.stream_tag, frame.frame_seq));
+    if stream.texture_key == frame_key {
+        return;
+    }
+    if let Ok(codec) = pb::VideoCodec::try_from(frame.codec) {
+        if let Ok(decoded) = video_decode::decode_video_frame(codec, &frame.payload) {
+            let image = egui::ColorImage::from_rgba_unmultiplied(
+                [decoded.width, decoded.height],
+                &decoded.rgba,
+            );
+            stream.texture = Some(ui.ctx().load_texture(
+                format!("streaming.{}", stream.stream_tag),
+                image,
+                egui::TextureOptions::LINEAR,
+            ));
+            stream.texture_key = frame_key;
+        }
+    }
+}
+
+fn paint_stream_tile(
+    ui: &mut egui::Ui,
+    stream: &mut StreamView,
+    show_stats: bool,
+    viewer_count: usize,
+    focused: bool,
+) -> egui::Response {
+    decode_texture(ui, stream);
+    let desired = if focused {
+        egui::vec2(ui.available_width(), ui.available_height().max(240.0))
+    } else {
+        egui::vec2((ui.available_width() / 2.0 - 6.0).max(220.0), 210.0)
+    };
+    let (rect, response) = ui.allocate_exact_size(desired, egui::Sense::click());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 6.0, theme::bg_medium());
+
+    let video_rect = rect.shrink2(egui::vec2(8.0, 8.0));
+    let mut video_rect = egui::Rect::from_min_max(
+        video_rect.min,
+        egui::pos2(video_rect.max.x, video_rect.max.y - 48.0),
+    );
+    let mut rendered = false;
+    let mut frame_size = (0, 0);
+
+    if let Some(texture) = &stream.texture {
+        frame_size = (texture.size()[0], texture.size()[1]);
+        let aspect = frame_size.0 as f32 / frame_size.1 as f32;
+        let mut draw_size = video_rect.size();
+        if draw_size.x / draw_size.y > aspect {
+            draw_size.x = draw_size.y * aspect;
+        } else {
+            draw_size.y = draw_size.x / aspect;
+        }
+        let draw_rect = egui::Rect::from_center_size(video_rect.center(), draw_size);
+        egui::Image::new((texture.id(), draw_size)).paint_at(ui, draw_rect);
+        rendered = true;
+    }
+
+    if !rendered {
+        painter.text(
+            video_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "Waiting for stream…",
+            egui::FontId::proportional(14.0),
+            theme::text_muted(),
+        );
+    }
+
+    let info = egui::Rect::from_min_max(
+        egui::pos2(rect.left() + 8.0, rect.bottom() - 36.0),
+        egui::pos2(rect.right() - 8.0, rect.bottom() - 8.0),
+    );
+    ui.scope_builder(egui::UiBuilder::new().max_rect(info), |ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(format!("Tag {}", stream.stream_tag));
+            ui.separator();
+            ui.label(format!("{}", codec_label(stream.codec)));
+            ui.separator();
+            if frame_size.0 > 0 {
+                ui.label(format!("{}x{}", frame_size.0, frame_size.1));
+            } else {
+                ui.label("res n/a");
+            }
+            ui.separator();
+            ui.label(format!("Viewers: {}", viewer_count));
+        });
+        if show_stats {
+            ui.small(format!("Last frame at: {} ms", stream.last_frame_at_ms));
+        }
+    });
+
+    response
+}
+
 pub fn show(ui: &mut egui::Ui, model: &mut UiModel) {
     let channel_name = if model.selected_channel_name.is_empty() {
         "Streaming"
     } else {
         &model.selected_channel_name
     };
-
     ui.horizontal(|ui| {
         ui.heading(egui::RichText::new(format!("📺 {channel_name}")).color(theme::text_color()));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let stats_text = if model.show_stream_stats {
-                "Hide Stats"
-            } else {
-                "Stats"
-            };
-            let response = ui
-                .add(egui::Button::new(stats_text))
-                .on_hover_text("Toggle stream diagnostics overlay (Stats for nerds)");
-            if response.clicked() {
+            if ui
+                .button(if model.show_stream_stats {
+                    "Hide Stats"
+                } else {
+                    "Stats"
+                })
+                .clicked()
+            {
                 model.show_stream_stats = !model.show_stream_stats;
             }
         });
     });
     ui.separator();
 
-    let dbg = &model.stream_debug;
+    if model.streams.is_empty() {
+        ui.add_space(16.0);
+        ui.label(egui::RichText::new("No active streams").color(theme::text_muted()));
+        return;
+    }
 
-    egui::Frame::group(ui.style())
-        .fill(theme::bg_dark())
-        .inner_margin(egui::Margin::same(12))
+    if model
+        .focused_stream_tag
+        .is_some_and(|tag| !model.streams.contains_key(&tag))
+    {
+        model.focused_stream_tag = model.streams.keys().next().copied();
+    }
+
+    let viewer_count = model
+        .selected_channel
+        .as_ref()
+        .and_then(|channel_id| model.members.get(channel_id))
+        .map(|members| members.iter().filter(|m| m.streaming).count())
+        .unwrap_or(0);
+
+    if let Some(tag) = model.focused_stream_tag {
+        ui.horizontal(|ui| {
+            if ui.button("Back to grid").clicked() {
+                model.focused_stream_tag = None;
+            }
+            ui.label(format!("Focused stream: {tag}"));
+        });
+        if let Some(stream) = model.streams.get_mut(&tag) {
+            let response =
+                paint_stream_tile(ui, stream, model.show_stream_stats, viewer_count, true);
+            if response.double_clicked() {
+                model.focused_stream_tag = None;
+            }
+        }
+        return;
+    }
+
+    let tags: Vec<u64> = model.streams.keys().copied().collect();
+    egui::Grid::new("stream-grid")
+        .num_columns(2)
+        .spacing(egui::vec2(12.0, 12.0))
         .show(ui, |ui| {
-            let available = ui.available_size();
-            let min_h = 260.0;
-            let target_h = available.y.max(min_h);
-            ui.set_min_height(target_h);
-
-            let (rect, _response) = ui.allocate_exact_size(
-                egui::vec2(available.x.max(220.0), target_h),
-                egui::Sense::hover(),
-            );
-
-            let mut video_rect = rect.shrink2(egui::vec2(8.0, 8.0));
-            video_rect.set_height((video_rect.height() - 36.0).max(180.0));
-
-            let painter = ui.painter_at(rect);
-            painter.rect_filled(video_rect, 6.0, theme::bg_medium());
-
-            let mut rendered = false;
-            let mut render_w = 0usize;
-            let mut render_h = 0usize;
-            if let Some(frame) = model.latest_stream_frame.as_ref() {
-                let frame_key = Some((frame.stream_tag, frame.frame_seq));
-                if model.latest_stream_frame_key != frame_key {
-                    if let Ok(codec) = pb::VideoCodec::try_from(frame.codec) {
-                        if let Ok(decoded) = video_decode::decode_video_frame(codec, &frame.payload)
-                        {
-                            let image = egui::ColorImage::from_rgba_unmultiplied(
-                                [decoded.width, decoded.height],
-                                &decoded.rgba,
-                            );
-                            model.latest_stream_frame_texture = Some(ui.ctx().load_texture(
-                                "streaming.latest",
-                                image,
-                                egui::TextureOptions::LINEAR,
-                            ));
-                            render_w = decoded.width;
-                            render_h = decoded.height;
-                            model.latest_stream_frame_key = frame_key;
-                        }
+            for (idx, tag) in tags.iter().enumerate() {
+                if let Some(stream) = model.streams.get_mut(tag) {
+                    let response =
+                        paint_stream_tile(ui, stream, model.show_stream_stats, viewer_count, false);
+                    if response.clicked() || response.double_clicked() {
+                        model.focused_stream_tag = Some(*tag);
                     }
                 }
-
-                if render_w == 0 || render_h == 0 {
-                    if let Some(texture) = &model.latest_stream_frame_texture {
-                        render_w = texture.size()[0];
-                        render_h = texture.size()[1];
-                    }
+                if idx % 2 == 1 {
+                    ui.end_row();
                 }
-
-                if render_w > 0 && render_h > 0 {
-                    let aspect = render_w as f32 / render_h as f32;
-                    let mut draw_size = video_rect.size();
-                    if draw_size.x / draw_size.y > aspect {
-                        draw_size.x = draw_size.y * aspect;
-                    } else {
-                        draw_size.y = draw_size.x / aspect;
-                    }
-                    let draw_rect = egui::Rect::from_center_size(video_rect.center(), draw_size);
-                    if let Some(texture) = &model.latest_stream_frame_texture {
-                        egui::Image::new((texture.id(), draw_size)).paint_at(ui, draw_rect);
-                        rendered = true;
-                    }
-                }
-            }
-
-            if !rendered {
-                painter.text(
-                    video_rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    "Waiting for stream…",
-                    egui::FontId::proportional(18.0),
-                    theme::text_muted(),
-                );
-            }
-
-            let controls_rect = egui::Rect::from_min_max(
-                egui::pos2(video_rect.left(), video_rect.bottom() + 8.0),
-                egui::pos2(video_rect.right(), rect.bottom() - 4.0),
-            );
-            ui.scope_builder(egui::UiBuilder::new().max_rect(controls_rect), |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(format!(
-                        "Stream tags: {}",
-                        if dbg.active_stream_tags.is_empty() {
-                            "(none)".to_string()
-                        } else {
-                            dbg.active_stream_tags
-                                .iter()
-                                .map(u64::to_string)
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        }
-                    ));
-                    ui.separator();
-                    ui.label(format!("Frames/s: {}", dbg.completed_frames_per_sec));
-                    ui.separator();
-                    ui.label(format!(
-                        "Tx: {} Kbps",
-                        (dbg.video_tx_bytes_per_sec * 8) / 1000
-                    ));
-                });
-            });
-
-            if model.show_stream_stats {
-                let stats_w = (video_rect.width() * 0.44).clamp(260.0, 430.0);
-                let stats_rect = egui::Rect::from_min_size(
-                    egui::pos2(video_rect.right() - stats_w - 8.0, video_rect.top() + 8.0),
-                    egui::vec2(stats_w, (video_rect.height() * 0.7).max(170.0)),
-                );
-                painter.rect_filled(stats_rect, 6.0, egui::Color32::from_black_alpha(212));
-                painter.rect_stroke(
-                    stats_rect,
-                    6.0,
-                    egui::Stroke::new(1.0, theme::bg_light()),
-                    egui::StrokeKind::Outside,
-                );
-
-                let (cur_res, viewport_text) = if rendered {
-                    let scale = if render_w > 0 {
-                        video_rect.width() / render_w as f32
-                    } else {
-                        1.0
-                    };
-                    (
-                        format!("{}x{}@{}", render_w, render_h, 25),
-                        format!(
-                            "{}x{}*{scale:.2}",
-                            video_rect.width().round() as i32,
-                            video_rect.height().round() as i32
-                        ),
-                    )
-                } else {
-                    (dbg.current_resolution.clone(), dbg.viewport.clone())
-                };
-
-                ui.scope_builder(
-                    egui::UiBuilder::new().max_rect(stats_rect.shrink(10.0)),
-                    |ui| {
-                        ui.label(
-                            egui::RichText::new("Stats for nerds")
-                                .color(theme::text_color())
-                                .strong(),
-                        );
-                        ui.separator();
-                        ui.label(format!("Codecs: {} / {}", dbg.codec_video, dbg.codec_audio));
-                        ui.label(format!(
-                            "Connection speed: {} Kbps",
-                            dbg.connection_speed_kbps
-                        ));
-                        ui.label(format!(
-                            "Network activity: {}",
-                            human_bytes(dbg.network_activity_bytes)
-                        ));
-                        ui.label(format!("Buffer health: {:.2} s", dbg.buffer_health_seconds));
-                        ui.label(format!(
-                            "Current / optimal res: {} / {}",
-                            cur_res, dbg.optimal_resolution
-                        ));
-                        ui.label(format!(
-                            "Viewport / Frames: {} / {} dropped of {}",
-                            viewport_text, dbg.dropped_frames, dbg.total_frames
-                        ));
-                        ui.separator();
-                        ui.label(format!(
-                            "Video rx/tx dgrams: {} / {}",
-                            dbg.video_datagrams_per_sec, dbg.video_tx_datagrams_per_sec
-                        ));
-                        ui.label(format!("Tx blocked/sec: {}", dbg.video_tx_blocked_per_sec));
-                        ui.label(format!(
-                            "Tx drops (video q/deadline): {}/{}",
-                            dbg.video_tx_drop_queue_full, dbg.video_tx_drop_deadline
-                        ));
-                        ui.label(format!(
-                            "Tx drops too-large (voice/video): {}/{}",
-                            dbg.voice_tx_drop_too_large, dbg.video_tx_drop_too_large
-                        ));
-                        ui.label(format!(
-                            "Drops (no sub/channel full): {}/{}",
-                            dbg.dropped_no_subscription, dbg.dropped_channel_full
-                        ));
-                        ui.label(format!("Sender frame errors: {}", dbg.sender_frame_errors));
-                        ui.label(format!(
-                            "Last frame: seq={} ts_ms={} size={} B",
-                            dbg.last_frame_seq, dbg.last_frame_ts_ms, dbg.last_frame_size_bytes
-                        ));
-                    },
-                );
             }
         });
+
+    let dbg = &model.stream_debug;
+    ui.separator();
+    ui.horizontal_wrapped(|ui| {
+        ui.label(format!("Frames/s: {}", dbg.completed_frames_per_sec));
+        ui.separator();
+        ui.label(format!(
+            "Tx: {} Kbps",
+            (dbg.video_tx_bytes_per_sec * 8) / 1000
+        ));
+        ui.separator();
+        ui.label(format!(
+            "Network: {}",
+            human_bytes(dbg.network_activity_bytes)
+        ));
+    });
 }
