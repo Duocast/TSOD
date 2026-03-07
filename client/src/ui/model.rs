@@ -2,6 +2,7 @@
 
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::PathBuf;
 use tracing::debug;
 use uuid::Uuid;
 use vp_route_hash::channel_route_hash;
@@ -1295,8 +1296,14 @@ pub struct ChatMessage {
 }
 
 #[derive(Debug, Clone)]
+pub enum AttachmentAsset {
+    PendingLocalPath(PathBuf),
+    UploadedAssetId(String),
+}
+
+#[derive(Debug, Clone)]
 pub struct AttachmentData {
-    pub asset_id: String,
+    pub asset: AttachmentAsset,
     pub filename: String,
     pub mime_type: String,
     pub size_bytes: u64,
