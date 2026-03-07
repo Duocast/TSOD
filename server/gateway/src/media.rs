@@ -72,15 +72,8 @@ impl MediaService {
             Some(pb::media_request::Payload::DownloadRequest(req)) => {
                 self.handle_download(&mut send, req, user_id).await
             }
-            Some(pb::media_request::Payload::ThumbRequest(_)) => {
-                let resp = pb::MediaResponse {
-                    payload: Some(pb::media_response::Payload::Error(pb::MediaError {
-                        message: "thumbnail generation not implemented".into(),
-                    })),
-                };
-                write_delimited(&mut send, &resp).await?;
-                send.finish()?;
-                Ok(())
+            Some(pb::media_request::Payload::ThumbRequest(req)) => {
+                self.handle_thumb(&mut send, req, user_id).await
             }
             None => Err(anyhow!("empty media request")),
         }
@@ -263,6 +256,70 @@ impl MediaService {
             }
             send.write_all(&buf[..n]).await?;
         }
+        send.finish()?;
+        Ok(())
+    }
+
+    async fn handle_thumb(
+        &self,
+        send: &mut quinn::SendStream,
+        req: pb::ThumbRequest,
+        user_id: UserId,
+    ) -> Result<()> {
+        let attachment_id = req
+            .attachment_id
+            .as_ref()
+            .ok_or_else(|| anyhow!("missing attachment id"))?
+            .value
+            .clone();
+        let id = Uuid::parse_str(&attachment_id).context("invalid attachment id")?;
+
+        let row = sqlx::query(
+            r#"SELECT channel_id, content_type, storage_path, quarantined
+               FROM attachments WHERE id=$1"#,
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let Some(row) = row else {
+            return self.write_error(send, "attachment not found").await;
+        };
+
+        let channel_id: Uuid = row.get("channel_id");
+        if !self
+            .user_in_channel(self.default_server_id.0, channel_id, user_id.0)
+            .await?
+        {
+            return self.write_error(send, "not authorized").await;
+        }
+        let quarantined: bool = row.get("quarantined");
+        if quarantined {
+            return self.write_error(send, "attachment quarantined").await;
+        }
+
+        let mime: String = row.get("content_type");
+        if !mime.starts_with("image/") {
+            return self
+                .write_error(send, "thumbnail only supported for image attachments")
+                .await;
+        }
+
+        let storage_path: String = row.get("storage_path");
+        let mut file = fs::File::open(&storage_path)
+            .await
+            .context("open attachment file")?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).await?;
+
+        let meta = pb::MediaResponse {
+            payload: Some(pb::media_response::Payload::ThumbMeta(pb::ThumbMeta {
+                mime,
+                size_bytes: bytes.len() as u64,
+            })),
+        };
+        write_delimited(send, &meta).await?;
+        send.write_all(&bytes).await?;
         send.finish()?;
         Ok(())
     }

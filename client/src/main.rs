@@ -263,9 +263,7 @@ impl ScreenCapture for WindowsWindowCapture {
             DIB_RGB_COLORS, HGDIOBJ, SRCCOPY,
         };
         use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS};
-        use windows::Win32::UI::WindowsAndMessaging::{
-            IsWindow, PW_RENDERFULLCONTENT,
-        };
+        use windows::Win32::UI::WindowsAndMessaging::{IsWindow, PW_RENDERFULLCONTENT};
 
         if !unsafe { IsWindow(Some(self.hwnd)) }.as_bool() {
             return Err(anyhow!("window is no longer valid: hwnd={:?}", self.hwnd.0));
@@ -304,7 +302,9 @@ impl ScreenCapture for WindowsWindowCapture {
             return Err(anyhow!("failed to select bitmap into device context"));
         }
 
-        let printed = unsafe { PrintWindow(self.hwnd, mem_dc, PRINT_WINDOW_FLAGS(PW_RENDERFULLCONTENT)) }.as_bool();
+        let printed =
+            unsafe { PrintWindow(self.hwnd, mem_dc, PRINT_WINDOW_FLAGS(PW_RENDERFULLCONTENT)) }
+                .as_bool();
         if !printed {
             let _ = unsafe {
                 BitBlt(
@@ -451,7 +451,7 @@ fn map_share_selection(selection: ShareSourceSelection) -> ShareSource {
 }
 
 fn platform_supports_system_audio() -> bool {
-    cfg!(target_os = "windows")
+    false
 }
 
 fn build_screen_capture(source: &ShareSource) -> anyhow::Result<Box<dyn ScreenCapture>> {
@@ -4029,9 +4029,7 @@ async fn connect_and_run_session(
                                             });
 
                                             if include_audio {
-                                                tokio::spawn(async move {
-                                                    warn!("[audio] system audio capture task placeholder started (parallel path)");
-                                                });
+                                                warn!("[audio] include_audio requested but system audio capture is currently disabled");
                                             }
 
                                             let _ = stop_watch_task.await;

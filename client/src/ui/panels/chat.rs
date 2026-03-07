@@ -84,8 +84,10 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
 
                 for msg in messages.iter() {
                     let msg_day = message_day(msg.timestamp);
-                    if msg_day.is_some() && msg_day != prev_day {
-                        show_date_separator(ui, msg_day.unwrap());
+                    if let Some(day) = msg_day {
+                        if Some(day) != prev_day {
+                            show_date_separator(ui, day);
+                        }
                     }
 
                     show_message(ui, msg, tx_intent);
