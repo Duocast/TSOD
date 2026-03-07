@@ -211,6 +211,164 @@ struct ScrapCapture {
     height: u32,
 }
 
+#[cfg(target_os = "windows")]
+struct WindowsWindowCapture {
+    hwnd: windows::Win32::Foundation::HWND,
+}
+
+#[cfg(target_os = "windows")]
+impl WindowsWindowCapture {
+    fn from_source(source: &ShareSource) -> anyhow::Result<Self> {
+        use windows::Win32::Foundation::HWND;
+
+        let ShareSource::WindowsWindow(id) = source else {
+            return Err(anyhow!("invalid capture source for Windows window backend"));
+        };
+
+        let hwnd_raw = id
+            .strip_prefix("window-hwnd-")
+            .and_then(|value| value.parse::<isize>().ok())
+            .ok_or_else(|| anyhow!("invalid window id: {id}"))?;
+        let hwnd = HWND(hwnd_raw);
+        if hwnd.0 == 0 {
+            return Err(anyhow!("invalid window handle: {id}"));
+        }
+
+        Ok(Self { hwnd })
+    }
+
+    fn window_dimensions(&self) -> anyhow::Result<(u32, u32)> {
+        use windows::Win32::Foundation::RECT;
+        use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
+
+        let mut rect = RECT::default();
+        if !unsafe { GetWindowRect(self.hwnd, &mut rect) }.as_bool() {
+            return Err(anyhow!(
+                "failed to query window bounds for hwnd={}",
+                self.hwnd.0
+            ));
+        }
+        let width = (rect.right - rect.left).max(1) as u32;
+        let height = (rect.bottom - rect.top).max(1) as u32;
+        Ok((width, height))
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl ScreenCapture for WindowsWindowCapture {
+    fn next_frame(&mut self) -> anyhow::Result<CapturedFrame> {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::Graphics::Gdi::{
+            BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits,
+            GetWindowDC, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+            DIB_RGB_COLORS, HGDIOBJ, SRCCOPY,
+        };
+        use windows::Win32::UI::WindowsAndMessaging::{
+            IsWindow, PrintWindow, PW_RENDERFULLCONTENT,
+        };
+
+        if !unsafe { IsWindow(self.hwnd) }.as_bool() {
+            return Err(anyhow!("window is no longer valid: hwnd={}", self.hwnd.0));
+        }
+
+        let (width, height) = self.window_dimensions()?;
+        let window_dc = unsafe { GetWindowDC(self.hwnd) };
+        if window_dc.0 == 0 {
+            return Err(anyhow!("failed to get window device context"));
+        }
+
+        let mem_dc = unsafe { CreateCompatibleDC(Some(window_dc)) };
+        if mem_dc.0 == 0 {
+            unsafe {
+                ReleaseDC(self.hwnd, window_dc);
+            }
+            return Err(anyhow!("failed to create memory device context"));
+        }
+
+        let bitmap = unsafe { CreateCompatibleBitmap(window_dc, width as i32, height as i32) };
+        if bitmap.0 == 0 {
+            unsafe {
+                DeleteDC(mem_dc);
+                ReleaseDC(self.hwnd, window_dc);
+            }
+            return Err(anyhow!("failed to create compatible bitmap"));
+        }
+
+        let previous = unsafe { SelectObject(mem_dc, HGDIOBJ(bitmap.0)) };
+        if previous.0 == 0 {
+            unsafe {
+                DeleteObject(HGDIOBJ(bitmap.0));
+                DeleteDC(mem_dc);
+                ReleaseDC(self.hwnd, window_dc);
+            }
+            return Err(anyhow!("failed to select bitmap into device context"));
+        }
+
+        let printed = unsafe { PrintWindow(self.hwnd, mem_dc, PW_RENDERFULLCONTENT) }.as_bool();
+        if !printed {
+            let _ = unsafe {
+                BitBlt(
+                    mem_dc,
+                    0,
+                    0,
+                    width as i32,
+                    height as i32,
+                    Some(window_dc),
+                    0,
+                    0,
+                    SRCCOPY,
+                )
+            };
+        }
+
+        let mut pixels = vec![0_u8; (width * height * 4) as usize];
+        let mut bitmap_info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: width as i32,
+                biHeight: -(height as i32),
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let rows = unsafe {
+            GetDIBits(
+                mem_dc,
+                bitmap,
+                0,
+                height,
+                Some(pixels.as_mut_ptr() as *mut _),
+                &mut bitmap_info,
+                DIB_RGB_COLORS,
+            )
+        };
+
+        unsafe {
+            SelectObject(mem_dc, previous);
+            DeleteObject(HGDIOBJ(bitmap.0));
+            DeleteDC(mem_dc);
+            ReleaseDC(HWND(self.hwnd.0), window_dc);
+        }
+
+        if rows == 0 {
+            return Err(anyhow!("failed to read window pixels from DIB"));
+        }
+
+        Ok(CapturedFrame {
+            width,
+            height,
+            stride: width * 4,
+            ts_ms: unix_ms() as u32,
+            format: PixelFormat::Bgra,
+            data: FrameData::Cpu(Bytes::from(pixels)),
+        })
+    }
+}
+
 impl ScrapCapture {
     fn from_source(source: &ShareSource) -> anyhow::Result<Self> {
         let displays = scrap::Display::all().context("enumerate displays")?;
@@ -304,6 +462,11 @@ fn build_screen_capture(source: &ShareSource) -> anyhow::Result<Box<dyn ScreenCa
         == Some("1")
     {
         return Ok(Box::new(SyntheticCapture::new()));
+    }
+
+    #[cfg(target_os = "windows")]
+    if matches!(source, ShareSource::WindowsWindow(_)) {
+        return Ok(Box::new(WindowsWindowCapture::from_source(source)?));
     }
 
     #[cfg(target_os = "linux")]
