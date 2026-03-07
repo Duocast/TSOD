@@ -1,6 +1,9 @@
-use std::{collections::HashSet, path::PathBuf};
+use std::{collections::HashSet, io::Cursor, path::PathBuf};
 
 use anyhow::{anyhow, Context, Result};
+use image::{
+    codecs::jpeg::JpegEncoder, imageops::FilterType, DynamicImage, GenericImageView, ImageReader,
+};
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row};
 use tokio::{
@@ -22,6 +25,9 @@ use crate::{
 const MEDIA_MAX_MSG: usize = 64 * 1024;
 const DEFAULT_MAX_UPLOAD_BYTES: u64 = 25 * 1024 * 1024;
 const DEFAULT_MAX_CHUNK: usize = 64 * 1024;
+const DEFAULT_THUMB_MAX_EDGE: u32 = 512;
+const MAX_THUMB_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_THUMB_PIXELS: u64 = 20_000_000;
 
 #[derive(Clone)]
 pub struct MediaService {
@@ -275,7 +281,7 @@ impl MediaService {
         let id = Uuid::parse_str(&attachment_id).context("invalid attachment id")?;
 
         let row = sqlx::query(
-            r#"SELECT channel_id, content_type, storage_path, quarantined
+            r#"SELECT channel_id, content_type, storage_path, sha256, quarantined
                FROM attachments WHERE id=$1"#,
         )
         .bind(id)
@@ -306,22 +312,86 @@ impl MediaService {
         }
 
         let storage_path: String = row.get("storage_path");
-        let mut file = fs::File::open(&storage_path)
+        let source_size = fs::metadata(&storage_path)
             .await
-            .context("open attachment file")?;
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes).await?;
+            .context("stat attachment file")?
+            .len();
+        if source_size > MAX_THUMB_SOURCE_BYTES {
+            return self
+                .write_error(send, "source image too large for thumbnailing")
+                .await;
+        }
+
+        let w = if req.w == 0 { 256 } else { req.w }.min(DEFAULT_THUMB_MAX_EDGE);
+        let h = if req.h == 0 { 256 } else { req.h }.min(DEFAULT_THUMB_MAX_EDGE);
+        let hash: Option<String> = row.get("sha256");
+        let hash_key = hash.unwrap_or_else(|| id.to_string());
+        let thumb_key = format!("{}_{}x{}", hash_key, w, h);
+        let thumb_path = self
+            .upload_dir
+            .join("thumb-cache")
+            .join(format!("{}.jpg", thumb_key));
+
+        let thumb_bytes = if fs::try_exists(&thumb_path).await.unwrap_or(false) {
+            fs::read(&thumb_path)
+                .await
+                .context("read thumbnail cache")?
+        } else {
+            let source_bytes = fs::read(&storage_path)
+                .await
+                .context("read attachment file")?;
+            let thumb =
+                tokio::task::spawn_blocking(move || Self::generate_thumbnail(&source_bytes, w, h))
+                    .await
+                    .context("thumbnail worker join")??;
+
+            if let Some(parent) = thumb_path.parent() {
+                fs::create_dir_all(parent)
+                    .await
+                    .context("create thumbnail cache dir")?;
+            }
+            fs::write(&thumb_path, &thumb)
+                .await
+                .context("write thumbnail cache")?;
+            thumb
+        };
 
         let meta = pb::MediaResponse {
             payload: Some(pb::media_response::Payload::ThumbMeta(pb::ThumbMeta {
-                mime,
-                size_bytes: bytes.len() as u64,
+                mime: "image/jpeg".to_string(),
+                size_bytes: thumb_bytes.len() as u64,
             })),
         };
         write_delimited(send, &meta).await?;
-        send.write_all(&bytes).await?;
+        send.write_all(&thumb_bytes).await?;
         send.finish()?;
         Ok(())
+    }
+
+    fn generate_thumbnail(source_bytes: &[u8], w: u32, h: u32) -> Result<Vec<u8>> {
+        let reader = ImageReader::new(Cursor::new(source_bytes))
+            .with_guessed_format()
+            .context("guess source image format")?;
+        let dyn_img = reader.decode().context("decode source image")?;
+
+        let (src_w, src_h) = dyn_img.dimensions();
+        let src_pixels = (src_w as u64).saturating_mul(src_h as u64);
+        if src_pixels > MAX_THUMB_PIXELS {
+            return Err(anyhow!("source image dimensions too large"));
+        }
+
+        let target_w = w.max(1).min(DEFAULT_THUMB_MAX_EDGE);
+        let target_h = h.max(1).min(DEFAULT_THUMB_MAX_EDGE);
+        let resized = dyn_img.resize(target_w, target_h, FilterType::Triangle);
+        let rgb = DynamicImage::ImageRgb8(resized.to_rgb8());
+
+        let mut out = Vec::new();
+        let mut encoder = JpegEncoder::new_with_quality(&mut out, 80);
+        encoder
+            .encode_image(&rgb)
+            .context("encode thumbnail jpeg")?;
+
+        Ok(out)
     }
 
     async fn user_in_channel(
