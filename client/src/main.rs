@@ -2753,6 +2753,7 @@ async fn connect_and_run_session(
         voice_ingress_q,
         playout.clone(),
         capture_dsp.clone(),
+        local_user_id.clone(),
         self_deafened.clone(),
         server_deafened.clone(),
         output_gain.clone(),
@@ -4844,6 +4845,7 @@ async fn voice_recv_loop(
     voice_ingress_q: Arc<OverwriteQueue<StampedBytes>>,
     playout: Arc<RwLock<Arc<audio::playout::Playout>>>,
     capture_dsp: Option<Arc<Mutex<audio::dsp::CaptureDsp>>>,
+    local_user_id: String,
     self_deafened: Arc<AtomicBool>,
     server_deafened: Arc<AtomicBool>,
     output_gain: Arc<std::sync::atomic::AtomicU32>,
@@ -5042,20 +5044,24 @@ async fn voice_recv_loop(
                     if speaking_now != stream.last_emitted_speaking {
                         stream.last_emitted_speaking = speaking_now;
                         if let Some(user_id) = stream.user_id.as_ref() {
-                            let _ = tx_event.send(UiEvent::VoiceActivity {
-                                user_id: user_id.clone(),
-                                speaking: speaking_now,
-                            });
+                            if user_id != &local_user_id {
+                                let _ = tx_event.send(UiEvent::VoiceActivity {
+                                    user_id: user_id.clone(),
+                                    speaking: speaking_now,
+                                });
+                            }
                         }
                     }
 
                     stream.level = if speaking_now { frame_level.max(stream.level * 0.75) } else { 0.0 };
                     voice_counters.observe_peak_stream_level(stream.level);
                     if let Some(user_id) = stream.user_id.as_ref() {
-                        let _ = tx_event.send(UiEvent::VoiceMeter {
-                            user_id: user_id.clone(),
-                            level: stream.level,
-                        });
+                        if user_id != &local_user_id {
+                            let _ = tx_event.send(UiEvent::VoiceMeter {
+                                user_id: user_id.clone(),
+                                level: stream.level,
+                            });
+                        }
                     }
                 }
 
@@ -5064,7 +5070,12 @@ async fn voice_recv_loop(
                     if idle >= STREAM_IDLE_DROP_MS {
                         if stream.last_emitted_speaking {
                             if let Some(user_id) = stream.user_id.as_ref() {
-                                let _ = tx_event.send(UiEvent::VoiceActivity { user_id: user_id.clone(), speaking: false });
+                                if user_id != &local_user_id {
+                                    let _ = tx_event.send(UiEvent::VoiceActivity {
+                                        user_id: user_id.clone(),
+                                        speaking: false,
+                                    });
+                                }
                             }
                         }
                         return false;
