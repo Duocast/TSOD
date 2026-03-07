@@ -217,6 +217,8 @@ async fn ensure_baseline_capabilities(
         ("everyone", "join_channel"),
         ("member", "send_message"),
         ("member", "speak"),
+        ("member", "stream"),
+		("member", "upload"),
     ] {
         sqlx::query(
             r#"
