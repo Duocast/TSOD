@@ -950,12 +950,48 @@ impl eframe::App for VpApp {
 }
 
 impl VpApp {
+    fn egui_key_from_ui_key(key: model::UiKey) -> Option<egui::Key> {
+        Some(match key {
+            model::UiKey::Space => egui::Key::Space,
+            model::UiKey::Escape => egui::Key::Escape,
+            model::UiKey::A => egui::Key::A,
+            model::UiKey::B => egui::Key::B,
+            model::UiKey::C => egui::Key::C,
+            model::UiKey::D => egui::Key::D,
+            model::UiKey::E => egui::Key::E,
+            model::UiKey::F => egui::Key::F,
+            model::UiKey::G => egui::Key::G,
+            model::UiKey::H => egui::Key::H,
+            model::UiKey::I => egui::Key::I,
+            model::UiKey::J => egui::Key::J,
+            model::UiKey::K => egui::Key::K,
+            model::UiKey::L => egui::Key::L,
+            model::UiKey::M => egui::Key::M,
+            model::UiKey::N => egui::Key::N,
+            model::UiKey::O => egui::Key::O,
+            model::UiKey::P => egui::Key::P,
+            model::UiKey::Q => egui::Key::Q,
+            model::UiKey::R => egui::Key::R,
+            model::UiKey::S => egui::Key::S,
+            model::UiKey::T => egui::Key::T,
+            model::UiKey::U => egui::Key::U,
+            model::UiKey::V => egui::Key::V,
+            model::UiKey::W => egui::Key::W,
+            model::UiKey::X => egui::Key::X,
+            model::UiKey::Y => egui::Key::Y,
+            model::UiKey::Z => egui::Key::Z,
+        })
+    }
+
     fn hotkey_pressed(ctx: &egui::Context, bind: Option<model::Keybind>) -> bool {
         let Some(bind) = bind else {
             return false;
         };
+        let Some(key) = Self::egui_key_from_ui_key(bind.key) else {
+            return false;
+        };
         ctx.input(|i| {
-            i.key_pressed(bind.key)
+            i.key_pressed(key)
                 && i.modifiers.ctrl == bind.ctrl
                 && i.modifiers.alt == bind.alt
                 && i.modifiers.shift == bind.shift
@@ -967,7 +1003,10 @@ impl VpApp {
         let Some(bind) = bind else {
             return false;
         };
-        ctx.input(|i| i.key_released(bind.key))
+        let Some(key) = Self::egui_key_from_ui_key(bind.key) else {
+            return false;
+        };
+        ctx.input(|i| i.key_released(key))
     }
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
