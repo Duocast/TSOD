@@ -80,8 +80,10 @@ impl CaptureDsp {
         let vad = if self.noise_suppression_enabled {
             self.denoiser.process_frame(pcm)
         } else {
-            // Still run VAD for level reporting even if denoiser is off
-            0.0
+            // Run energy-based VAD as fallback when RNNoise denoiser is off,
+            // so voice activation detection still functions.
+            let active = vad::energy_vad(pcm, -40.0);
+            if active { 0.85 } else { 0.05 }
         };
 
         // Apply output leveling after denoise. Use VAD/noise-floor aware AGC behavior
