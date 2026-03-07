@@ -929,10 +929,36 @@ impl Gateway {
                 Some(pb::client_to_server::Payload::PermListChanOvr(r)) => {
                     let channel_id = parse_channel_id(r.channel_id.as_ref())?;
                     let rows = self.control.perm_list_channel_overrides(&ctx, channel_id).await?;
-                    let overrides = rows.into_iter().map(|row| {
-                        let target = if let Some(role_id) = row.role_id { pb::perm_channel_override::Target::RoleId(role_id) } else { pb::perm_channel_override::Target::UserId(pb::UserId { value: row.user_id.expect("user id").0.to_string() }) };
-                        pb::PermChannelOverride { channel_id: Some(pb::ChannelId { value: row.channel_id.0.to_string() }), target: Some(target), cap: row.cap, effect: row.effect }
-                    }).collect();
+                    let overrides = rows
+                        .into_iter()
+                        .filter_map(|row| {
+                            let target = if let Some(role_id) = row.role_id {
+                                Some(pb::perm_channel_override::Target::RoleId(role_id))
+                            } else {
+                                row.user_id.map(|user_id| {
+                                    pb::perm_channel_override::Target::UserId(pb::UserId {
+                                        value: user_id.0.to_string(),
+                                    })
+                                })
+                            };
+                            let Some(target) = target else {
+                                warn!(
+                                    channel_id = %row.channel_id.0,
+                                    cap = %row.cap,
+                                    "permission override missing role_id and user_id; dropping malformed row"
+                                );
+                                return None;
+                            };
+                            Some(pb::PermChannelOverride {
+                                channel_id: Some(pb::ChannelId {
+                                    value: row.channel_id.0.to_string(),
+                                }),
+                                target: Some(target),
+                                cap: row.cap,
+                                effect: row.effect,
+                            })
+                        })
+                        .collect();
                     let resp = pb::ServerToClient { request_id: req_id, session_id: Some(pb::SessionId { value: session_id.clone() }), sent_at: Some(now_ts()), error: None, event_seq: 0, payload: Some(pb::server_to_client::Payload::PermListChanOvr(pb::PermListChannelOverridesResponse { overrides, role_overrides: vec![], user_overrides: vec![] })) };
                     if let Err(e) = write_delimited(&mut send, &resp).await { warn!("control write failed: {:#}", e); break; }
                 }
@@ -1593,16 +1619,14 @@ fn negotiate_codecs(
     let fallback = if remaining.is_empty() {
         None
     } else {
-        codec_rank()
-            .into_iter()
-            .find(|c| {
-                remaining.iter().all(|uid| {
-                    support
-                        .get(uid)
-                        .map(|s| s.contains(&(*c as i32)))
-                        .unwrap_or(false)
-                })
+        codec_rank().into_iter().find(|c| {
+            remaining.iter().all(|uid| {
+                support
+                    .get(uid)
+                    .map(|s| s.contains(&(*c as i32)))
+                    .unwrap_or(false)
             })
+        })
     };
 
     if !remaining.is_empty() && fallback.is_none() {
