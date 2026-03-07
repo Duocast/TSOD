@@ -1603,13 +1603,6 @@ fn negotiate_codecs(
                         .unwrap_or(false)
                 })
             })
-            .or_else(|| {
-                if sset.contains(&(pb::VideoCodec::Vp8 as i32)) {
-                    Some(pb::VideoCodec::Vp8)
-                } else {
-                    None
-                }
-            })
     };
 
     if !remaining.is_empty() && fallback.is_none() {
@@ -1735,6 +1728,32 @@ mod tests {
         let streamer = vec![pb::VideoCodec::Av1];
         let a = vp_control::ids::UserId::new();
         let viewers = HashMap::from([(a, vec![pb::VideoCodec::Vp8])]);
+        let err = negotiate_codecs(&streamer, &viewers).expect_err("should fail");
+        let control = err
+            .downcast_ref::<ControlError>()
+            .expect("should return control error");
+        match control {
+            ControlError::FailedPrecondition(msg) => assert_eq!(*msg, "viewer unsupported"),
+            other => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn negotiate_codecs_rejects_when_remaining_viewers_share_no_codec() {
+        let streamer = vec![
+            pb::VideoCodec::Av1,
+            pb::VideoCodec::Vp9,
+            pb::VideoCodec::Vp8,
+        ];
+        let a = vp_control::ids::UserId::new();
+        let b = vp_control::ids::UserId::new();
+        let c = vp_control::ids::UserId::new();
+        let viewers = HashMap::from([
+            (a, vec![pb::VideoCodec::Av1]),
+            (b, vec![pb::VideoCodec::Vp9]),
+            (c, vec![pb::VideoCodec::Vp8]),
+        ]);
+
         let err = negotiate_codecs(&streamer, &viewers).expect_err("should fail");
         let control = err
             .downcast_ref::<ControlError>()
