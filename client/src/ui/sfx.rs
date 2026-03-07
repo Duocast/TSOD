@@ -134,7 +134,7 @@ fn play_member_tone_impl(volume: f32, joined: bool) -> Result<()> {
         .default_output_config()
         .context("default output config")?;
 
-    let sample_rate = config.sample_rate().0 as f32;
+    let sample_rate = config.sample_rate() as f32;
     let channels = config.channels() as usize;
     let samples = build_member_tone_buffer(sample_rate, volume, joined);
     let mut sample_idx: usize = 0;
