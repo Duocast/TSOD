@@ -733,13 +733,6 @@ impl Gateway {
                             .map(|a| {
                                 serde_json::json!({
                                     "asset_id": a.asset_id.map(|x| x.value).unwrap_or_default(),
-                                    "filename": a.filename,
-                                    "mime_type": a.mime_type,
-                                    "size_bytes": a.size_bytes,
-                                    "width": a.width,
-                                    "height": a.height,
-                                    "duration_ms": a.duration_ms,
-                                    "sha256": a.sha256,
                                 })
                             })
                             .collect(),

@@ -86,8 +86,22 @@ pub struct ChatMessage {
 pub struct SendMessage {
     pub channel_id: ChannelId,
     pub text: String,
-    /// Optional attachments in a JSON envelope (URLs, inline metadata, etc.)
+    /// Optional attachments from the gateway. Only asset_id is trusted.
     pub attachments: Option<Json>,
+}
+
+/// Canonical attachment row loaded from storage.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Attachment {
+    pub id: uuid::Uuid,
+    pub server_id: ServerId,
+    pub channel_id: ChannelId,
+    pub uploader_user_id: UserId,
+    pub filename: String,
+    pub content_type: String,
+    pub size_bytes: i64,
+    pub sha256: Option<String>,
+    pub quarantined: bool,
 }
 
 /// Outbox event to be persisted

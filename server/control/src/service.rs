@@ -886,14 +886,65 @@ impl<R: ControlRepo> ControlService<R> {
         .await?
         .ok_or(ControlError::NotFound("member"))?;
 
+        let requested_attachments = msg
+            .attachments
+            .unwrap_or_else(|| json!([]))
+            .as_array()
+            .cloned()
+            .ok_or(ControlError::InvalidArgument(
+                "attachments must be an array",
+            ))?;
+
+        let mut canonical_attachments = Vec::with_capacity(requested_attachments.len());
+        for requested in requested_attachments {
+            let Some(asset_id) = requested
+                .get("asset_id")
+                .and_then(serde_json::Value::as_str)
+                .filter(|s| !s.is_empty())
+            else {
+                return Err(ControlError::InvalidArgument("attachment asset_id missing"));
+            };
+            let parsed_asset_id = Uuid::parse_str(asset_id)
+                .map_err(|_| ControlError::InvalidArgument("invalid attachment asset_id"))?;
+
+            let attachment =
+                <R as ControlRepo>::get_attachment(&self.repo, &mut tx, parsed_asset_id)
+                    .await?
+                    .ok_or(ControlError::NotFound("attachment"))?;
+
+            if attachment.server_id != ctx.server_id {
+                return Err(ControlError::PermissionDenied("attachment server mismatch"));
+            }
+            if attachment.channel_id != msg.channel_id {
+                return Err(ControlError::PermissionDenied(
+                    "attachment channel mismatch",
+                ));
+            }
+            if attachment.uploader_user_id != ctx.user_id {
+                return Err(ControlError::PermissionDenied(
+                    "attachment uploader mismatch",
+                ));
+            }
+            if attachment.quarantined {
+                return Err(ControlError::FailedPrecondition("attachment quarantined"));
+            }
+
+            canonical_attachments.push(json!({
+                "asset_id": attachment.id,
+                "filename": attachment.filename,
+                "mime_type": attachment.content_type,
+                "size_bytes": attachment.size_bytes,
+                "sha256": attachment.sha256.unwrap_or_default(),
+            }));
+        }
+
         let rec = ChatMessage {
             id: MessageId(Uuid::new_v4()),
             server_id: ctx.server_id,
             channel_id: msg.channel_id,
             author_user_id: ctx.user_id,
             text: text.to_string(),
-            // FIX: Option<JsonValue> -> JsonValue
-            attachments: msg.attachments.unwrap_or_else(|| json!([])),
+            attachments: json!(canonical_attachments),
             created_at: Utc::now(),
         };
 
