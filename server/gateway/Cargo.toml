@@ -31,6 +31,7 @@ ring = "0.17.14"
 sha2 = "0.10.9"
 hex = "0.4.3"
 infer = "0.19"
+image = { version = "0.25.9", default-features = false, features = ["jpeg", "png", "gif", "webp", "avif"] }
 
 sqlx = { version = "0.8.6", features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json", "macros", "migrate"] }
 
