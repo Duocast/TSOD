@@ -88,6 +88,10 @@ pub struct Config {
     pub quic_datagram_recv_buffer_bytes: usize,
 }
 
+fn default_dev_mode() -> bool {
+    cfg!(debug_assertions)
+}
+
 fn default_owner_bootstrap_policy() -> OwnerBootstrapPolicy {
     if cfg!(debug_assertions) {
         OwnerBootstrapPolicy::FirstLoginWins
