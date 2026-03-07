@@ -9,9 +9,9 @@ use crate::{
     errors::{ControlError, ControlResult},
     ids::{ChannelId, MessageId, OutboxId, ServerId, UserId},
     model::{
-        AuditEntry, Channel, ChannelListItem, ChatMessage, Member, OutboxEvent, OutboxEventRow,
-        PermAuditRow, PermChannelOverrideRecord, PermRoleRecord, PermUserSummaryRecord,
-        PermissionRequest,
+        Attachment, AuditEntry, Channel, ChannelListItem, ChatMessage, Member, OutboxEvent,
+        OutboxEventRow, PermAuditRow, PermChannelOverrideRecord, PermRoleRecord,
+        PermUserSummaryRecord, PermissionRequest,
     },
     perms::Decision,
 };
@@ -252,6 +252,12 @@ pub trait ControlRepo: Send + Sync {
         server: ServerId,
         id: MessageId,
     ) -> ControlResult<Option<ChatMessage>>;
+
+    async fn get_attachment(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        id: Uuid,
+    ) -> ControlResult<Option<Attachment>>;
 
     // Outbox
     async fn insert_outbox(
@@ -1296,6 +1302,36 @@ impl ControlRepo for PgControlRepo {
             text: r.get::<String, _>("text"),
             attachments: r.get::<Json, _>("attachments"),
             created_at: r.get::<DateTime<Utc>, _>("created_at"),
+        }))
+    }
+
+    async fn get_attachment(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        id: Uuid,
+    ) -> ControlResult<Option<Attachment>> {
+        let row = sqlx::query(
+            r#"
+            SELECT id, server_id, channel_id, uploader_user_id, filename, content_type, size_bytes, sha256, quarantined
+            FROM attachments
+            WHERE id = $1
+            "#,
+        )
+        .bind(id)
+        .fetch_optional(&mut **tx)
+        .await
+        .context("get attachment")?;
+
+        Ok(row.map(|r| Attachment {
+            id: r.get::<Uuid, _>("id"),
+            server_id: ServerId(r.get::<Uuid, _>("server_id")),
+            channel_id: ChannelId(r.get::<Uuid, _>("channel_id")),
+            uploader_user_id: UserId(r.get::<Uuid, _>("uploader_user_id")),
+            filename: r.get::<String, _>("filename"),
+            content_type: r.get::<String, _>("content_type"),
+            size_bytes: r.get::<i64, _>("size_bytes"),
+            sha256: r.get::<Option<String>, _>("sha256"),
+            quarantined: r.get::<bool, _>("quarantined"),
         }))
     }
 
