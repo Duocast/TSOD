@@ -6,6 +6,7 @@ mod frame;
 mod gateway;
 mod media;
 mod metrics_adapter;
+mod orphan_cleaner;
 mod outbox_dispatch;
 mod overwrite_queue;
 mod prune;
@@ -144,6 +145,18 @@ async fn main() -> Result<()> {
             claim_ttl_seconds: cfg.outbox_claim_ttl_s,
         },
     ));
+
+    // Orphan upload file cleaner
+    if cfg.orphan_scan_interval_secs > 0 {
+        let orphan_pool = pool.clone();
+        let orphan_dir = std::path::PathBuf::from("./data/uploads");
+        let orphan_interval = Duration::from_secs(cfg.orphan_scan_interval_secs);
+        tokio::spawn(orphan_cleaner::run_orphan_cleaner(
+            orphan_pool,
+            orphan_dir,
+            orphan_interval,
+        ));
+    }
 
     // QUIC listener
     let (certs, key) = tls::load_or_generate_tls(
