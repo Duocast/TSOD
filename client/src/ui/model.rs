@@ -1,8 +1,10 @@
 //! Application state model for the GUI.
 
-use std::collections::{HashMap, HashSet, VecDeque};
 use serde::Deserialize;
+use std::collections::{HashMap, HashSet, VecDeque};
 use tracing::debug;
+use uuid::Uuid;
+use vp_route_hash::channel_route_hash;
 
 use crate::audio::dsp::agc::AgcPreset;
 use crate::ui::sfx;
@@ -2217,6 +2219,11 @@ impl UiModel {
                 typers.push((user_name, std::time::Instant::now()));
             }
             UiEvent::MemberJoined { channel_id, member } => {
+                let joined_user_id = member.user_id.clone();
+                let joined_channel_route = Uuid::parse_str(&channel_id)
+                    .ok()
+                    .map(channel_route_hash)
+                    .unwrap_or(0);
                 let now = std::time::Instant::now();
                 self.member_first_seen_at
                     .entry(member.user_id.clone())
@@ -2227,15 +2234,36 @@ impl UiModel {
                 } else {
                     members.push(member);
                 }
+
+                if self.settings.notify_user_joined
+                    && self.active_voice_channel_route != 0
+                    && self.active_voice_channel_route == joined_channel_route
+                    && joined_user_id != self.user_id
+                {
+                    sfx::play_member_join_tone(self.settings.notification_volume);
+                }
             }
             UiEvent::MemberLeft {
                 channel_id,
                 user_id,
             } => {
+                let left_channel_route = Uuid::parse_str(&channel_id)
+                    .ok()
+                    .map(channel_route_hash)
+                    .unwrap_or(0);
                 if let Some(members) = self.members.get_mut(&channel_id) {
                     members.retain(|m| m.user_id != user_id);
                 }
                 self.member_telemetry.remove(&user_id);
+
+                if self.settings.notify_user_joined
+                    && self.active_voice_channel_route != 0
+                    && self.active_voice_channel_route == left_channel_route
+                    && user_id != self.user_id
+                {
+                    sfx::play_member_leave_tone(self.settings.notification_volume);
+                }
+
                 if user_id == self.user_id
                     && self
                         .selected_channel
