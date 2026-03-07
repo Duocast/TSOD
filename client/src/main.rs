@@ -257,13 +257,12 @@ impl WindowsWindowCapture {
 #[cfg(target_os = "windows")]
 impl ScreenCapture for WindowsWindowCapture {
     fn next_frame(&mut self) -> anyhow::Result<CapturedFrame> {
-        use windows::Win32::Foundation::HWND;
         use windows::Win32::Graphics::Gdi::{
             BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits,
             GetWindowDC, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
             DIB_RGB_COLORS, HGDIOBJ, SRCCOPY,
         };
-        use windows::Win32::Storage::Xps::PrintWindow;
+        use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS};
         use windows::Win32::UI::WindowsAndMessaging::{
             IsWindow, PW_RENDERFULLCONTENT,
         };
@@ -305,7 +304,7 @@ impl ScreenCapture for WindowsWindowCapture {
             return Err(anyhow!("failed to select bitmap into device context"));
         }
 
-        let printed = unsafe { PrintWindow(self.hwnd, mem_dc, PW_RENDERFULLCONTENT) }.as_bool();
+        let printed = unsafe { PrintWindow(self.hwnd, mem_dc, PRINT_WINDOW_FLAGS(PW_RENDERFULLCONTENT)) }.as_bool();
         if !printed {
             let _ = unsafe {
                 BitBlt(
