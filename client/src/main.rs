@@ -34,6 +34,7 @@ use proto::voiceplatform::v1 as pb;
 use std::collections::HashMap;
 #[cfg(debug_assertions)]
 use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering},
     Arc,
@@ -2173,6 +2174,7 @@ async fn connect_and_run_session(
         let tx_event = tx_event.clone();
         let mut last_event_seq = snapshot.snapshot_version;
         let local_user_id = local_user_id.clone();
+        let conn = conn.clone();
         let active_voice_channel_route = active_voice_channel_route.clone();
         let server_deafened = server_deafened.clone();
         let stream_state = stream_state.clone();
@@ -2225,6 +2227,34 @@ async fn connect_and_run_session(
                                         "received message_posted push event"
                                     );
 
+                                    let mut attachments: Vec<ui::model::AttachmentData> = mp
+                                        .attachments
+                                        .into_iter()
+                                        .map(|a| ui::model::AttachmentData {
+                                            asset_id: a
+                                                .asset_id
+                                                .map(|x| x.value)
+                                                .unwrap_or_default(),
+                                            filename: a.filename,
+                                            mime_type: a.mime_type,
+                                            size_bytes: a.size_bytes,
+                                            download_url: String::new(),
+                                            thumbnail_url: None,
+                                        })
+                                        .collect();
+
+                                    for attachment in &mut attachments {
+                                        if attachment.asset_id.is_empty() {
+                                            continue;
+                                        }
+                                        if let Ok(path) =
+                                            resolve_attachment_local_path(&conn, attachment).await
+                                        {
+                                            attachment.download_url =
+                                                format!("file://{}", path.display());
+                                        }
+                                    }
+
                                     let _ = tx_event.send(UiEvent::MessageReceived(
                                         ui::model::ChatMessage {
                                             message_id,
@@ -2233,21 +2263,7 @@ async fn connect_and_run_session(
                                             author_id: author_id.clone(),
                                             text: mp.text.clone(),
                                             timestamp,
-                                            attachments: mp
-                                                .attachments
-                                                .into_iter()
-                                                .map(|a| ui::model::AttachmentData {
-                                                    asset_id: a
-                                                        .asset_id
-                                                        .map(|x| x.value)
-                                                        .unwrap_or_default(),
-                                                    filename: a.filename,
-                                                    mime_type: a.mime_type,
-                                                    size_bytes: a.size_bytes,
-                                                    download_url: String::new(),
-                                                    thumbnail_url: None,
-                                                })
-                                                .collect(),
+                                            attachments,
                                             reply_to: mp.reply_to_message_id.map(|r| r.value),
                                             reactions: Vec::new(),
                                             pinned: mp.pinned,
@@ -3137,6 +3153,22 @@ async fn connect_and_run_session(
                                 let _ = tx_event.send(UiEvent::AppendLog(
                                     "[ctl] no channel selected, cannot send message".into(),
                                 ));
+                            }
+                        }
+                        UiIntent::OpenAttachment { attachment } => {
+                            match resolve_attachment_local_path(&conn, &attachment).await {
+                                Ok(path) => {
+                                    if let Err(e) = open::that(&path) {
+                                        let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                            "[chat] open attachment failed: {e:#}"
+                                        )));
+                                    }
+                                }
+                                Err(e) => {
+                                    let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                        "[chat] download attachment failed: {e:#}"
+                                    )));
+                                }
                             }
                         }
                         UiIntent::JoinChannel { channel_id } => {
@@ -4434,6 +4466,104 @@ async fn upload_attachment_quic(
         }
         _ => Err(anyhow!("unexpected media upload completion")),
     }
+}
+
+async fn resolve_attachment_local_path(
+    conn: &quinn::Connection,
+    attachment: &ui::model::AttachmentData,
+) -> anyhow::Result<PathBuf> {
+    let local = PathBuf::from(&attachment.asset_id);
+    if local.is_absolute() && local.exists() {
+        return Ok(local);
+    }
+
+    let cache_dir = dirs::cache_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("tsod")
+        .join("attachment-cache");
+    tokio::fs::create_dir_all(&cache_dir)
+        .await
+        .with_context(|| format!("create attachment cache dir: {}", cache_dir.display()))?;
+
+    let local_path = cache_dir.join(cached_attachment_filename(attachment));
+    if tokio::fs::metadata(&local_path).await.is_ok() {
+        return Ok(local_path);
+    }
+
+    download_attachment_quic(conn, &attachment.asset_id, &local_path).await?;
+    Ok(local_path)
+}
+
+async fn download_attachment_quic(
+    conn: &quinn::Connection,
+    asset_id: &str,
+    output_path: &Path,
+) -> anyhow::Result<()> {
+    use tokio::io::AsyncWriteExt;
+
+    let (mut send, mut recv) = conn.open_bi().await.context("open media stream")?;
+    let req = pb::MediaRequest {
+        payload: Some(pb::media_request::Payload::DownloadRequest(
+            pb::DownloadRequest {
+                attachment_id: Some(pb::AssetId {
+                    value: asset_id.to_string(),
+                }),
+            },
+        )),
+    };
+    net::frame::write_delimited(&mut send, &req).await?;
+
+    let meta: pb::MediaResponse = net::frame::read_delimited(&mut recv, 64 * 1024).await?;
+    let expected_size = match meta.payload {
+        Some(pb::media_response::Payload::DownloadMeta(meta)) => meta.size_bytes,
+        Some(pb::media_response::Payload::Error(e)) => {
+            return Err(anyhow!("media download rejected: {}", e.message));
+        }
+        _ => return Err(anyhow!("unexpected media download response")),
+    };
+
+    if let Some(parent) = output_path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("create download dir: {}", parent.display()))?;
+    }
+    let mut file = tokio::fs::File::create(output_path)
+        .await
+        .with_context(|| format!("create downloaded attachment: {}", output_path.display()))?;
+
+    let copied = tokio::io::copy(&mut recv, &mut file)
+        .await
+        .context("read media stream")?;
+    file.flush().await?;
+
+    if expected_size != 0 && copied != expected_size {
+        return Err(anyhow!(
+            "download size mismatch (expected {}, got {})",
+            expected_size,
+            copied
+        ));
+    }
+    Ok(())
+}
+
+fn cached_attachment_filename(attachment: &ui::model::AttachmentData) -> String {
+    let safe_name = attachment
+        .filename
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '.' || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let safe_name = if safe_name.is_empty() {
+        "attachment".to_string()
+    } else {
+        safe_name
+    };
+    format!("{}-{}", attachment.asset_id, safe_name)
 }
 
 async fn emit_telemetry_loop(

@@ -819,9 +819,9 @@ fn show_message_content(ui: &mut egui::Ui, msg: &ChatMessage, tx_intent: &Sender
 
     for att in &msg.attachments {
         if att.mime_type.starts_with("image/") {
-            show_image_attachment(ui, att);
+            show_image_attachment(ui, att, tx_intent);
         } else {
-            show_file_attachment(ui, att, "\u{1F39E}");
+            show_file_attachment(ui, att, "\u{1F39E}", tx_intent);
         }
     }
 
@@ -857,12 +857,8 @@ fn show_message_content(ui: &mut egui::Ui, msg: &ChatMessage, tx_intent: &Sender
     }
 }
 
-fn show_image_attachment(ui: &mut egui::Ui, att: &AttachmentData) {
-    let uri = if !att.download_url.is_empty() {
-        att.download_url.clone()
-    } else {
-        format!("file://{}", att.asset_id)
-    };
+fn show_image_attachment(ui: &mut egui::Ui, att: &AttachmentData, tx_intent: &Sender<UiIntent>) {
+    let uri = att.download_url.clone();
     ui.horizontal(|ui| {
         ui.label("\u{1F5BC}");
         let response = ui.add(
@@ -878,30 +874,36 @@ fn show_image_attachment(ui: &mut egui::Ui, att: &AttachmentData) {
             .sense(egui::Sense::click()),
         );
         if response.clicked() {
-            let _ = open::that(uri.clone());
+            let _ = tx_intent.send(UiIntent::OpenAttachment {
+                attachment: att.clone(),
+            });
         }
     });
 
-    let image = egui::Image::from_uri(uri.clone())
-        .max_width(MAX_PREVIEW_IMAGE_SIZE)
-        .max_height(MAX_PREVIEW_IMAGE_SIZE)
-        .maintain_aspect_ratio(true)
-        .sense(egui::Sense::click());
-    let response = ui.add(image);
-    if response.clicked() {
-        let _ = open::that(uri);
-    }
-    if response.hovered() {
-        response.on_hover_text("Click to open full image");
+    if !uri.is_empty() {
+        let image = egui::Image::from_uri(uri)
+            .max_width(MAX_PREVIEW_IMAGE_SIZE)
+            .max_height(MAX_PREVIEW_IMAGE_SIZE)
+            .maintain_aspect_ratio(true)
+            .sense(egui::Sense::click());
+        let response = ui.add(image);
+        if response.clicked() {
+            let _ = tx_intent.send(UiIntent::OpenAttachment {
+                attachment: att.clone(),
+            });
+        }
+        if response.hovered() {
+            response.on_hover_text("Click to open full image");
+        }
     }
 }
 
-fn show_file_attachment(ui: &mut egui::Ui, att: &AttachmentData, icon: &str) {
-    let uri = if !att.download_url.is_empty() {
-        att.download_url.clone()
-    } else {
-        format!("file://{}", att.asset_id)
-    };
+fn show_file_attachment(
+    ui: &mut egui::Ui,
+    att: &AttachmentData,
+    icon: &str,
+    tx_intent: &Sender<UiIntent>,
+) {
     ui.horizontal(|ui| {
         ui.label(icon);
         let response = ui.add(
@@ -917,7 +919,9 @@ fn show_file_attachment(ui: &mut egui::Ui, att: &AttachmentData, icon: &str) {
             .sense(egui::Sense::click()),
         );
         if response.clicked() {
-            let _ = open::that(uri);
+            let _ = tx_intent.send(UiIntent::OpenAttachment {
+                attachment: att.clone(),
+            });
         }
     });
 }
