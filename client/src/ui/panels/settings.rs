@@ -7,7 +7,7 @@ use crate::audio::dsp::agc::AgcPreset;
 use crate::settings_io;
 use crate::ui::model::{
     keybind_to_string, parse_keybind, AppSettings, AudioDeviceInfo, CaptureMode, DspMethod,
-    FecMode, Keybind, SettingsPage, UiEvent, UiIntent, UiModel, VoiceProcessingMode,
+    FecMode, Keybind, SettingsPage, UiEvent, UiIntent, UiKey, UiModel, VoiceProcessingMode,
 };
 use crate::ui::theme;
 use crossbeam_channel::Sender;
@@ -388,6 +388,40 @@ fn keybind_capture_edit(
     desired_width: f32,
     hint_text: &str,
 ) -> bool {
+    fn ui_key_from_egui_key(key: egui::Key) -> Option<UiKey> {
+        Some(match key {
+            egui::Key::Space => UiKey::Space,
+            egui::Key::Escape => UiKey::Escape,
+            egui::Key::A => UiKey::A,
+            egui::Key::B => UiKey::B,
+            egui::Key::C => UiKey::C,
+            egui::Key::D => UiKey::D,
+            egui::Key::E => UiKey::E,
+            egui::Key::F => UiKey::F,
+            egui::Key::G => UiKey::G,
+            egui::Key::H => UiKey::H,
+            egui::Key::I => UiKey::I,
+            egui::Key::J => UiKey::J,
+            egui::Key::K => UiKey::K,
+            egui::Key::L => UiKey::L,
+            egui::Key::M => UiKey::M,
+            egui::Key::N => UiKey::N,
+            egui::Key::O => UiKey::O,
+            egui::Key::P => UiKey::P,
+            egui::Key::Q => UiKey::Q,
+            egui::Key::R => UiKey::R,
+            egui::Key::S => UiKey::S,
+            egui::Key::T => UiKey::T,
+            egui::Key::U => UiKey::U,
+            egui::Key::V => UiKey::V,
+            egui::Key::W => UiKey::W,
+            egui::Key::X => UiKey::X,
+            egui::Key::Y => UiKey::Y,
+            egui::Key::Z => UiKey::Z,
+            _ => return None,
+        })
+    }
+
     let mut dirty = false;
     let mut text = keybind_to_string(*slot);
     let response = ui.add(
@@ -412,8 +446,8 @@ fn keybind_capture_edit(
                     repeat: false,
                     modifiers,
                     ..
-                } => Some(Keybind {
-                    key: *key,
+                } => ui_key_from_egui_key(*key).map(|mapped| Keybind {
+                    key: mapped,
                     ctrl: modifiers.ctrl,
                     alt: modifiers.alt,
                     shift: modifiers.shift,

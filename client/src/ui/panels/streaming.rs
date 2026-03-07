@@ -70,15 +70,14 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel) {
                     if let Ok(codec) = pb::VideoCodec::try_from(frame.codec) {
                         if let Ok(decoded) = video_decode::decode_video_frame(codec, &frame.payload)
                         {
-                            let image = egui::ColorImage::from_rgba_unmultiplied(
-                                [decoded.width, decoded.height],
-                                &decoded.rgba,
-                            );
-                            model.latest_stream_frame_texture = Some(ui.ctx().load_texture(
-                                "streaming.latest",
-                                image,
-                                egui::TextureOptions::LINEAR,
-                            ));
+                            model.latest_stream_frame_cache =
+                                Some(crate::ui::model::StreamFrameCache {
+                                    frame_id: frame.stream_tag,
+                                    route_hash: frame.frame_seq,
+                                    width: decoded.width,
+                                    height: decoded.height,
+                                    rgba: decoded.rgba,
+                                });
                             render_w = decoded.width;
                             render_h = decoded.height;
                             model.latest_stream_frame_key = frame_key;
@@ -87,9 +86,9 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel) {
                 }
 
                 if render_w == 0 || render_h == 0 {
-                    if let Some(texture) = &model.latest_stream_frame_texture {
-                        render_w = texture.size()[0];
-                        render_h = texture.size()[1];
+                    if let Some(cache) = &model.latest_stream_frame_cache {
+                        render_w = cache.width;
+                        render_h = cache.height;
                     }
                 }
 
@@ -102,7 +101,15 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel) {
                         draw_size.y = draw_size.x / aspect;
                     }
                     let draw_rect = egui::Rect::from_center_size(video_rect.center(), draw_size);
-                    if let Some(texture) = &model.latest_stream_frame_texture {
+                    if let Some(cache) = &model.latest_stream_frame_cache {
+                        let texture = ui.ctx().load_texture(
+                            "streaming.latest",
+                            egui::ColorImage::from_rgba_unmultiplied(
+                                [cache.width, cache.height],
+                                &cache.rgba,
+                            ),
+                            egui::TextureOptions::LINEAR,
+                        );
                         egui::Image::new((texture.id(), draw_size)).paint_at(ui, draw_rect);
                         rendered = true;
                     }

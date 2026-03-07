@@ -10,7 +10,6 @@ use vp_route_hash::channel_route_hash;
 use crate::audio::dsp::agc::AgcPreset;
 use crate::ui::sfx;
 use crate::ui::widgets::cosmic_chat_composer::ChatComposer;
-use eframe::egui;
 
 /// Maximum number of chat messages to retain per channel.
 const MAX_MESSAGES_PER_CHANNEL: usize = 500;
@@ -926,7 +925,7 @@ const fn default_hotkey_enabled() -> bool {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Keybind {
-    pub key: egui::Key,
+    pub key: UiKey,
     pub ctrl: bool,
     pub alt: bool,
     pub shift: bool,
@@ -1160,37 +1159,114 @@ pub fn keybind_to_string(bind: Option<Keybind>) -> String {
     parts.join("+")
 }
 
-pub fn parse_key_name(name: &str) -> Option<egui::Key> {
+pub fn parse_key_name(name: &str) -> Option<UiKey> {
     match name.to_ascii_uppercase().as_str() {
-        "SPACE" => Some(egui::Key::Space),
-        "A" => Some(egui::Key::A),
-        "B" => Some(egui::Key::B),
-        "C" => Some(egui::Key::C),
-        "D" => Some(egui::Key::D),
-        "E" => Some(egui::Key::E),
-        "F" => Some(egui::Key::F),
-        "G" => Some(egui::Key::G),
-        "H" => Some(egui::Key::H),
-        "I" => Some(egui::Key::I),
-        "J" => Some(egui::Key::J),
-        "K" => Some(egui::Key::K),
-        "L" => Some(egui::Key::L),
-        "M" => Some(egui::Key::M),
-        "N" => Some(egui::Key::N),
-        "O" => Some(egui::Key::O),
-        "P" => Some(egui::Key::P),
-        "Q" => Some(egui::Key::Q),
-        "R" => Some(egui::Key::R),
-        "S" => Some(egui::Key::S),
-        "T" => Some(egui::Key::T),
-        "U" => Some(egui::Key::U),
-        "V" => Some(egui::Key::V),
-        "W" => Some(egui::Key::W),
-        "X" => Some(egui::Key::X),
-        "Y" => Some(egui::Key::Y),
-        "Z" => Some(egui::Key::Z),
+        "SPACE" => Some(UiKey::Space),
+        "A" => Some(UiKey::A),
+        "B" => Some(UiKey::B),
+        "C" => Some(UiKey::C),
+        "D" => Some(UiKey::D),
+        "E" => Some(UiKey::E),
+        "F" => Some(UiKey::F),
+        "G" => Some(UiKey::G),
+        "H" => Some(UiKey::H),
+        "I" => Some(UiKey::I),
+        "J" => Some(UiKey::J),
+        "K" => Some(UiKey::K),
+        "L" => Some(UiKey::L),
+        "M" => Some(UiKey::M),
+        "N" => Some(UiKey::N),
+        "O" => Some(UiKey::O),
+        "P" => Some(UiKey::P),
+        "Q" => Some(UiKey::Q),
+        "R" => Some(UiKey::R),
+        "S" => Some(UiKey::S),
+        "T" => Some(UiKey::T),
+        "U" => Some(UiKey::U),
+        "V" => Some(UiKey::V),
+        "W" => Some(UiKey::W),
+        "X" => Some(UiKey::X),
+        "Y" => Some(UiKey::Y),
+        "Z" => Some(UiKey::Z),
+        "ESC" | "ESCAPE" => Some(UiKey::Escape),
         _ => None,
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum UiKey {
+    Space,
+    Escape,
+    A,
+    B,
+    C,
+    D,
+    E,
+    F,
+    G,
+    H,
+    I,
+    J,
+    K,
+    L,
+    M,
+    N,
+    O,
+    P,
+    Q,
+    R,
+    S,
+    T,
+    U,
+    V,
+    W,
+    X,
+    Y,
+    Z,
+}
+
+impl UiKey {
+    pub fn name(self) -> &'static str {
+        match self {
+            UiKey::Space => "Space",
+            UiKey::Escape => "Escape",
+            UiKey::A => "A",
+            UiKey::B => "B",
+            UiKey::C => "C",
+            UiKey::D => "D",
+            UiKey::E => "E",
+            UiKey::F => "F",
+            UiKey::G => "G",
+            UiKey::H => "H",
+            UiKey::I => "I",
+            UiKey::J => "J",
+            UiKey::K => "K",
+            UiKey::L => "L",
+            UiKey::M => "M",
+            UiKey::N => "N",
+            UiKey::O => "O",
+            UiKey::P => "P",
+            UiKey::Q => "Q",
+            UiKey::R => "R",
+            UiKey::S => "S",
+            UiKey::T => "T",
+            UiKey::U => "U",
+            UiKey::V => "V",
+            UiKey::W => "W",
+            UiKey::X => "X",
+            UiKey::Y => "Y",
+            UiKey::Z => "Z",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct StreamFrameCache {
+    pub frame_id: u64,
+    pub route_hash: u32,
+    pub width: usize,
+    pub height: usize,
+    pub rgba: Vec<u8>,
 }
 
 // ── Settings page enum ────────────────────────────────────────────────
@@ -1683,7 +1759,7 @@ pub struct UiModel {
     pub start_share_in_flight: bool,
     pub stream_debug: StreamDebugView,
     pub latest_stream_frame: Option<StreamFrameView>,
-    pub latest_stream_frame_texture: Option<egui::TextureHandle>,
+    pub latest_stream_frame_cache: Option<StreamFrameCache>,
     pub latest_stream_frame_key: Option<(u64, u32)>,
     pub show_stream_stats: bool,
     pub avatar_path_draft: String,
@@ -1996,7 +2072,7 @@ impl Default for UiModel {
             start_share_in_flight: false,
             stream_debug: StreamDebugView::default(),
             latest_stream_frame: None,
-            latest_stream_frame_texture: None,
+            latest_stream_frame_cache: None,
             latest_stream_frame_key: None,
             show_stream_stats: false,
             avatar_path_draft: String::new(),
