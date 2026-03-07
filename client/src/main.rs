@@ -78,12 +78,12 @@ pub enum PixelFormat {
     Nv12,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum FrameData {
     Cpu(Bytes),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CapturedFrame {
     pub width: u32,
     pub height: u32,
@@ -550,6 +550,15 @@ fn video_codec_name(codec: pb::VideoCodec) -> &'static str {
         pb::VideoCodec::Vp9 => "VP9",
         pb::VideoCodec::Vp8 => "VP8",
         _ => "UNKNOWN",
+    }
+}
+
+fn video_codec_encoder_name(codec: pb::VideoCodec) -> Option<&'static str> {
+    match codec {
+        pb::VideoCodec::Av1 => Some("AV1"),
+        pb::VideoCodec::Vp9 => Some("VP9"),
+        pb::VideoCodec::Vp8 => Some("VP8"),
+        _ => None,
     }
 }
 
@@ -3629,29 +3638,46 @@ async fn connect_and_run_session(
                             {
                                 Ok(Ok(resp)) => {
                                     if let Some(pb::server_to_client::Payload::StartScreenShareResponse(r)) = resp.payload {
-                                        let stream_tag = r.primary_stream_tag;
+                                        let mut negotiated_streams = Vec::new();
+                                        negotiated_streams.push((
+                                            r.primary_stream_tag,
+                                            pb::VideoCodec::try_from(r.primary_codec)
+                                                .unwrap_or(pb::VideoCodec::Unspecified),
+                                        ));
+                                        if let (Some(fallback_tag), Some(fallback_codec)) =
+                                            (r.fallback_stream_tag, r.fallback_codec)
+                                        {
+                                            negotiated_streams.push((
+                                                fallback_tag,
+                                                pb::VideoCodec::try_from(fallback_codec)
+                                                    .unwrap_or(pb::VideoCodec::Unspecified),
+                                            ));
+                                        }
+
                                         active_local_stream_id = r.stream_id.clone();
                                         {
                                             let mut streams = stream_state.active_streams.write().await;
-                                            streams
-                                                .entry(stream_tag)
-                                                .or_insert_with(|| Arc::new(Mutex::new(VideoReceiver::new(4, vp_voice::MAX_FRAGS_PER_FRAME))));
+                                            for (stream_tag, _) in &negotiated_streams {
+                                                streams
+                                                    .entry(*stream_tag)
+                                                    .or_insert_with(|| Arc::new(Mutex::new(VideoReceiver::new(4, vp_voice::MAX_FRAGS_PER_FRAME))));
+                                            }
                                         }
                                         {
                                             let mut stream_codecs = stream_state.stream_codecs.write().await;
-                                            if let Ok(codec) = pb::VideoCodec::try_from(r.primary_codec) {
-                                                stream_codecs.insert(stream_tag, codec);
-                                            }
-                                            if let (Some(fallback_tag), Some(fallback_codec)) =
-                                                (r.fallback_stream_tag, r.fallback_codec)
-                                            {
-                                                if let Ok(codec) = pb::VideoCodec::try_from(fallback_codec) {
-                                                    stream_codecs.insert(fallback_tag, codec);
-                                                }
+                                            for (stream_tag, codec) in &negotiated_streams {
+                                                stream_codecs.insert(*stream_tag, *codec);
                                             }
                                         }
+                                        let stream_descriptions = negotiated_streams
+                                            .iter()
+                                            .map(|(stream_tag, codec)| {
+                                                format!("{stream_tag}:{}", video_codec_name(*codec))
+                                            })
+                                            .collect::<Vec<_>>()
+                                            .join(", ");
                                         let _ = tx_event.send(UiEvent::AppendLog(format!(
-                                            "[video] StartScreenShareRequest ok stream_tag={stream_tag} source={source:?} include_audio={include_audio}"
+                                            "[video] StartScreenShareRequest ok streams=[{stream_descriptions}] source={source:?} include_audio={include_audio}"
                                         )));
                                         share_state = ShareState::Active;
                                         let (share_stop_tx, share_stop_rx) = watch::channel(false);
@@ -3659,14 +3685,27 @@ async fn connect_and_run_session(
 
                                         let egress_send = egress.clone();
                                         let video_counters = stream_state.counters.clone();
-                                        let selected_codec = selected_codec.clone();
                                         let selected_profile = saved_settings.screen_share_profile.clone();
                                         tokio::spawn(async move {
-                                            let mut sender = VideoSender::new(stream_tag, 0, sender_profile, mtu);
-                                            sender.set_pacing_enabled(false);
+                                            let stream_senders = negotiated_streams
+                                                .into_iter()
+                                                .filter_map(|(stream_tag, codec)| {
+                                                    let codec_name = video_codec_encoder_name(codec)?;
+                                                    let mut sender =
+                                                        VideoSender::new(stream_tag, 0, sender_profile, mtu);
+                                                    sender.set_pacing_enabled(false);
+                                                    Some((stream_tag, codec_name.to_string(), sender))
+                                                })
+                                                .collect::<Vec<_>>();
+
+                                            if stream_senders.is_empty() {
+                                                warn!(
+                                                    "[video] no encodable stream codecs negotiated; aborting local send"
+                                                );
+                                                return;
+                                            }
 
                                             let (capture_tx, mut capture_rx) = mpsc::channel::<CapturedFrame>(4);
-                                            let (encoded_tx, mut encoded_rx) = mpsc::channel::<EncodedFrame>(4);
                                             let stop_flag = Arc::new(AtomicBool::new(false));
 
                                             let watcher_flag = stop_flag.clone();
@@ -3703,54 +3742,111 @@ async fn connect_and_run_session(
                                                 }
                                             });
 
-                                            let encode_task = tokio::spawn(async move {
-                                                let mut encoder = match build_screen_encoder(&selected_codec, &selected_profile) {
-                                                    Ok(enc) => enc,
-                                                    Err(e) => {
-                                                        warn!(error=?e, "[video] failed to build screen encoder");
-                                                        return;
-                                                    }
-                                                };
+                                            let send_task = tokio::spawn(async move {
+                                                let mut stream_encoders = stream_senders
+                                                    .into_iter()
+                                                    .filter_map(|(stream_tag, codec_name, sender)| {
+                                                        let encoder = match build_screen_encoder(
+                                                            &codec_name,
+                                                            &selected_profile,
+                                                        ) {
+                                                            Ok(enc) => enc,
+                                                            Err(e) => {
+                                                                warn!(
+                                                                    error=?e,
+                                                                    stream_tag,
+                                                                    codec=%codec_name,
+                                                                    "[video] failed to build screen encoder"
+                                                                );
+                                                                return None;
+                                                            }
+                                                        };
+                                                        Some((stream_tag, sender, encoder, 0_u32))
+                                                    })
+                                                    .collect::<Vec<_>>();
+
+                                                if stream_encoders.is_empty() {
+                                                    warn!(
+                                                        "[video] no screen encoders available for negotiated stream set"
+                                                    );
+                                                    return;
+                                                }
+
                                                 while let Some(mut frame) = capture_rx.recv().await {
                                                     while let Ok(next) = capture_rx.try_recv() {
                                                         frame = next;
                                                     }
-                                                    match encoder.encode(frame) {
-                                                        Ok(encoded) => {
-                                                            let _ = encoded_tx.try_send(encoded);
-                                                        }
-                                                        Err(e) => {
-                                                            warn!(error=?e, "[video] encode failed");
-                                                        }
-                                                    }
-                                                }
-                                            });
 
-                                            let send_task = tokio::spawn(async move {
-                                                let mut frame_idx = 0_u32;
-                                                while let Some(mut encoded) = encoded_rx.recv().await {
-                                                    while let Ok(next) = encoded_rx.try_recv() {
-                                                        encoded = next;
-                                                    }
-                                                    if let Err(e) = sender.send_frame_async(encoded.ts_ms, encoded.is_keyframe, &encoded.data, |dg| {
-                                                        match egress_send.enqueue_video_fragment(stream_tag, frame_idx, encoded.is_keyframe, std::time::Instant::now(), dg) {
-                                                            Ok(report) => {
-                                                                video_counters.video_tx_datagrams.fetch_add(1, Ordering::Relaxed);
-                                                                if let Some(dropped) = report.dropped {
-                                                                    video_counters.video_tx_drop_queue_full.fetch_add(dropped.count as u64, Ordering::Relaxed);
-                                                                }
+                                                    for (stream_tag, sender, encoder, frame_idx) in
+                                                        &mut stream_encoders
+                                                    {
+                                                        let encoded = match encoder.encode(frame.clone()) {
+                                                            Ok(encoded) => encoded,
+                                                            Err(e) => {
+                                                                warn!(
+                                                                    error=?e,
+                                                                    stream_tag,
+                                                                    "[video] encode failed"
+                                                                );
+                                                                continue;
                                                             }
-                                                            Err(reason) => {
-                                                                video_counters.video_tx_drop_deadline.fetch_add(1, Ordering::Relaxed);
-                                                                warn!(?reason, stream_tag, frame_idx, "[video] enqueue rejected");
-                                                            }
+                                                        };
+
+                                                        if let Err(e) = sender
+                                                            .send_frame_async(
+                                                                encoded.ts_ms,
+                                                                encoded.is_keyframe,
+                                                                &encoded.data,
+                                                                |dg| {
+                                                                    match egress_send.enqueue_video_fragment(
+                                                                        *stream_tag,
+                                                                        *frame_idx,
+                                                                        encoded.is_keyframe,
+                                                                        std::time::Instant::now(),
+                                                                        dg,
+                                                                    ) {
+                                                                        Ok(report) => {
+                                                                            video_counters
+                                                                                .video_tx_datagrams
+                                                                                .fetch_add(1, Ordering::Relaxed);
+                                                                            if let Some(dropped) = report.dropped {
+                                                                                video_counters
+                                                                                    .video_tx_drop_queue_full
+                                                                                    .fetch_add(
+                                                                                        dropped.count as u64,
+                                                                                        Ordering::Relaxed,
+                                                                                    );
+                                                                            }
+                                                                        }
+                                                                        Err(reason) => {
+                                                                            video_counters
+                                                                                .video_tx_drop_deadline
+                                                                                .fetch_add(1, Ordering::Relaxed);
+                                                                            warn!(
+                                                                                ?reason,
+                                                                                stream_tag,
+                                                                                frame_idx,
+                                                                                "[video] enqueue rejected"
+                                                                            );
+                                                                        }
+                                                                    }
+                                                                },
+                                                            )
+                                                            .await
+                                                        {
+                                                            video_counters
+                                                                .sender_frame_errors
+                                                                .fetch_add(1, Ordering::Relaxed);
+                                                            warn!(
+                                                                error=?e,
+                                                                stream_tag,
+                                                                frame_size=encoded.data.len(),
+                                                                "[video] send_frame failed"
+                                                            );
+                                                            break;
                                                         }
-                                                    }).await {
-                                                        video_counters.sender_frame_errors.fetch_add(1, Ordering::Relaxed);
-                                                        warn!(error=?e, frame_size=encoded.data.len(), "[video] send_frame failed");
-                                                        break;
+                                                        *frame_idx = frame_idx.wrapping_add(1);
                                                     }
-                                                    frame_idx = frame_idx.wrapping_add(1);
                                                 }
                                             });
 
@@ -3762,7 +3858,6 @@ async fn connect_and_run_session(
 
                                             let _ = stop_watch_task.await;
                                             let _ = capture_task.await;
-                                            let _ = encode_task.await;
                                             let _ = send_task.await;
                                         });
                                     } else {
