@@ -600,11 +600,13 @@ async fn datagram_demux_loop(
             let overflow = voice_ingress_q.overflow_evictions_swap();
             let stale = voice_stale_drops_total.swap(0, Ordering::Relaxed);
             let drain = voice_drain_drops_total.swap(0, Ordering::Relaxed);
-            let queue_len = voice_ingress_q.len();
-            info!(
-                "[voice] client ingress overflow_evictions/sec={} stale_drops/sec={} drain_drops/sec={} queue_len={}",
-                overflow, stale, drain, queue_len
-            );
+            if overflow > 0 || stale > 0 || drain > 0 {
+                let queue_len = voice_ingress_q.len();
+                info!(
+                    "[voice] client ingress overflow_evictions/sec={} stale_drops/sec={} drain_drops/sec={} queue_len={}",
+                    overflow, stale, drain, queue_len
+                );
+            }
             last_log = Instant::now();
         }
     }
