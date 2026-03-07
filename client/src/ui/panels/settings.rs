@@ -214,9 +214,151 @@ fn enumerate_video_devices() -> Vec<VideoDeviceInfo> {
         disambiguate_video_labels(&mut devices);
         devices
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
+    {
+        enumerate_video_devices_windows()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
         Vec::new()
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn enumerate_video_devices_windows() -> Vec<VideoDeviceInfo> {
+    use windows::Win32::Media::MediaFoundation::IMFActivate;
+    use windows::Win32::Media::MediaFoundation::{
+        MFEnumDeviceSources, MFShutdown, MFStartup, MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME,
+        MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID,
+        MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK, MF_VERSION,
+    };
+    use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
+    struct ComGuard;
+    impl ComGuard {
+        fn new() -> Option<Self> {
+            unsafe {
+                CoInitializeEx(None, COINIT_MULTITHREADED)
+                    .ok()
+                    .ok()
+                    .map(|_| Self)
+            }
+        }
+    }
+    impl Drop for ComGuard {
+        fn drop(&mut self) {
+            unsafe { CoUninitialize() }
+        }
+    }
+
+    let _com = ComGuard::new();
+
+    if unsafe { MFStartup(MF_VERSION, 0) }.is_err() {
+        tracing::warn!("[video enum] MFStartup failed");
+        return Vec::new();
+    }
+
+    let result = (|| -> Vec<VideoDeviceInfo> {
+        use windows::Win32::Media::MediaFoundation::IMFAttributes;
+        use windows::Win32::Media::MediaFoundation::MFCreateAttributes;
+
+        let attr: IMFAttributes = unsafe {
+            let mut attr = None;
+            if MFCreateAttributes(&mut attr, 1).is_err() {
+                return Vec::new();
+            }
+            attr.unwrap()
+        };
+
+        if unsafe {
+            attr.SetGUID(
+                &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
+                &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID,
+            )
+        }
+        .is_err()
+        {
+            return Vec::new();
+        }
+
+        let mut raw_devices: *mut Option<IMFActivate> = std::ptr::null_mut();
+        let mut count: u32 = 0;
+
+        if unsafe { MFEnumDeviceSources(&attr, &mut raw_devices, &mut count) }.is_err() {
+            tracing::warn!("[video enum] MFEnumDeviceSources failed");
+            return Vec::new();
+        }
+
+        if count == 0 || raw_devices.is_null() {
+            return Vec::new();
+        }
+
+        let activates = unsafe { std::slice::from_raw_parts(raw_devices, count as usize) };
+
+        let mut devices = Vec::with_capacity(count as usize);
+
+        for activate_opt in activates {
+            let activate = match activate_opt {
+                Some(a) => a,
+                None => continue,
+            };
+
+            let friendly = get_mf_string(activate, &MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME)
+                .unwrap_or_else(|| "Unknown camera".to_string());
+
+            let symlink = get_mf_string(
+                activate,
+                &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK,
+            )
+            .unwrap_or_default();
+
+            if !symlink.is_empty() {
+                devices.push(VideoDeviceInfo {
+                    id: symlink,
+                    label: friendly,
+                    display_label: String::new(),
+                });
+            }
+        }
+
+        unsafe {
+            windows::Win32::System::Com::CoTaskMemFree(Some(raw_devices as *const _));
+        }
+
+        devices
+    })();
+
+    unsafe { MFShutdown().ok() };
+
+    let mut devices = result;
+    devices.sort_by(|a, b| a.label.cmp(&b.label));
+    disambiguate_video_labels(&mut devices);
+    devices
+}
+
+#[cfg(target_os = "windows")]
+fn get_mf_string(
+    activate: &windows::Win32::Media::MediaFoundation::IMFActivate,
+    key: &windows::core::GUID,
+) -> Option<String> {
+    use windows::Win32::System::Com::CoTaskMemFree;
+
+    unsafe {
+        let mut raw_str = windows::core::PWSTR::null();
+        let mut len = 0u32;
+        if activate
+            .GetAllocatedString(key, &mut raw_str, &mut len)
+            .is_ok()
+        {
+            if raw_str.is_null() || len == 0 {
+                return None;
+            }
+            let slice = std::slice::from_raw_parts(raw_str.as_ptr(), len as usize);
+            let s = String::from_utf16_lossy(slice);
+            CoTaskMemFree(Some(raw_str.as_ptr() as *const _));
+            Some(s)
+        } else {
+            None
+        }
     }
 }
 
