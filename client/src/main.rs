@@ -229,8 +229,8 @@ impl WindowsWindowCapture {
             .strip_prefix("window-hwnd-")
             .and_then(|value| value.parse::<isize>().ok())
             .ok_or_else(|| anyhow!("invalid window id: {id}"))?;
-        let hwnd = HWND(hwnd_raw);
-        if hwnd.0 == 0 {
+        let hwnd = HWND(hwnd_raw as *mut std::ffi::c_void);
+        if hwnd.0.is_null() {
             return Err(anyhow!("invalid window handle: {id}"));
         }
 
@@ -242,9 +242,9 @@ impl WindowsWindowCapture {
         use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
 
         let mut rect = RECT::default();
-        if !unsafe { GetWindowRect(self.hwnd, &mut rect) }.as_bool() {
+        if unsafe { GetWindowRect(self.hwnd, &mut rect) }.is_err() {
             return Err(anyhow!(
-                "failed to query window bounds for hwnd={}",
+                "failed to query window bounds for hwnd={:?}",
                 self.hwnd.0
             ));
         }
@@ -263,43 +263,44 @@ impl ScreenCapture for WindowsWindowCapture {
             GetWindowDC, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
             DIB_RGB_COLORS, HGDIOBJ, SRCCOPY,
         };
+        use windows::Win32::Storage::Xps::PrintWindow;
         use windows::Win32::UI::WindowsAndMessaging::{
-            IsWindow, PrintWindow, PW_RENDERFULLCONTENT,
+            IsWindow, PW_RENDERFULLCONTENT,
         };
 
-        if !unsafe { IsWindow(self.hwnd) }.as_bool() {
-            return Err(anyhow!("window is no longer valid: hwnd={}", self.hwnd.0));
+        if !unsafe { IsWindow(Some(self.hwnd)) }.as_bool() {
+            return Err(anyhow!("window is no longer valid: hwnd={:?}", self.hwnd.0));
         }
 
         let (width, height) = self.window_dimensions()?;
-        let window_dc = unsafe { GetWindowDC(self.hwnd) };
-        if window_dc.0 == 0 {
+        let window_dc = unsafe { GetWindowDC(Some(self.hwnd)) };
+        if window_dc.0.is_null() {
             return Err(anyhow!("failed to get window device context"));
         }
 
         let mem_dc = unsafe { CreateCompatibleDC(Some(window_dc)) };
-        if mem_dc.0 == 0 {
+        if mem_dc.0.is_null() {
             unsafe {
-                ReleaseDC(self.hwnd, window_dc);
+                ReleaseDC(Some(self.hwnd), window_dc);
             }
             return Err(anyhow!("failed to create memory device context"));
         }
 
         let bitmap = unsafe { CreateCompatibleBitmap(window_dc, width as i32, height as i32) };
-        if bitmap.0 == 0 {
+        if bitmap.0.is_null() {
             unsafe {
                 DeleteDC(mem_dc);
-                ReleaseDC(self.hwnd, window_dc);
+                ReleaseDC(Some(self.hwnd), window_dc);
             }
             return Err(anyhow!("failed to create compatible bitmap"));
         }
 
         let previous = unsafe { SelectObject(mem_dc, HGDIOBJ(bitmap.0)) };
-        if previous.0 == 0 {
+        if previous.0.is_null() {
             unsafe {
                 DeleteObject(HGDIOBJ(bitmap.0));
                 DeleteDC(mem_dc);
-                ReleaseDC(self.hwnd, window_dc);
+                ReleaseDC(Some(self.hwnd), window_dc);
             }
             return Err(anyhow!("failed to select bitmap into device context"));
         }
@@ -351,7 +352,7 @@ impl ScreenCapture for WindowsWindowCapture {
             SelectObject(mem_dc, previous);
             DeleteObject(HGDIOBJ(bitmap.0));
             DeleteDC(mem_dc);
-            ReleaseDC(HWND(self.hwnd.0), window_dc);
+            ReleaseDC(Some(self.hwnd), window_dc);
         }
 
         if rows == 0 {
