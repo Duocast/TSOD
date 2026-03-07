@@ -210,12 +210,14 @@ impl VpApp {
 }
 
 impl eframe::App for VpApp {
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+    fn on_exit(&mut self) {
         self.persist_settings_if_dirty();
         self.signal_quit();
     }
 
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+
         // Drain backend events
         self.drain_events();
 
@@ -231,10 +233,10 @@ impl eframe::App for VpApp {
         }
 
         // Apply theme
-        theme::apply_theme(ctx, &self.model.settings.theme);
+        theme::apply_theme(&ctx, &self.model.settings.theme);
 
         // Top menu bar
-        egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
+        egui::Panel::top("top_bar").show_inside(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.label(egui::RichText::new("TSOD").strong().size(16.0));
                 ui.label(egui::RichText::new(BUILD_VERSION).size(12.0).monospace());
@@ -295,9 +297,9 @@ impl eframe::App for VpApp {
         });
 
         // Status bar at bottom (simplified — user panel moved to left sidebar)
-        egui::TopBottomPanel::bottom("status_bar")
-            .max_height(24.0)
-            .show(ctx, |ui| {
+        egui::Panel::bottom("status_bar")
+            .max_size(24.0)
+            .show_inside(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(
                         egui::RichText::new(&self.model.status_line)
@@ -351,10 +353,10 @@ impl eframe::App for VpApp {
             });
 
         // Left panel: server/channel tree + user panel at bottom
-        egui::SidePanel::left("server_tree")
-            .default_width(220.0)
-            .min_width(180.0)
-            .show(ctx, |ui| {
+        egui::Panel::left("server_tree")
+            .default_size(220.0)
+            .min_size(180.0)
+            .show_inside(ui, |ui| {
                 let total_height = ui.available_height();
                 let user_panel_height = 100.0;
                 let tree_height = (total_height - user_panel_height).max(100.0);
@@ -378,10 +380,10 @@ impl eframe::App for VpApp {
             });
 
         // Right panel: member list
-        egui::SidePanel::right("members_panel")
-            .default_width(200.0)
-            .min_width(150.0)
-            .show(ctx, |ui| {
+        egui::Panel::right("members_panel")
+            .default_size(200.0)
+            .min_size(150.0)
+            .show_inside(ui, |ui| {
                 panels::members::show(ui, &mut self.model, &self.tx_intent);
             });
 
@@ -395,7 +397,7 @@ impl eframe::App for VpApp {
                 .min_width(520.0)
                 .min_height(360.0)
                 .collapsible(false)
-                .show(ctx, |ui| {
+                .show(&ctx, |ui| {
                     ui.horizontal(|ui| {
                         ui.selectable_value(&mut self.model.about_tab, 0, "About");
                         ui.selectable_value(&mut self.model.about_tab, 1, "Copyright");
@@ -474,7 +476,7 @@ impl eframe::App for VpApp {
                 .min_width(600.0)
                 .min_height(400.0)
                 .collapsible(false)
-                .show(ctx, |ui| {
+                .show(&ctx, |ui| {
                     panels::settings::show(ui, &mut self.model, &self.tx_intent);
                 });
             if !open {
@@ -503,7 +505,7 @@ impl eframe::App for VpApp {
                 .open(&mut open)
                 .default_width(360.0)
                 .resizable(false)
-                .show(ctx, |ui| {
+                .show(&ctx, |ui| {
                     ui.label("Server address:");
                     ui.horizontal(|ui| {
                         ui.label("IP / Host");
@@ -597,7 +599,7 @@ impl eframe::App for VpApp {
                 .constrain(false)
                 .open(&mut open)
                 .default_width(400.0)
-                .show(ctx, |ui| {
+                .show(&ctx, |ui| {
                     panels::telemetry::show(ui, &self.model);
                 });
             if !open {
@@ -615,7 +617,7 @@ impl eframe::App for VpApp {
                 .min_width(320.0)
                 .collapsible(false)
                 .resizable(false)
-                .show(ctx, |ui| {
+                .show(&ctx, |ui| {
                     ui.horizontal(|ui| {
                         ui.label("Message:");
                         ui.add_sized(
@@ -674,7 +676,7 @@ impl eframe::App for VpApp {
                 .min_width(380.0)
                 .collapsible(false)
                 .resizable(false)
-                .show(ctx, |ui| {
+                .show(&ctx, |ui| {
                     ui.label("Choose an image file for your avatar.");
                     ui.add_space(8.0);
 
@@ -713,7 +715,7 @@ impl eframe::App for VpApp {
                 .min_width(680.0)
                 .resizable(false)
                 .collapsible(false)
-                .show(ctx, |ui| {
+                .show(&ctx, |ui| {
                     ui.horizontal(|ui| {
                         ui.heading("Share content");
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -862,12 +864,12 @@ impl eframe::App for VpApp {
         }
 
         // Create channel dialog (floating)
-        panels::server_tree::show_create_channel_dialog(ctx, &mut self.model, &self.tx_intent);
-        panels::server_tree::show_channel_dialogs(ctx, &mut self.model, &self.tx_intent);
-        panels::permissions_center::show_permissions_center(ctx, &mut self.model, &self.tx_intent);
+        panels::server_tree::show_create_channel_dialog(&ctx, &mut self.model, &self.tx_intent);
+        panels::server_tree::show_channel_dialogs(&ctx, &mut self.model, &self.tx_intent);
+        panels::permissions_center::show_permissions_center(&ctx, &mut self.model, &self.tx_intent);
 
         // Central panel: connection status + chat messages + input
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show_inside(ui, |ui| {
             let stage = self.model.connection_stage;
             let panel_visible = stage.is_in_progress()
                 || stage == ConnectionStage::Failed
@@ -904,7 +906,7 @@ impl eframe::App for VpApp {
                             let _ = self.launch_connect_attempt(false);
                         }
                         if ui.small_button("Copy details").clicked() {
-                            self.copy_connection_details(ctx);
+                            self.copy_connection_details(&ctx);
                         }
                     });
 
@@ -945,7 +947,7 @@ impl eframe::App for VpApp {
         });
 
         // Handle keyboard shortcuts
-        self.handle_shortcuts(ctx);
+        self.handle_shortcuts(&ctx);
     }
 }
 
