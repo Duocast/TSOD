@@ -7,7 +7,7 @@ use crate::audio::dsp::agc::AgcPreset;
 use crate::settings_io;
 use crate::ui::model::{
     keybind_to_string, parse_keybind, AppSettings, AudioDeviceInfo, CaptureMode, DspMethod,
-    FecMode, SettingsPage, UiEvent, UiIntent, UiModel, VoiceProcessingMode,
+    FecMode, Keybind, SettingsPage, UiEvent, UiIntent, UiModel, VoiceProcessingMode,
 };
 use crate::ui::theme;
 use crossbeam_channel::Sender;
@@ -381,6 +381,60 @@ fn hint(ui: &mut egui::Ui, text: &str) {
     ui.label(egui::RichText::new(text).small().color(theme::text_muted()));
 }
 
+fn keybind_capture_edit(
+    ui: &mut egui::Ui,
+    id_source: impl std::hash::Hash,
+    slot: &mut Option<Keybind>,
+    desired_width: f32,
+    hint_text: &str,
+) -> bool {
+    let mut dirty = false;
+    let mut text = keybind_to_string(*slot);
+    let response = ui.add(
+        egui::TextEdit::singleline(&mut text)
+            .id_source(id_source)
+            .desired_width(desired_width)
+            .hint_text(hint_text),
+    );
+
+    let parsed = parse_keybind(&text);
+    if parsed != *slot {
+        *slot = parsed;
+        dirty = true;
+    }
+
+    if response.has_focus() {
+        let captured = ui.input(|i| {
+            i.events.iter().find_map(|event| match event {
+                egui::Event::Key {
+                    key,
+                    pressed: true,
+                    repeat: false,
+                    modifiers,
+                    ..
+                } => Some(Keybind {
+                    key: *key,
+                    ctrl: modifiers.ctrl,
+                    alt: modifiers.alt,
+                    shift: modifiers.shift,
+                    command: modifiers.command,
+                }),
+                _ => None,
+            })
+        });
+
+        if let Some(bind) = captured {
+            if *slot != Some(bind) {
+                *slot = Some(bind);
+                dirty = true;
+            }
+            ui.ctx().memory_mut(|m| m.surrender_focus(response.id));
+        }
+    }
+
+    dirty
+}
+
 // ── Application ───────────────────────────────────────────────────────
 
 fn page_application(ui: &mut egui::Ui, model: &mut UiModel) -> bool {
@@ -660,17 +714,13 @@ fn page_capture(
         CaptureMode::PushToTalk => {
             ui.horizontal(|ui: &mut egui::Ui| {
                 ui.label("Hotkey:");
-                let mut ptt_text = keybind_to_string(s.hotkeys.ptt);
-                ui.add(
-                    egui::TextEdit::singleline(&mut ptt_text)
-                        .desired_width(120.0)
-                        .hint_text("Press a key..."),
+                dirty |= keybind_capture_edit(
+                    ui,
+                    "capture_ptt_hotkey",
+                    &mut s.hotkeys.ptt,
+                    120.0,
+                    "Press a key...",
                 );
-                let parsed = parse_keybind(&ptt_text);
-                if parsed != s.hotkeys.ptt {
-                    s.hotkeys.ptt = parsed;
-                    dirty = true;
-                }
             });
             ui.horizontal(|ui: &mut egui::Ui| {
                 ui.label("Release Delay:");
@@ -1255,29 +1305,6 @@ fn page_hotkeys(ui: &mut egui::Ui, s: &mut AppSettings) -> bool {
                         .color(theme::text_color()),
                 );
 
-                let mut text = match binding.action {
-                    crate::ui::model::HotkeyAction::ToggleMute => {
-                        keybind_to_string(s.hotkeys.toggle_mute)
-                    }
-                    crate::ui::model::HotkeyAction::ToggleDeafen => {
-                        keybind_to_string(s.hotkeys.toggle_deafen)
-                    }
-                    crate::ui::model::HotkeyAction::PushToTalk => keybind_to_string(s.hotkeys.ptt),
-                    crate::ui::model::HotkeyAction::ToggleScreenShare => {
-                        keybind_to_string(s.hotkeys.toggle_screen_share)
-                    }
-                    crate::ui::model::HotkeyAction::ToggleVideo => {
-                        keybind_to_string(s.hotkeys.toggle_video)
-                    }
-                    crate::ui::model::HotkeyAction::FocusChat
-                    | crate::ui::model::HotkeyAction::Disconnect => String::new(),
-                };
-                ui.add(
-                    egui::TextEdit::singleline(&mut text)
-                        .desired_width(140.0)
-                        .hint_text("Key combo"),
-                );
-                let parsed = parse_keybind(&text);
                 let slot = match binding.action {
                     crate::ui::model::HotkeyAction::ToggleMute => &mut s.hotkeys.toggle_mute,
                     crate::ui::model::HotkeyAction::ToggleDeafen => &mut s.hotkeys.toggle_deafen,
@@ -1293,10 +1320,8 @@ fn page_hotkeys(ui: &mut egui::Ui, s: &mut AppSettings) -> bool {
                         continue;
                     }
                 };
-                if *slot != parsed {
-                    *slot = parsed;
-                    dirty = true;
-                }
+                let id = ui.make_persistent_id(("hotkey_capture", binding.action));
+                dirty |= keybind_capture_edit(ui, id, slot, 140.0, "Press keys");
 
                 let mut enabled = slot.is_some();
                 if ui.checkbox(&mut enabled, "").changed() {
