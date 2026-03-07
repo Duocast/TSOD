@@ -98,21 +98,26 @@ pub fn channel_route_key(channel_id: ChannelId) -> u32 {
 #[derive(Clone)]
 pub struct SessionMap {
     inner: Arc<DashMap<(UserId, String), Arc<SessionSendCtx>>>,
+    user_index: Arc<DashMap<UserId, HashSet<String>>>,
 }
 
 impl SessionMap {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(DashMap::new()),
+            user_index: Arc::new(DashMap::new()),
         }
     }
 
     pub fn register(&self, user: UserId, session_id: &str, tx: Arc<SessionSendCtx>) {
-        self.inner.insert((user, session_id.to_string()), tx);
+        let session_id = session_id.to_string();
+        self.inner.insert((user, session_id.clone()), tx);
+        self.user_index.entry(user).or_default().insert(session_id);
     }
 
     pub fn unregister(&self, user: UserId, session_id: &str) {
         self.inner.remove(&(user, session_id.to_string()));
+        self.remove_from_user_index(user, session_id);
     }
 
     pub fn unregister_by_session_id(&self, session_id: &str) {
@@ -124,6 +129,17 @@ impl SessionMap {
             .collect::<Vec<_>>();
         for key in keys {
             self.inner.remove(&key);
+            self.remove_from_user_index(key.0, &key.1);
+        }
+    }
+
+    fn remove_from_user_index(&self, user: UserId, session_id: &str) {
+        if let Some(mut sessions) = self.user_index.get_mut(&user) {
+            sessions.remove(session_id);
+            if sessions.is_empty() {
+                drop(sessions);
+                self.user_index.remove(&user);
+            }
         }
     }
 
@@ -169,16 +185,20 @@ impl SessionMap {
 #[async_trait::async_trait]
 impl SessionRegistry for SessionMap {
     async fn get_sessions(&self, user: UserId) -> Vec<(String, Arc<dyn DatagramTx>)> {
-        self.inner
-            .iter()
-            .filter(|entry| entry.key().0 == user)
-            .map(|entry| {
-                (
-                    entry.key().1.clone(),
-                    entry.value().clone() as Arc<dyn DatagramTx>,
-                )
-            })
-            .collect()
+        let Some(indexed_sessions) = self.user_index.get(&user) else {
+            return Vec::new();
+        };
+
+        let session_ids = indexed_sessions.iter().cloned().collect::<Vec<_>>();
+        drop(indexed_sessions);
+
+        let mut sessions = Vec::with_capacity(session_ids.len());
+        for session_id in session_ids {
+            if let Some(entry) = self.inner.get(&(user, session_id.clone())) {
+                sessions.push((session_id, entry.value().clone() as Arc<dyn DatagramTx>));
+            }
+        }
+        sessions
     }
 }
 
@@ -403,14 +423,10 @@ impl ViewerProvider for MembershipCache {
 
 #[cfg(test)]
 mod tests {
-    use super::{MembershipCache, PushHub, SessionMap};
+    use super::{MembershipCache, PushHub};
     use crate::proto::voiceplatform::v1 as pb;
-    use anyhow::Result;
-    use bytes::Bytes;
-    use std::sync::Arc;
     use tokio::sync::mpsc;
     use vp_control::ids::{ChannelId, UserId};
-    use vp_media::voice_forwarder::SessionRegistry;
 
     #[tokio::test]
     async fn pushhub_sends_to_all_sessions_for_same_user() {
@@ -486,6 +502,52 @@ mod tests {
             .members_of(channel)
             .expect("channel should exist in cache");
         assert!(members.is_empty());
+    }
+
+    #[test]
+    fn session_user_index_lifecycle_multi_session_and_reconnect() {
+        let sessions = super::SessionMap::new();
+        let user = UserId(uuid::Uuid::new_v4());
+        let s1 = "s1".to_string();
+        let s2 = "s2".to_string();
+
+        sessions
+            .user_index
+            .entry(user)
+            .or_default()
+            .insert(s1.clone());
+        sessions
+            .user_index
+            .entry(user)
+            .or_default()
+            .insert(s2.clone());
+        // reconnect of the same session id should not duplicate entries
+        sessions
+            .user_index
+            .entry(user)
+            .or_default()
+            .insert(s1.clone());
+
+        let ids = sessions
+            .user_index
+            .get(&user)
+            .map(|set| set.clone())
+            .unwrap_or_default();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains("s1"));
+        assert!(ids.contains("s2"));
+
+        sessions.remove_from_user_index(user, "s1");
+        let ids = sessions
+            .user_index
+            .get(&user)
+            .map(|set| set.clone())
+            .unwrap_or_default();
+        assert_eq!(ids.len(), 1);
+        assert!(ids.contains("s2"));
+
+        sessions.remove_from_user_index(user, "s2");
+        assert!(sessions.user_index.get(&user).is_none());
     }
 }
 

@@ -45,6 +45,18 @@ impl VoiceMetrics for GatewayVoiceMetrics {
     fn inc_forwarded(&self, fanout: usize) {
         self.inner.forwarded(fanout);
     }
+    fn observe_session_lookup_us(&self, micros: u64) {
+        self.inner.session_lookup_us(micros);
+    }
+    fn observe_recipient_enumeration_us(&self, micros: u64) {
+        self.inner.recipient_enumeration_us(micros);
+    }
+    fn observe_packet_fanout_us(&self, micros: u64) {
+        self.inner.packet_fanout_us(micros);
+    }
+    fn observe_handle_incoming_us(&self, micros: u64) {
+        self.inner.handle_incoming_us(micros);
+    }
 }
 
 impl DatagramSendPolicyMetrics for GatewayVoiceMetrics {
