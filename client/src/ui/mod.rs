@@ -4,13 +4,12 @@ pub mod model;
 pub mod sfx;
 pub mod widgets;
 
-pub use model::{ConnectionStage, UiEvent, UiIntent, UiModel};
+pub use model::{UiEvent, UiIntent, UiModel};
 
 use anyhow::Result;
 use crossbeam_channel::{Receiver, Sender};
-use iced::alignment::Horizontal;
 use iced::widget::{button, column, container, row, scrollable, text, text_input};
-use iced::{executor, time, Application, Command, Element, Length, Settings, Subscription, Theme};
+use iced::{time, Center, Element, Fill, Subscription, Task};
 use std::time::{Duration, Instant};
 
 use crate::BUILD_VERSION;
@@ -23,12 +22,6 @@ enum Message {
     NickChanged(String),
     ConnectPressed,
     ToggleConnections,
-}
-
-#[derive(Clone)]
-pub struct AppFlags {
-    pub tx_intent: Sender<UiIntent>,
-    pub rx_event: Receiver<UiEvent>,
 }
 
 pub struct VpApp {
@@ -44,6 +37,17 @@ impl Drop for VpApp {
 }
 
 impl VpApp {
+    fn new(tx_intent: Sender<UiIntent>, rx_event: Receiver<UiEvent>) -> (Self, Task<Message>) {
+        (
+            Self {
+                model: UiModel::default(),
+                tx_intent,
+                rx_event,
+            },
+            Task::none(),
+        )
+    }
+
     fn drain_events(&mut self) {
         while let Ok(ev) = self.rx_event.try_recv() {
             self.model.apply_event(ev);
@@ -76,30 +80,12 @@ impl VpApp {
             nickname,
         });
     }
-}
-
-impl Application for VpApp {
-    type Executor = executor::Default;
-    type Message = Message;
-    type Theme = Theme;
-    type Flags = AppFlags;
-
-    fn new(flags: Self::Flags) -> (Self, Command<Self::Message>) {
-        (
-            Self {
-                model: UiModel::default(),
-                tx_intent: flags.tx_intent,
-                rx_event: flags.rx_event,
-            },
-            Command::none(),
-        )
-    }
 
     fn title(&self) -> String {
         format!("TSOD {BUILD_VERSION}")
     }
 
-    fn update(&mut self, message: Self::Message) -> Command<Self::Message> {
+    fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Tick(_) => self.drain_events(),
             Message::HostChanged(v) => self.model.connection_host_draft = v,
@@ -111,10 +97,10 @@ impl Application for VpApp {
             }
         }
 
-        Command::none()
+        Task::none()
     }
 
-    fn view(&self) -> Element<Self::Message> {
+    fn view(&self) -> Element<Message> {
         let status = if self.model.connected {
             "Connected"
         } else {
@@ -129,7 +115,7 @@ impl Application for VpApp {
                 .on_press(Message::ToggleConnections)
         ]
         .spacing(16)
-        .align_items(iced::Alignment::Center);
+        .align_y(Center);
 
         let connection_panel = if self.model.show_connections {
             column![
@@ -155,35 +141,30 @@ impl Application for VpApp {
                 col.push(text(line).size(14))
             });
 
-        let content = column![header, connection_panel, scrollable(logs).height(Length::Fill)]
+        let content = column![header, connection_panel, scrollable(logs).height(Fill)]
             .spacing(12)
             .padding(16);
 
         container(content)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .align_x(Horizontal::Left)
+            .width(Fill)
+            .height(Fill)
             .into()
     }
 
-    fn subscription(&self) -> Subscription<Self::Message> {
+    fn subscription(&self) -> Subscription<Message> {
         time::every(Duration::from_millis(16)).map(Message::Tick)
     }
 }
 
 pub fn run_ui(tx_intent: Sender<UiIntent>, rx_event: Receiver<UiEvent>) -> Result<()> {
-    VpApp::run(Settings {
-        id: None,
-        window: iced::window::Settings {
+    iced::application(VpApp::title, VpApp::update, VpApp::view)
+        .subscription(VpApp::subscription)
+        .window(iced::window::Settings {
             size: iced::Size::new(1200.0, 800.0),
             min_size: Some(iced::Size::new(800.0, 500.0)),
             ..Default::default()
-        },
-        flags: AppFlags { tx_intent, rx_event },
-        default_font: Default::default(),
-        default_text_size: 16.0.into(),
-        antialiasing: true,
-        exit_on_close_request: true,
-    })?;
+        })
+        .antialiasing(true)
+        .run_with(move || VpApp::new(tx_intent, rx_event))?;
     Ok(())
 }
