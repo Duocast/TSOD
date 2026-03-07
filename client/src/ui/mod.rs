@@ -133,11 +133,11 @@ impl VpApp {
 
         let logs = self
             .model
-            .logs
+            .log
             .iter()
             .rev()
             .take(100)
-            .fold(column![text("Recent logs").size(20)], |col, line| {
+            .fold(column![text("Recent logs").size(20)], |col: iced::widget::Column<'_, Message>, line| {
                 col.push(text(line).size(14))
             });
 
@@ -157,7 +157,8 @@ impl VpApp {
 }
 
 pub fn run_ui(tx_intent: Sender<UiIntent>, rx_event: Receiver<UiEvent>) -> Result<()> {
-    iced::application(VpApp::title, VpApp::update, VpApp::view)
+    iced::application(move || VpApp::new(tx_intent, rx_event), VpApp::update, VpApp::view)
+        .title(VpApp::title)
         .subscription(VpApp::subscription)
         .window(iced::window::Settings {
             size: iced::Size::new(1200.0, 800.0),
@@ -165,6 +166,6 @@ pub fn run_ui(tx_intent: Sender<UiIntent>, rx_event: Receiver<UiEvent>) -> Resul
             ..Default::default()
         })
         .antialiasing(true)
-        .run_with(move || VpApp::new(tx_intent, rx_event))?;
+        .run()?;
     Ok(())
 }
