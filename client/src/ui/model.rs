@@ -1497,7 +1497,75 @@ pub fn enumerate_share_sources() -> Vec<ShareSourceOption> {
 
 #[cfg(not(target_os = "windows"))]
 pub fn enumerate_share_sources() -> Vec<ShareSourceOption> {
-    Vec::new()
+    #[cfg(target_os = "linux")]
+    {
+        use std::process::Command;
+
+        let mut sources = Vec::new();
+        let session_type = std::env::var("XDG_SESSION_TYPE")
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let is_wayland = session_type == "wayland" || std::env::var("WAYLAND_DISPLAY").is_ok();
+
+        if is_wayland {
+            sources.push(ShareSourceOption {
+                selection: ShareSourceSelection::LinuxPortal("portal-picker".to_string()),
+                title: "Share via system picker".to_string(),
+                subtitle: "Wayland (xdg-desktop-portal + PipeWire)".to_string(),
+                kind: ShareSourceKind::Screen,
+            });
+            return sources;
+        }
+
+        if let Ok(displays) = scrap::Display::all() {
+            for (idx, _) in displays.iter().enumerate() {
+                let n = idx + 1;
+                sources.push(ShareSourceOption {
+                    selection: ShareSourceSelection::LinuxPortal(format!("screen-{n}")),
+                    title: format!("Screen {n}"),
+                    subtitle: "X11 display".to_string(),
+                    kind: ShareSourceKind::Screen,
+                });
+            }
+        }
+
+        if let Ok(output) = Command::new("wmctrl").arg("-lx").output() {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for line in stdout.lines() {
+                    let mut parts = line.split_whitespace();
+                    let Some(window_hex) = parts.next() else {
+                        continue;
+                    };
+                    let Ok(window_id) =
+                        u64::from_str_radix(window_hex.trim_start_matches("0x"), 16)
+                    else {
+                        continue;
+                    };
+                    let title = line
+                        .splitn(5, ' ')
+                        .nth(4)
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or("Application window")
+                        .to_string();
+                    sources.push(ShareSourceOption {
+                        selection: ShareSourceSelection::X11Window(window_id),
+                        title,
+                        subtitle: "X11 window".to_string(),
+                        kind: ShareSourceKind::Window,
+                    });
+                }
+            }
+        }
+
+        return sources;
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        Vec::new()
+    }
 }
 
 // ── Main UI model ──────────────────────────────────────────────────────
