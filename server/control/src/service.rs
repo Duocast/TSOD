@@ -858,11 +858,23 @@ impl<R: ControlRepo> ControlService<R> {
         msg: SendMessage,
     ) -> ControlResult<ChatMessage> {
         let text = msg.text.trim();
-        if text.is_empty() {
-            return Err(ControlError::InvalidArgument("message text empty"));
-        }
         if text.len() > 2000 {
             return Err(ControlError::InvalidArgument("message too long"));
+        }
+
+        let requested_attachments = msg
+            .attachments
+            .unwrap_or_else(|| json!([]))
+            .as_array()
+            .cloned()
+            .ok_or(ControlError::InvalidArgument(
+                "attachments must be an array",
+            ))?;
+
+        if text.is_empty() && requested_attachments.is_empty() {
+            return Err(ControlError::InvalidArgument(
+                "message text and attachments empty",
+            ));
         }
 
         let mut tx = <R as ControlRepo>::tx(&self.repo).await?;
@@ -885,15 +897,6 @@ impl<R: ControlRepo> ControlService<R> {
         )
         .await?
         .ok_or(ControlError::NotFound("member"))?;
-
-        let requested_attachments = msg
-            .attachments
-            .unwrap_or_else(|| json!([]))
-            .as_array()
-            .cloned()
-            .ok_or(ControlError::InvalidArgument(
-                "attachments must be an array",
-            ))?;
 
         let mut canonical_attachments = Vec::with_capacity(requested_attachments.len());
         for requested in requested_attachments {
