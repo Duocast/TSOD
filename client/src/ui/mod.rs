@@ -26,6 +26,9 @@ use eframe::egui;
 
 use crate::BUILD_VERSION;
 
+const TSOD_LOGO: egui::ImageSource<'static> = egui::include_image!("../../assets/tsod-logo.svg");
+const THIRD_PARTY_LICENSES: &str = include_str!("../../assets/third_party_licenses.tsv");
+
 fn share_source_card(
     ui: &mut egui::Ui,
     selection: &model::ShareSourceSelection,
@@ -271,6 +274,9 @@ impl eframe::App for VpApp {
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("About").clicked() {
+                        self.model.show_about = true;
+                    }
                     if ui.button("Settings").clicked() {
                         if self.model.show_settings {
                             self.persist_settings_if_dirty();
@@ -378,6 +384,84 @@ impl eframe::App for VpApp {
             .show(ctx, |ui| {
                 panels::members::show(ui, &mut self.model, &self.tx_intent);
             });
+
+        if self.model.show_about {
+            let mut open = true;
+            egui::Window::new("About TSOD")
+                .constrain(false)
+                .open(&mut open)
+                .default_width(640.0)
+                .default_height(500.0)
+                .min_width(520.0)
+                .min_height(360.0)
+                .collapsible(false)
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.selectable_value(&mut self.model.about_tab, 0, "About");
+                        ui.selectable_value(&mut self.model.about_tab, 1, "Copyright");
+                    });
+                    ui.separator();
+
+                    match self.model.about_tab {
+                        0 => {
+                            ui.vertical_centered(|ui| {
+                                ui.add(
+                                    egui::Image::new(TSOD_LOGO)
+                                        .max_width(180.0)
+                                        .maintain_aspect_ratio(true),
+                                );
+                                ui.add_space(8.0);
+                                ui.heading("TSOD");
+                                ui.label(egui::RichText::new(format!("Version {BUILD_VERSION}")).monospace());
+                            });
+                            ui.add_space(10.0);
+                            ui.label("TSOD is a low-latency, TeamSpeak- and Discord-inspired voice collaboration client built for reliable channels, rich chat, permissions-aware moderation, and high quality audio/video communication across modern desktop environments.");
+                        }
+                        _ => {
+                            ui.label(
+                                egui::RichText::new(
+                                    "Third-party libraries and licenses used by this project:",
+                                )
+                                .small(),
+                            );
+                            ui.add_space(6.0);
+                            egui::ScrollArea::vertical()
+                                .auto_shrink([false; 2])
+                                .show(ui, |ui| {
+                                    egui::Grid::new("about_copyright_grid")
+                                        .striped(true)
+                                        .num_columns(3)
+                                        .show(ui, |ui| {
+                                            ui.strong("Library");
+                                            ui.strong("Version");
+                                            ui.strong("License");
+                                            ui.end_row();
+
+                                            for line in THIRD_PARTY_LICENSES.lines().skip(1) {
+                                                let mut cols = line.splitn(3, '\t');
+                                                let Some(name) = cols.next() else {
+                                                    continue;
+                                                };
+                                                let Some(version) = cols.next() else {
+                                                    continue;
+                                                };
+                                                let Some(license) = cols.next() else {
+                                                    continue;
+                                                };
+                                                ui.label(name);
+                                                ui.label(version);
+                                                ui.label(license);
+                                                ui.end_row();
+                                            }
+                                        });
+                                });
+                        }
+                    }
+                });
+            if !open {
+                self.model.show_about = false;
+            }
+        }
 
         // Settings window (floating, TS3-style Options dialog)
         if self.model.show_settings {
