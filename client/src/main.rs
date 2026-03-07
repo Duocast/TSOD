@@ -1,9 +1,9 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
-//! vp-client main — egui/eframe GUI + QUIC voice
+//! vp-client main — iced GUI + QUIC voice
 //!
 //! Architecture:
-//! - eframe runs the GUI event loop on the main thread
+//! - iced runs the GUI event loop on the main thread
 //! - A tokio runtime runs in a background thread for networking + audio
 //! - crossbeam channels bridge the GUI ↔ backend boundary
 //! - DSP pipeline (RNNoise, AGC, VAD) processes audio before encoding
@@ -47,7 +47,7 @@ use tracing::{debug, info, warn, Level};
 use tracing_subscriber::EnvFilter;
 use ui::model::AudioDeviceId;
 use ui::model::{AttachmentAsset, DspMethod, FecMode, PerUserAudioSettings, ShareSourceSelection};
-use ui::{UiEvent, UiIntent, VpApp};
+use ui::{UiEvent, UiIntent};
 
 #[cfg(debug_assertions)]
 static DEBUG_SEEN_AUTH_USER_IDS: OnceLock<StdMutex<HashSet<String>>> = OnceLock::new();
@@ -1054,35 +1054,6 @@ fn apply_resampler_mode(mode: DspMethod) {
     std::env::set_var("VP_AUDIO_RESAMPLER", mode.label());
 }
 
-fn select_gui_renderer() -> eframe::Renderer {
-    let default_renderer = eframe::Renderer::default();
-    match std::env::var("VP_GUI_RENDERER") {
-        Ok(value) => {
-            let normalized = value.trim().to_ascii_lowercase();
-            let alias = match normalized.as_str() {
-                "gl" | "opengl" => "glow",
-                "gpu" | "hardware" => "wgpu",
-                "auto" | "default" => "wgpu",
-                other => other,
-            };
-
-            match alias.parse::<eframe::Renderer>() {
-                Ok(renderer) => {
-                    info!("[gui] forcing {renderer} renderer via VP_GUI_RENDERER={value}");
-                    renderer
-                }
-                Err(_) => {
-                    warn!(
-                        "[gui] unsupported VP_GUI_RENDERER value '{value}'; falling back to renderer ({default_renderer})"
-                    );
-                    default_renderer
-                }
-            }
-        }
-        Err(_) => default_renderer,
-    }
-}
-
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env().add_directive(Level::INFO.into()))
@@ -1133,22 +1104,8 @@ fn main() -> Result<()> {
         });
     });
 
-    // Run the eframe GUI on the main thread
-    let native_options = eframe::NativeOptions {
-        renderer: select_gui_renderer(),
-        viewport: egui::ViewportBuilder::default()
-            .with_title("TSOD")
-            .with_inner_size([1200.0, 800.0])
-            .with_min_inner_size([800.0, 500.0])
-            .with_drag_and_drop(true),
-        ..Default::default()
-    };
-
-    let gui_result = eframe::run_native(
-        "TSOD",
-        native_options,
-        Box::new(move |cc| Ok(Box::new(VpApp::new(cc, tx_intent, rx_event)))),
-    );
+    // Run the iced GUI on the main thread
+    let gui_result = ui::run_ui(tx_intent, rx_event);
 
     // GUI exited — signal backend to shut down
     running.store(false, Ordering::Relaxed);
@@ -1158,7 +1115,7 @@ fn main() -> Result<()> {
     // Once the main thread returns, the process exits immediately.
     let _ = backend_thread;
 
-    gui_result.map_err(|e| anyhow!("eframe error: {e}"))
+    gui_result
 }
 
 // ── Backend task ───────────────────────────────────────────────────────
