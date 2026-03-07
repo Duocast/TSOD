@@ -489,6 +489,8 @@ fn build_screen_capture(source: &ShareSource) -> anyhow::Result<Box<dyn ScreenCa
 fn build_screen_encoder(codec: &str, _profile: &str) -> anyhow::Result<Box<dyn ScreenEncoder>> {
     match codec {
         "AV1" if cfg!(feature = "video-av1") => Ok(Box::new(Av1AvifEncoder::new())),
+        // TODO(video-vp9): replace AVIF-frame fallback with a realtime VP9 encoder.
+        "VP9" if cfg!(feature = "video-vp9") => Ok(Box::new(Av1AvifEncoder::new())),
         _ => Err(anyhow!("no screen encoder available for codec {codec}")),
     }
 }
