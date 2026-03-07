@@ -9,7 +9,10 @@ use tokio::{
 };
 use tracing::warn;
 use uuid::Uuid;
-use vp_control::ids::{ServerId, UserId};
+use vp_control::{
+    ids::{ChannelId, ServerId, UserId},
+    repo::is_user_in_channel,
+};
 
 use crate::{
     frame::{read_delimited, write_delimited},
@@ -97,7 +100,10 @@ impl MediaService {
             .value
             .clone();
         let channel_uuid = Uuid::parse_str(&channel_id).context("invalid channel id")?;
-        if !self.user_in_channel(channel_uuid, user_id.0).await? {
+        if !self
+            .user_in_channel(self.default_server_id.0, channel_uuid, user_id.0)
+            .await?
+        {
             return self.write_error(send, "not authorized for channel").await;
         }
         if init.size_bytes == 0 || init.size_bytes > self.max_upload_bytes {
@@ -216,7 +222,10 @@ impl MediaService {
         };
 
         let channel_id: Uuid = row.get("channel_id");
-        if !self.user_in_channel(channel_id, user_id.0).await? {
+        if !self
+            .user_in_channel(self.default_server_id.0, channel_id, user_id.0)
+            .await?
+        {
             return self.write_error(send, "not authorized").await;
         }
         let quarantined: bool = row.get("quarantined");
@@ -258,16 +267,19 @@ impl MediaService {
         Ok(())
     }
 
-    async fn user_in_channel(&self, channel_id: Uuid, user_id: Uuid) -> Result<bool> {
-        let exists = sqlx::query_scalar::<_, i64>(
-            "SELECT 1 FROM channel_members WHERE channel_id=$1 AND user_id=$2 LIMIT 1",
+    async fn user_in_channel(
+        &self,
+        server_id: Uuid,
+        channel_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<bool> {
+        Ok(is_user_in_channel(
+            &self.pool,
+            ServerId(server_id),
+            ChannelId(channel_id),
+            UserId(user_id),
         )
-        .bind(channel_id)
-        .bind(user_id)
-        .fetch_optional(&self.pool)
-        .await?
-        .is_some();
-        Ok(exists)
+        .await?)
     }
 
     async fn write_error(&self, send: &mut quinn::SendStream, message: &str) -> Result<()> {
