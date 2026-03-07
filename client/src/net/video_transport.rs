@@ -23,6 +23,7 @@ pub enum VideoSendError {
     FrameTooLarge,
 }
 
+#[derive(Clone, Copy)]
 pub enum VideoStreamProfile {
     P1080p60,
     P1440p60,
