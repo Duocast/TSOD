@@ -16,6 +16,31 @@ use crate::{
     perms::Decision,
 };
 
+pub async fn is_user_in_channel(
+    pool: &PgPool,
+    server: ServerId,
+    channel: ChannelId,
+    user: UserId,
+) -> ControlResult<bool> {
+    let exists = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT 1
+        FROM members
+        WHERE server_id = $1 AND channel_id = $2 AND user_id = $3
+        LIMIT 1
+        "#,
+    )
+    .bind(server.0)
+    .bind(channel.0)
+    .bind(user.0)
+    .fetch_optional(pool)
+    .await
+    .context("check channel membership")?
+    .is_some();
+
+    Ok(exists)
+}
+
 #[async_trait]
 pub trait ControlRepo: Send + Sync {
     async fn tx(&self) -> ControlResult<Transaction<'_, Postgres>>;
