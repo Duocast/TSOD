@@ -62,6 +62,10 @@ pub trait VoiceMetrics:
     fn inc_drop_talker_limit(&self);
     fn inc_drop_send_queue_full(&self);
     fn inc_forwarded(&self, fanout: usize);
+    fn observe_session_lookup_us(&self, micros: u64);
+    fn observe_recipient_enumeration_us(&self, micros: u64);
+    fn observe_packet_fanout_us(&self, micros: u64);
+    fn observe_handle_incoming_us(&self, micros: u64);
 }
 
 pub struct NoopMetrics;
@@ -75,6 +79,10 @@ impl VoiceMetrics for NoopMetrics {
     fn inc_drop_talker_limit(&self) {}
     fn inc_drop_send_queue_full(&self) {}
     fn inc_forwarded(&self, _fanout: usize) {}
+    fn observe_session_lookup_us(&self, _micros: u64) {}
+    fn observe_recipient_enumeration_us(&self, _micros: u64) {}
+    fn observe_packet_fanout_us(&self, _micros: u64) {}
+    fn observe_handle_incoming_us(&self, _micros: u64) {}
 }
 
 #[async_trait::async_trait]
@@ -177,6 +185,7 @@ impl VoiceForwarder {
     }
 
     pub async fn handle_incoming(&self, sender: UserId, datagram: Bytes) {
+        let handle_started = Instant::now();
         self.metrics.inc_rx_packets();
         self.metrics.inc_rx_bytes(datagram.len());
         if datagram.len() < self.cfg.min_datagram_bytes
@@ -222,8 +231,10 @@ impl VoiceForwarder {
             return;
         }
 
+        let recipients_started = Instant::now();
         let members = self.membership.list_members(channel).await;
         let mut recipients = Vec::new();
+        let session_lookup_started = Instant::now();
         for uid in members {
             if uid == sender || self.membership.is_deafened(channel, uid).await {
                 continue;
@@ -236,16 +247,26 @@ impl VoiceForwarder {
                     .map(|(_, s)| s),
             );
         }
+        self.metrics
+            .observe_session_lookup_us(session_lookup_started.elapsed().as_micros() as u64);
+        self.metrics
+            .observe_recipient_enumeration_us(recipients_started.elapsed().as_micros() as u64);
 
         let now = now_ms();
+        let fanout_started = Instant::now();
+        let mut packet_by_wire_max = HashMap::<usize, Option<Bytes>>::new();
         let mut forwarded = 0;
         for sess in recipients {
             let max_wire = sess
                 .max_datagram_size()
                 .unwrap_or(vp_voice::QUIC_MAX_DATAGRAM_BYTES);
-            if let Some(outbound) =
-                build_forwarded_voice_datagram(max_wire, &parsed, sender, channel, &datagram)
-            {
+            let outbound = packet_by_wire_max
+                .entry(max_wire)
+                .or_insert_with(|| {
+                    build_forwarded_voice_datagram(max_wire, &parsed, sender, channel, &datagram)
+                })
+                .clone();
+            if let Some(outbound) = outbound {
                 debug_assert!(outbound.len() <= max_wire);
                 sess.send_voice(
                     now,
@@ -261,6 +282,10 @@ impl VoiceForwarder {
                 );
             }
         }
+        self.metrics
+            .observe_packet_fanout_us(fanout_started.elapsed().as_micros() as u64);
+        self.metrics
+            .observe_handle_incoming_us(handle_started.elapsed().as_micros() as u64);
         self.metrics.inc_forwarded(forwarded);
     }
 
@@ -467,6 +492,166 @@ fn _log_forward_failures(failure_count: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        collections::HashSet,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Mutex,
+        },
+    };
+
+    #[derive(Default)]
+    struct TestMetrics {
+        forwarded: AtomicUsize,
+        invalid: AtomicUsize,
+        muted: AtomicUsize,
+        talker_limit: AtomicUsize,
+        oversize: AtomicUsize,
+        session_lookup_samples: AtomicUsize,
+        recipient_samples: AtomicUsize,
+        fanout_samples: AtomicUsize,
+        incoming_samples: AtomicUsize,
+    }
+
+    impl VoiceMetrics for TestMetrics {
+        fn inc_rx_packets(&self) {}
+        fn inc_rx_bytes(&self, _n: usize) {}
+        fn inc_drop_invalid(&self) {
+            self.invalid.fetch_add(1, Ordering::Relaxed);
+        }
+        fn inc_drop_rate_limited(&self) {}
+        fn inc_drop_not_member(&self) {}
+        fn inc_drop_muted(&self) {
+            self.muted.fetch_add(1, Ordering::Relaxed);
+        }
+        fn inc_drop_talker_limit(&self) {
+            self.talker_limit.fetch_add(1, Ordering::Relaxed);
+        }
+        fn inc_drop_send_queue_full(&self) {}
+        fn inc_forwarded(&self, fanout: usize) {
+            self.forwarded.fetch_add(fanout, Ordering::Relaxed);
+        }
+        fn observe_session_lookup_us(&self, _micros: u64) {
+            self.session_lookup_samples.fetch_add(1, Ordering::Relaxed);
+        }
+        fn observe_recipient_enumeration_us(&self, _micros: u64) {
+            self.recipient_samples.fetch_add(1, Ordering::Relaxed);
+        }
+        fn observe_packet_fanout_us(&self, _micros: u64) {
+            self.fanout_samples.fetch_add(1, Ordering::Relaxed);
+        }
+        fn observe_handle_incoming_us(&self, _micros: u64) {
+            self.incoming_samples.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    impl crate::datagram_send_policy::DatagramSendPolicyMetrics for TestMetrics {
+        fn inc_no_datagrams(&self) {}
+        fn inc_oversize_drop(&self) {
+            self.oversize.fetch_add(1, Ordering::Relaxed);
+        }
+        fn inc_conn_lost(&self) {}
+        fn inc_send_err_other(&self) {}
+        fn inc_prune_evt_dropped(&self) {}
+        fn inc_video_dropped_due_to_space(&self) {}
+    }
+
+    struct TestMembership {
+        channel: ChannelId,
+        members: Vec<UserId>,
+        muted: HashSet<UserId>,
+        deafened: HashSet<UserId>,
+        max_talkers: usize,
+    }
+
+    #[async_trait::async_trait]
+    impl MembershipProvider for TestMembership {
+        async fn resolve_channel_for_sender(
+            &self,
+            sender: UserId,
+            _route_key: u32,
+        ) -> Option<ChannelId> {
+            self.members.contains(&sender).then_some(self.channel)
+        }
+
+        async fn list_members(&self, _channel: ChannelId) -> Vec<UserId> {
+            self.members.clone()
+        }
+
+        async fn is_muted(&self, _channel: ChannelId, sender: UserId) -> bool {
+            self.muted.contains(&sender)
+        }
+
+        async fn is_deafened(&self, _channel: ChannelId, user: UserId) -> bool {
+            self.deafened.contains(&user)
+        }
+
+        async fn max_talkers(&self, _channel: ChannelId) -> usize {
+            self.max_talkers
+        }
+    }
+
+    struct TestTx {
+        session_id: String,
+        max_wire: Option<usize>,
+        sent: Arc<Mutex<Vec<Bytes>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl DatagramTx for TestTx {
+        async fn send(&self, _bytes: Bytes) -> Result<()> {
+            Ok(())
+        }
+        fn session_id(&self) -> &str {
+            &self.session_id
+        }
+        fn max_datagram_size(&self) -> Option<usize> {
+            self.max_wire
+        }
+        fn send_voice(
+            &self,
+            _now_ms: u64,
+            _channel_id: ChannelId,
+            pkt: Bytes,
+            _prune_tx: &mpsc::Sender<()>,
+            _metrics: &dyn crate::datagram_send_policy::DatagramSendPolicyMetrics,
+        ) {
+            self.sent.lock().expect("test tx lock poisoned").push(pkt);
+        }
+        fn send_video_best_effort(
+            &self,
+            _now_ms: u64,
+            _channel_id: ChannelId,
+            _pkt: Bytes,
+            _prune_tx: &mpsc::Sender<()>,
+            _metrics: &dyn crate::datagram_send_policy::DatagramSendPolicyMetrics,
+        ) {
+        }
+    }
+
+    #[derive(Default)]
+    struct TestSessions {
+        sessions: HashMap<UserId, Vec<(String, Arc<dyn DatagramTx>)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl SessionRegistry for TestSessions {
+        async fn get_sessions(&self, user: UserId) -> Vec<(String, Arc<dyn DatagramTx>)> {
+            self.sessions.get(&user).cloned().unwrap_or_default()
+        }
+    }
+
+    fn make_voice_datagram(channel_route: u32, vad: bool) -> Bytes {
+        let mut bytes = BytesMut::new();
+        bytes.extend_from_slice(&[1, if vad { 0x01 } else { 0x00 }]);
+        bytes.put_u16(vp_voice::CLIENT_VOICE_HEADER_BYTES as u16);
+        bytes.put_u32(channel_route);
+        bytes.put_u32(2);
+        bytes.put_u32(3);
+        bytes.put_u32(4);
+        bytes.extend_from_slice(&[7; 64]);
+        bytes.freeze()
+    }
 
     #[test]
     fn build_forwarded_voice_respects_max() {
@@ -496,5 +681,187 @@ mod tests {
             &datagram
         )
         .is_some());
+    }
+
+    #[tokio::test]
+    async fn forwards_to_all_eligible_sessions_without_duplicates() {
+        let channel = ChannelId::new();
+        let sender = UserId::new();
+        let r1 = UserId::new();
+        let r2 = UserId::new();
+        let membership = Arc::new(TestMembership {
+            channel,
+            members: vec![sender, r1, r2],
+            muted: HashSet::new(),
+            deafened: HashSet::new(),
+            max_talkers: 10,
+        });
+
+        let r1s1 = Arc::new(TestTx {
+            session_id: "r1s1".to_string(),
+            max_wire: None,
+            sent: Arc::new(Mutex::new(Vec::new())),
+        });
+        let r1s2 = Arc::new(TestTx {
+            session_id: "r1s2".to_string(),
+            max_wire: None,
+            sent: Arc::new(Mutex::new(Vec::new())),
+        });
+        let r2s1 = Arc::new(TestTx {
+            session_id: "r2s1".to_string(),
+            max_wire: None,
+            sent: Arc::new(Mutex::new(Vec::new())),
+        });
+
+        let sessions = Arc::new(TestSessions {
+            sessions: HashMap::from([
+                (
+                    r1,
+                    vec![
+                        ("r1s1".into(), r1s1.clone() as Arc<dyn DatagramTx>),
+                        ("r1s2".into(), r1s2.clone() as Arc<dyn DatagramTx>),
+                    ],
+                ),
+                (
+                    r2,
+                    vec![("r2s1".into(), r2s1.clone() as Arc<dyn DatagramTx>)],
+                ),
+            ]),
+        });
+
+        let metrics = Arc::new(TestMetrics::default());
+        let (prune_tx, _prune_rx) = mpsc::channel(4);
+        let forwarder = VoiceForwarder::new(
+            VoiceForwarderConfig::default(),
+            sessions,
+            membership,
+            metrics.clone(),
+            prune_tx,
+        );
+
+        forwarder
+            .handle_incoming(sender, make_voice_datagram(1, true))
+            .await;
+
+        assert_eq!(r1s1.sent.lock().unwrap().len(), 1);
+        assert_eq!(r1s2.sent.lock().unwrap().len(), 1);
+        assert_eq!(r2s1.sent.lock().unwrap().len(), 1);
+        assert_eq!(metrics.forwarded.load(Ordering::Relaxed), 3);
+        assert_eq!(metrics.session_lookup_samples.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.recipient_samples.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.fanout_samples.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.incoming_samples.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn preserves_muted_and_talker_limit_behavior() {
+        let channel = ChannelId::new();
+        let sender_a = UserId::new();
+        let sender_b = UserId::new();
+        let sender_c = UserId::new();
+        let listener = UserId::new();
+        let membership = Arc::new(TestMembership {
+            channel,
+            members: vec![sender_a, sender_b, sender_c, listener],
+            muted: HashSet::from([sender_a]),
+            deafened: HashSet::new(),
+            max_talkers: 1,
+        });
+        let ltx = Arc::new(TestTx {
+            session_id: "listener".to_string(),
+            max_wire: None,
+            sent: Arc::new(Mutex::new(Vec::new())),
+        });
+        let sessions = Arc::new(TestSessions {
+            sessions: HashMap::from([(
+                listener,
+                vec![("listener".into(), ltx as Arc<dyn DatagramTx>)],
+            )]),
+        });
+        let metrics = Arc::new(TestMetrics::default());
+        let (prune_tx, _prune_rx) = mpsc::channel(4);
+        let mut cfg = VoiceForwarderConfig::default();
+        cfg.vad_required_for_talker = true;
+        let forwarder = VoiceForwarder::new(cfg, sessions, membership, metrics.clone(), prune_tx);
+
+        forwarder
+            .handle_incoming(sender_a, make_voice_datagram(1, true))
+            .await;
+        forwarder
+            .handle_incoming(sender_b, make_voice_datagram(1, true))
+            .await;
+        forwarder
+            .handle_incoming(sender_c, make_voice_datagram(1, true))
+            .await;
+
+        assert_eq!(metrics.muted.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.talker_limit.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn load_style_50_member_multi_session_fanout() {
+        let channel = ChannelId::new();
+        let sender = UserId::new();
+        let mut members = vec![sender];
+        let mut sessions_map = HashMap::<UserId, Vec<(String, Arc<dyn DatagramTx>)>>::new();
+        let mut recipients = Vec::new();
+
+        for idx in 0..49 {
+            let user = UserId::new();
+            members.push(user);
+            recipients.push(user);
+            let s1 = Arc::new(TestTx {
+                session_id: format!("{idx}-a"),
+                max_wire: Some(vp_voice::QUIC_MAX_DATAGRAM_BYTES),
+                sent: Arc::new(Mutex::new(Vec::new())),
+            }) as Arc<dyn DatagramTx>;
+            let s2 = Arc::new(TestTx {
+                session_id: format!("{idx}-b"),
+                max_wire: Some(vp_voice::APP_MEDIA_MTU),
+                sent: Arc::new(Mutex::new(Vec::new())),
+            }) as Arc<dyn DatagramTx>;
+            sessions_map.insert(
+                user,
+                vec![(format!("{idx}-a"), s1), (format!("{idx}-b"), s2)],
+            );
+        }
+
+        let membership = Arc::new(TestMembership {
+            channel,
+            members,
+            muted: HashSet::new(),
+            deafened: HashSet::new(),
+            max_talkers: 10,
+        });
+        let sessions = Arc::new(TestSessions {
+            sessions: sessions_map,
+        });
+        let metrics = Arc::new(TestMetrics::default());
+        let (prune_tx, _prune_rx) = mpsc::channel(8);
+        let forwarder = VoiceForwarder::new(
+            VoiceForwarderConfig::default(),
+            sessions,
+            membership,
+            metrics.clone(),
+            prune_tx,
+        );
+
+        let start = Instant::now();
+        for _ in 0..100 {
+            forwarder
+                .handle_incoming(sender, make_voice_datagram(1, true))
+                .await;
+        }
+        let elapsed = start.elapsed();
+        println!(
+            "load-style fanout: 100 packets to {} sessions in {:?}",
+            recipients.len() * 2,
+            elapsed
+        );
+
+        let expected_fanout = recipients.len() * 2 * 100;
+        assert_eq!(metrics.forwarded.load(Ordering::Relaxed), expected_fanout);
+        assert_eq!(metrics.invalid.load(Ordering::Relaxed), 0);
+        assert!(elapsed < Duration::from_secs(5));
     }
 }

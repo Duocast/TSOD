@@ -11,6 +11,10 @@ pub struct VoiceMetricsImpl {
     drops_name: &'static str,
     send_queue_drops_name: &'static str,
     rx_by_channel_name: &'static str,
+    session_lookup_us_name: &'static str,
+    recipient_enumeration_us_name: &'static str,
+    packet_fanout_us_name: &'static str,
+    handle_incoming_us_name: &'static str,
     policy: LabelPolicy,
 }
 
@@ -31,6 +35,18 @@ impl VoiceMetricsImpl {
             ),
             rx_by_channel_name: Box::leak(
                 format!("{namespace}_voice_rx_packets_by_channel_total").into_boxed_str(),
+            ),
+            session_lookup_us_name: Box::leak(
+                format!("{namespace}_voice_session_lookup_us").into_boxed_str(),
+            ),
+            recipient_enumeration_us_name: Box::leak(
+                format!("{namespace}_voice_recipient_enumeration_us").into_boxed_str(),
+            ),
+            packet_fanout_us_name: Box::leak(
+                format!("{namespace}_voice_packet_fanout_us").into_boxed_str(),
+            ),
+            handle_incoming_us_name: Box::leak(
+                format!("{namespace}_voice_handle_incoming_us").into_boxed_str(),
             ),
             policy,
         }
@@ -71,6 +87,26 @@ impl VoiceMetricsImpl {
         )
         .increment(1);
     }
+
+    #[inline]
+    pub fn session_lookup_us(&self, micros: u64) {
+        histogram!(self.session_lookup_us_name).record(micros as f64);
+    }
+
+    #[inline]
+    pub fn recipient_enumeration_us(&self, micros: u64) {
+        histogram!(self.recipient_enumeration_us_name).record(micros as f64);
+    }
+
+    #[inline]
+    pub fn packet_fanout_us(&self, micros: u64) {
+        histogram!(self.packet_fanout_us_name).record(micros as f64);
+    }
+
+    #[inline]
+    pub fn handle_incoming_us(&self, micros: u64) {
+        histogram!(self.handle_incoming_us_name).record(micros as f64);
+    }
 }
 
 /// Adapter implementing the `VoiceMetrics` trait used by voice_forwarder.rs
@@ -90,6 +126,10 @@ pub mod adapter {
         fn inc_drop_talker_limit(&self);
         fn inc_drop_send_queue_full(&self);
         fn inc_forwarded(&self, fanout: usize);
+        fn observe_session_lookup_us(&self, micros: u64);
+        fn observe_recipient_enumeration_us(&self, micros: u64);
+        fn observe_packet_fanout_us(&self, micros: u64);
+        fn observe_handle_incoming_us(&self, micros: u64);
     }
 
     impl VoiceMetrics for VoiceMetricsImpl {
@@ -119,6 +159,18 @@ pub mod adapter {
         }
         fn inc_forwarded(&self, fanout: usize) {
             self.forwarded(fanout);
+        }
+        fn observe_session_lookup_us(&self, micros: u64) {
+            self.session_lookup_us(micros);
+        }
+        fn observe_recipient_enumeration_us(&self, micros: u64) {
+            self.recipient_enumeration_us(micros);
+        }
+        fn observe_packet_fanout_us(&self, micros: u64) {
+            self.packet_fanout_us(micros);
+        }
+        fn observe_handle_incoming_us(&self, micros: u64) {
+            self.handle_incoming_us(micros);
         }
     }
 }
