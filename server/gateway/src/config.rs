@@ -63,8 +63,8 @@ pub struct Config {
     #[arg(long, default_value_t = 30)]
     pub outbox_claim_ttl_s: i64,
 
-    /// Dev mode: accept dev token "dev"
-    #[arg(long, default_value_t = true)]
+    /// Dev mode: accept dev token "dev" (NEVER enable in production)
+    #[arg(long, default_value_t = default_dev_mode())]
     pub dev_mode: bool,
 
     /// Max concurrent connections (soft limit)
