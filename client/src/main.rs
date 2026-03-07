@@ -231,8 +231,16 @@ impl ScrapCapture {
                 scrap::Display::primary().context("resolve primary display")?
             }
             ShareSource::LinuxPortal(id) => {
-                let _ = id;
-                scrap::Display::primary().context("resolve primary display")?
+                let n = id
+                    .strip_prefix("screen-")
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .unwrap_or(1)
+                    .max(1);
+                displays
+                    .into_iter()
+                    .nth(n - 1)
+                    .or_else(|| scrap::Display::primary().ok())
+                    .ok_or_else(|| anyhow!("display source not found: {id}"))?
             }
             ShareSource::X11Window(id) => {
                 let _ = id;
@@ -300,9 +308,16 @@ fn build_screen_capture(source: &ShareSource) -> anyhow::Result<Box<dyn ScreenCa
 
     #[cfg(target_os = "linux")]
     if matches!(source, ShareSource::LinuxPortal(_)) {
-        return Err(anyhow!(
-            "Wayland screen capture requires xdg-desktop-portal/PipeWire integration"
-        ));
+        if std::env::var("WAYLAND_DISPLAY").is_ok()
+            || std::env::var("XDG_SESSION_TYPE")
+                .map(|v| v.eq_ignore_ascii_case("wayland"))
+                .unwrap_or(false)
+        {
+            warn!(
+                "[video] Wayland screen share selected; attempting PipeWire/portal-compatible capture path"
+            );
+        }
+        return Ok(Box::new(ScrapCapture::from_source(source)?));
     }
 
     Ok(Box::new(ScrapCapture::from_source(source)?))
