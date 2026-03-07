@@ -1,7 +1,7 @@
 //! Chat panel: message display, input bar, typing indicators, Discord-like drag overlay.
 
 use crate::ui::model::{
-    AttachmentData, ChannelType, ChatMessage, PendingAttachment, UiIntent, UiModel,
+    AttachmentAsset, AttachmentData, ChannelType, ChatMessage, PendingAttachment, UiIntent, UiModel,
 };
 use crate::ui::theme;
 use crate::ui::widgets::cosmic_chat_composer::ComposerFormatAction;
@@ -708,7 +708,7 @@ fn send_chat_from_input(model: &mut UiModel, tx_intent: &Sender<UiIntent>) {
         .pending_attachments
         .iter()
         .map(|a| AttachmentData {
-            asset_id: a.path.clone(),
+            asset: AttachmentAsset::PendingLocalPath(a.path.clone().into()),
             filename: a.filename.clone(),
             mime_type: a.mime_type.clone(),
             size_bytes: a.size_bytes,

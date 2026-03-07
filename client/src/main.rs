@@ -46,7 +46,7 @@ use tokio::time::{sleep, Duration, Instant, MissedTickBehavior};
 use tracing::{debug, info, warn, Level};
 use tracing_subscriber::EnvFilter;
 use ui::model::AudioDeviceId;
-use ui::model::{DspMethod, FecMode, PerUserAudioSettings, ShareSourceSelection};
+use ui::model::{AttachmentAsset, DspMethod, FecMode, PerUserAudioSettings, ShareSourceSelection};
 use ui::{UiEvent, UiIntent, VpApp};
 
 #[cfg(debug_assertions)]
@@ -2231,10 +2231,9 @@ async fn connect_and_run_session(
                                         .attachments
                                         .into_iter()
                                         .map(|a| ui::model::AttachmentData {
-                                            asset_id: a
-                                                .asset_id
-                                                .map(|x| x.value)
-                                                .unwrap_or_default(),
+                                            asset: AttachmentAsset::UploadedAssetId(
+                                                a.asset_id.map(|x| x.value).unwrap_or_default(),
+                                            ),
                                             filename: a.filename,
                                             mime_type: a.mime_type,
                                             size_bytes: a.size_bytes,
@@ -2244,7 +2243,10 @@ async fn connect_and_run_session(
                                         .collect();
 
                                     for attachment in &mut attachments {
-                                        if attachment.asset_id.is_empty() {
+                                        if !matches!(
+                                            &attachment.asset,
+                                            AttachmentAsset::UploadedAssetId(ref asset_id) if !asset_id.is_empty()
+                                        ) {
                                             continue;
                                         }
                                         if let Ok(path) =
@@ -3086,22 +3088,20 @@ async fn connect_and_run_session(
                                 let mut upload_failed = false;
                                 for attachment in &attachments {
                                     let result: anyhow::Result<()> = async {
-                                        if attachment.asset_id.starts_with('/') {
-                                            let uploaded = upload_attachment_quic(
-                                                &conn,
-                                                ch,
-                                                attachment,
-                                            )
-                                            .await?;
-                                            uploaded_attachments.push(uploaded);
-                                        } else {
-                                            uploaded_attachments.push(attachment.clone());
+                                        match &attachment.asset {
+                                            AttachmentAsset::PendingLocalPath(_) => {
+                                                let uploaded = upload_attachment_quic(&conn, ch, attachment).await?;
+                                                uploaded_attachments.push(uploaded);
+                                            }
+                                            AttachmentAsset::UploadedAssetId(_) => {
+                                                uploaded_attachments.push(attachment.clone());
+                                            }
                                         }
                                         Ok(())
                                     }.await;
                                     if let Err(e) = result {
                                         let _ = tx_event.send(UiEvent::AttachmentUploadError {
-                                            path: attachment.asset_id.clone(),
+                                            path: attachment_source_label(attachment),
                                             error: e.to_string(),
                                         });
                                         let _ = tx_event.send(UiEvent::AppendLog(format!("[upload] failed: {e:#}")));
@@ -3133,13 +3133,23 @@ async fn connect_and_run_session(
                                 let _ = tx_event.send(UiEvent::PlayChatMessageSfx);
                                 let pb_attachments = uploaded_attachments
                                     .into_iter()
-                                    .map(|a| pb::AttachmentRef {
-                                        asset_id: Some(pb::AssetId { value: a.asset_id }),
-                                        filename: a.filename,
-                                        mime_type: a.mime_type,
-                                        size_bytes: a.size_bytes,
-                                        sha256: String::new(),
-                                        ..Default::default()
+                                    .filter_map(|a| {
+                                        let asset_id = match a.asset {
+                                            AttachmentAsset::UploadedAssetId(asset_id)
+                                                if !asset_id.is_empty() =>
+                                            {
+                                                asset_id
+                                            }
+                                            _ => return None,
+                                        };
+                                        Some(pb::AttachmentRef {
+                                            asset_id: Some(pb::AssetId { value: asset_id }),
+                                            filename: a.filename,
+                                            mime_type: a.mime_type,
+                                            size_bytes: a.size_bytes,
+                                            sha256: String::new(),
+                                            ..Default::default()
+                                        })
                                     })
                                     .collect();
                                 if let Err(e) = dispatcher.send_chat(ch, &text, pb_attachments).await {
@@ -4416,9 +4426,10 @@ async fn upload_attachment_quic(
     use tokio::io::AsyncReadExt;
 
     let (mut send, mut recv) = conn.open_bi().await.context("open media stream")?;
-    let mut file = tokio::fs::File::open(&attachment.asset_id)
+    let local_path = pending_local_path(attachment)?;
+    let mut file = tokio::fs::File::open(&local_path)
         .await
-        .with_context(|| format!("open attachment: {}", attachment.asset_id))?;
+        .with_context(|| format!("open attachment: {}", local_path.display()))?;
     let size_bytes = file.metadata().await?.len();
 
     let init = pb::MediaRequest {
@@ -4454,7 +4465,9 @@ async fn upload_attachment_quic(
     let complete: pb::MediaResponse = net::frame::read_delimited(&mut recv, 64 * 1024).await?;
     match complete.payload {
         Some(pb::media_response::Payload::UploadComplete(done)) => Ok(ui::model::AttachmentData {
-            asset_id: done.attachment_id.map(|a| a.value).unwrap_or_default(),
+            asset: AttachmentAsset::UploadedAssetId(
+                done.attachment_id.map(|a| a.value).unwrap_or_default(),
+            ),
             filename: done.filename,
             mime_type: done.mime,
             size_bytes: done.size_bytes,
@@ -4472,9 +4485,10 @@ async fn resolve_attachment_local_path(
     conn: &quinn::Connection,
     attachment: &ui::model::AttachmentData,
 ) -> anyhow::Result<PathBuf> {
-    let local = PathBuf::from(&attachment.asset_id);
-    if local.is_absolute() && local.exists() {
-        return Ok(local);
+    if let AttachmentAsset::PendingLocalPath(local) = &attachment.asset {
+        if local.is_absolute() && local.exists() {
+            return Ok(local.clone());
+        }
     }
 
     let cache_dir = dirs::cache_dir()
@@ -4490,7 +4504,7 @@ async fn resolve_attachment_local_path(
         return Ok(local_path);
     }
 
-    download_attachment_quic(conn, &attachment.asset_id, &local_path).await?;
+    download_attachment_quic(conn, uploaded_asset_id(attachment)?, &local_path).await?;
     Ok(local_path)
 }
 
@@ -4546,6 +4560,44 @@ async fn download_attachment_quic(
     Ok(())
 }
 
+fn pending_local_path(attachment: &ui::model::AttachmentData) -> anyhow::Result<&Path> {
+    match &attachment.asset {
+        AttachmentAsset::PendingLocalPath(path) => Ok(path.as_path()),
+        AttachmentAsset::UploadedAssetId(asset_id) => {
+            Err(anyhow!("attachment already uploaded (asset_id={asset_id})"))
+        }
+    }
+}
+
+fn uploaded_asset_id(attachment: &ui::model::AttachmentData) -> anyhow::Result<&str> {
+    match &attachment.asset {
+        AttachmentAsset::UploadedAssetId(asset_id) if !asset_id.is_empty() => Ok(asset_id),
+        AttachmentAsset::UploadedAssetId(_) => Err(anyhow!("attachment asset_id is empty")),
+        AttachmentAsset::PendingLocalPath(path) => Err(anyhow!(
+            "attachment has local path and is not uploaded: {}",
+            path.display()
+        )),
+    }
+}
+
+fn attachment_source_label(attachment: &ui::model::AttachmentData) -> String {
+    match &attachment.asset {
+        AttachmentAsset::PendingLocalPath(path) => path.display().to_string(),
+        AttachmentAsset::UploadedAssetId(asset_id) => asset_id.clone(),
+    }
+}
+
+fn cache_asset_key(attachment: &ui::model::AttachmentData) -> String {
+    match &attachment.asset {
+        AttachmentAsset::UploadedAssetId(asset_id) => asset_id.clone(),
+        AttachmentAsset::PendingLocalPath(path) => path
+            .to_string_lossy()
+            .chars()
+            .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+            .collect(),
+    }
+}
+
 fn cached_attachment_filename(attachment: &ui::model::AttachmentData) -> String {
     let safe_name = attachment
         .filename
@@ -4563,7 +4615,7 @@ fn cached_attachment_filename(attachment: &ui::model::AttachmentData) -> String 
     } else {
         safe_name
     };
-    format!("{}-{}", attachment.asset_id, safe_name)
+    format!("{}-{}", cache_asset_key(attachment), safe_name)
 }
 
 async fn emit_telemetry_loop(
