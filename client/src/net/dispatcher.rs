@@ -812,7 +812,6 @@ pub fn available_screen_share_codecs() -> Vec<&'static str> {
         .filter_map(|codec| match codec {
             pb::VideoCodec::Av1 => Some("AV1"),
             pb::VideoCodec::Vp9 => Some("VP9"),
-            pb::VideoCodec::Vp8 => Some("VP8"),
             _ => None,
         })
         .collect()

@@ -29,6 +29,8 @@ impl VideoDecoder for Av1AvifDecoder {
 pub fn decoder_for_codec(codec: pb::VideoCodec) -> Option<Box<dyn VideoDecoder>> {
     match codec {
         pb::VideoCodec::Av1 if cfg!(feature = "video-av1") => Some(Box::new(Av1AvifDecoder)),
+        // TODO(video-vp9): replace AVIF-frame fallback with a realtime VP9 decoder.
+        pb::VideoCodec::Vp9 if cfg!(feature = "video-vp9") => Some(Box::new(Av1AvifDecoder)),
         _ => None,
     }
 }
@@ -40,9 +42,12 @@ pub fn decode_video_frame(codec: pb::VideoCodec, encoded: &[u8]) -> Result<Decod
 }
 
 pub fn available_decodable_codecs() -> Vec<pb::VideoCodec> {
-    let mut codecs = Vec::with_capacity(1);
+    let mut codecs = Vec::with_capacity(2);
     if cfg!(feature = "video-av1") {
         codecs.push(pb::VideoCodec::Av1);
+    }
+    if cfg!(feature = "video-vp9") {
+        codecs.push(pb::VideoCodec::Vp9);
     }
     codecs
 }
