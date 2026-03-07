@@ -1623,6 +1623,8 @@ pub struct UiModel {
 
     // UI toggles
     pub show_settings: bool,
+    pub show_about: bool,
+    pub about_tab: usize,
     pub show_telemetry: bool,
     pub show_connections: bool,
     pub member_connection_info_windows: Vec<MemberConnectionInfoWindow>,
@@ -1942,6 +1944,8 @@ impl Default for UiModel {
             telemetry: TelemetryData::default(),
             member_telemetry: HashMap::new(),
             show_settings: false,
+            show_about: false,
+            about_tab: 0,
             show_telemetry: false,
             show_connections: false,
             member_connection_info_windows: Vec::new(),

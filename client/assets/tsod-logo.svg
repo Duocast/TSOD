@@ -1,0 +1,15 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="g1" x1="60" y1="40" x2="430" y2="390" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#18A9E6"/>
+      <stop offset="1" stop-color="#6B16D9"/>
+    </linearGradient>
+  </defs>
+  <circle cx="256" cy="182" r="128" stroke="url(#g1)" stroke-width="28"/>
+  <circle cx="210" cy="182" r="16" fill="url(#g1)"/>
+  <circle cx="302" cy="182" r="16" fill="url(#g1)"/>
+  <path d="M160 302C188 326 222 340 256 340C292 340 324 326 352 302" stroke="url(#g1)" stroke-width="22" stroke-linecap="round"/>
+  <circle cx="108" cy="170" r="20" fill="url(#g1)"/>
+  <circle cx="404" cy="170" r="20" fill="url(#g1)"/>
+  <text x="256" y="455" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="110" font-weight="700" fill="#2F2B93">TSOD</text>
+</svg>
