@@ -325,6 +325,9 @@ pub enum UiIntent {
         text: String,
         attachments: Vec<AttachmentData>,
     },
+    OpenAttachment {
+        attachment: AttachmentData,
+    },
     JoinChannel {
         channel_id: String,
     },
