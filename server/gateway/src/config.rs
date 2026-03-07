@@ -71,6 +71,10 @@ pub struct Config {
     #[arg(long, default_value_t = 10_000)]
     pub max_connections: usize,
 
+    /// Interval in seconds between orphan upload file scans (0 = disabled)
+    #[arg(long, default_value_t = 3600)]
+    pub orphan_scan_interval_secs: u64,
+
     /// Quinn per-connection total bytes buffered for received-but-not-yet-consumed datagrams.
     ///
     /// In quinn 0.11 this also influences the peer-advertised max datagram frame size.
