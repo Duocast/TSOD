@@ -9,7 +9,7 @@ pub use model::{UiEvent, UiIntent, UiModel};
 use anyhow::Result;
 use crossbeam_channel::{Receiver, Sender};
 use iced::widget::{
-    button, column, container, horizontal_rule, row, scrollable, text, text_input, vertical_rule,
+    button, column, container, row, rule, scrollable, text, text_input,
 };
 use iced::{time, Center, Element, Fill, Length, Subscription, Task};
 use std::time::{Duration, Instant};
@@ -192,7 +192,7 @@ impl VpApp {
         let channels_list = self.model.channels.iter().fold(
             column![
                 row![text("Channels").size(32), button("+")].spacing(8),
-                horizontal_rule(1)
+                rule::horizontal(1)
             ]
             .spacing(8),
             |col, channel| {
@@ -242,7 +242,7 @@ impl VpApp {
                 self.model.selected_channel_name.clone()
             })
             .size(40),
-            horizontal_rule(1),
+            rule::horizontal(1),
             scrollable(messages).height(Length::FillPortion(8)),
             text_input("Type a message...", &composer_text)
                 .on_input(Message::ChatInputChanged)
@@ -256,7 +256,7 @@ impl VpApp {
         .width(Length::FillPortion(5));
 
         let members_list = self.model.current_members().iter().fold(
-            column![text("Members").size(32), horizontal_rule(1)].spacing(8),
+            column![text("Members").size(32), rule::horizontal(1)].spacing(8),
             |col, member| col.push(text(member.display_name.clone()).size(22)),
         );
 
@@ -289,14 +289,14 @@ impl VpApp {
         let body = row![
             column![
                 container(scrollable(channels_list).height(Fill)).height(Length::FillPortion(3)),
-                horizontal_rule(1),
+                rule::horizontal(1),
                 container(user_panel).height(Length::FillPortion(1))
             ]
             .width(Length::FillPortion(2))
             .spacing(8),
-            vertical_rule(1),
+            rule::vertical(1),
             center_panel,
-            vertical_rule(1),
+            rule::vertical(1),
             container(scrollable(members_list).height(Fill)).width(Length::FillPortion(2))
         ]
         .height(Fill)
