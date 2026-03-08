@@ -1365,8 +1365,106 @@ pub struct UserProfileData {
     pub user_id: String,
     pub display_name: String,
     pub description: String,
-    pub status: String,
-    pub badges: Vec<String>,
+    pub status: OnlineStatus,
+    pub custom_status_text: String,
+    pub custom_status_emoji: String,
+    pub accent_color: u32,
+    pub avatar_url: Option<String>,
+    pub banner_url: Option<String>,
+    pub badges: Vec<BadgeData>,
+    pub links: Vec<ProfileLinkData>,
+    pub created_at: i64,
+    pub last_seen_at: i64,
+    pub current_activity: Option<GameActivityData>,
+    pub roles: Vec<RoleData>,
+}
+
+impl Default for UserProfileData {
+    fn default() -> Self {
+        Self {
+            user_id: String::new(),
+            display_name: String::new(),
+            description: String::new(),
+            status: OnlineStatus::default(),
+            custom_status_text: String::new(),
+            custom_status_emoji: String::new(),
+            accent_color: 0,
+            avatar_url: None,
+            banner_url: None,
+            badges: Vec::new(),
+            links: Vec::new(),
+            created_at: 0,
+            last_seen_at: 0,
+            current_activity: None,
+            roles: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OnlineStatus {
+    #[default]
+    Online,
+    Idle,
+    DoNotDisturb,
+    Invisible,
+    Offline,
+}
+
+#[derive(Debug, Clone)]
+pub struct BadgeData {
+    pub id: String,
+    pub label: String,
+    pub icon_url: String,
+    pub tooltip: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProfileLinkData {
+    pub platform: String,
+    pub url: String,
+    pub display_text: String,
+    pub verified: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct GameActivityData {
+    pub game_name: String,
+    pub details: String,
+    pub state: String,
+    pub started_at: i64,
+    pub large_image_url: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct RoleData {
+    pub name: String,
+    pub color: u32,
+    pub position: i32,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct UserProfileEditDraft {
+    pub display_name: String,
+    pub description: String,
+    pub accent_color: u32,
+    pub custom_status_text: String,
+    pub custom_status_emoji: String,
+    pub links: Vec<ProfileLinkData>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CachedProfile {
+    pub data: UserProfileData,
+    pub fetched_at: std::time::Instant,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProfileEditTab {
+    Profile,
+    Links,
+    Avatar,
+    Banner,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1688,6 +1786,14 @@ pub struct UiModel {
 
     // User popup
     pub show_user_popup: bool,
+    pub profile_popup_user_id: Option<String>,
+    pub profile_popup_data: Option<UserProfileData>,
+    pub profile_popup_loading: bool,
+    pub profile_popup_anchor: Option<egui::Pos2>,
+    pub show_edit_profile: bool,
+    pub edit_profile_tab: ProfileEditTab,
+    pub edit_profile_draft: UserProfileEditDraft,
+    pub profile_cache: HashMap<String, CachedProfile>,
     pub show_away_message_dialog: bool,
     pub show_set_avatar_dialog: bool,
     pub show_share_content_dialog: bool,
@@ -2003,6 +2109,14 @@ impl Default for UiModel {
             default_channel_id: None,
             last_event_seq: 0,
             show_user_popup: false,
+            profile_popup_user_id: None,
+            profile_popup_data: None,
+            profile_popup_loading: false,
+            profile_popup_anchor: None,
+            show_edit_profile: false,
+            edit_profile_tab: ProfileEditTab::Profile,
+            edit_profile_draft: UserProfileEditDraft::default(),
+            profile_cache: HashMap::new(),
             show_away_message_dialog: false,
             show_set_avatar_dialog: false,
             show_share_content_dialog: false,
