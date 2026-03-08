@@ -178,7 +178,7 @@ impl ControlDispatcher {
         let resp = self
             .send_request(
                 pb::client_to_server::Payload::Hello(hello),
-                Duration::from_secs(5),
+                Duration::from_secs(1),
             )
             .await??;
 
@@ -215,7 +215,7 @@ impl ControlDispatcher {
         let resp = self
             .send_request(
                 pb::client_to_server::Payload::AuthRequest(auth),
-                Duration::from_secs(5),
+                Duration::from_secs(1),
             )
             .await??;
 
@@ -267,7 +267,7 @@ impl ControlDispatcher {
         let resp = self
             .send_request(
                 pb::client_to_server::Payload::JoinChannelRequest(req),
-                Duration::from_secs(5),
+                Duration::from_secs(1),
             )
             .await??;
 
@@ -293,7 +293,7 @@ impl ControlDispatcher {
         let resp = self
             .send_request(
                 pb::client_to_server::Payload::GetInitialStateSnapshotRequest(req),
-                Duration::from_secs(5),
+                Duration::from_secs(1),
             )
             .await??;
 
@@ -334,7 +334,7 @@ impl ControlDispatcher {
         let resp = self
             .send_request(
                 pb::client_to_server::Payload::LeaveChannelRequest(req),
-                Duration::from_secs(5),
+                Duration::from_secs(1),
             )
             .await??;
 
@@ -378,7 +378,7 @@ impl ControlDispatcher {
         let resp = self
             .send_request(
                 pb::client_to_server::Payload::CreateChannelRequest(req),
-                Duration::from_secs(5),
+                Duration::from_secs(1),
             )
             .await??;
 
@@ -421,7 +421,7 @@ impl ControlDispatcher {
         let resp = self
             .send_request(
                 pb::client_to_server::Payload::UpdateChannelRequest(req),
-                Duration::from_secs(5),
+                Duration::from_secs(1),
             )
             .await??;
         if let Some(err) = resp.error {
@@ -439,7 +439,7 @@ impl ControlDispatcher {
         let resp = self
             .send_request(
                 pb::client_to_server::Payload::DeleteChannelRequest(req),
-                Duration::from_secs(5),
+                Duration::from_secs(1),
             )
             .await??;
         if let Some(err) = resp.error {
@@ -466,7 +466,7 @@ impl ControlDispatcher {
         let resp = self
             .send_request(
                 pb::client_to_server::Payload::SendMessageRequest(req),
-                Duration::from_secs(5),
+                Duration::from_secs(1),
             )
             .await??;
 
@@ -494,11 +494,83 @@ impl ControlDispatcher {
         let resp = self
             .send_request(
                 pb::client_to_server::Payload::ModerationActionRequest(req),
-                Duration::from_secs(5),
+                Duration::from_secs(1),
             )
             .await??;
         if let Some(err) = resp.error {
             return Err(anyhow!("moderate_user error: {:?}", err));
+        }
+        Ok(())
+    }
+
+    pub async fn add_reaction(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        emoji: &str,
+    ) -> Result<()> {
+        let req = pb::AddReactionRequest {
+            message_id: Some(pb::MessageId {
+                value: message_id.into(),
+            }),
+            channel_id: Some(pb::ChannelId {
+                value: channel_id.into(),
+            }),
+            emoji: emoji.into(),
+        };
+        let resp = self
+            .send_request(
+                pb::client_to_server::Payload::AddReactionRequest(req),
+                Duration::from_secs(1),
+            )
+            .await??;
+        if let Some(err) = resp.error {
+            return Err(anyhow!("add_reaction error: {:?}", err));
+        }
+        Ok(())
+    }
+
+    pub async fn remove_reaction(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        emoji: &str,
+    ) -> Result<()> {
+        let req = pb::RemoveReactionRequest {
+            message_id: Some(pb::MessageId {
+                value: message_id.into(),
+            }),
+            channel_id: Some(pb::ChannelId {
+                value: channel_id.into(),
+            }),
+            emoji: emoji.into(),
+        };
+        let resp = self
+            .send_request(
+                pb::client_to_server::Payload::RemoveReactionRequest(req),
+                Duration::from_secs(1),
+            )
+            .await??;
+        if let Some(err) = resp.error {
+            return Err(anyhow!("remove_reaction error: {:?}", err));
+        }
+        Ok(())
+    }
+
+    pub async fn send_typing(&self, channel_id: &str) -> Result<()> {
+        let req = pb::SendTypingRequest {
+            channel_id: Some(pb::ChannelId {
+                value: channel_id.into(),
+            }),
+        };
+        let resp = self
+            .send_request(
+                pb::client_to_server::Payload::SendTypingRequest(req),
+                Duration::from_secs(1),
+            )
+            .await??;
+        if let Some(err) = resp.error {
+            return Err(anyhow!("send_typing error: {:?}", err));
         }
         Ok(())
     }
@@ -513,7 +585,7 @@ impl ControlDispatcher {
         let resp = self
             .send_request(
                 pb::client_to_server::Payload::PokeRequest(req),
-                Duration::from_secs(5),
+                Duration::from_secs(2),
             )
             .await??;
         if let Some(err) = resp.error {
@@ -535,7 +607,7 @@ impl ControlDispatcher {
         let resp = self
             .send_request(
                 pb::client_to_server::Payload::UpdateUserProfileRequest(req),
-                Duration::from_secs(5),
+                Duration::from_secs(1),
             )
             .await??;
 
@@ -554,7 +626,7 @@ impl ControlDispatcher {
         let resp = self
             .send_request(
                 pb::client_to_server::Payload::SetAvatarRequest(req),
-                Duration::from_secs(5),
+                Duration::from_secs(1),
             )
             .await??;
 

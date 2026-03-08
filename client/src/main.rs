@@ -2492,6 +2492,72 @@ async fn connect_and_run_session(
                                             .unwrap_or_default(),
                                     });
                                 }
+                                pb::chat_event::Kind::ReactionAdded(ra) => {
+                                    let channel_id = ra
+                                        .channel_id
+                                        .as_ref()
+                                        .map(|c| c.value.clone())
+                                        .unwrap_or_default();
+                                    let message_id = ra
+                                        .message_id
+                                        .as_ref()
+                                        .map(|m| m.value.clone())
+                                        .unwrap_or_default();
+                                    let user_id = ra
+                                        .user_id
+                                        .as_ref()
+                                        .map(|u| u.value.clone())
+                                        .unwrap_or_default();
+                                    let _ = tx_event.send(UiEvent::ReactionAdded {
+                                        channel_id,
+                                        message_id,
+                                        emoji: ra.emoji,
+                                        me: user_id == local_user_id,
+                                        user_id,
+                                    });
+                                }
+                                pb::chat_event::Kind::ReactionRemoved(rr) => {
+                                    let channel_id = rr
+                                        .channel_id
+                                        .as_ref()
+                                        .map(|c| c.value.clone())
+                                        .unwrap_or_default();
+                                    let message_id = rr
+                                        .message_id
+                                        .as_ref()
+                                        .map(|m| m.value.clone())
+                                        .unwrap_or_default();
+                                    let user_id = rr
+                                        .user_id
+                                        .as_ref()
+                                        .map(|u| u.value.clone())
+                                        .unwrap_or_default();
+                                    let _ = tx_event.send(UiEvent::ReactionRemoved {
+                                        channel_id,
+                                        message_id,
+                                        emoji: rr.emoji,
+                                        me: user_id == local_user_id,
+                                        user_id,
+                                    });
+                                }
+                                pb::chat_event::Kind::TypingStarted(ts) => {
+                                    let channel_id = ts
+                                        .channel_id
+                                        .as_ref()
+                                        .map(|c| c.value.clone())
+                                        .unwrap_or_default();
+                                    let user_id = ts
+                                        .user_id
+                                        .as_ref()
+                                        .map(|u| u.value.clone())
+                                        .unwrap_or_default();
+                                    if user_id != local_user_id {
+                                        let _ = tx_event.send(UiEvent::TypingIndicator {
+                                            channel_id,
+                                            user_name: user_id,
+                                        });
+                                    }
+                                }
                                 _ => {}
                             }
                         }
@@ -3354,6 +3420,31 @@ async fn connect_and_run_session(
                                 let _ = tx_event.send(UiEvent::AppendLog(
                                     "[ctl] no channel selected, cannot send message".into(),
                                 ));
+                            }
+                        }
+                        UiIntent::AddReaction { message_id, emoji } => {
+                            if let Some(ref ch) = active_channel {
+                                if let Err(e) = dispatcher.add_reaction(ch, &message_id, &emoji).await {
+                                    let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                        "[ctl] add_reaction failed: {e:#}",
+                                    )));
+                                }
+                            }
+                        }
+                        UiIntent::RemoveReaction { message_id, emoji } => {
+                            if let Some(ref ch) = active_channel {
+                                if let Err(e) =
+                                    dispatcher.remove_reaction(ch, &message_id, &emoji).await
+                                {
+                                    let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                        "[ctl] remove_reaction failed: {e:#}",
+                                    )));
+                                }
+                            }
+                        }
+                        UiIntent::SendTyping => {
+                            if let Some(ref ch) = active_channel {
+                                let _ = dispatcher.send_typing(ch).await;
                             }
                         }
                         UiIntent::OpenAttachment { attachment } => {
