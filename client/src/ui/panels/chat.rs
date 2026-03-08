@@ -89,7 +89,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                         }
                     }
 
-                    show_message(ui, msg, tx_intent);
+                    show_message(ui, model, msg, tx_intent);
 
                     prev_day = msg_day;
                 }
@@ -766,15 +766,45 @@ fn detect_mime_type(path: &Path, raw_mime: &str) -> String {
     .to_string()
 }
 
-fn show_message(ui: &mut egui::Ui, msg: &ChatMessage, tx_intent: &Sender<UiIntent>) {
+fn show_message(
+    ui: &mut egui::Ui,
+    model: &mut UiModel,
+    msg: &ChatMessage,
+    tx_intent: &Sender<UiIntent>,
+) {
     ui.horizontal(|ui| {
         ui.vertical(|ui| {
             ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new(&msg.author_name)
-                        .strong()
-                        .color(theme::text_color()),
+                let author_resp = ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(&msg.author_name)
+                            .strong()
+                            .color(theme::text_color()),
+                    )
+                    .sense(egui::Sense::click()),
                 );
+                if author_resp.clicked() {
+                    model.profile_popup_user_id = Some(msg.author_id.clone());
+                    model.profile_popup_anchor = author_resp.interact_pointer_pos();
+                    if let Some(cached) = model.profile_cache.get(&msg.author_id) {
+                        if cached.fetched_at.elapsed() < Duration::from_secs(60) {
+                            model.profile_popup_data = Some(cached.data.clone());
+                            model.profile_popup_loading = false;
+                        } else {
+                            model.profile_popup_loading = true;
+                            model.profile_popup_data = None;
+                            let _ = tx_intent.send(UiIntent::FetchUserProfile {
+                                user_id: msg.author_id.clone(),
+                            });
+                        }
+                    } else {
+                        model.profile_popup_loading = true;
+                        model.profile_popup_data = None;
+                        let _ = tx_intent.send(UiIntent::FetchUserProfile {
+                            user_id: msg.author_id.clone(),
+                        });
+                    }
+                }
                 let ts = format_timestamp(msg.timestamp);
                 ui.label(egui::RichText::new(ts).small().color(theme::text_muted()));
                 if msg.edited {

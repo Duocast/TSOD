@@ -432,6 +432,12 @@ pub enum UiIntent {
         user_id: String,
         message: String,
     },
+    FetchUserProfile {
+        user_id: String,
+    },
+    CreateDmChannel {
+        participant_user_ids: Vec<String>,
+    },
 
     // Whisper
     SetWhisperTargets {
@@ -2606,7 +2612,17 @@ impl UiModel {
                     kind: NotificationKind::Poke,
                 });
             }
-            UiEvent::UserProfileLoaded(_profile) => {}
+            UiEvent::UserProfileLoaded(profile) => {
+                self.profile_popup_loading = false;
+                self.profile_popup_data = Some(profile.clone());
+                self.profile_cache.insert(
+                    profile.user_id.clone(),
+                    CachedProfile {
+                        data: profile,
+                        fetched_at: std::time::Instant::now(),
+                    },
+                );
+            }
             UiEvent::SetSelfMuted(m) => self.self_muted = m,
             UiEvent::SetSelfDeafened(d) => self.self_deafened = d,
             UiEvent::SetAudioDevices {
