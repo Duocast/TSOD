@@ -207,6 +207,20 @@ pub enum UiEvent {
         channel_id: String,
         message_id: String,
     },
+    ReactionAdded {
+        channel_id: String,
+        message_id: String,
+        emoji: String,
+        user_id: String,
+        me: bool,
+    },
+    ReactionRemoved {
+        channel_id: String,
+        message_id: String,
+        emoji: String,
+        user_id: String,
+        me: bool,
+    },
     ClearPendingAttachments,
     AttachmentUploadError {
         path: String,
@@ -1594,6 +1608,7 @@ pub struct UiModel {
     pub chat_input_options_open: bool,
     pub pending_attachments: Vec<PendingAttachment>,
     pub typing_users: HashMap<String, Vec<(String, std::time::Instant)>>,
+    pub last_typing_sent_at: HashMap<String, std::time::Instant>,
 
     // Per-channel drafts (text + attachments preserved on channel switch)
     pub drafts: HashMap<String, DraftState>,
@@ -1927,6 +1942,7 @@ impl Default for UiModel {
             chat_input_options_open: false,
             pending_attachments: Vec::new(),
             typing_users: HashMap::new(),
+            last_typing_sent_at: HashMap::new(),
             drafts: HashMap::new(),
             drag_hovering: false,
             drag_overlay_until: None,
@@ -2272,6 +2288,53 @@ impl UiModel {
             } => {
                 if let Some(msgs) = self.messages.get_mut(&channel_id) {
                     msgs.retain(|m| m.message_id != message_id);
+                }
+            }
+            UiEvent::ReactionAdded {
+                channel_id,
+                message_id,
+                emoji,
+                user_id,
+                me,
+            } => {
+                if let Some(msgs) = self.messages.get_mut(&channel_id) {
+                    if let Some(msg) = msgs.iter_mut().find(|m| m.message_id == message_id) {
+                        if let Some(reaction) = msg.reactions.iter_mut().find(|r| r.emoji == emoji)
+                        {
+                            reaction.count = reaction.count.saturating_add(1);
+                            if me || user_id == self.user_id {
+                                reaction.me = true;
+                            }
+                        } else {
+                            msg.reactions.push(ReactionData {
+                                emoji,
+                                count: 1,
+                                me,
+                            });
+                        }
+                    }
+                }
+            }
+            UiEvent::ReactionRemoved {
+                channel_id,
+                message_id,
+                emoji,
+                user_id,
+                me,
+            } => {
+                if let Some(msgs) = self.messages.get_mut(&channel_id) {
+                    if let Some(msg) = msgs.iter_mut().find(|m| m.message_id == message_id) {
+                        if let Some(idx) = msg.reactions.iter().position(|r| r.emoji == emoji) {
+                            if msg.reactions[idx].count > 1 {
+                                msg.reactions[idx].count -= 1;
+                                if me || user_id == self.user_id {
+                                    msg.reactions[idx].me = false;
+                                }
+                            } else {
+                                msg.reactions.remove(idx);
+                            }
+                        }
+                    }
                 }
             }
             UiEvent::ClearPendingAttachments => {

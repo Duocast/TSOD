@@ -503,6 +503,78 @@ impl ControlDispatcher {
         Ok(())
     }
 
+    pub async fn add_reaction(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        emoji: &str,
+    ) -> Result<()> {
+        let req = pb::AddReactionRequest {
+            message_id: Some(pb::MessageId {
+                value: message_id.into(),
+            }),
+            channel_id: Some(pb::ChannelId {
+                value: channel_id.into(),
+            }),
+            emoji: emoji.into(),
+        };
+        let resp = self
+            .send_request(
+                pb::client_to_server::Payload::AddReactionRequest(req),
+                Duration::from_secs(5),
+            )
+            .await??;
+        if let Some(err) = resp.error {
+            return Err(anyhow!("add_reaction error: {:?}", err));
+        }
+        Ok(())
+    }
+
+    pub async fn remove_reaction(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        emoji: &str,
+    ) -> Result<()> {
+        let req = pb::RemoveReactionRequest {
+            message_id: Some(pb::MessageId {
+                value: message_id.into(),
+            }),
+            channel_id: Some(pb::ChannelId {
+                value: channel_id.into(),
+            }),
+            emoji: emoji.into(),
+        };
+        let resp = self
+            .send_request(
+                pb::client_to_server::Payload::RemoveReactionRequest(req),
+                Duration::from_secs(5),
+            )
+            .await??;
+        if let Some(err) = resp.error {
+            return Err(anyhow!("remove_reaction error: {:?}", err));
+        }
+        Ok(())
+    }
+
+    pub async fn send_typing(&self, channel_id: &str) -> Result<()> {
+        let req = pb::SendTypingRequest {
+            channel_id: Some(pb::ChannelId {
+                value: channel_id.into(),
+            }),
+        };
+        let resp = self
+            .send_request(
+                pb::client_to_server::Payload::SendTypingRequest(req),
+                Duration::from_secs(3),
+            )
+            .await??;
+        if let Some(err) = resp.error {
+            return Err(anyhow!("send_typing error: {:?}", err));
+        }
+        Ok(())
+    }
+
     pub async fn poke_user(&self, target_user_id: &str, message: &str) -> Result<()> {
         let req = pb::PokeRequest {
             target_user_id: Some(pb::UserId {
