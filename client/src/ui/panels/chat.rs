@@ -176,6 +176,21 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
             );
             model.chat_input_focused = composer_result.has_focus;
 
+            if composer_result.has_focus && !model.chat_composer.text().trim().is_empty() {
+                if let Some(channel_id) = model.selected_channel.clone() {
+                    let now = std::time::Instant::now();
+                    let should_send = model
+                        .last_typing_sent_at
+                        .get(&channel_id)
+                        .map(|last| now.duration_since(*last) >= std::time::Duration::from_secs(2))
+                        .unwrap_or(true);
+                    if should_send {
+                        model.last_typing_sent_at.insert(channel_id, now);
+                        let _ = tx_intent.send(UiIntent::SendTyping);
+                    }
+                }
+            }
+
             if composer_result.send_requested || send_clicked {
                 send_chat_from_input(model, tx_intent);
             }
