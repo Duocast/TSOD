@@ -24,8 +24,11 @@ pub struct Capture {
 }
 
 pub const CAPTURE_MODE_AUTO: &str = "Automatically use best mode";
+#[allow(dead_code)]
 pub const CAPTURE_MODE_PIPEWIRE: &str = "PipeWire";
+#[allow(dead_code)]
 pub const CAPTURE_MODE_PULSEAUDIO: &str = "PulseAudio";
+#[allow(dead_code)]
 pub const CAPTURE_MODE_WASAPI: &str = "WASAPI";
 
 #[cfg(target_os = "linux")]
@@ -44,6 +47,7 @@ type CaptureBackend = non_linux::CpalCapture;
 ))]
 type CaptureBackend = non_linux::CpalCapture;
 
+#[allow(dead_code)]
 impl Capture {
     pub fn start(sample_rate: u32, channels: u16, frame_ms: u32) -> Result<Self> {
         Self::start_with_device(sample_rate, channels, frame_ms, None, None)
@@ -175,18 +179,22 @@ pub fn enumerate_capture_modes() -> Vec<String> {
     CaptureBackend::enumerate_capture_modes()
 }
 
+#[allow(dead_code)]
 #[cfg(target_os = "windows")]
 fn cpal_backend() -> AudioBackend {
     AudioBackend::Wasapi
 }
+#[allow(dead_code)]
 #[cfg(target_os = "macos")]
 fn cpal_backend() -> AudioBackend {
     AudioBackend::CoreAudio
 }
+#[allow(dead_code)]
 #[cfg(target_os = "linux")]
 fn cpal_backend() -> AudioBackend {
     AudioBackend::Pulse
 }
+#[allow(dead_code)]
 #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
 fn cpal_backend() -> AudioBackend {
     AudioBackend::Unknown

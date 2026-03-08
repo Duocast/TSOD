@@ -185,7 +185,7 @@ fn show_roles_tab(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiI
                     caps: vec![],
                 });
             }
-            ui.small_button("Clone");
+            let _ = ui.small_button("Clone");
             let selected_role = model.permissions_roles.get(model.permissions_selected_role);
             let protected = selected_role.is_some_and(|r| r.protected);
             let has_role_id = selected_role.is_some_and(|r| !r.role_id.trim().is_empty());
@@ -330,7 +330,7 @@ fn show_roles_tab(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiI
                             caps: vec![],
                         });
                     }
-                    ui.button("Discard");
+                    let _ = ui.button("Discard");
                 });
             });
         }

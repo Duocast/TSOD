@@ -20,6 +20,7 @@ impl Denoiser {
     }
 
     /// Create a denoiser with an owned custom RNNoise model.
+    #[allow(dead_code)]
     pub fn from_model(model: RnnModel) -> Self {
         Self {
             state: DenoiseState::from_model(model),
@@ -32,6 +33,7 @@ impl Denoiser {
     /// Create a denoiser with a borrowed custom RNNoise model.
     ///
     /// The model reference must be `'static` to match this denoiser's storage.
+    #[allow(dead_code)]
     pub fn with_model(model: &'static RnnModel) -> Self {
         Self {
             state: DenoiseState::with_model(model),

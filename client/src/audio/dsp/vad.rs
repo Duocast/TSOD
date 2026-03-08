@@ -76,6 +76,7 @@ impl VadHysteresis {
         self.active
     }
 
+    #[allow(dead_code)]
     pub fn is_active(&self) -> bool {
         self.active
     }

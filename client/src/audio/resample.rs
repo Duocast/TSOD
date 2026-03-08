@@ -63,6 +63,7 @@ impl ResamplerImpl {
         }
     }
 
+    #[allow(dead_code)]
     pub fn process_interleaved(&mut self, input: &[f32], channels: usize, out: &mut Vec<f32>) {
         match self {
             Self::Rubato(r) => r.process_interleaved(input, channels, out),
@@ -71,7 +72,7 @@ impl ResamplerImpl {
     }
 }
 
-struct RubatoResampler {
+pub(crate) struct RubatoResampler {
     inner: AsyncResampler<f32>,
     channels: usize,
     pending_interleaved: Vec<f32>,
@@ -229,6 +230,7 @@ impl LinearResampler {
     }
 }
 
+#[allow(dead_code)]
 fn process_linear_interleaved(
     linear: &mut LinearResampler,
     input: &[f32],

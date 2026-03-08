@@ -17,6 +17,7 @@ use crate::net::UiLogTx;
 pub enum DatagramKind {
     Voice,
     Video,
+    #[allow(dead_code)]
     Control,
 }
 
@@ -66,6 +67,7 @@ pub enum DropReason {
 
 #[derive(Debug, Clone, Copy)]
 pub struct DroppedDatagrams {
+    #[allow(dead_code)]
     pub reason: DropReason,
     pub count: u32,
 }

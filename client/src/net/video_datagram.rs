@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Video/screenshare datagram builder and parser.
 //!
 //! Wire format (24-byte fixed header, little-endian multi-byte fields):

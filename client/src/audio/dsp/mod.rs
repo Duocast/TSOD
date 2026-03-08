@@ -96,6 +96,7 @@ impl CaptureDsp {
     }
 
     /// Returns true if the last processed frame had voice activity.
+    #[allow(dead_code)]
     pub fn is_voice_active(&self) -> bool {
         self.denoiser.last_vad() >= self.vad_threshold
     }
@@ -195,11 +196,13 @@ impl CaptureDsp {
 }
 
 /// DSP pipeline for the playout (speaker) path.
+#[allow(dead_code)]
 pub struct PlayoutDsp {
     agc: agc::Agc,
     frame_scratch: Vec<i16>,
 }
 
+#[allow(dead_code)]
 impl PlayoutDsp {
     pub fn new() -> Self {
         Self {

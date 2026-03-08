@@ -286,7 +286,7 @@ impl ScreenCapture for WindowsWindowCapture {
         let bitmap = unsafe { CreateCompatibleBitmap(window_dc, width as i32, height as i32) };
         if bitmap.0.is_null() {
             unsafe {
-                DeleteDC(mem_dc);
+                let _ = DeleteDC(mem_dc);
                 ReleaseDC(Some(self.hwnd), window_dc);
             }
             return Err(anyhow!("failed to create compatible bitmap"));
@@ -295,8 +295,8 @@ impl ScreenCapture for WindowsWindowCapture {
         let previous = unsafe { SelectObject(mem_dc, HGDIOBJ(bitmap.0)) };
         if previous.0.is_null() {
             unsafe {
-                DeleteObject(HGDIOBJ(bitmap.0));
-                DeleteDC(mem_dc);
+                let _ = DeleteObject(HGDIOBJ(bitmap.0));
+                let _ = DeleteDC(mem_dc);
                 ReleaseDC(Some(self.hwnd), window_dc);
             }
             return Err(anyhow!("failed to select bitmap into device context"));
@@ -349,8 +349,8 @@ impl ScreenCapture for WindowsWindowCapture {
 
         unsafe {
             SelectObject(mem_dc, previous);
-            DeleteObject(HGDIOBJ(bitmap.0));
-            DeleteDC(mem_dc);
+            let _ = DeleteObject(HGDIOBJ(bitmap.0));
+            let _ = DeleteDC(mem_dc);
             ReleaseDC(Some(self.hwnd), window_dc);
         }
 
@@ -684,6 +684,7 @@ impl OpusAdaptationController {
 }
 
 #[derive(Default)]
+#[allow(dead_code)]
 struct VideoRuntimeCounters {
     video_datagrams: AtomicU64,
     video_tx_datagrams: AtomicU64,
@@ -1828,6 +1829,7 @@ fn pb_channel_type_to_ui(channel_type: i32) -> ui::model::ChannelType {
     }
 }
 
+#[allow(dead_code)]
 fn opus_profile_from_pb(opus_profile: i32) -> audio::opus::OpusEncoderProfile {
     match pb::OpusProfile::try_from(opus_profile).ok() {
         Some(pb::OpusProfile::OpusMusic) => audio::opus::OpusEncoderProfile::Music,
@@ -3114,6 +3116,7 @@ async fn connect_and_run_session(
         }
     });
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[allow(dead_code)]
     enum ShareState {
         Idle,
         Starting,
@@ -5864,6 +5867,7 @@ enum StreamKey {
     Ssrc(u32),
 }
 
+#[allow(dead_code)]
 struct InboundVoice<'a> {
     sender_user_id: Option<uuid::Uuid>,
     channel_id: Option<uuid::Uuid>,
@@ -5990,6 +5994,7 @@ impl Backoff {
     fn reset(&mut self) {
         self.cur = self.min;
     }
+    #[allow(dead_code)]
     async fn sleep(&mut self) {
         let jitter = rand::random::<u64>() % 150;
         sleep(self.cur + Duration::from_millis(jitter)).await;

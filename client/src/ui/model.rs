@@ -1,4 +1,5 @@
 //! Application state model for the GUI.
+#![allow(dead_code)]
 
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet, VecDeque};
