@@ -67,6 +67,7 @@ message ClientToServer {
     GetUserProfileRequest get_user_profile_request = 70;
     UpdateUserProfileRequest update_user_profile_request = 71;
     SetAvatarRequest set_avatar_request = 72;
+    SetBannerRequest set_banner_request = 73;
 
     // Permissions & roles
     GetRolesRequest get_roles_request = 80;
@@ -207,6 +208,7 @@ message ServerToClient {
     GetUserProfileResponse get_user_profile_response = 75;
     UpdateUserProfileResponse update_user_profile_response = 76;
     SetAvatarResponse set_avatar_response = 77;
+    SetBannerResponse set_banner_response = 78;
 
     // Permission responses
     GetRolesResponse get_roles_response = 80;

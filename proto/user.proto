@@ -35,6 +35,16 @@ message UserProfile {
   repeated Badge badges = 8;
   Timestamp created_at = 9;
   Timestamp last_seen_at = 10;
+
+  // ─── New fields ───
+  string banner_asset_url = 11;       // profile banner image URL
+  AssetId banner_asset_id = 12;
+  uint32 accent_color = 13;           // ARGB packed, user-chosen highlight color
+  repeated ProfileLink links = 14;    // social/game links
+  string custom_status_emoji = 15;    // emoji for custom status (unicode or asset ref)
+  Timestamp custom_status_expires = 16; // optional auto-clear time
+  GameActivity current_activity = 17; // "Playing Rust" rich presence
+  AudioProfile audio_profile = 18;    // public-facing audio config (opt-in)
 }
 
 // ── Requests ───────────────────────────────────────────────────────────
@@ -47,12 +57,38 @@ message GetUserProfileResponse {
   UserProfile profile = 1;
 }
 
+message ProfileLink {
+  string platform = 1;   // "steam", "github", "twitter", "twitch", "youtube", "website"
+  string url = 2;
+  string display_text = 3; // optional custom label
+  bool verified = 4;       // server-side verification flag (future)
+}
+
+message GameActivity {
+  string game_name = 1;
+  string details = 2;      // e.g. "Ranked — Gold II"
+  string state = 3;        // e.g. "In Queue"
+  Timestamp started_at = 4;
+  string large_image_url = 5;  // game icon
+}
+
+message AudioProfile {
+  string codec_name = 1;      // e.g. "Opus 510 kbps Music"
+  uint32 bitrate_bps = 2;
+  string quality_tier = 3;    // "Audiophile", "Music", "Voice"
+}
+
 message UpdateUserProfileRequest {
   // Only set the fields you want to change.
-  string display_name = 1;
-  string description = 2;
+  // Empty string = "clear this field"; absent = "don't touch".
+  optional string display_name = 1;
+  optional string description = 2;
   OnlineStatus status = 3;
-  string custom_status_text = 4;
+  optional string custom_status_text = 4;
+  optional string custom_status_emoji = 5;
+  optional Timestamp custom_status_expires = 6;
+  optional uint32 accent_color = 7;
+  repeated ProfileLink links = 8;     // full replacement when present
 }
 
 message UpdateUserProfileResponse {
@@ -65,6 +101,14 @@ message SetAvatarRequest {
 
 message SetAvatarResponse {
   string avatar_asset_url = 1;
+}
+
+message SetBannerRequest {
+  AssetId asset_id = 1;
+}
+
+message SetBannerResponse {
+  string banner_asset_url = 1;
 }
 
 // ── Events ─────────────────────────────────────────────────────────────
