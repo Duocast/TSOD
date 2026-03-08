@@ -399,8 +399,22 @@ fn show_channel(
     } else {
         theme::text_color()
     };
+
+    // Active channel indicator (small green cue next to the channel name).
+    let indicator_size = 6.0;
+    let indicator_padding = 6.0;
+    let text_x = if is_selected {
+        let indicator_center =
+            row_rect.left_center() + egui::vec2(indent + indicator_size * 0.5, 0.0);
+        ui.painter()
+            .circle_filled(indicator_center, indicator_size * 0.5, theme::COLOR_ONLINE);
+        indent + indicator_size + indicator_padding
+    } else {
+        indent + 2.0
+    };
+
     ui.painter().text(
-        row_rect.left_center() + egui::vec2(indent + 2.0, 0.0),
+        row_rect.left_center() + egui::vec2(text_x, 0.0),
         egui::Align2::LEFT_CENTER,
         &ch.name,
         egui::TextStyle::Button.resolve(ui.style()),
