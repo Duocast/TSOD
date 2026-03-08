@@ -200,7 +200,7 @@ fn write_windows_protected_file(path: &Path, bytes: &[u8]) -> Result<()> {
         Ok(handle) => handle,
         Err(err) => {
             unsafe {
-                let _ = LocalFree(HLOCAL(security_descriptor.0 as *mut c_void));
+                let _ = LocalFree(Some(HLOCAL(security_descriptor.0 as *mut c_void)));
             }
             return Err(anyhow!("failed to create protected identity file: {err}"));
         }
@@ -217,7 +217,7 @@ fn write_windows_protected_file(path: &Path, bytes: &[u8]) -> Result<()> {
 
     drop(file);
     unsafe {
-        let _ = LocalFree(HLOCAL(security_descriptor.0 as *mut c_void));
+        let _ = LocalFree(Some(HLOCAL(security_descriptor.0 as *mut c_void)));
     }
 
     result
@@ -251,7 +251,7 @@ fn dpapi_protect(data: &[u8]) -> Result<Vec<u8>> {
         .context("CryptProtectData failed")?;
 
         let encrypted = std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec();
-        let _ = LocalFree(HLOCAL(output.pbData as *mut c_void));
+        let _ = LocalFree(Some(HLOCAL(output.pbData as *mut c_void)));
         Ok(encrypted)
     }
 }
@@ -284,7 +284,7 @@ fn dpapi_unprotect(data: &[u8]) -> Result<Vec<u8>> {
         .context("CryptUnprotectData failed")?;
 
         let decrypted = std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec();
-        let _ = LocalFree(HLOCAL(output.pbData as *mut c_void));
+        let _ = LocalFree(Some(HLOCAL(output.pbData as *mut c_void)));
         Ok(decrypted)
     }
 }
