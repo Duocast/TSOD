@@ -24,7 +24,7 @@ pub use model::{ConnectionStage, UiEvent, UiIntent, UiModel};
 use crossbeam_channel::{Receiver, Sender};
 use eframe::egui;
 
-use crate::{APP_VERSION, BUILD_VERSION};
+use crate::BUILD_VERSION;
 
 const TSOD_LOGO: egui::ImageSource<'static> = egui::include_image!("../../assets/tsod-logo.svg");
 const THIRD_PARTY_LICENSES: &str = include_str!("../../assets/third_party_licenses.tsv");
@@ -416,47 +416,6 @@ impl eframe::App for VpApp {
                             });
                             ui.add_space(10.0);
                             ui.label("TSOD is a low-latency, TeamSpeak- and Discord-inspired voice collaboration client built for reliable channels, rich chat, permissions-aware moderation, and high quality audio/video communication across modern desktop environments.");
-                            ui.add_space(14.0);
-                            ui.heading("Updates");
-                            ui.label(format!("Installed version: {APP_VERSION}"));
-                            ui.horizontal(|ui| {
-                                let checking = self.model.update_check_in_flight;
-                                if ui
-                                    .add_enabled(!checking, egui::Button::new("Check for updates now"))
-                                    .clicked()
-                                {
-                                    let _ = self.tx_intent.send(UiIntent::CheckForUpdates);
-                                }
-                                if checking {
-                                    ui.spinner();
-                                    ui.label("Checking...");
-                                }
-                            });
-
-                            if let Some(update) = self.model.available_update.as_ref() {
-                                ui.add_space(8.0);
-                                ui.colored_label(
-                                    theme::COLOR_MENTION,
-                                    format!("Update available: {}", update.version),
-                                );
-                                if !update.notes.trim().is_empty() {
-                                    ui.label(update.notes.as_str());
-                                }
-                                ui.horizontal_wrapped(|ui| {
-                                    if ui.link("View release notes").clicked() {
-                                        let _ = open::that(update.page_url.clone());
-                                    }
-                                    if ui.link("Get update").clicked() {
-                                        let _ = self.tx_intent.send(UiIntent::GetUpdate {
-                                            version: update.version.clone(),
-                                            download_url: update.download_url.clone(),
-                                        });
-                                    }
-                                });
-                                if let Some(path) = update.downloaded_file_path.as_ref() {
-                                    ui.label(format!("Downloaded to: {path}"));
-                                }
-                            }
                         }
                         _ => {
                             ui.label(
@@ -501,36 +460,6 @@ impl eframe::App for VpApp {
                 });
             if !open {
                 self.model.show_about = false;
-            }
-        }
-
-        if self.model.update_popup_open {
-            let mut open = true;
-            egui::Window::new("Update available")
-                .collapsible(false)
-                .resizable(false)
-                .open(&mut open)
-                .show(ctx, |ui| {
-                    if let Some(update) = self.model.available_update.as_ref() {
-                        ui.label(format!("TSOD {} is now available.", update.version));
-                        if !update.notes.trim().is_empty() {
-                            ui.label(update.notes.as_str());
-                        }
-                        ui.horizontal_wrapped(|ui| {
-                            if ui.link("Get update").clicked() {
-                                let _ = self.tx_intent.send(UiIntent::GetUpdate {
-                                    version: update.version.clone(),
-                                    download_url: update.download_url.clone(),
-                                });
-                            }
-                            if ui.link("Release notes").clicked() {
-                                let _ = open::that(update.page_url.clone());
-                            }
-                        });
-                    }
-                });
-            if !open {
-                self.model.update_popup_open = false;
             }
         }
 
