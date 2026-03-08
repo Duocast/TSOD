@@ -9,7 +9,7 @@ use std::{
     },
 };
 use tokio::{
-    sync::{mpsc, RwLock},
+    sync::{mpsc, RwLock, Semaphore},
     time::{timeout, Duration, Instant},
 };
 use tracing::{debug, info, warn};
@@ -48,6 +48,7 @@ pub struct Gateway {
     voice: Arc<VoiceForwarder>,
     video: Arc<StreamForwarder>,
     media: Arc<MediaService>,
+    connection_limit: Arc<Semaphore>,
     reactions: Arc<RwLock<HashMap<(ChannelId, uuid::Uuid), HashMap<String, HashSet<UserId>>>>>,
 }
 
@@ -77,6 +78,7 @@ impl Gateway {
             voice,
             video,
             media,
+            connection_limit: Arc::new(Semaphore::new(max_connections)),
             reactions: Arc::new(RwLock::new(HashMap::new())),
         }
     }
