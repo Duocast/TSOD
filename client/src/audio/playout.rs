@@ -17,8 +17,11 @@ pub struct Playout {
 }
 
 pub const PLAYBACK_MODE_AUTO: &str = "Automatically use best mode";
+#[allow(dead_code)]
 pub const PLAYBACK_MODE_PIPEWIRE: &str = "PipeWire";
+#[allow(dead_code)]
 pub const PLAYBACK_MODE_PULSEAUDIO: &str = "PulseAudio";
+#[allow(dead_code)]
 pub const PLAYBACK_MODE_WASAPI: &str = "WASAPI";
 
 #[cfg(target_os = "linux")]
@@ -37,6 +40,7 @@ type PlayoutBackend = non_linux::CpalPlayout;
 ))]
 type PlayoutBackend = non_linux::CpalPlayout;
 
+#[allow(dead_code)]
 impl Playout {
     pub fn start(sample_rate: u32, channels: u16) -> Result<Self> {
         Self::start_with_device(sample_rate, channels, None, None)
@@ -116,18 +120,22 @@ pub fn enumerate_playback_modes() -> Vec<String> {
     PlayoutBackend::enumerate_playback_modes()
 }
 
+#[allow(dead_code)]
 #[cfg(target_os = "windows")]
 fn cpal_backend() -> AudioBackend {
     AudioBackend::Wasapi
 }
+#[allow(dead_code)]
 #[cfg(target_os = "macos")]
 fn cpal_backend() -> AudioBackend {
     AudioBackend::CoreAudio
 }
+#[allow(dead_code)]
 #[cfg(target_os = "linux")]
 fn cpal_backend() -> AudioBackend {
     AudioBackend::Pulse
 }
+#[allow(dead_code)]
 #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
 fn cpal_backend() -> AudioBackend {
     AudioBackend::Unknown

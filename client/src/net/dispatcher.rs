@@ -77,13 +77,14 @@ pub enum PushEvent {
         event: pb::UnsubscribeStream,
         event_seq: u64,
     },
-    Unknown(pb::ServerToClient),
+    Unknown(#[allow(dead_code)] pb::ServerToClient),
 }
 
 #[derive(Clone, Debug)]
 pub struct AuthInfo {
     pub user_id: String,
     pub session_id: String,
+    #[allow(dead_code)]
     pub server_id: String,
 }
 
@@ -105,6 +106,7 @@ enum Command {
     SendNoResponse {
         payload: pb::client_to_server::Payload,
     },
+    #[allow(dead_code)]
     Shutdown,
 }
 
@@ -659,6 +661,7 @@ impl ControlDispatcher {
             .map_err(|_| anyhow!("dispatcher dropped response"))?)
     }
 
+    #[allow(dead_code)]
     pub async fn shutdown(&self) {
         let _ = self.inner.cmd_tx.send(Command::Shutdown).await;
     }

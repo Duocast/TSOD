@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Client-side video/screenshare transport with allocation-free steady state.
 //!
 //! This module provides:

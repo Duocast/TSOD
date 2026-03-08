@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use bytes::{BufMut, Bytes, BytesMut};
 
 pub const VOICE_VERSION: u8 = 1;

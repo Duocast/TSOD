@@ -8,11 +8,13 @@ pub enum OpusEncoderProfile {
 
 pub struct OpusEncoder {
     enc: opus::Encoder,
+    #[allow(dead_code)]
     encoded_scratch: Vec<u8>,
 }
 
 pub struct OpusDecoder {
     dec: opus::Decoder,
+    #[allow(dead_code)]
     decoded_scratch: Vec<i16>,
 }
 
@@ -38,6 +40,7 @@ impl OpusEncoder {
         Ok(self.enc.encode(pcm, out)?)
     }
 
+    #[allow(dead_code)]
     pub fn encode_reuse(&mut self, pcm: &[i16]) -> Result<&[u8]> {
         let n = self.enc.encode(pcm, &mut self.encoded_scratch)?;
         Ok(&self.encoded_scratch[..n])
@@ -73,6 +76,7 @@ impl OpusDecoder {
         })
     }
 
+    #[allow(dead_code)]
     pub fn decode_reuse(&mut self, data: &[u8]) -> Result<&[i16]> {
         let n = self.dec.decode(data, &mut self.decoded_scratch, false)?;
         Ok(&self.decoded_scratch[..n])
