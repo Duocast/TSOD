@@ -160,7 +160,7 @@ fn write_windows_protected_file(path: &Path, bytes: &[u8]) -> Result<()> {
     };
     use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
     use windows::Win32::Storage::FileSystem::{CreateFileW, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL};
-    use windows::Win32::System::Memory::LocalFree;
+    use windows::Win32::Foundation::LocalFree;
 
     let mut path_wide: Vec<u16> = path.as_os_str().encode_wide().collect();
     path_wide.push(0);
@@ -227,15 +227,15 @@ fn write_windows_protected_file(path: &Path, bytes: &[u8]) -> Result<()> {
 fn dpapi_protect(data: &[u8]) -> Result<Vec<u8>> {
     use windows::Win32::Foundation::HLOCAL;
     use windows::Win32::Security::Cryptography::{
-        CryptProtectData, CRYPTPROTECT_UI_FORBIDDEN, DATA_BLOB,
+        CryptProtectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
     };
-    use windows::Win32::System::Memory::LocalFree;
+    use windows::Win32::Foundation::LocalFree;
 
-    let mut input = DATA_BLOB {
+    let mut input = CRYPT_INTEGER_BLOB {
         cbData: data.len() as u32,
         pbData: data.as_ptr() as *mut u8,
     };
-    let mut output = DATA_BLOB::default();
+    let mut output = CRYPT_INTEGER_BLOB::default();
 
     unsafe {
         CryptProtectData(
@@ -260,15 +260,15 @@ fn dpapi_protect(data: &[u8]) -> Result<Vec<u8>> {
 fn dpapi_unprotect(data: &[u8]) -> Result<Vec<u8>> {
     use windows::Win32::Foundation::HLOCAL;
     use windows::Win32::Security::Cryptography::{
-        CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, DATA_BLOB,
+        CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
     };
-    use windows::Win32::System::Memory::LocalFree;
+    use windows::Win32::Foundation::LocalFree;
 
-    let mut input = DATA_BLOB {
+    let mut input = CRYPT_INTEGER_BLOB {
         cbData: data.len() as u32,
         pbData: data.as_ptr() as *mut u8,
     };
-    let mut output = DATA_BLOB::default();
+    let mut output = CRYPT_INTEGER_BLOB::default();
 
     unsafe {
         CryptUnprotectData(
