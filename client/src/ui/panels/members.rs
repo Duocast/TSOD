@@ -55,6 +55,12 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                 );
             }
 
+            // Left-click opens profile popup; middle-click opens connection info.
+            if response.clicked() {
+                let click_pos = response.rect.right_top() + egui::vec2(8.0, 0.0);
+                model.open_profile_popup(member.user_id.clone(), click_pos);
+            }
+
             if response.middle_clicked() {
                 model.open_member_connection_info_window(
                     member.user_id.clone(),
@@ -162,6 +168,12 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
             }
 
             response.context_menu(|ui| {
+                if ui.button("View Profile").clicked() {
+                    let click_pos = ui.min_rect().right_top() + egui::vec2(8.0, 0.0);
+                    model.open_profile_popup(member.user_id.clone(), click_pos);
+                    ui.close();
+                }
+                ui.separator();
                 let current_gain = model.user_output_gain(&member.user_id);
                 let mut draft_gain = current_gain;
                 let mut local_muted = model.user_locally_muted(&member.user_id);

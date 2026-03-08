@@ -78,7 +78,9 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
         .max_height(available.max(100.0))
         .stick_to_bottom(true)
         .show(ui, |ui| {
-            if let Some(messages) = model.current_messages() {
+            let messages_snapshot: Option<Vec<ChatMessage>> =
+                model.current_messages().map(|msgs| msgs.iter().cloned().collect());
+            if let Some(messages) = messages_snapshot {
                 let mut prev_day: Option<NaiveDate> = None;
 
                 for msg in messages.iter() {
@@ -89,7 +91,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                         }
                     }
 
-                    show_message(ui, msg, tx_intent);
+                    show_message(ui, msg, model, tx_intent);
 
                     prev_day = msg_day;
                 }
@@ -766,15 +768,22 @@ fn detect_mime_type(path: &Path, raw_mime: &str) -> String {
     .to_string()
 }
 
-fn show_message(ui: &mut egui::Ui, msg: &ChatMessage, tx_intent: &Sender<UiIntent>) {
+fn show_message(ui: &mut egui::Ui, msg: &ChatMessage, model: &mut UiModel, tx_intent: &Sender<UiIntent>) {
     ui.horizontal(|ui| {
         ui.vertical(|ui| {
             ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new(&msg.author_name)
-                        .strong()
-                        .color(theme::text_color()),
+                let author_label = ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(&msg.author_name)
+                            .strong()
+                            .color(theme::text_color()),
+                    )
+                    .sense(egui::Sense::click()),
                 );
+                if author_label.clicked() {
+                    let click_pos = author_label.rect.left_bottom() + egui::vec2(0.0, 4.0);
+                    model.open_profile_popup(msg.author_id.clone(), click_pos);
+                }
                 let ts = format_timestamp(msg.timestamp);
                 ui.label(egui::RichText::new(ts).small().color(theme::text_muted()));
                 if msg.edited {
