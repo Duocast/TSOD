@@ -203,3 +203,16 @@ pub struct PermissionRequest {
     pub channel_id: Option<ChannelId>,
     pub target_user_id: Option<UserId>,
 }
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ScreenShareStartAuth {
+    pub channel_id: ChannelId,
+    pub stream_count: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ScreenShareStopAuth {
+    pub stream_tag: u64,
+    pub owner_user_id: UserId,
+    pub channel_id: ChannelId,
+}

@@ -67,17 +67,18 @@ async fn main() -> Result<()> {
     // Migrations (control-plane schema)
     sqlx::migrate!("../control/migrations").run(&pool).await?;
 
+    let repo = vp_control::PgControlRepo::new(pool.clone());
+    let control = Arc::new(vp_control::ControlService::new(repo.clone()));
+
     let media = Arc::new(
         media::MediaService::new(
             pool.clone(),
+            control.clone(),
             std::path::PathBuf::from("./data/uploads"),
             vp_control::ids::ServerId(uuid::Uuid::parse_str(&cfg.default_server_id)?),
         )
         .await?,
     );
-
-    let repo = vp_control::PgControlRepo::new(pool.clone());
-    let control = Arc::new(vp_control::ControlService::new(repo.clone()));
 
     // Shared runtime state
     let push = PushHub::new();

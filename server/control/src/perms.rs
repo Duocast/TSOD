@@ -12,6 +12,10 @@ pub enum Capability {
     ModerateMembers,
     ManageRoles,
     MuteVoice,
+    DeafenVoice,
+    KickMember,
+    MoveMember,
+    ModerateStreams,
 }
 
 impl Capability {
@@ -27,6 +31,10 @@ impl Capability {
             Capability::ModerateMembers => "moderate_members",
             Capability::ManageRoles => "manage_roles",
             Capability::MuteVoice => "mute_voice",
+            Capability::DeafenVoice => "deafen_voice",
+            Capability::KickMember => "kick_member",
+            Capability::MoveMember => "move_member",
+            Capability::ModerateStreams => "moderate_streams",
         }
     }
     pub fn from_str(s: &str) -> Option<Self> {
@@ -41,6 +49,10 @@ impl Capability {
             "moderate_members" => Capability::ModerateMembers,
             "manage_roles" => Capability::ManageRoles,
             "mute_voice" => Capability::MuteVoice,
+            "deafen_voice" => Capability::DeafenVoice,
+            "kick_member" => Capability::KickMember,
+            "move_member" => Capability::MoveMember,
+            "moderate_streams" => Capability::ModerateStreams,
             _ => return None,
         })
     }

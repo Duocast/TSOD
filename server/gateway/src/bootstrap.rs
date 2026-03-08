@@ -218,7 +218,12 @@ async fn ensure_baseline_capabilities(
         ("member", "send_message"),
         ("member", "speak"),
         ("member", "stream"),
-		("member", "upload"),
+        ("member", "upload"),
+        ("mod", "mute_voice"),
+        ("mod", "deafen_voice"),
+        ("mod", "kick_member"),
+        ("mod", "move_member"),
+        ("mod", "moderate_streams"),
     ] {
         sqlx::query(
             r#"

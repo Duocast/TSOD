@@ -15,6 +15,7 @@ use uuid::Uuid;
 use vp_control::{
     ids::{ChannelId, ServerId, UserId},
     repo::is_user_in_channel,
+    ControlService, PgControlRepo, RequestContext,
 };
 
 use crate::{
@@ -32,6 +33,7 @@ const MAX_THUMB_PIXELS: u64 = 20_000_000;
 #[derive(Clone)]
 pub struct MediaService {
     pool: PgPool,
+    control: std::sync::Arc<ControlService<PgControlRepo>>,
     upload_dir: PathBuf,
     default_server_id: ServerId,
     max_upload_bytes: u64,
@@ -41,6 +43,7 @@ pub struct MediaService {
 impl MediaService {
     pub async fn new(
         pool: PgPool,
+        control: std::sync::Arc<ControlService<PgControlRepo>>,
         upload_dir: PathBuf,
         default_server_id: ServerId,
     ) -> Result<Self> {
@@ -49,6 +52,7 @@ impl MediaService {
             .context("create media upload dir")?;
         Ok(Self {
             pool,
+            control,
             upload_dir,
             default_server_id,
             max_upload_bytes: DEFAULT_MAX_UPLOAD_BYTES,
@@ -67,19 +71,18 @@ impl MediaService {
         &self,
         mut send: quinn::SendStream,
         mut recv: quinn::RecvStream,
-        user_id: UserId,
+        ctx: RequestContext,
     ) -> Result<()> {
         let req: pb::MediaRequest = read_delimited(&mut recv, MEDIA_MAX_MSG).await?;
         match req.payload {
             Some(pb::media_request::Payload::UploadInit(init)) => {
-                self.handle_upload(&mut send, &mut recv, user_id, init)
-                    .await
+                self.handle_upload(&mut send, &mut recv, ctx, init).await
             }
             Some(pb::media_request::Payload::DownloadRequest(req)) => {
-                self.handle_download(&mut send, req, user_id).await
+                self.handle_download(&mut send, req, ctx).await
             }
             Some(pb::media_request::Payload::ThumbRequest(req)) => {
-                self.handle_thumb(&mut send, req, user_id).await
+                self.handle_thumb(&mut send, req, ctx).await
             }
             None => Err(anyhow!("empty media request")),
         }
@@ -89,7 +92,7 @@ impl MediaService {
         &self,
         send: &mut quinn::SendStream,
         recv: &mut quinn::RecvStream,
-        user_id: UserId,
+        ctx: RequestContext,
         init: pb::UploadInit,
     ) -> Result<()> {
         let channel_id = init
@@ -100,10 +103,17 @@ impl MediaService {
             .clone();
         let channel_uuid = Uuid::parse_str(&channel_id).context("invalid channel id")?;
         if !self
-            .user_in_channel(self.default_server_id.0, channel_uuid, user_id.0)
+            .user_in_channel(self.default_server_id.0, channel_uuid, ctx.user_id.0)
             .await?
         {
             return self.write_error(send, "not authorized for channel").await;
+        }
+        if let Err(vp_control::ControlError::PermissionDenied(_)) = self
+            .control
+            .authorize_upload(&ctx, ChannelId(channel_uuid))
+            .await
+        {
+            return self.write_error(send, "not authorized for upload").await;
         }
         if init.size_bytes == 0 || init.size_bytes > self.max_upload_bytes {
             return self.write_error(send, "invalid upload size").await;
@@ -166,7 +176,7 @@ impl MediaService {
         .bind(attachment_id)
         .bind(self.default_server_id.0)
         .bind(channel_uuid)
-        .bind(user_id.0)
+         .bind(ctx.user_id.0)
         .bind(&init.filename)
         .bind(&mime)
         .bind(total as i64)
@@ -198,7 +208,7 @@ impl MediaService {
         &self,
         send: &mut quinn::SendStream,
         req: pb::DownloadRequest,
-        user_id: UserId,
+        ctx: RequestContext,
     ) -> Result<()> {
         let attachment_id = req
             .attachment_id
@@ -222,7 +232,7 @@ impl MediaService {
 
         let channel_id: Uuid = row.get("channel_id");
         if !self
-            .user_in_channel(self.default_server_id.0, channel_id, user_id.0)
+            .user_in_channel(self.default_server_id.0, channel_id, ctx.user_id.0)
             .await?
         {
             return self.write_error(send, "not authorized").await;
@@ -270,7 +280,7 @@ impl MediaService {
         &self,
         send: &mut quinn::SendStream,
         req: pb::ThumbRequest,
-        user_id: UserId,
+        ctx: RequestContext,
     ) -> Result<()> {
         let attachment_id = req
             .attachment_id
@@ -294,7 +304,7 @@ impl MediaService {
 
         let channel_id: Uuid = row.get("channel_id");
         if !self
-            .user_in_channel(self.default_server_id.0, channel_id, user_id.0)
+            .user_in_channel(self.default_server_id.0, channel_id, ctx.user_id.0)
             .await?
         {
             return self.write_error(send, "not authorized").await;
