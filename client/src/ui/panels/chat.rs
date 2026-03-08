@@ -176,6 +176,10 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
             );
             model.chat_input_focused = composer_result.has_focus;
 
+            if composer_result.has_focus && !model.chat_composer.text().trim().is_empty() {
+                let _ = tx_intent.send(UiIntent::SendTyping);
+            }
+
             if composer_result.send_requested || send_clicked {
                 send_chat_from_input(model, tx_intent);
             }

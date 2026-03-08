@@ -9,7 +9,7 @@ use std::{
     },
 };
 use tokio::{
-    sync::mpsc,
+    sync::{mpsc, RwLock},
     time::{timeout, Duration, Instant},
 };
 use tracing::{debug, info, warn};
@@ -48,6 +48,7 @@ pub struct Gateway {
     voice: Arc<VoiceForwarder>,
     video: Arc<StreamForwarder>,
     media: Arc<MediaService>,
+    reactions: Arc<RwLock<HashMap<(ChannelId, uuid::Uuid), HashMap<String, HashSet<UserId>>>>>,
 }
 
 impl Gateway {
@@ -75,6 +76,7 @@ impl Gateway {
             voice,
             video,
             media,
+            reactions: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -765,6 +767,146 @@ impl Gateway {
                         break;
                     }
                 }
+                Some(pb::client_to_server::Payload::AddReactionRequest(r)) => {
+                    let ch = parse_channel_id(r.channel_id.as_ref())?;
+                    let msg_id = parse_message_uuid(r.message_id.as_ref())?;
+                    let emoji = r.emoji.trim().to_string();
+                    if emoji.is_empty() {
+                        return Err(ControlError::InvalidArgument("emoji missing").into());
+                    }
+
+                    {
+                        let mut reactions = self.reactions.write().await;
+                        let by_msg = reactions.entry((ch, msg_id)).or_default();
+                        by_msg.entry(emoji.clone()).or_default().insert(user_id);
+                    }
+
+                    self.broadcast_chat_event(
+                        ch,
+                        pb::chat_event::Kind::ReactionAdded(pb::ReactionAdded {
+                            message_id: Some(pb::MessageId { value: msg_id.to_string() }),
+                            channel_id: Some(pb::ChannelId { value: ch.0.to_string() }),
+                            user_id: Some(pb::UserId { value: user_id.0.to_string() }),
+                            emoji,
+                        }),
+                    )
+                    .await;
+
+                    let resp = pb::ServerToClient {
+                        request_id: req_id,
+                        session_id: Some(pb::SessionId {
+                            value: session_id.clone(),
+                        }),
+                        sent_at: Some(now_ts()),
+                        error: None,
+                        event_seq: 0,
+                        payload: Some(pb::server_to_client::Payload::AddReactionResponse(
+                            pb::AddReactionResponse {},
+                        )),
+                    };
+                    if let Err(e) = write_delimited(&mut send, &resp).await {
+                        warn!("control write failed: {:#}", e);
+                        break;
+                    }
+                }
+                Some(pb::client_to_server::Payload::RemoveReactionRequest(r)) => {
+                    let ch = parse_channel_id(r.channel_id.as_ref())?;
+                    let msg_id = parse_message_uuid(r.message_id.as_ref())?;
+                    let emoji = r.emoji.trim().to_string();
+                    if emoji.is_empty() {
+                        return Err(ControlError::InvalidArgument("emoji missing").into());
+                    }
+
+                    {
+                        let mut reactions = self.reactions.write().await;
+                        if let Some(by_msg) = reactions.get_mut(&(ch, msg_id)) {
+                            if let Some(users) = by_msg.get_mut(&emoji) {
+                                users.remove(&user_id);
+                                if users.is_empty() {
+                                    by_msg.remove(&emoji);
+                                }
+                            }
+                            if by_msg.is_empty() {
+                                reactions.remove(&(ch, msg_id));
+                            }
+                        }
+                    }
+
+                    self.broadcast_chat_event(
+                        ch,
+                        pb::chat_event::Kind::ReactionRemoved(pb::ReactionRemoved {
+                            message_id: Some(pb::MessageId { value: msg_id.to_string() }),
+                            channel_id: Some(pb::ChannelId { value: ch.0.to_string() }),
+                            user_id: Some(pb::UserId { value: user_id.0.to_string() }),
+                            emoji,
+                        }),
+                    )
+                    .await;
+
+                    let resp = pb::ServerToClient {
+                        request_id: req_id,
+                        session_id: Some(pb::SessionId {
+                            value: session_id.clone(),
+                        }),
+                        sent_at: Some(now_ts()),
+                        error: None,
+                        event_seq: 0,
+                        payload: Some(pb::server_to_client::Payload::RemoveReactionResponse(
+                            pb::RemoveReactionResponse {},
+                        )),
+                    };
+                    if let Err(e) = write_delimited(&mut send, &resp).await {
+                        warn!("control write failed: {:#}", e);
+                        break;
+                    }
+                }
+                Some(pb::client_to_server::Payload::SendTypingRequest(r)) => {
+                    let ch = parse_channel_id(r.channel_id.as_ref())?;
+                    self.broadcast_chat_event(
+                        ch,
+                        pb::chat_event::Kind::TypingStarted(pb::TypingStarted {
+                            channel_id: Some(pb::ChannelId { value: ch.0.to_string() }),
+                            user_id: Some(pb::UserId { value: user_id.0.to_string() }),
+                        }),
+                    )
+                    .await;
+
+                    let resp = pb::ServerToClient {
+                        request_id: req_id,
+                        session_id: Some(pb::SessionId {
+                            value: session_id.clone(),
+                        }),
+                        sent_at: Some(now_ts()),
+                        error: None,
+                        event_seq: 0,
+                        payload: Some(pb::server_to_client::Payload::SendTypingResponse(
+                            pb::SendTypingResponse {},
+                        )),
+                    };
+                    if let Err(e) = write_delimited(&mut send, &resp).await {
+                        warn!("control write failed: {:#}", e);
+                        break;
+                    }
+                }
+                Some(pb::client_to_server::Payload::ResumeSessionRequest(_r)) => {
+                    let resp = pb::ServerToClient {
+                        request_id: req_id,
+                        session_id: Some(pb::SessionId { value: session_id.clone() }),
+                        sent_at: Some(now_ts()),
+                        error: None,
+                        event_seq: 0,
+                        payload: Some(pb::server_to_client::Payload::ResumeSessionResponse(
+                            pb::ResumeSessionResponse {
+                                resumed: false,
+                                current_event_seq: 0,
+                            },
+                        )),
+                    };
+                    if let Err(e) = write_delimited(&mut send, &resp).await {
+                        warn!("control write failed: {:#}", e);
+                        break;
+                    }
+                }
                 Some(pb::client_to_server::Payload::ModerationActionRequest(r)) => {
                     let ch = parse_channel_id(r.channel_id.as_ref())?;
                     let target = r
@@ -1395,6 +1537,25 @@ impl Gateway {
             .context("write AuthResponse")?;
         Ok(identity)
     }
+
+    async fn broadcast_chat_event(&self, channel_id: ChannelId, kind: pb::chat_event::Kind) {
+        let recipients = self.membership.members_of(channel_id).unwrap_or_default();
+        let event = pb::ChatEvent {
+            at: Some(now_ts()),
+            kind: Some(kind),
+        };
+        let msg = pb::ServerToClient {
+            request_id: None,
+            session_id: None,
+            sent_at: Some(now_ts()),
+            error: None,
+            event_seq: 0,
+            payload: Some(pb::server_to_client::Payload::ChatEvent(event)),
+        };
+        for uid in recipients {
+            self.push.send_to(uid, msg.clone()).await;
+        }
+    }
 }
 
 impl Gateway {
@@ -1653,6 +1814,12 @@ fn parse_channel_id(ch: Option<&pb::ChannelId>) -> Result<ChannelId> {
     Ok(ChannelId(uuid::Uuid::parse_str(&ch.value).map_err(
         |_| ControlError::InvalidArgument("invalid channel_id"),
     )?))
+}
+
+fn parse_message_uuid(id: Option<&pb::MessageId>) -> Result<uuid::Uuid> {
+    let id = id.ok_or(ControlError::InvalidArgument("message_id missing"))?;
+    uuid::Uuid::parse_str(&id.value)
+        .map_err(|_| ControlError::InvalidArgument("invalid message_id").into())
 }
 
 fn error_from_anyhow(err: &anyhow::Error) -> pb::Error {
