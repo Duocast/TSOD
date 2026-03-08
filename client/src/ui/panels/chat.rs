@@ -78,10 +78,10 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
         .max_height(available.max(100.0))
         .stick_to_bottom(true)
         .show(ui, |ui| {
-            if let Some(messages) = model.current_messages() {
+            if let Some(messages) = model.current_messages().cloned() {
                 let mut prev_day: Option<NaiveDate> = None;
 
-                for msg in messages.iter() {
+                for msg in &messages {
                     let msg_day = message_day(msg.timestamp);
                     if let Some(day) = msg_day {
                         if Some(day) != prev_day {
