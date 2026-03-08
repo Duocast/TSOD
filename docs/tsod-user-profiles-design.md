@@ -270,12 +270,12 @@ The popup is an `egui::Window` rendered as a floating card (not a system window)
 
 ```
 ┌──────────────────────────────────┐
-│  ░░░░░░ BANNER IMAGE ░░░░░░░░░  │  ← 340 × 100 px, or accent_color gradient
-│  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  │
+│  ░░░░░░ BANNER IMAGE ░░░░░░░░░   │  ← 340 × 100 px, or accent_color gradient
+│  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   │
 │ ┌────┐                           │
-│ │    │ DisplayName                │  ← Avatar overlaps banner bottom edge
-│ │ AV │ he/him                     │    64×64 circle, 3px border in accent_color
-│ │    │ ● Online                   │
+│ │    │ DisplayName               │  ← Avatar overlaps banner bottom edge
+│ │ AV │ ● Online                  │    64×64 circle, 3px border in accent_color
+│ │    │                           │
 │ └────┘                           │
 │──────────────────────────────────│
 │ 🎮 Playing Rust — 2h 14m        │  ← Activity row (conditional)
