@@ -187,23 +187,6 @@ pub enum UiEvent {
         text: String,
         kind: NotificationKind,
     },
-    UpdateCheckStarted,
-    UpdateAvailable {
-        version: String,
-        notes: String,
-        download_url: String,
-        page_url: String,
-    },
-    UpdateNotAvailable {
-        current_version: String,
-    },
-    UpdateDownloaded {
-        version: String,
-        file_path: String,
-    },
-    UpdateCheckFailed {
-        error: String,
-    },
 
     // Channel list
     SetChannels(Vec<ChannelEntry>),
@@ -374,11 +357,6 @@ pub enum UiIntent {
     ToggleSelfMute,
     ToggleSelfDeafen,
     Help,
-    CheckForUpdates,
-    GetUpdate {
-        version: String,
-        download_url: String,
-    },
     SetAwayMessage {
         message: String,
     },
@@ -647,8 +625,6 @@ pub struct AppSettings {
     pub start_minimized: bool,
     pub minimize_to_tray: bool,
     pub check_for_updates: bool,
-    #[serde(default = "default_update_manifest_url")]
-    pub update_manifest_url: String,
     pub language: String,
     pub theme: String,
     pub ui_scale: f32,
@@ -744,7 +720,6 @@ impl Default for AppSettings {
             start_minimized: false,
             minimize_to_tray: true,
             check_for_updates: true,
-            update_manifest_url: default_update_manifest_url(),
             language: "English".into(),
             theme: "Dark".into(),
             ui_scale: 1.0,
@@ -773,10 +748,6 @@ impl Default for AppSettings {
             auto_download_files: false,
         }
     }
-}
-
-fn default_update_manifest_url() -> String {
-    "https://updates.tsod.app/stable/manifest.json".to_string()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1727,9 +1698,6 @@ pub struct UiModel {
 
     // Notifications
     pub notifications: VecDeque<Notification>,
-    pub update_check_in_flight: bool,
-    pub update_popup_open: bool,
-    pub available_update: Option<AvailableUpdate>,
 
     // ── Settings system ──
     pub settings: AppSettings,
@@ -1785,15 +1753,6 @@ pub struct Notification {
     pub text: String,
     pub created: std::time::Instant,
     pub kind: NotificationKind,
-}
-
-#[derive(Debug, Clone)]
-pub struct AvailableUpdate {
-    pub version: String,
-    pub notes: String,
-    pub download_url: String,
-    pub page_url: String,
-    pub downloaded_file_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -2054,9 +2013,6 @@ impl Default for UiModel {
                 "In a meeting".into(),
             ],
             notifications: VecDeque::new(),
-            update_check_in_flight: false,
-            update_popup_open: false,
-            available_update: None,
             settings,
             settings_draft,
             settings_page: SettingsPage::Capture,
@@ -2219,59 +2175,6 @@ impl UiModel {
                     text,
                     created: std::time::Instant::now(),
                     kind,
-                });
-            }
-            UiEvent::UpdateCheckStarted => {
-                self.update_check_in_flight = true;
-            }
-            UiEvent::UpdateAvailable {
-                version,
-                notes,
-                download_url,
-                page_url,
-            } => {
-                self.update_check_in_flight = false;
-                self.available_update = Some(AvailableUpdate {
-                    version,
-                    notes,
-                    download_url,
-                    page_url,
-                    downloaded_file_path: None,
-                });
-                self.update_popup_open = true;
-                self.notifications.push_back(Notification {
-                    text: "A new TSOD update is available.".to_string(),
-                    created: std::time::Instant::now(),
-                    kind: NotificationKind::Info,
-                });
-            }
-            UiEvent::UpdateNotAvailable { current_version } => {
-                self.update_check_in_flight = false;
-                self.notifications.push_back(Notification {
-                    text: format!("TSOD is up to date ({current_version})."),
-                    created: std::time::Instant::now(),
-                    kind: NotificationKind::Info,
-                });
-            }
-            UiEvent::UpdateDownloaded { version, file_path } => {
-                self.update_check_in_flight = false;
-                if let Some(update) = self.available_update.as_mut() {
-                    if update.version == version {
-                        update.downloaded_file_path = Some(file_path.clone());
-                    }
-                }
-                self.notifications.push_back(Notification {
-                    text: format!("Downloaded TSOD {version} to {file_path}"),
-                    created: std::time::Instant::now(),
-                    kind: NotificationKind::Info,
-                });
-            }
-            UiEvent::UpdateCheckFailed { error } => {
-                self.update_check_in_flight = false;
-                self.notifications.push_back(Notification {
-                    text: format!("Update check failed: {error}"),
-                    created: std::time::Instant::now(),
-                    kind: NotificationKind::Error,
                 });
             }
             UiEvent::SetChannels(chs) => {
