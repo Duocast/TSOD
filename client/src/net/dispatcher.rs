@@ -595,14 +595,18 @@ impl ControlDispatcher {
     }
     pub async fn set_away_message(&self, message: &str) -> Result<()> {
         let req = pb::UpdateUserProfileRequest {
-            display_name: String::new(),
-            description: String::new(),
+            display_name: None,
+            description: None,
             status: if message.trim().is_empty() {
                 pb::OnlineStatus::Online as i32
             } else {
                 pb::OnlineStatus::Idle as i32
             },
-            custom_status_text: message.to_string(),
+            custom_status_text: Some(message.to_string()),
+            custom_status_emoji: None,
+            custom_status_expires: None,
+            accent_color: None,
+            links: Vec::new(),
         };
         let resp = self
             .send_request(

@@ -78,12 +78,10 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
         .max_height(available.max(100.0))
         .stick_to_bottom(true)
         .show(ui, |ui| {
-            let messages_snapshot: Option<Vec<ChatMessage>> =
-                model.current_messages().map(|msgs| msgs.iter().cloned().collect());
-            if let Some(messages) = messages_snapshot {
+            if let Some(messages) = model.current_messages().cloned() {
                 let mut prev_day: Option<NaiveDate> = None;
 
-                for msg in messages.iter() {
+                for msg in &messages {
                     let msg_day = message_day(msg.timestamp);
                     if let Some(day) = msg_day {
                         if Some(day) != prev_day {
@@ -91,7 +89,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                         }
                     }
 
-                    show_message(ui, msg, model, tx_intent);
+                    show_message(ui, model, msg, tx_intent);
 
                     prev_day = msg_day;
                 }
@@ -768,11 +766,16 @@ fn detect_mime_type(path: &Path, raw_mime: &str) -> String {
     .to_string()
 }
 
-fn show_message(ui: &mut egui::Ui, msg: &ChatMessage, model: &mut UiModel, tx_intent: &Sender<UiIntent>) {
+fn show_message(
+    ui: &mut egui::Ui,
+    model: &mut UiModel,
+    msg: &ChatMessage,
+    tx_intent: &Sender<UiIntent>,
+) {
     ui.horizontal(|ui| {
         ui.vertical(|ui| {
             ui.horizontal(|ui| {
-                let author_label = ui.add(
+                let author_resp = ui.add(
                     egui::Label::new(
                         egui::RichText::new(&msg.author_name)
                             .strong()
@@ -780,9 +783,27 @@ fn show_message(ui: &mut egui::Ui, msg: &ChatMessage, model: &mut UiModel, tx_in
                     )
                     .sense(egui::Sense::click()),
                 );
-                if author_label.clicked() {
-                    let click_pos = author_label.rect.left_bottom() + egui::vec2(0.0, 4.0);
-                    model.open_profile_popup(msg.author_id.clone(), click_pos);
+                if author_resp.clicked() {
+                    model.profile_popup_user_id = Some(msg.author_id.clone());
+                    model.profile_popup_anchor = author_resp.interact_pointer_pos();
+                    if let Some(cached) = model.profile_cache.get(&msg.author_id) {
+                        if cached.fetched_at.elapsed() < Duration::from_secs(60) {
+                            model.profile_popup_data = Some(cached.data.clone());
+                            model.profile_popup_loading = false;
+                        } else {
+                            model.profile_popup_loading = true;
+                            model.profile_popup_data = None;
+                            let _ = tx_intent.send(UiIntent::FetchUserProfile {
+                                user_id: msg.author_id.clone(),
+                            });
+                        }
+                    } else {
+                        model.profile_popup_loading = true;
+                        model.profile_popup_data = None;
+                        let _ = tx_intent.send(UiIntent::FetchUserProfile {
+                            user_id: msg.author_id.clone(),
+                        });
+                    }
                 }
                 let ts = format_timestamp(msg.timestamp);
                 ui.label(egui::RichText::new(ts).small().color(theme::text_muted()));

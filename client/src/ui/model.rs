@@ -432,6 +432,12 @@ pub enum UiIntent {
         user_id: String,
         message: String,
     },
+    FetchUserProfile {
+        user_id: String,
+    },
+    CreateDmChannel {
+        participant_user_ids: Vec<String>,
+    },
 
     // Whisper
     SetWhisperTargets {
@@ -2645,17 +2651,15 @@ impl UiModel {
                 });
             }
             UiEvent::UserProfileLoaded(profile) => {
-                // Populate the profile popup if this matches the requested user.
-                if self.profile_popup_user_id.as_deref() == Some(&profile.user_id) {
-                    self.profile_popup_loading = false;
-                    self.profile_popup_data = Some(profile.clone());
-                }
-                // Insert/update cache.
-                let uid = profile.user_id.clone();
-                self.profile_cache.insert(uid, CachedProfile {
-                    data: profile,
-                    fetched_at: std::time::Instant::now(),
-                });
+                self.profile_popup_loading = false;
+                self.profile_popup_data = Some(profile.clone());
+                self.profile_cache.insert(
+                    profile.user_id.clone(),
+                    CachedProfile {
+                        data: profile,
+                        fetched_at: std::time::Instant::now(),
+                    },
+                );
             }
             UiEvent::SetSelfMuted(m) => self.self_muted = m,
             UiEvent::SetSelfDeafened(d) => self.self_deafened = d,

@@ -5,6 +5,7 @@ use crate::ui::panels::telemetry;
 use crate::ui::theme;
 use crossbeam_channel::Sender;
 use eframe::egui;
+use std::time::Duration;
 
 pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>) {
     ui.heading("Members");
@@ -66,6 +67,29 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                     member.user_id.clone(),
                     member.display_name.clone(),
                 );
+            }
+
+            if response.clicked() {
+                model.profile_popup_user_id = Some(member.user_id.clone());
+                model.profile_popup_anchor = response.interact_pointer_pos();
+                if let Some(cached) = model.profile_cache.get(&member.user_id) {
+                    if cached.fetched_at.elapsed() < Duration::from_secs(60) {
+                        model.profile_popup_data = Some(cached.data.clone());
+                        model.profile_popup_loading = false;
+                    } else {
+                        model.profile_popup_loading = true;
+                        model.profile_popup_data = None;
+                        let _ = tx_intent.send(UiIntent::FetchUserProfile {
+                            user_id: member.user_id.clone(),
+                        });
+                    }
+                } else {
+                    model.profile_popup_loading = true;
+                    model.profile_popup_data = None;
+                    let _ = tx_intent.send(UiIntent::FetchUserProfile {
+                        user_id: member.user_id.clone(),
+                    });
+                }
             }
 
             let avatar_size = 32.0;
