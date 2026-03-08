@@ -33,6 +33,7 @@ quinn = "0.11.9"
 rustls = { version = "0.23.37", default-features = false, features = ["std", "ring"] }
 rustls-pemfile = "2.2.0"
 ring = "0.17.14"
+hex = "0.4.3"
 
 # Audio (cross-platform)
 opus = "0.3.1"

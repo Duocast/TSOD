@@ -13,6 +13,7 @@ pub fn load_or_generate_tls(
     cert_pem: Option<&str>,
     key_pem: Option<&str>,
     extra_self_signed_sans: &[String],
+    allow_ephemeral_self_signed_dev: bool,
 ) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
     match (cert_pem, key_pem) {
         (Some(cert_path), Some(key_path)) => {
@@ -34,6 +35,11 @@ pub fn load_or_generate_tls(
             Ok((certs, key))
         }
         (None, None) => {
+            if !allow_ephemeral_self_signed_dev {
+                return Err(anyhow!(
+                    "missing TLS cert/key; set --tls-cert-pem and --tls-key-pem (or --allow-ephemeral-self-signed-dev for local development)"
+                ));
+            }
             let cert = generate_self_signed(extra_self_signed_sans)
                 .context("failed generating self-signed cert")?;
             let cert_der: CertificateDer<'static> = cert.cert.der().clone();

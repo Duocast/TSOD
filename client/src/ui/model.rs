@@ -329,6 +329,12 @@ pub enum UiIntent {
     OpenAttachment {
         attachment: AttachmentData,
     },
+    DownloadAttachment {
+        attachment: AttachmentData,
+    },
+    SaveAttachmentAs {
+        attachment: AttachmentData,
+    },
     JoinChannel {
         channel_id: String,
     },
@@ -1307,6 +1313,7 @@ pub struct AttachmentData {
     pub filename: String,
     pub mime_type: String,
     pub size_bytes: u64,
+    pub sha256: String,
     pub download_url: String,
     pub thumbnail_url: Option<String>,
 }
