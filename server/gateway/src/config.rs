@@ -63,13 +63,9 @@ pub struct Config {
     #[arg(long, default_value_t = 30)]
     pub outbox_claim_ttl_s: i64,
 
-    /// Dev mode: accept dev token "dev" (NEVER enable in production)
-    #[arg(long, default_value_t = default_dev_mode())]
-    pub dev_mode: bool,
-
-    /// Max concurrent connections (soft limit)
-    #[arg(long, default_value_t = 10_000)]
-    pub max_connections: usize,
+    /// Allow ephemeral self-signed TLS certificates for local development only.
+    #[arg(long, default_value_t = false)]
+    pub allow_ephemeral_self_signed_dev: bool,
 
     /// Interval in seconds between orphan upload file scans (0 = disabled)
     #[arg(long, default_value_t = 3600)]
@@ -86,10 +82,6 @@ pub struct Config {
         default_value_t = 32 * 1024
     )]
     pub quic_datagram_recv_buffer_bytes: usize,
-}
-
-fn default_dev_mode() -> bool {
-    cfg!(debug_assertions)
 }
 
 fn default_owner_bootstrap_policy() -> OwnerBootstrapPolicy {

@@ -159,10 +159,17 @@ async fn main() -> Result<()> {
     }
 
     // QUIC listener
+    let allow_ephemeral_self_signed_dev = if cfg!(debug_assertions) {
+        cfg.allow_ephemeral_self_signed_dev
+    } else {
+        false
+    };
+
     let (certs, key) = tls::load_or_generate_tls(
         cfg.tls_cert_pem.as_deref(),
         cfg.tls_key_pem.as_deref(),
         &cfg.tls_self_signed_sans,
+        allow_ephemeral_self_signed_dev,
     )?;
 
     let mut rustls = RustlsServerConfig::builder()

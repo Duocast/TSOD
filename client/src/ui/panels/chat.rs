@@ -714,6 +714,7 @@ fn send_chat_from_input(model: &mut UiModel, tx_intent: &Sender<UiIntent>) {
             filename: a.filename.clone(),
             mime_type: a.mime_type.clone(),
             size_bytes: a.size_bytes,
+            sha256: String::new(),
             download_url: String::new(),
             thumbnail_url: None,
         })
@@ -860,7 +861,10 @@ fn show_message_content(ui: &mut egui::Ui, msg: &ChatMessage, tx_intent: &Sender
 }
 
 fn show_image_attachment(ui: &mut egui::Ui, att: &AttachmentData, tx_intent: &Sender<UiIntent>) {
-    let uri = att.download_url.clone();
+    let uri = att
+        .thumbnail_url
+        .clone()
+        .unwrap_or_else(|| att.download_url.clone());
     ui.horizontal(|ui| {
         ui.label("\u{1F5BC}");
         let response = ui.add(
@@ -908,20 +912,23 @@ fn show_file_attachment(
 ) {
     ui.horizontal(|ui| {
         ui.label(icon);
-        let response = ui.add(
-            egui::Label::new(
-                egui::RichText::new(format!(
-                    "{} ({}) [Open]",
-                    att.filename,
-                    format_size(att.size_bytes)
-                ))
-                .color(theme::COLOR_LINK)
-                .underline(),
-            )
-            .sense(egui::Sense::click()),
-        );
-        if response.clicked() {
+        ui.label(format!(
+            "{} ({})",
+            att.filename,
+            format_size(att.size_bytes)
+        ));
+        if ui.small_button("Download").clicked() {
+            let _ = tx_intent.send(UiIntent::DownloadAttachment {
+                attachment: att.clone(),
+            });
+        }
+        if ui.small_button("Open").clicked() {
             let _ = tx_intent.send(UiIntent::OpenAttachment {
+                attachment: att.clone(),
+            });
+        }
+        if ui.small_button("Save As").clicked() {
+            let _ = tx_intent.send(UiIntent::SaveAttachmentAs {
                 attachment: att.clone(),
             });
         }

@@ -1,6 +1,7 @@
-use std::{collections::HashSet, io::Cursor, path::PathBuf};
+use std::{collections::HashSet, io::Cursor, path::PathBuf, sync::Arc};
 
 use anyhow::{anyhow, Context, Result};
+use dashmap::DashMap;
 use image::{
     codecs::jpeg::JpegEncoder, imageops::FilterType, DynamicImage, GenericImageView, ImageReader,
 };
@@ -9,6 +10,8 @@ use sqlx::{PgPool, Row};
 use tokio::{
     fs,
     io::{AsyncReadExt, AsyncWriteExt},
+    sync::Semaphore,
+    time::{timeout, Duration},
 };
 use tracing::warn;
 use uuid::Uuid;
@@ -28,6 +31,10 @@ const DEFAULT_MAX_CHUNK: usize = 64 * 1024;
 const DEFAULT_THUMB_MAX_EDGE: u32 = 512;
 const MAX_THUMB_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_THUMB_PIXELS: u64 = 20_000_000;
+const UPLOAD_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
+const UPLOAD_TOTAL_TIMEOUT: Duration = Duration::from_secs(120);
+const MAX_CONCURRENT_UPLOADS_PER_USER: usize = 3;
+const MAX_CONCURRENT_UPLOADS_PER_CHANNEL: usize = 8;
 
 #[derive(Clone)]
 pub struct MediaService {
@@ -36,6 +43,8 @@ pub struct MediaService {
     default_server_id: ServerId,
     max_upload_bytes: u64,
     inline_safe_mime: HashSet<&'static str>,
+    user_upload_limits: Arc<DashMap<Uuid, Arc<Semaphore>>>,
+    channel_upload_limits: Arc<DashMap<Uuid, Arc<Semaphore>>>,
 }
 
 impl MediaService {
@@ -60,6 +69,8 @@ impl MediaService {
                 "image/avif",
                 "text/plain",
             ]),
+            user_upload_limits: Arc::new(DashMap::new()),
+            channel_upload_limits: Arc::new(DashMap::new()),
         })
     }
 
@@ -109,14 +120,32 @@ impl MediaService {
             return self.write_error(send, "invalid upload size").await;
         }
 
+        let user_limit = self
+            .user_upload_limits
+            .entry(user_id.0)
+            .or_insert_with(|| Arc::new(Semaphore::new(MAX_CONCURRENT_UPLOADS_PER_USER)))
+            .clone();
+        let channel_limit = self
+            .channel_upload_limits
+            .entry(channel_uuid)
+            .or_insert_with(|| Arc::new(Semaphore::new(MAX_CONCURRENT_UPLOADS_PER_CHANNEL)))
+            .clone();
+        let _user_permit = user_limit
+            .try_acquire_owned()
+            .map_err(|_| anyhow!("too many concurrent uploads for user"))?;
+        let _channel_permit = channel_limit
+            .try_acquire_owned()
+            .map_err(|_| anyhow!("too many concurrent uploads for channel"))?;
+
         let attachment_id = Uuid::new_v4();
         let shard = &attachment_id.to_string()[..2];
         let dir = self.upload_dir.join(shard);
         fs::create_dir_all(&dir).await?;
         let path = dir.join(attachment_id.to_string());
-        let mut file = fs::File::create(&path)
+        let temp_path = path.with_extension("uploading");
+        let mut file = fs::File::create(&temp_path)
             .await
-            .context("create upload file")?;
+            .context("create upload temp file")?;
 
         let ready = pb::MediaResponse {
             payload: Some(pb::media_response::Payload::UploadReady(pb::UploadReady {
@@ -134,25 +163,36 @@ impl MediaService {
         let mut sniff_buf = Vec::with_capacity(1024);
         let mut buf = vec![0u8; DEFAULT_MAX_CHUNK];
 
-        while remaining > 0 {
-            let want = usize::min(DEFAULT_MAX_CHUNK, remaining as usize);
-            recv.read_exact(&mut buf[..want])
-                .await
-                .context("read upload bytes")?;
-            let chunk = &buf[..want];
-            file.write_all(chunk).await.context("write upload bytes")?;
-            hasher.update(chunk);
-            if sniff_buf.len() < 1024 {
-                let copy = usize::min(1024 - sniff_buf.len(), chunk.len());
-                sniff_buf.extend_from_slice(&chunk[..copy]);
+        let upload_task = async {
+            while remaining > 0 {
+                let want = usize::min(DEFAULT_MAX_CHUNK, remaining as usize);
+                timeout(UPLOAD_IDLE_TIMEOUT, recv.read_exact(&mut buf[..want]))
+                    .await
+                    .context("upload idle timeout")??;
+                let chunk = &buf[..want];
+                file.write_all(chunk).await.context("write upload bytes")?;
+                hasher.update(chunk);
+                if sniff_buf.len() < 1024 {
+                    let copy = usize::min(1024 - sniff_buf.len(), chunk.len());
+                    sniff_buf.extend_from_slice(&chunk[..copy]);
+                }
+                total += want as u64;
+                remaining -= want as u64;
+                if total > self.max_upload_bytes {
+                    return Err(anyhow!("upload exceeds server limit"));
+                }
             }
-            total += want as u64;
-            remaining -= want as u64;
-            if total > self.max_upload_bytes {
-                return self.write_error(send, "upload exceeds server limit").await;
-            }
-        }
+            Ok::<(), anyhow::Error>(())
+        };
+        timeout(UPLOAD_TOTAL_TIMEOUT, upload_task)
+            .await
+            .context("upload exceeded total deadline")??;
         file.flush().await?;
+        file.sync_all().await?;
+        drop(file);
+        fs::rename(&temp_path, &path)
+            .await
+            .context("commit upload file")?;
 
         let sniffed = infer::get(&sniff_buf).map(|k| k.mime_type().to_string());
         let mime = sniffed.unwrap_or_else(|| init.mime.clone());
@@ -174,7 +214,8 @@ impl MediaService {
         .bind(&hash)
         .execute(&self.pool)
         .await
-        .context("insert attachment row")?;
+        .context("insert attachment row")
+        .map_err(|e| { let _ = std::fs::remove_file(&path); e })?;
 
         let complete = pb::MediaResponse {
             payload: Some(pb::media_response::Payload::UploadComplete(

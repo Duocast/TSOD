@@ -57,6 +57,13 @@ pub const BUILD_VERSION: &str = env!("VP_CLIENT_BUILD_VERSION");
 const VOICE_INGRESS_CAP: usize = 16; // Do not increase without justification; latency risk.
 const VOICE_MAX_AGE: Duration = Duration::from_millis(250);
 const VOICE_DRAIN_KEEP_LATEST: usize = 4;
+const THUMB_PREVIEW_EDGE: u32 = 320;
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct AttachmentCacheMeta {
+    size_bytes: u64,
+    sha256: String,
+}
 
 #[derive(Debug, Clone)]
 struct PttState {
@@ -2367,6 +2374,7 @@ async fn connect_and_run_session(
         let active_voice_channel_route = active_voice_channel_route.clone();
         let server_deafened = server_deafened.clone();
         let stream_state = stream_state.clone();
+        let download_settings = saved_settings.clone();
         tokio::spawn(async move {
             while let Some(ev) = push_rx.recv().await {
                 match ev {
@@ -2426,6 +2434,7 @@ async fn connect_and_run_session(
                                             filename: a.filename,
                                             mime_type: a.mime_type,
                                             size_bytes: a.size_bytes,
+                                            sha256: a.sha256,
                                             download_url: String::new(),
                                             thumbnail_url: None,
                                         })
@@ -2438,11 +2447,31 @@ async fn connect_and_run_session(
                                         ) {
                                             continue;
                                         }
-                                        if let Ok(path) =
-                                            resolve_attachment_local_path(&conn, attachment).await
-                                        {
-                                            attachment.download_url =
-                                                format!("file://{}", path.display());
+
+                                        if should_auto_download_attachment(
+                                            &download_settings,
+                                            attachment,
+                                        ) {
+                                            if let Ok(path) = resolve_attachment_local_path(
+                                                &conn,
+                                                attachment,
+                                                &download_settings,
+                                            )
+                                            .await
+                                            {
+                                                attachment.download_url =
+                                                    format!("file://{}", path.display());
+                                            }
+                                        } else if is_visual_attachment_mime(&attachment.mime_type) {
+                                            if let Ok(path) =
+                                                resolve_attachment_thumbnail_local_path(
+                                                    &conn, attachment,
+                                                )
+                                                .await
+                                            {
+                                                attachment.thumbnail_url =
+                                                    Some(format!("file://{}", path.display()));
+                                            }
                                         }
                                     }
 
@@ -3336,7 +3365,7 @@ async fn connect_and_run_session(
                                             filename: a.filename,
                                             mime_type: a.mime_type,
                                             size_bytes: a.size_bytes,
-                                            sha256: String::new(),
+                                            sha256: a.sha256,
                                             ..Default::default()
                                         })
                                     })
@@ -3355,12 +3384,59 @@ async fn connect_and_run_session(
                             }
                         }
                         UiIntent::OpenAttachment { attachment } => {
-                            match resolve_attachment_local_path(&conn, &attachment).await {
+                            match resolve_attachment_local_path(&conn, &attachment, &saved_settings).await {
                                 Ok(path) => {
                                     if let Err(e) = open::that(&path) {
                                         let _ = tx_event.send(UiEvent::AppendLog(format!(
                                             "[chat] open attachment failed: {e:#}"
                                         )));
+                                    }
+                                }
+                                Err(e) => {
+                                    let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                        "[chat] download attachment failed: {e:#}"
+                                    )));
+                                }
+                            }
+                        }
+                        UiIntent::DownloadAttachment { attachment } => {
+                            match resolve_attachment_local_path(&conn, &attachment, &saved_settings).await {
+                                Ok(path) => {
+                                    let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                        "[chat] downloaded attachment to {}",
+                                        path.display()
+                                    )));
+                                }
+                                Err(e) => {
+                                    let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                        "[chat] download attachment failed: {e:#}"
+                                    )));
+                                }
+                            }
+                        }
+                        UiIntent::SaveAttachmentAs { attachment } => {
+                            match resolve_attachment_local_path(&conn, &attachment, &saved_settings).await {
+                                Ok(path) => {
+                                    let suggested_name = attachment.filename.clone();
+                                    match tokio::task::spawn_blocking(move || {
+                                        let Some(dst) = rfd::FileDialog::new().set_file_name(&suggested_name).save_file() else {
+                                            return Ok::<_, anyhow::Error>(None);
+                                        };
+                                        std::fs::copy(&path, &dst)?;
+                                        Ok(Some(dst))
+                                    }).await {
+                                        Ok(Ok(Some(dst))) => {
+                                            let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                                "[chat] saved attachment to {}",
+                                                dst.display()
+                                            )));
+                                        }
+                                        Ok(Ok(None)) => {}
+                                        Ok(Err(e)) | Err(e) => {
+                                            let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                                "[chat] save attachment failed: {e:#}"
+                                            )));
+                                        }
                                     }
                                 }
                                 Err(e) => {
@@ -4744,6 +4820,7 @@ async fn upload_attachment_quic(
             filename: done.filename,
             mime_type: done.mime,
             size_bytes: done.size_bytes,
+            sha256: done.sha256,
             download_url: String::new(),
             thumbnail_url: None,
         }),
@@ -4757,6 +4834,7 @@ async fn upload_attachment_quic(
 async fn resolve_attachment_local_path(
     conn: &quinn::Connection,
     attachment: &ui::model::AttachmentData,
+    settings: &ui::model::AppSettings,
 ) -> anyhow::Result<PathBuf> {
     if let AttachmentAsset::PendingLocalPath(local) = &attachment.asset {
         if local.is_absolute() && local.exists() {
@@ -4764,26 +4842,125 @@ async fn resolve_attachment_local_path(
         }
     }
 
+    if attachment.size_bytes > (settings.max_download_size_mb as u64) * 1024 * 1024 {
+        return Err(anyhow!(
+            "attachment exceeds max download size ({} > {} MB)",
+            attachment.size_bytes,
+            settings.max_download_size_mb
+        ));
+    }
+
+    let download_dir = configured_download_directory(settings).join("tsod-attachments");
+    tokio::fs::create_dir_all(&download_dir)
+        .await
+        .with_context(|| format!("create attachment download dir: {}", download_dir.display()))?;
+
+    let local_path = download_dir.join(cached_attachment_filename(attachment));
+    if verify_cached_attachment(attachment, &local_path).await? {
+        return Ok(local_path);
+    }
+
+    download_attachment_quic(
+        conn,
+        uploaded_asset_id(attachment)?,
+        attachment,
+        &local_path,
+    )
+    .await?;
+    Ok(local_path)
+}
+
+async fn resolve_attachment_thumbnail_local_path(
+    conn: &quinn::Connection,
+    attachment: &ui::model::AttachmentData,
+) -> anyhow::Result<PathBuf> {
     let cache_dir = dirs::cache_dir()
         .unwrap_or_else(std::env::temp_dir)
         .join("tsod")
-        .join("attachment-cache");
+        .join("thumb-cache");
     tokio::fs::create_dir_all(&cache_dir)
         .await
-        .with_context(|| format!("create attachment cache dir: {}", cache_dir.display()))?;
+        .with_context(|| format!("create thumbnail cache dir: {}", cache_dir.display()))?;
 
-    let local_path = cache_dir.join(cached_attachment_filename(attachment));
+    let local_path = cache_dir.join(cached_thumbnail_filename(attachment));
     if tokio::fs::metadata(&local_path).await.is_ok() {
         return Ok(local_path);
     }
 
-    download_attachment_quic(conn, uploaded_asset_id(attachment)?, &local_path).await?;
+    download_attachment_thumbnail_quic(conn, uploaded_asset_id(attachment)?, &local_path).await?;
     Ok(local_path)
+}
+
+async fn verify_cached_attachment(
+    attachment: &ui::model::AttachmentData,
+    local_path: &Path,
+) -> anyhow::Result<bool> {
+    if tokio::fs::metadata(local_path).await.is_err() {
+        return Ok(false);
+    }
+
+    let meta_path = cache_metadata_path(local_path);
+    let meta_bytes = match tokio::fs::read(&meta_path).await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            purge_corrupt_cached_attachment(local_path).await?;
+            return Ok(false);
+        }
+    };
+    let meta: AttachmentCacheMeta = match serde_json::from_slice(&meta_bytes) {
+        Ok(meta) => meta,
+        Err(_) => {
+            purge_corrupt_cached_attachment(local_path).await?;
+            return Ok(false);
+        }
+    };
+
+    if meta.size_bytes != attachment.size_bytes {
+        purge_corrupt_cached_attachment(local_path).await?;
+        return Ok(false);
+    }
+    if !attachment.sha256.is_empty() && !meta.sha256.eq_ignore_ascii_case(&attachment.sha256) {
+        purge_corrupt_cached_attachment(local_path).await?;
+        return Ok(false);
+    }
+
+    let computed = compute_file_sha256_hex(local_path).await?;
+    if !meta.sha256.is_empty() && !computed.eq_ignore_ascii_case(&meta.sha256) {
+        purge_corrupt_cached_attachment(local_path).await?;
+        return Ok(false);
+    }
+
+    Ok(true)
+}
+
+async fn purge_corrupt_cached_attachment(local_path: &Path) -> anyhow::Result<()> {
+    let _ = tokio::fs::remove_file(local_path).await;
+    let _ = tokio::fs::remove_file(cache_metadata_path(local_path)).await;
+    Ok(())
+}
+
+async fn compute_file_sha256_hex(path: &Path) -> anyhow::Result<String> {
+    use tokio::io::AsyncReadExt;
+
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .with_context(|| format!("open file for hash: {}", path.display()))?;
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut ctx = ring::digest::Context::new(&ring::digest::SHA256);
+    loop {
+        let n = file.read(&mut buf).await?;
+        if n == 0 {
+            break;
+        }
+        ctx.update(&buf[..n]);
+    }
+    Ok(hex::encode(ctx.finish().as_ref()))
 }
 
 async fn download_attachment_quic(
     conn: &quinn::Connection,
     asset_id: &str,
+    attachment: &ui::model::AttachmentData,
     output_path: &Path,
 ) -> anyhow::Result<()> {
     use tokio::io::AsyncWriteExt;
@@ -4801,38 +4978,150 @@ async fn download_attachment_quic(
     net::frame::write_delimited(&mut send, &req).await?;
 
     let meta: pb::MediaResponse = net::frame::read_delimited(&mut recv, 64 * 1024).await?;
-    let expected_size = match meta.payload {
-        Some(pb::media_response::Payload::DownloadMeta(meta)) => meta.size_bytes,
+    let (expected_size, expected_sha) = match meta.payload {
+        Some(pb::media_response::Payload::DownloadMeta(meta)) => (meta.size_bytes, meta.sha256),
         Some(pb::media_response::Payload::Error(e)) => {
             return Err(anyhow!("media download rejected: {}", e.message));
         }
         _ => return Err(anyhow!("unexpected media download response")),
     };
 
+    if expected_size != attachment.size_bytes {
+        return Err(anyhow!(
+            "download metadata size mismatch (msg={}, server={})",
+            attachment.size_bytes,
+            expected_size
+        ));
+    }
+    if !attachment.sha256.is_empty() && !expected_sha.eq_ignore_ascii_case(&attachment.sha256) {
+        return Err(anyhow!("download metadata hash mismatch"));
+    }
+
     if let Some(parent) = output_path.parent() {
         tokio::fs::create_dir_all(parent)
             .await
             .with_context(|| format!("create download dir: {}", parent.display()))?;
     }
-    let mut file = tokio::fs::File::create(output_path)
-        .await
-        .with_context(|| format!("create downloaded attachment: {}", output_path.display()))?;
 
-    let copied = tokio::io::copy(&mut recv, &mut file)
+    let temp_path = output_path.with_extension("part");
+    let mut file = tokio::fs::File::create(&temp_path)
         .await
-        .context("read media stream")?;
-    file.flush().await?;
+        .with_context(|| format!("create downloaded attachment: {}", temp_path.display()))?;
+
+    let mut copied = 0u64;
+    let mut ctx = ring::digest::Context::new(&ring::digest::SHA256);
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = tokio::io::AsyncReadExt::read(&mut recv, &mut buf).await?;
+        if n == 0 {
+            break;
+        }
+        file.write_all(&buf[..n]).await?;
+        ctx.update(&buf[..n]);
+        copied += n as u64;
+    }
 
     if expected_size != 0 && copied != expected_size {
+        let _ = tokio::fs::remove_file(&temp_path).await;
         return Err(anyhow!(
             "download size mismatch (expected {}, got {})",
             expected_size,
             copied
         ));
     }
+
+    let downloaded_sha = hex::encode(ctx.finish().as_ref());
+    if !expected_sha.is_empty() && !downloaded_sha.eq_ignore_ascii_case(&expected_sha) {
+        let _ = tokio::fs::remove_file(&temp_path).await;
+        return Err(anyhow!("download hash mismatch"));
+    }
+
+    file.sync_all().await?;
+    drop(file);
+    tokio::fs::rename(&temp_path, output_path).await?;
+
+    let cache_meta = AttachmentCacheMeta {
+        size_bytes: copied,
+        sha256: downloaded_sha,
+    };
+    tokio::fs::write(
+        cache_metadata_path(output_path),
+        serde_json::to_vec(&cache_meta)?,
+    )
+    .await
+    .context("write attachment cache metadata")?;
     Ok(())
 }
 
+async fn download_attachment_thumbnail_quic(
+    conn: &quinn::Connection,
+    asset_id: &str,
+    output_path: &Path,
+) -> anyhow::Result<()> {
+    use tokio::io::AsyncWriteExt;
+
+    let (mut send, mut recv) = conn.open_bi().await.context("open thumb stream")?;
+    let req = pb::MediaRequest {
+        payload: Some(pb::media_request::Payload::ThumbRequest(pb::ThumbRequest {
+            attachment_id: Some(pb::AssetId {
+                value: asset_id.to_string(),
+            }),
+            w: THUMB_PREVIEW_EDGE,
+            h: THUMB_PREVIEW_EDGE,
+            mode: "fit".to_string(),
+            format: "jpeg".to_string(),
+        })),
+    };
+    net::frame::write_delimited(&mut send, &req).await?;
+
+    let meta: pb::MediaResponse = net::frame::read_delimited(&mut recv, 64 * 1024).await?;
+    let expected_size = match meta.payload {
+        Some(pb::media_response::Payload::ThumbMeta(meta)) => meta.size_bytes,
+        Some(pb::media_response::Payload::Error(e)) => return Err(anyhow!(e.message)),
+        _ => return Err(anyhow!("unexpected media thumb response")),
+    };
+
+    let temp_path = output_path.with_extension("part");
+    let mut file = tokio::fs::File::create(&temp_path).await?;
+    let copied = tokio::io::copy(&mut recv, &mut file).await?;
+    file.sync_all().await?;
+    drop(file);
+    if expected_size != 0 && copied != expected_size {
+        let _ = tokio::fs::remove_file(&temp_path).await;
+        return Err(anyhow!("thumbnail size mismatch"));
+    }
+    tokio::fs::rename(&temp_path, output_path).await?;
+    Ok(())
+}
+
+fn configured_download_directory(settings: &ui::model::AppSettings) -> PathBuf {
+    if !settings.download_directory.trim().is_empty() {
+        return PathBuf::from(settings.download_directory.trim());
+    }
+    dirs::download_dir().unwrap_or_else(std::env::temp_dir)
+}
+
+fn should_auto_download_attachment(
+    settings: &ui::model::AppSettings,
+    attachment: &ui::model::AttachmentData,
+) -> bool {
+    if attachment.size_bytes > (settings.max_download_size_mb as u64) * 1024 * 1024 {
+        return false;
+    }
+    if is_visual_attachment_mime(&attachment.mime_type) {
+        settings.auto_download_images
+    } else {
+        settings.auto_download_files
+    }
+}
+
+fn is_visual_attachment_mime(mime: &str) -> bool {
+    mime.starts_with("image/") || mime.starts_with("video/")
+}
+
+fn cache_metadata_path(path: &Path) -> PathBuf {
+    path.with_extension("meta.json")
+}
 fn pending_local_path(attachment: &ui::model::AttachmentData) -> anyhow::Result<&Path> {
     match &attachment.asset {
         AttachmentAsset::PendingLocalPath(path) => Ok(path.as_path()),
@@ -4889,6 +5178,10 @@ fn cached_attachment_filename(attachment: &ui::model::AttachmentData) -> String 
         safe_name
     };
     format!("{}-{}", cache_asset_key(attachment), safe_name)
+}
+
+fn cached_thumbnail_filename(attachment: &ui::model::AttachmentData) -> String {
+    format!("{}-thumb.jpg", cache_asset_key(attachment))
 }
 
 async fn emit_telemetry_loop(
