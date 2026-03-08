@@ -389,6 +389,8 @@ impl eframe::App for VpApp {
                 panels::members::show(ui, &mut self.model, &self.tx_intent);
             });
 
+        panels::profile_popup::show(ctx, &mut self.model, &self.tx_intent);
+
         if self.model.show_about {
             let mut open = true;
             egui::Window::new("About TSOD")
@@ -1007,6 +1009,10 @@ impl VpApp {
             self.model.show_telemetry = false;
             self.model.show_connections = false;
             self.model.show_create_channel = false;
+            self.model.profile_popup_user_id = None;
+            self.model.profile_popup_data = None;
+            self.model.profile_popup_loading = false;
+            self.model.profile_popup_anchor = None;
         }
     }
 }

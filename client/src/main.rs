@@ -1828,6 +1828,17 @@ fn pb_channel_type_to_ui(channel_type: i32) -> ui::model::ChannelType {
     }
 }
 
+fn ui_status_from_pb(status: i32) -> ui::model::OnlineStatus {
+    match pb::OnlineStatus::try_from(status).ok() {
+        Some(pb::OnlineStatus::Online) => ui::model::OnlineStatus::Online,
+        Some(pb::OnlineStatus::Idle) => ui::model::OnlineStatus::Idle,
+        Some(pb::OnlineStatus::DoNotDisturb) => ui::model::OnlineStatus::DoNotDisturb,
+        Some(pb::OnlineStatus::Invisible) => ui::model::OnlineStatus::Invisible,
+        Some(pb::OnlineStatus::Offline) => ui::model::OnlineStatus::Offline,
+        _ => ui::model::OnlineStatus::Online,
+    }
+}
+
 fn opus_profile_from_pb(opus_profile: i32) -> audio::opus::OpusEncoderProfile {
     match pb::OpusProfile::try_from(opus_profile).ok() {
         Some(pb::OpusProfile::OpusMusic) => audio::opus::OpusEncoderProfile::Music,
@@ -4604,6 +4615,85 @@ async fn connect_and_run_session(
                                 let _ = tx_event.send(UiEvent::AppendLog(format!("[moderation] poke failed: {e:#}")));
                             } else {
                                 let _ = tx_event.send(UiEvent::AppendLog(format!("[moderation] poked {user_id}")));
+                            }
+                        }
+                        UiIntent::FetchUserProfile { user_id } => {
+                            let request = pb::GetUserProfileRequest {
+                                user_id: Some(pb::UserId { value: user_id.clone() }),
+                            };
+                            match dispatcher
+                                .send_request(
+                                    pb::client_to_server::Payload::GetUserProfileRequest(request),
+                                    Duration::from_secs(5),
+                                )
+                                .await
+                            {
+                                Ok(Ok(resp)) => {
+                                    if let Some(pb::server_to_client::Payload::GetUserProfileResponse(payload)) = resp.payload {
+                                        if let Some(profile) = payload.profile {
+                                            let user_profile = ui::model::UserProfileData {
+                                                user_id: profile.user_id.map(|u| u.value).unwrap_or_default(),
+                                                display_name: profile.display_name,
+                                                description: profile.description,
+                                                status: ui_status_from_pb(profile.status),
+                                                custom_status_text: profile.custom_status_text,
+                                                custom_status_emoji: profile.custom_status_emoji,
+                                                accent_color: profile.accent_color,
+                                                avatar_url: (!profile.avatar_asset_url.is_empty()).then_some(profile.avatar_asset_url),
+                                                banner_url: (!profile.banner_asset_url.is_empty()).then_some(profile.banner_asset_url),
+                                                badges: profile.badges.into_iter().map(|badge| ui::model::BadgeData {
+                                                    id: badge.id,
+                                                    label: badge.label,
+                                                    icon_url: badge.icon_url,
+                                                    tooltip: badge.tooltip,
+                                                }).collect(),
+                                                links: profile.links.into_iter().map(|link| ui::model::ProfileLinkData {
+                                                    platform: link.platform,
+                                                    url: link.url,
+                                                    display_text: link.display_text,
+                                                    verified: link.verified,
+                                                }).collect(),
+                                                created_at: profile.created_at.map(|ts| ts.unix_millis).unwrap_or_default(),
+                                                last_seen_at: profile.last_seen_at.map(|ts| ts.unix_millis).unwrap_or_default(),
+                                                current_activity: profile.current_activity.map(|activity| ui::model::GameActivityData {
+                                                    game_name: activity.game_name,
+                                                    details: activity.details,
+                                                    state: activity.state,
+                                                    started_at: activity.started_at.map(|ts| ts.unix_millis).unwrap_or_default(),
+                                                    large_image_url: activity.large_image_url,
+                                                }),
+                                                roles: Vec::new(),
+                                            };
+                                            let _ = tx_event.send(UiEvent::UserProfileLoaded(user_profile));
+                                        }
+                                    }
+                                }
+                                Ok(Err(e)) | Err(e) => {
+                                    let _ = tx_event.send(UiEvent::AppendLog(format!("[profile] failed to fetch profile for {user_id}: {e:#}")));
+                                }
+                            }
+                        }
+                        UiIntent::CreateDmChannel { participant_user_ids } => {
+                            let request = pb::CreateDmChannelRequest {
+                                participant_user_ids: participant_user_ids
+                                    .into_iter()
+                                    .map(|id| pb::UserId { value: id })
+                                    .collect(),
+                                name: String::new(),
+                            };
+                            match dispatcher
+                                .send_request(
+                                    pb::client_to_server::Payload::CreateDmChannelRequest(request),
+                                    Duration::from_secs(5),
+                                )
+                                .await
+                            {
+                                Ok(Ok(_)) => {
+                                    let _ = tx_event.send(UiEvent::AppendLog("[dm] opened direct message".into()));
+                                }
+                                Ok(Err(e)) | Err(e) => {
+                                    let _ = tx_event.send(UiEvent::AppendLog(format!("[dm] open failed: {e:#}")));
+                                }
                             }
                         }
                         UiIntent::MuteUser { user_id, muted } => {
