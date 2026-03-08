@@ -9,7 +9,7 @@ use std::{
     },
 };
 use tokio::{
-    sync::mpsc,
+    sync::{mpsc, RwLock},
     time::{timeout, Duration, Instant},
 };
 use tracing::{debug, info, warn};
@@ -48,6 +48,7 @@ pub struct Gateway {
     voice: Arc<VoiceForwarder>,
     video: Arc<StreamForwarder>,
     media: Arc<MediaService>,
+    stream_owners: Arc<RwLock<HashMap<u64, (UserId, ChannelId)>>>,
 }
 
 impl Gateway {
@@ -75,6 +76,7 @@ impl Gateway {
             voice,
             video,
             media,
+            stream_owners: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -348,13 +350,14 @@ impl Gateway {
             is_admin: identity.is_admin,
         };
 
+        let media_ctx = ctx;
         let media = self.media.clone();
         let conn_media = conn.clone();
         tokio::spawn(async move {
             while let Ok((send_s, recv_s)) = conn_media.accept_bi().await {
                 let media = media.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = media.handle_stream(send_s, recv_s, user_id).await {
+                    if let Err(e) = media.handle_stream(send_s, recv_s, media_ctx).await {
                         warn!("media stream failed: {:#}", e);
                     }
                 });
@@ -1030,6 +1033,16 @@ impl Gateway {
                 }
                 Some(pb::client_to_server::Payload::StartScreenShareRequest(r)) => {
                     let ch = parse_channel_id(r.channel_id.as_ref())?;
+                    let active_stream_count = self
+                        .stream_owners
+                        .read()
+                        .await
+                        .iter()
+                        .filter(|(_, (owner, channel))| *owner == user_id && *channel == ch)
+                        .count() as i64;
+                    self.control
+                        .authorize_screen_share_start(&ctx, ch, active_stream_count)
+                        .await?;
 
                     let streamer_caps = self.membership.streamer_encode_codecs(user_id);
                     let mut viewer_caps = HashMap::new();
@@ -1093,6 +1106,14 @@ impl Gateway {
                         None
                     };
 
+                    {
+                        let mut owners = self.stream_owners.write().await;
+                        owners.insert(primary_tag, (user_id, ch));
+                        if let Some((tag, _)) = fallback_tag {
+                            owners.insert(tag, (user_id, ch));
+                        }
+                    }
+
                     let stream_id = format!("{:016x}", primary_tag);
                     let resp = pb::ServerToClient {
                         request_id: req_id,
@@ -1124,6 +1145,18 @@ impl Gateway {
                 Some(pb::client_to_server::Payload::StopScreenShareRequest(r)) => {
                     if let Some(sid) = r.stream_id.as_ref() {
                         if let Ok(stream_tag) = u64::from_str_radix(&sid.value, 16) {
+                            if let Some((owner_user_id, channel_id)) =
+                                self.stream_owners.read().await.get(&stream_tag).copied()
+                            {
+                                self.control
+                                    .authorize_screen_share_stop(
+                                        &ctx,
+                                        stream_tag,
+                                        owner_user_id,
+                                        channel_id,
+                                    )
+                                    .await?;
+                            }
                             for viewer in self.video.subscribers_for_stream(stream_tag).await {
                                 self.push.send_to(viewer, pb::ServerToClient {
                                     request_id: None,
@@ -1135,6 +1168,7 @@ impl Gateway {
                                 }).await;
                             }
                             self.video.unregister_stream(stream_tag).await;
+                            self.stream_owners.write().await.remove(&stream_tag);
                         }
                     }
                     let resp = pb::ServerToClient {

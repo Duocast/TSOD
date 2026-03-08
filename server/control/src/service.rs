@@ -9,7 +9,8 @@ use crate::{
     model::{
         AuditEntry, Channel, ChannelCreate, ChatMessage, JoinChannel, Member, OutboxEvent,
         OutboxEventRow, PermAuditRow, PermChannelOverrideRecord, PermRoleRecord,
-        PermUserSummaryRecord, PermissionRequest, SendMessage,
+        PermUserSummaryRecord, PermissionRequest, ScreenShareStartAuth, ScreenShareStopAuth,
+        SendMessage,
     },
     perms::{Capability, Decision},
     repo::ControlRepo,
@@ -431,6 +432,48 @@ impl<R: ControlRepo> ControlService<R> {
             }
         }
 
+        let prior_channels = <R as ControlRepo>::delete_memberships_for_user(
+            &self.repo,
+            &mut tx,
+            ctx.server_id,
+            ctx.user_id,
+        )
+        .await?;
+        for prior in prior_channels
+            .iter()
+            .copied()
+            .filter(|c| *c != req.channel_id)
+        {
+            <R as ControlRepo>::insert_audit(
+                &self.repo,
+                &mut tx,
+                &AuditEntry::new(
+                    ctx.server_id,
+                    Some(ctx.user_id),
+                    "member.leave",
+                    "channel",
+                    prior.0.to_string(),
+                    json!({ "user_id": ctx.user_id.0 }),
+                ),
+            )
+            .await?;
+
+            <R as ControlRepo>::insert_outbox(
+                &self.repo,
+                &mut tx,
+                &OutboxEvent {
+                    id: OutboxId(Uuid::new_v4()),
+                    server_id: ctx.server_id,
+                    topic: "presence.member_left".to_string(),
+                    payload_json: json!({
+                        "channel_id": prior.0,
+                        "user_id": ctx.user_id.0
+                    }),
+                },
+            )
+            .await?;
+        }
+
         let m = Member {
             channel_id: req.channel_id,
             user_id: ctx.user_id,
@@ -640,6 +683,8 @@ impl<R: ControlRepo> ControlService<R> {
             Capability::MuteVoice,
         )
         .await?;
+        self.require_manageable_target_user(&mut tx, ctx, target_user)
+            .await?;
 
         let mut m = <R as ControlRepo>::get_member(
             &self.repo,
@@ -721,6 +766,16 @@ impl<R: ControlRepo> ControlService<R> {
         reason: Option<String>,
     ) -> ControlResult<Member> {
         let mut tx = <R as ControlRepo>::tx(&self.repo).await?;
+        self.require(
+            &mut tx,
+            ctx,
+            Some(channel_id),
+            Some(target_user),
+            Capability::DeafenVoice,
+        )
+        .await?;
+        self.require_manageable_target_user(&mut tx, ctx, target_user)
+            .await?;
         let mut m = <R as ControlRepo>::get_member(
             &self.repo,
             &mut tx,
@@ -778,6 +833,25 @@ impl<R: ControlRepo> ControlService<R> {
         reason: Option<String>,
     ) -> ControlResult<()> {
         let mut tx = <R as ControlRepo>::tx(&self.repo).await?;
+        self.require(
+            &mut tx,
+            ctx,
+            Some(channel_id),
+            Some(target_user),
+            Capability::KickMember,
+        )
+        .await?;
+        self.require_manageable_target_user(&mut tx, ctx, target_user)
+            .await?;
+        let _member = <R as ControlRepo>::get_member(
+            &self.repo,
+            &mut tx,
+            ctx.server_id,
+            channel_id,
+            target_user,
+        )
+        .await?
+        .ok_or(ControlError::NotFound("member"))?;
         <R as ControlRepo>::delete_member(
             &self.repo,
             &mut tx,
@@ -1455,6 +1529,88 @@ impl<R: ControlRepo> ControlService<R> {
                 "target user is not below your highest role",
             ));
         }
+        Ok(())
+    }
+
+    pub async fn authorize_upload(
+        &self,
+        ctx: &RequestContext,
+        channel_id: ChannelId,
+    ) -> ControlResult<()> {
+        let mut tx = <R as ControlRepo>::tx(&self.repo).await?;
+        self.require(&mut tx, ctx, Some(channel_id), None, Capability::Upload)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn authorize_screen_share_start(
+        &self,
+        ctx: &RequestContext,
+        channel_id: ChannelId,
+        active_stream_count: i64,
+    ) -> ControlResult<()> {
+        let mut tx = <R as ControlRepo>::tx(&self.repo).await?;
+        let member = <R as ControlRepo>::get_member(
+            &self.repo,
+            &mut tx,
+            ctx.server_id,
+            channel_id,
+            ctx.user_id,
+        )
+        .await?;
+        if member.is_none() {
+            return Err(ControlError::PermissionDenied(
+                "must be in voice channel to start stream",
+            ));
+        }
+        self.require(&mut tx, ctx, Some(channel_id), None, Capability::Stream)
+            .await?;
+        <R as ControlRepo>::ensure_stream_start_allowed(
+            &self.repo,
+            &mut tx,
+            &ScreenShareStartAuth {
+                channel_id,
+                stream_count: active_stream_count,
+            },
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn authorize_screen_share_stop(
+        &self,
+        ctx: &RequestContext,
+        stream_tag: u64,
+        owner_user_id: UserId,
+        channel_id: ChannelId,
+    ) -> ControlResult<()> {
+        if owner_user_id == ctx.user_id {
+            return Ok(());
+        }
+
+        let mut tx = <R as ControlRepo>::tx(&self.repo).await?;
+        let req = ScreenShareStopAuth {
+            stream_tag,
+            owner_user_id,
+            channel_id,
+        };
+        if <R as ControlRepo>::can_stop_stream(&self.repo, &mut tx, &req).await? {
+            tx.commit().await?;
+            return Ok(());
+        }
+        self.require(
+            &mut tx,
+            ctx,
+            Some(channel_id),
+            Some(owner_user_id),
+            Capability::ModerateStreams,
+        )
+        .await?;
+        self.require_manageable_target_user(&mut tx, ctx, owner_user_id)
+            .await?;
+        tx.commit().await?;
         Ok(())
     }
 

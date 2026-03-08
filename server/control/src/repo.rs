@@ -11,7 +11,7 @@ use crate::{
     model::{
         Attachment, AuditEntry, Channel, ChannelListItem, ChatMessage, Member, OutboxEvent,
         OutboxEventRow, PermAuditRow, PermChannelOverrideRecord, PermRoleRecord,
-        PermUserSummaryRecord, PermissionRequest,
+        PermUserSummaryRecord, PermissionRequest, ScreenShareStartAuth, ScreenShareStopAuth,
     },
     perms::Decision,
 };
@@ -239,6 +239,25 @@ pub trait ControlRepo: Send + Sync {
         tx: &mut Transaction<'_, Postgres>,
         req: &PermissionRequest,
     ) -> ControlResult<Decision>;
+
+    async fn delete_memberships_for_user(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        server: ServerId,
+        user: UserId,
+    ) -> ControlResult<Vec<ChannelId>>;
+
+    async fn ensure_stream_start_allowed(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        req: &crate::model::ScreenShareStartAuth,
+    ) -> ControlResult<()>;
+
+    async fn can_stop_stream(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        req: &crate::model::ScreenShareStopAuth,
+    ) -> ControlResult<bool>;
 
     // Chat (ChatMessage uses author_user_id; no Default)
     async fn insert_chat_message(
@@ -712,6 +731,49 @@ impl ControlRepo for PgControlRepo {
             .into_iter()
             .map(|r| ChannelId(r.get::<Uuid, _>("channel_id")))
             .collect())
+    }
+
+    async fn delete_memberships_for_user(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        server: ServerId,
+        user: UserId,
+    ) -> ControlResult<Vec<ChannelId>> {
+        let channels = self.list_member_channels_for_user(tx, server, user).await?;
+        sqlx::query(
+            r#"
+            DELETE FROM members
+            WHERE server_id = $1 AND user_id = $2
+            "#,
+        )
+        .bind(server.0)
+        .bind(user.0)
+        .execute(&mut **tx)
+        .await
+        .context("delete memberships for user")?;
+        Ok(channels)
+    }
+
+    async fn ensure_stream_start_allowed(
+        &self,
+        _tx: &mut Transaction<'_, Postgres>,
+        req: &ScreenShareStartAuth,
+    ) -> ControlResult<()> {
+        const MAX_STREAMS_PER_USER_PER_CHANNEL: i64 = 3;
+        if req.stream_count >= MAX_STREAMS_PER_USER_PER_CHANNEL {
+            return Err(ControlError::ResourceExhausted(
+                "too many active streams in channel for user",
+            ));
+        }
+        Ok(())
+    }
+
+    async fn can_stop_stream(
+        &self,
+        _tx: &mut Transaction<'_, Postgres>,
+        _req: &ScreenShareStopAuth,
+    ) -> ControlResult<bool> {
+        Ok(false)
     }
 
     // -------------------------
