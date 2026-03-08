@@ -47,8 +47,11 @@ pub struct Config {
     #[arg(long, default_value_t = false)]
     pub dev_repair_orphan_user_roles: bool,
 
-    /// Metrics scrape listen address
-    #[arg(long, default_value = "0.0.0.0:9100")]
+    /// Metrics scrape listen address.
+    ///
+    /// Defaults to loopback-only for safety. Set explicitly (e.g. 0.0.0.0:9100)
+    /// to opt-in to remote scraping.
+    #[arg(long, default_value = "127.0.0.1:9100")]
     pub metrics_listen: String,
 
     /// Outbox poll interval in milliseconds
@@ -109,5 +112,11 @@ mod tests {
     fn quic_datagram_recv_buffer_default_is_32kib() {
         let cfg = Config::parse_from(["vp-gateway", "--database-url", "postgres://dummy"]);
         assert_eq!(cfg.quic_datagram_recv_buffer_bytes, 32 * 1024);
+    }
+
+    #[test]
+    fn metrics_listen_default_is_loopback() {
+        let cfg = Config::parse_from(["vp-gateway", "--database-url", "postgres://dummy"]);
+        assert_eq!(cfg.metrics_listen, "127.0.0.1:9100");
     }
 }

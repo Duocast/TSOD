@@ -5,7 +5,7 @@ use hyper_util::rt::TokioIo;
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
 use std::{net::SocketAddr, sync::Arc};
 use tokio::net::TcpListener;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::MetricsConfig;
 
@@ -21,7 +21,9 @@ impl MetricsServer {
             // Optional: allow only vp_* metrics or keep default.
             .set_buckets_for_metric(
                 Matcher::Prefix(format!("{}_voice_", cfg.namespace)),
-                &[0.001, 0.005, 0.01, 0.02, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0],
+                &[
+                    0.001, 0.005, 0.01, 0.02, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0,
+                ],
             )?
             .install_recorder()?;
 
@@ -31,6 +33,12 @@ impl MetricsServer {
     pub async fn serve(self) -> Result<()> {
         let addr: SocketAddr = self.cfg.listen.parse()?;
         let listener = TcpListener::bind(addr).await?;
+        if !addr.ip().is_loopback() {
+            warn!(
+                "metrics endpoint is exposed on non-loopback address {}; this is an explicit opt-in",
+                addr
+            );
+        }
         info!("metrics listening on http://{}/metrics", addr);
 
         let handle = Arc::new(self.handle);
@@ -42,10 +50,11 @@ impl MetricsServer {
             tokio::spawn(async move {
                 let io = TokioIo::new(stream);
 
-                let service = hyper::service::service_fn(move |req: Request<hyper::body::Incoming>| {
-                    let handle = handle.clone();
-                    async move { metrics_handler(req, handle).await }
-                });
+                let service =
+                    hyper::service::service_fn(move |req: Request<hyper::body::Incoming>| {
+                        let handle = handle.clone();
+                        async move { metrics_handler(req, handle).await }
+                    });
 
                 let _ = hyper::server::conn::http1::Builder::new()
                     .serve_connection(io, service)
