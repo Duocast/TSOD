@@ -31,7 +31,6 @@ use net::voice_datagram::{
     make_voice_datagram, VOICE_FORWARDED_HDR_LEN, VOICE_HDR_LEN, VOICE_VERSION,
 };
 use proto::voiceplatform::v1 as pb;
-use serde::Deserialize;
 use std::collections::HashMap;
 #[cfg(debug_assertions)]
 use std::collections::HashSet;
@@ -54,142 +53,6 @@ use ui::{UiEvent, UiIntent, VpApp};
 static DEBUG_SEEN_AUTH_USER_IDS: OnceLock<StdMutex<HashSet<String>>> = OnceLock::new();
 
 pub const BUILD_VERSION: &str = env!("VP_CLIENT_BUILD_VERSION");
-pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
-
-#[derive(Debug, Deserialize)]
-struct UpdateManifest {
-    version: String,
-    #[serde(default)]
-    notes: String,
-    download_url: String,
-    #[serde(default)]
-    page_url: String,
-}
-
-fn parse_semverish(input: &str) -> Option<Vec<u64>> {
-    let trimmed = input.trim().trim_start_matches('v');
-    let core = trimmed.split(['-', '+']).next()?;
-    let mut parts = Vec::new();
-    for piece in core.split('.') {
-        if piece.is_empty() {
-            return None;
-        }
-        parts.push(piece.parse::<u64>().ok()?);
-    }
-    Some(parts)
-}
-
-fn is_newer_version(current: &str, remote: &str) -> bool {
-    if let (Some(cur), Some(rem)) = (parse_semverish(current), parse_semverish(remote)) {
-        let max_len = cur.len().max(rem.len());
-        for i in 0..max_len {
-            let c = *cur.get(i).unwrap_or(&0);
-            let r = *rem.get(i).unwrap_or(&0);
-            if r > c {
-                return true;
-            }
-            if r < c {
-                return false;
-            }
-        }
-        return false;
-    }
-
-    current.trim() != remote.trim()
-}
-
-fn curl_fetch_bytes(url: &str) -> Result<Vec<u8>> {
-    let output = std::process::Command::new("curl")
-        .args(["--fail", "--silent", "--show-error", "--location", url])
-        .output()
-        .with_context(|| "failed to launch curl")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow!("curl failed: {}", stderr.trim()));
-    }
-
-    Ok(output.stdout)
-}
-
-async fn run_update_check(tx_event: &Sender<UiEvent>, manifest_url: &str) {
-    let _ = tx_event.send(UiEvent::UpdateCheckStarted);
-    match tokio::task::spawn_blocking({
-        let manifest_url = manifest_url.to_string();
-        move || -> Result<UpdateManifest> {
-            let body = curl_fetch_bytes(&manifest_url)?;
-            let manifest = serde_json::from_slice::<UpdateManifest>(&body)?;
-            Ok(manifest)
-        }
-    })
-    .await
-    {
-        Ok(Ok(manifest)) => {
-            let release_page = if manifest.page_url.trim().is_empty() {
-                manifest.download_url.clone()
-            } else {
-                manifest.page_url.clone()
-            };
-            if is_newer_version(APP_VERSION, &manifest.version) {
-                let _ = tx_event.send(UiEvent::UpdateAvailable {
-                    version: manifest.version,
-                    notes: manifest.notes,
-                    download_url: manifest.download_url,
-                    page_url: release_page,
-                });
-            } else {
-                let _ = tx_event.send(UiEvent::UpdateNotAvailable {
-                    current_version: APP_VERSION.to_string(),
-                });
-            }
-        }
-        Ok(Err(e)) => {
-            let _ = tx_event.send(UiEvent::UpdateCheckFailed {
-                error: format!("update check failed: {e:#}"),
-            });
-        }
-        Err(e) => {
-            let _ = tx_event.send(UiEvent::UpdateCheckFailed {
-                error: format!("update task failed: {e}"),
-            });
-        }
-    }
-}
-
-async fn download_update_asset(
-    tx_event: &Sender<UiEvent>,
-    version: &str,
-    download_url: &str,
-) -> Result<()> {
-    let _ = tx_event.send(UiEvent::UpdateCheckStarted);
-
-    let bytes = tokio::task::spawn_blocking({
-        let download_url = download_url.to_string();
-        move || curl_fetch_bytes(&download_url)
-    })
-    .await
-    .map_err(|e| anyhow!("download task failed: {e}"))??;
-
-    let mut target_dir = dirs::download_dir()
-        .or_else(dirs::home_dir)
-        .unwrap_or_else(|| PathBuf::from("."));
-    target_dir.push("tsod-updates");
-    tokio::fs::create_dir_all(&target_dir).await?;
-
-    let filename = download_url
-        .rsplit('/')
-        .next()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or("tsod-update.bin");
-    let output_path = target_dir.join(filename);
-    tokio::fs::write(&output_path, &bytes).await?;
-
-    let _ = tx_event.send(UiEvent::UpdateDownloaded {
-        version: version.to_string(),
-        file_path: output_path.display().to_string(),
-    });
-    Ok(())
-}
 
 const VOICE_INGRESS_CAP: usize = 16; // Do not increase without justification; latency risk.
 const VOICE_MAX_AGE: Duration = Duration::from_millis(250);
@@ -1377,10 +1240,6 @@ async fn app_task(
     }
     let _ = tx_event.send(UiEvent::SettingsLoaded(Box::new(saved_settings.clone())));
 
-    if saved_settings.check_for_updates {
-        run_update_check(&tx_event, &saved_settings.update_manifest_url).await;
-    }
-
     #[cfg(target_os = "linux")]
     {
         if std::env::var_os("WAYLAND_DISPLAY").is_some() {
@@ -1904,22 +1763,6 @@ async fn app_task(
                                     format!("[presence] away message set: {message}")
                                 };
                                 let _ = tx_event.send(UiEvent::AppendLog(text));
-                            }
-                            UiIntent::CheckForUpdates => {
-                                run_update_check(&tx_event, &saved_settings.update_manifest_url)
-                                    .await;
-                            }
-                            UiIntent::GetUpdate {
-                                version,
-                                download_url,
-                            } => {
-                                if let Err(e) =
-                                    download_update_asset(&tx_event, &version, &download_url).await
-                                {
-                                    let _ = tx_event.send(UiEvent::UpdateCheckFailed {
-                                        error: format!("download failed: {e:#}"),
-                                    });
-                                }
                             }
                             _ => {}
                         }
@@ -3681,16 +3524,6 @@ async fn connect_and_run_session(
                             let _ = tx_event.send(UiEvent::AppendLog(
                                 "[help] Space=PTT | Enter=Send | Settings for audio config".into(),
                             ));
-                        }
-                        UiIntent::CheckForUpdates => {
-                            run_update_check(tx_event, &saved_settings.update_manifest_url).await;
-                        }
-                        UiIntent::GetUpdate { version, download_url } => {
-                            if let Err(e) = download_update_asset(tx_event, &version, &download_url).await {
-                                let _ = tx_event.send(UiEvent::UpdateCheckFailed {
-                                    error: format!("download failed: {e:#}"),
-                                });
-                            }
                         }
                         UiIntent::SetVoiceProcessingMode(mode) => {
                                 saved_settings.voice_processing_mode = mode;
