@@ -515,22 +515,6 @@ fn page_application(ui: &mut egui::Ui, model: &mut UiModel) -> bool {
     {
         dirty = true;
     }
-    ui.horizontal(|ui: &mut egui::Ui| {
-        ui.label("Update manifest URL:");
-        if ui
-            .text_edit_singleline(&mut s.update_manifest_url)
-            .changed()
-        {
-            dirty = true;
-        }
-    });
-    ui.label(
-        egui::RichText::new(
-            "Manifest must be HTTPS JSON with fields: version, download_url, page_url, notes.",
-        )
-        .small()
-        .color(egui::Color32::GRAY),
-    );
 
     section(ui, "Debug");
 
