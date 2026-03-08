@@ -60,7 +60,7 @@ async fn main() -> Result<()> {
 
     // Postgres
     let pool = PgPoolOptions::new()
-        .max_connections(32)
+        .max_connections(cfg.db_pool_max_connections)
         .connect(&cfg.database_url)
         .await?;
 
@@ -241,6 +241,7 @@ async fn main() -> Result<()> {
         forwarder,
         stream_forwarder,
         media,
+        cfg.max_connections,
     );
 
     tokio::select! {

@@ -67,9 +67,13 @@ pub struct Config {
     #[arg(long, default_value_t = default_dev_mode())]
     pub dev_mode: bool,
 
-    /// Max concurrent connections (soft limit)
+    /// Max concurrent QUIC client connections (soft admission limit)
     #[arg(long, default_value_t = 10_000)]
     pub max_connections: usize,
+
+    /// Max Postgres pool connections.
+    #[arg(long, env = "VP_DB_POOL_MAX_CONNECTIONS", default_value_t = 32)]
+    pub db_pool_max_connections: u32,
 
     /// Interval in seconds between orphan upload file scans (0 = disabled)
     #[arg(long, default_value_t = 3600)]
