@@ -157,7 +157,7 @@ impl VpApp {
 }
 
 pub fn run_ui(tx_intent: Sender<UiIntent>, rx_event: Receiver<UiEvent>) -> Result<()> {
-    iced::application(move || VpApp::new(tx_intent, rx_event), VpApp::update, VpApp::view)
+    iced::application(move || VpApp::new(tx_intent.clone(), rx_event.clone()), VpApp::update, VpApp::view)
         .title(VpApp::title)
         .subscription(VpApp::subscription)
         .window(iced::window::Settings {
