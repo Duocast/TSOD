@@ -89,11 +89,15 @@ impl VpApp {
         cc: &eframe::CreationContext<'_>,
         tx_intent: Sender<UiIntent>,
         rx_event: Receiver<UiEvent>,
+        max_upload_mb: u64,
     ) -> Self {
         egui_extras::install_image_loaders(&cc.egui_ctx);
 
+        let mut model = UiModel::default();
+        model.max_upload_bytes = max_upload_mb.saturating_mul(1024 * 1024);
+
         Self {
-            model: UiModel::default(),
+            model,
             tx_intent,
             rx_event,
         }

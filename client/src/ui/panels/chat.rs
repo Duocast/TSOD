@@ -12,7 +12,6 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 const MAX_PREVIEW_IMAGE_SIZE: f32 = 240.0;
-const MAX_ATTACHMENT_BYTES: u64 = 25 * 1024 * 1024;
 const ALLOWED_ATTACHMENT_MIME: &[&str] = &[
     "image/png",
     "image/jpeg",
@@ -285,8 +284,9 @@ fn handle_drag_and_drop(
             let mut error = None;
             if !ALLOWED_ATTACHMENT_MIME.contains(&mime_type.as_str()) {
                 error = Some("Unsupported file type".to_string());
-            } else if size_bytes > MAX_ATTACHMENT_BYTES {
-                error = Some("File exceeds 25MB limit".to_string());
+            } else if size_bytes > model.max_upload_bytes {
+                let limit_mb = model.max_upload_bytes / (1024 * 1024);
+                error = Some(format!("File exceeds {}MB limit", limit_mb));
             }
 
             model.pending_attachments.push(PendingAttachment {

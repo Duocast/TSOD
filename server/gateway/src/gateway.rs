@@ -64,6 +64,7 @@ impl Gateway {
         voice: Arc<VoiceForwarder>,
         video: Arc<StreamForwarder>,
         media: Arc<MediaService>,
+        max_connections: usize,
     ) -> Self {
         Self {
             auth,
@@ -88,9 +89,14 @@ impl Gateway {
                 .accept()
                 .await
                 .ok_or_else(|| anyhow!("endpoint closed"))?;
+            let Ok(permit) = self.connection_limit.clone().try_acquire_owned() else {
+                warn!("connection soft limit reached; dropping incoming connection");
+                continue;
+            };
             let gw = self.clone();
 
             tokio::spawn(async move {
+                let _permit = permit;
                 if let Err(e) = gw.handle_conn(incoming).await {
                     warn!("conn ended with error: {:#}", e);
                 }

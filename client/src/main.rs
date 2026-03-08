@@ -1144,10 +1144,12 @@ fn main() -> Result<()> {
         ..Default::default()
     };
 
+    let max_upload_mb = cfg.max_upload_mb;
+
     let gui_result = eframe::run_native(
         "TSOD",
         native_options,
-        Box::new(move |cc| Ok(Box::new(VpApp::new(cc, tx_intent, rx_event)))),
+        Box::new(move |cc| Ok(Box::new(VpApp::new(cc, tx_intent, rx_event, max_upload_mb)))),
     );
 
     // GUI exited — signal backend to shut down

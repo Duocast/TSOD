@@ -1607,6 +1607,7 @@ pub struct UiModel {
     pub chat_input_focused: bool,
     pub chat_input_options_open: bool,
     pub pending_attachments: Vec<PendingAttachment>,
+    pub max_upload_bytes: u64,
     pub typing_users: HashMap<String, Vec<(String, std::time::Instant)>>,
     pub last_typing_sent_at: HashMap<String, std::time::Instant>,
 
@@ -1941,6 +1942,7 @@ impl Default for UiModel {
             chat_input_focused: false,
             chat_input_options_open: false,
             pending_attachments: Vec::new(),
+            max_upload_bytes: 25 * 1024 * 1024,
             typing_users: HashMap::new(),
             last_typing_sent_at: HashMap::new(),
             drafts: HashMap::new(),
