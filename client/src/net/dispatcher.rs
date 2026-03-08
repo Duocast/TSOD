@@ -566,7 +566,7 @@ impl ControlDispatcher {
         let resp = self
             .send_request(
                 pb::client_to_server::Payload::SendTypingRequest(req),
-                Duration::from_secs(3),
+                Duration::from_secs(1),
             )
             .await??;
         if let Some(err) = resp.error {
