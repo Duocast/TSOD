@@ -68,22 +68,27 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel) {
                 let frame_key = Some((frame.stream_tag, frame.frame_seq));
                 if model.latest_stream_frame_key != frame_key {
                     if let Ok(codec) = pb::VideoCodec::try_from(frame.codec) {
-                        if let Ok(decoded) = video_decode::decode_video_frame(codec, &frame.payload)
-                        {
-                            let image = egui::ColorImage::from_rgba_unmultiplied(
-                                [decoded.width, decoded.height],
-                                &decoded.rgba,
-                            );
-                            model.latest_stream_frame_texture = Some(ui.ctx().load_texture(
-                                "streaming.latest",
-                                image,
-                                egui::TextureOptions::LINEAR,
-                            ));
-                            render_w = decoded.width;
-                            render_h = decoded.height;
-                            model.latest_stream_frame_key = frame_key;
+                        match video_decode::decode_video_frame(codec, &frame.payload) {
+                            Ok(decoded) => {
+                                let image = egui::ColorImage::from_rgba_unmultiplied(
+                                    [decoded.width, decoded.height],
+                                    &decoded.rgba,
+                                );
+                                model.latest_stream_frame_texture = Some(ui.ctx().load_texture(
+                                    "streaming.latest",
+                                    image,
+                                    egui::TextureOptions::LINEAR,
+                                ));
+                                render_w = decoded.width;
+                                render_h = decoded.height;
+                                model.latest_stream_decode_error = None;
+                            }
+                            Err(e) => {
+                                model.latest_stream_decode_error = Some(e.to_string());
+                            }
                         }
                     }
+                    model.latest_stream_frame_key = frame_key;
                 }
 
                 if render_w == 0 || render_h == 0 {
@@ -110,10 +115,15 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel) {
             }
 
             if !rendered {
+                let placeholder_text = model
+                    .latest_stream_decode_error
+                    .as_deref()
+                    .map(|e| format!("Stream unavailable\n{e}"))
+                    .unwrap_or_else(|| "Waiting for stream…".to_string());
                 painter.text(
                     video_rect.center(),
                     egui::Align2::CENTER_CENTER,
-                    "Waiting for stream…",
+                    placeholder_text,
                     egui::FontId::proportional(18.0),
                     theme::text_muted(),
                 );

@@ -144,7 +144,42 @@ impl ScreenEncoder for Av1AvifEncoder {
                     }
                 }
             }
-            PixelFormat::Nv12 => return Err(anyhow!("NV12 screen encoding is not implemented")),
+            PixelFormat::Nv12 => {
+                let y_plane_len = width * height;
+                let uv_plane_len = y_plane_len / 2;
+                if src.len() < y_plane_len + uv_plane_len {
+                    return Err(anyhow!(
+                        "invalid NV12 frame: expected at least {} bytes, got {}",
+                        y_plane_len + uv_plane_len,
+                        src.len()
+                    ));
+                }
+                let y_plane = &src[..y_plane_len];
+                let uv_plane = &src[y_plane_len..(y_plane_len + uv_plane_len)];
+                for y in 0..height {
+                    for x in 0..width {
+                        let yi = y * width + x;
+                        let uvi = (y / 2) * width + (x & !1);
+                        let y_sample = y_plane[yi] as i32;
+                        let u_sample = uv_plane[uvi] as i32;
+                        let v_sample = uv_plane[uvi + 1] as i32;
+
+                        let c = (y_sample - 16).max(0);
+                        let d = u_sample - 128;
+                        let e = v_sample - 128;
+
+                        let r = ((298 * c + 409 * e + 128) >> 8).clamp(0, 255) as u8;
+                        let g = ((298 * c - 100 * d - 208 * e + 128) >> 8).clamp(0, 255) as u8;
+                        let b = ((298 * c + 516 * d + 128) >> 8).clamp(0, 255) as u8;
+
+                        let di = yi * 4;
+                        rgba[di] = r;
+                        rgba[di + 1] = g;
+                        rgba[di + 2] = b;
+                        rgba[di + 3] = 255;
+                    }
+                }
+            }
         }
 
         let mut encoded = Vec::new();
@@ -489,8 +524,9 @@ fn build_screen_capture(source: &ShareSource) -> anyhow::Result<Box<dyn ScreenCa
 fn build_screen_encoder(codec: &str, _profile: &str) -> anyhow::Result<Box<dyn ScreenEncoder>> {
     match codec {
         "AV1" if cfg!(feature = "video-av1") => Ok(Box::new(Av1AvifEncoder::new())),
-        // TODO(video-vp9): replace AVIF-frame fallback with a realtime VP9 encoder.
-        "VP9" if cfg!(feature = "video-vp9") => Ok(Box::new(Av1AvifEncoder::new())),
+        "VP9" if cfg!(feature = "video-vp9") => Err(anyhow!(
+            "VP9 realtime encoder backend is not available in this build"
+        )),
         _ => Err(anyhow!("no screen encoder available for codec {codec}")),
     }
 }
