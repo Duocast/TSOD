@@ -40,12 +40,11 @@ message UserProfile {
   string banner_asset_url = 11;       // profile banner image URL
   AssetId banner_asset_id = 12;
   uint32 accent_color = 13;           // ARGB packed, user-chosen highlight color
-  string pronouns = 14;               // freeform, e.g. "he/him", "they/them"
-  repeated ProfileLink links = 15;    // social/game links
-  string custom_status_emoji = 16;    // emoji for custom status (unicode or asset ref)
-  Timestamp custom_status_expires = 17; // optional auto-clear time
-  GameActivity current_activity = 18; // "Playing Rust" rich presence
-  AudioProfile audio_profile = 19;    // public-facing audio config (opt-in)
+  repeated ProfileLink links = 14;    // social/game links
+  string custom_status_emoji = 15;    // emoji for custom status (unicode or asset ref)
+  Timestamp custom_status_expires = 16; // optional auto-clear time
+  GameActivity current_activity = 17; // "Playing Rust" rich presence
+  AudioProfile audio_profile = 18;    // public-facing audio config (opt-in)
 }
 
 // ── Requests ───────────────────────────────────────────────────────────
@@ -89,8 +88,7 @@ message UpdateUserProfileRequest {
   optional string custom_status_emoji = 5;
   optional Timestamp custom_status_expires = 6;
   optional uint32 accent_color = 7;
-  optional string pronouns = 8;
-  repeated ProfileLink links = 9;     // full replacement when present
+  repeated ProfileLink links = 8;     // full replacement when present
 }
 
 message UpdateUserProfileResponse {
