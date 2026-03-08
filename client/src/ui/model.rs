@@ -2211,6 +2211,44 @@ impl UiModel {
             && !crate::net::dispatcher::available_screen_share_codecs().is_empty()
     }
 
+    /// Open the profile popup for a given user, anchored near `click_pos`.
+    pub fn open_profile_popup(&mut self, user_id: String, click_pos: egui::Pos2) {
+        // Check cache first (60s TTL).
+        const PROFILE_CACHE_TTL_SECS: u64 = 60;
+        if let Some(cached) = self.profile_cache.get(&user_id) {
+            if cached.fetched_at.elapsed().as_secs() < PROFILE_CACHE_TTL_SECS {
+                self.profile_popup_data = Some(cached.data.clone());
+                self.profile_popup_loading = false;
+                self.show_user_popup = true;
+                self.profile_popup_user_id = Some(user_id);
+                self.profile_popup_anchor = Some(click_pos);
+                return;
+            }
+        }
+        // No cache hit — request from server.
+        self.show_user_popup = true;
+        self.profile_popup_user_id = Some(user_id);
+        self.profile_popup_data = None;
+        self.profile_popup_loading = true;
+        self.profile_popup_anchor = Some(click_pos);
+        // NOTE: The actual GetUserProfileRequest is not yet wired in the
+        // backend, so for now we populate a stub profile from MemberEntry
+        // data available locally.
+    }
+
+    /// Build a stub UserProfileData from a MemberEntry for immediate display
+    /// while the full profile fetch is pending (or not yet implemented).
+    pub fn stub_profile_from_member(&self, user_id: &str) -> Option<UserProfileData> {
+        self.current_members().iter().find(|m| m.user_id == user_id).map(|m| {
+            UserProfileData {
+                user_id: m.user_id.clone(),
+                display_name: m.display_name.clone(),
+                avatar_url: m.avatar_url.clone(),
+                ..Default::default()
+            }
+        })
+    }
+
     pub fn open_member_connection_info_window(&mut self, user_id: String, display_name: String) {
         let telemetry = self
             .member_telemetry

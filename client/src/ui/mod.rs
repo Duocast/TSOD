@@ -867,6 +867,324 @@ impl eframe::App for VpApp {
             }
         }
 
+        // ── Profile popup (user card) ──
+        if self.model.show_user_popup {
+            // If we have no data yet, try to build a stub from the member list.
+            if self.model.profile_popup_data.is_none() && self.model.profile_popup_loading {
+                if let Some(uid) = self.model.profile_popup_user_id.clone() {
+                    if let Some(stub) = self.model.stub_profile_from_member(&uid) {
+                        self.model.profile_popup_data = Some(stub);
+                    }
+                }
+            }
+
+            let mut open = true;
+            let anchor = self.model.profile_popup_anchor.unwrap_or(egui::pos2(300.0, 200.0));
+
+            egui::Window::new("User Profile")
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(false)
+                .fixed_size(egui::vec2(340.0, 420.0))
+                .default_pos(anchor)
+                .title_bar(false)
+                .show(ctx, |ui| {
+                    if let Some(profile) = &self.model.profile_popup_data {
+                        // ── Banner area ──
+                        let banner_height = 100.0;
+                        let (banner_rect, _) = ui.allocate_exact_size(
+                            egui::vec2(ui.available_width(), banner_height),
+                            egui::Sense::hover(),
+                        );
+                        // Accent colour gradient (fallback when no banner image).
+                        let accent = if profile.accent_color != 0 {
+                            let [_, r, g, b] = profile.accent_color.to_be_bytes();
+                            egui::Color32::from_rgb(r, g, b)
+                        } else {
+                            theme::COLOR_ACCENT
+                        };
+                        let mesh = {
+                            let mut mesh = egui::Mesh::default();
+                            let top_color = accent;
+                            let bot_color = theme::bg_dark();
+                            let tl = banner_rect.left_top();
+                            let tr = banner_rect.right_top();
+                            let bl = banner_rect.left_bottom();
+                            let br = banner_rect.right_bottom();
+                            mesh.colored_vertex(tl, top_color);
+                            mesh.colored_vertex(tr, top_color);
+                            mesh.colored_vertex(br, bot_color);
+                            mesh.colored_vertex(bl, bot_color);
+                            mesh.add_triangle(0, 1, 2);
+                            mesh.add_triangle(0, 2, 3);
+                            mesh
+                        };
+                        ui.painter().add(egui::Shape::mesh(mesh));
+
+                        // ── Avatar + identity row ──
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            // Avatar circle
+                            let avatar_size = 64.0;
+                            let (avatar_rect, _) = ui.allocate_exact_size(
+                                egui::vec2(avatar_size, avatar_size),
+                                egui::Sense::hover(),
+                            );
+                            let center = avatar_rect.center();
+                            let radius = avatar_size * 0.5;
+                            // Accent ring
+                            ui.painter().circle_stroke(
+                                center,
+                                radius + 2.0,
+                                egui::Stroke::new(3.0, accent),
+                            );
+                            // Background fill
+                            ui.painter().circle_filled(center, radius, theme::bg_light());
+                            // Initial letter
+                            let initial = profile
+                                .display_name
+                                .chars()
+                                .next()
+                                .unwrap_or('?')
+                                .to_uppercase()
+                                .to_string();
+                            ui.painter().text(
+                                center,
+                                egui::Align2::CENTER_CENTER,
+                                &initial,
+                                egui::FontId::proportional(28.0),
+                                theme::text_color(),
+                            );
+
+                            ui.vertical(|ui| {
+                                ui.label(
+                                    egui::RichText::new(&profile.display_name)
+                                        .size(18.0)
+                                        .strong(),
+                                );
+                                let status_label = match profile.status {
+                                    model::OnlineStatus::Online => ("Online", theme::COLOR_ONLINE),
+                                    model::OnlineStatus::Idle => ("Idle", theme::COLOR_IDLE),
+                                    model::OnlineStatus::DoNotDisturb => ("Do Not Disturb", theme::COLOR_DND),
+                                    model::OnlineStatus::Invisible | model::OnlineStatus::Offline => ("Offline", theme::COLOR_OFFLINE),
+                                };
+                                ui.colored_label(status_label.1, status_label.0);
+                            });
+                        });
+
+                        ui.separator();
+
+                        // ── Activity row (conditional) ──
+                        if let Some(activity) = &profile.current_activity {
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new("🎮").size(14.0));
+                                ui.label(
+                                    egui::RichText::new(format!("Playing {}", activity.game_name))
+                                        .strong()
+                                        .size(13.0),
+                                );
+                                if !activity.details.is_empty() {
+                                    ui.label(
+                                        egui::RichText::new(&activity.details)
+                                            .size(12.0)
+                                            .color(theme::text_dim()),
+                                    );
+                                }
+                            });
+                            ui.separator();
+                        }
+
+                        // ── Custom status (conditional) ──
+                        if !profile.custom_status_text.is_empty() {
+                            ui.horizontal(|ui| {
+                                if !profile.custom_status_emoji.is_empty() {
+                                    ui.label(&profile.custom_status_emoji);
+                                }
+                                ui.label(
+                                    egui::RichText::new(&profile.custom_status_text)
+                                        .size(13.0)
+                                        .color(theme::text_dim()),
+                                );
+                            });
+                            ui.separator();
+                        }
+
+                        // ── About Me ──
+                        if !profile.description.is_empty() {
+                            ui.label(
+                                egui::RichText::new("ABOUT ME")
+                                    .small()
+                                    .strong()
+                                    .color(theme::text_muted()),
+                            );
+                            ui.add_space(2.0);
+                            let desc = if profile.description.len() > 190 {
+                                format!("{}...", &profile.description[..187])
+                            } else {
+                                profile.description.clone()
+                            };
+                            ui.label(
+                                egui::RichText::new(&desc)
+                                    .size(13.0)
+                                    .color(theme::text_color()),
+                            );
+                            ui.separator();
+                        }
+
+                        // ── Roles ──
+                        if !profile.roles.is_empty() {
+                            ui.label(
+                                egui::RichText::new("ROLES")
+                                    .small()
+                                    .strong()
+                                    .color(theme::text_muted()),
+                            );
+                            ui.add_space(2.0);
+                            ui.horizontal_wrapped(|ui| {
+                                let mut sorted_roles = profile.roles.clone();
+                                sorted_roles.sort_by(|a, b| b.position.cmp(&a.position));
+                                for role in &sorted_roles {
+                                    let role_color = if role.color != 0 {
+                                        let [_, r, g, b] = role.color.to_be_bytes();
+                                        egui::Color32::from_rgb(r, g, b)
+                                    } else {
+                                        theme::text_dim()
+                                    };
+                                    let pill = egui::Frame::new()
+                                        .fill(role_color.linear_multiply(0.2))
+                                        .corner_radius(4.0)
+                                        .inner_margin(egui::Margin::symmetric(6, 2));
+                                    pill.show(ui, |ui| {
+                                        ui.label(
+                                            egui::RichText::new(&role.name)
+                                                .size(12.0)
+                                                .color(role_color),
+                                        );
+                                    });
+                                }
+                            });
+                            ui.separator();
+                        }
+
+                        // ── Links ──
+                        if !profile.links.is_empty() {
+                            ui.label(
+                                egui::RichText::new("LINKS")
+                                    .small()
+                                    .strong()
+                                    .color(theme::text_muted()),
+                            );
+                            ui.add_space(2.0);
+                            ui.horizontal_wrapped(|ui| {
+                                for link in &profile.links {
+                                    let icon = match link.platform.as_str() {
+                                        "steam" => "🎮",
+                                        "github" => "🐙",
+                                        "twitter" | "x" => "🐦",
+                                        "twitch" => "📺",
+                                        "youtube" => "▶",
+                                        _ => "🔗",
+                                    };
+                                    let label = if !link.display_text.is_empty() {
+                                        &link.display_text
+                                    } else {
+                                        &link.platform
+                                    };
+                                    ui.label(
+                                        egui::RichText::new(format!("{icon} {label}"))
+                                            .size(12.0)
+                                            .color(theme::COLOR_LINK),
+                                    );
+                                }
+                            });
+                            ui.separator();
+                        }
+
+                        // ── Badges ──
+                        if !profile.badges.is_empty() {
+                            ui.horizontal_wrapped(|ui| {
+                                for badge in &profile.badges {
+                                    let badge_label = egui::Label::new(
+                                        egui::RichText::new(format!("🏷️ {}", badge.label))
+                                            .size(12.0)
+                                            .color(theme::text_dim()),
+                                    );
+                                    let response = ui.add(badge_label);
+                                    if !badge.tooltip.is_empty() {
+                                        response.on_hover_text(&badge.tooltip);
+                                    }
+                                }
+                            });
+                            ui.separator();
+                        }
+
+                        // ── Footer: member since + action buttons ──
+                        if profile.created_at > 0 {
+                            let secs = profile.created_at / 1000;
+                            let naive = chrono::DateTime::from_timestamp(secs, 0);
+                            if let Some(dt) = naive {
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "Member since {}",
+                                        dt.format("%b %d, %Y")
+                                    ))
+                                    .small()
+                                    .color(theme::text_muted()),
+                                );
+                            }
+                        }
+
+                        ui.add_space(4.0);
+                        let profile_uid = profile.user_id.clone();
+                        let profile_dname = profile.display_name.clone();
+                        ui.horizontal(|ui| {
+                            if ui
+                                .add(
+                                    egui::Button::new("Poke")
+                                        .corner_radius(4.0),
+                                )
+                                .clicked()
+                            {
+                                self.model.show_poke_dialog = true;
+                                self.model.poke_target_user_id = profile_uid.clone();
+                                self.model.poke_target_display_name = profile_dname.clone();
+                                self.model.poke_message_draft = "Poke".into();
+                                self.model.show_user_popup = false;
+                            }
+                            if ui
+                                .add(
+                                    egui::Button::new("Connection Info")
+                                        .corner_radius(4.0),
+                                )
+                                .clicked()
+                            {
+                                self.model.open_member_connection_info_window(
+                                    profile_uid.clone(),
+                                    profile_dname.clone(),
+                                );
+                                self.model.show_user_popup = false;
+                            }
+                        });
+                    } else {
+                        // Loading state
+                        ui.vertical_centered(|ui| {
+                            ui.add_space(80.0);
+                            ui.spinner();
+                            ui.label(
+                                egui::RichText::new("Loading profile…")
+                                    .color(theme::text_muted()),
+                            );
+                        });
+                    }
+                });
+            if !open {
+                self.model.show_user_popup = false;
+                self.model.profile_popup_user_id = None;
+                self.model.profile_popup_data = None;
+                self.model.profile_popup_loading = false;
+            }
+        }
+
         // Create channel dialog (floating)
         panels::server_tree::show_create_channel_dialog(ctx, &mut self.model, &self.tx_intent);
         panels::server_tree::show_channel_dialogs(ctx, &mut self.model, &self.tx_intent);
