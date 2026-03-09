@@ -60,7 +60,7 @@ pub fn show(ctx: &egui::Context, model: &mut UiModel, tx_intent: &Sender<UiInten
 
     let esc_pressed = ctx.input(|i| i.key_pressed(egui::Key::Escape));
     let clicked_outside = ctx.input(|i| {
-        i.pointer.primary_clicked()
+        i.pointer.primary_pressed()
             && i.pointer
                 .interact_pos()
                 .is_some_and(|pos| popup_rect != egui::Rect::NOTHING && !popup_rect.contains(pos))
