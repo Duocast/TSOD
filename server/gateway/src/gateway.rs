@@ -1217,6 +1217,24 @@ impl Gateway {
                         break;
                     }
                 }
+                Some(pb::client_to_server::Payload::CreateBadge(r)) => {
+                    let icon_url = r.icon_asset_id.map(|a| a.value).unwrap_or_default();
+                    let badge = self.control.create_badge(&ctx, &r.id, &r.label, &icon_url, &r.tooltip).await?;
+                    let resp = pb::ServerToClient { request_id: req_id, session_id: Some(pb::SessionId { value: session_id.clone() }), sent_at: Some(now_ts()), error: None, event_seq: 0, payload: Some(pb::server_to_client::Payload::CreateBadge(pb::CreateBadgeResponse { badge: Some(pb::Badge { id: badge.id, label: badge.label, icon_url: badge.icon_url, tooltip: badge.tooltip }) })) };
+                    if let Err(e) = write_delimited(&mut send, &resp).await { warn!("control write failed: {:#}", e); break; }
+                }
+                Some(pb::client_to_server::Payload::GrantBadge(r)) => {
+                    let target = parse_user_id(r.user_id.as_ref())?;
+                    self.control.grant_badge(&ctx, target, &r.badge_id).await?;
+                    let resp = pb::ServerToClient { request_id: req_id, session_id: Some(pb::SessionId { value: session_id.clone() }), sent_at: Some(now_ts()), error: None, event_seq: 0, payload: Some(pb::server_to_client::Payload::GrantBadge(pb::GrantBadgeResponse {})) };
+                    if let Err(e) = write_delimited(&mut send, &resp).await { warn!("control write failed: {:#}", e); break; }
+                }
+                Some(pb::client_to_server::Payload::RevokeBadge(r)) => {
+                    let target = parse_user_id(r.user_id.as_ref())?;
+                    self.control.revoke_badge(&ctx, target, &r.badge_id).await?;
+                    let resp = pb::ServerToClient { request_id: req_id, session_id: Some(pb::SessionId { value: session_id.clone() }), sent_at: Some(now_ts()), error: None, event_seq: 0, payload: Some(pb::server_to_client::Payload::RevokeBadge(pb::RevokeBadgeResponse {})) };
+                    if let Err(e) = write_delimited(&mut send, &resp).await { warn!("control write failed: {:#}", e); break; }
+                }
                 Some(pb::client_to_server::Payload::StartScreenShareRequest(r)) => {
                     let ch = parse_channel_id(r.channel_id.as_ref())?;
 

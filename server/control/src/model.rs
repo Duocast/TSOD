@@ -219,6 +219,17 @@ pub struct UserBadgeRow {
     pub tooltip: String,
 }
 
+/// Badge definition row from badge_definitions table.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BadgeDefinitionRow {
+    pub id: String,
+    pub server_id: ServerId,
+    pub label: String,
+    pub icon_url: String,
+    pub tooltip: String,
+    pub position: i32,
+}
+
 /// Role display info for a user.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UserRoleRow {
