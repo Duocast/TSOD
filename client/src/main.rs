@@ -5017,6 +5017,29 @@ async fn connect_and_run_session(
                                 )));
                             }
                         }
+                        UiIntent::RevokeBadgeFromUser { user_id, badge_id } => {
+                            let revoke_req = pb::RevokeBadgeRequest {
+                                user_id: Some(pb::UserId {
+                                    value: user_id.clone(),
+                                }),
+                                badge_id: badge_id.clone(),
+                            };
+                            if let Err(e) = dispatcher
+                                .send_request(
+                                    pb::client_to_server::Payload::RevokeBadge(revoke_req),
+                                    Duration::from_secs(5),
+                                )
+                                .await
+                            {
+                                let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                    "[perm] revoke badge failed ({badge_id} -> {user_id}): {e:#}"
+                                )));
+                            } else {
+                                let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                    "[perm] revoked badge {badge_id} from {user_id}"
+                                )));
+                            }
+                        }
                         UiIntent::PermsSetChannelOverride {
                             channel_id,
                             role_id,

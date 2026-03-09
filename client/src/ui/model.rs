@@ -566,6 +566,10 @@ pub enum UiIntent {
         icon_path: String,
         tooltip: String,
     },
+    RevokeBadgeFromUser {
+        user_id: String,
+        badge_id: String,
+    },
     PermsSetChannelOverride {
         channel_id: String,
         role_id: Option<String>,
