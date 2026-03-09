@@ -15,15 +15,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                 .on_hover_text("Create Channel")
                 .clicked()
             {
-                model.show_create_channel = true;
-                model.create_channel_parent_id = None;
-                model.create_channel_name.clear();
-                model.create_channel_description.clear();
-                model.create_channel_type = 0;
-                model.create_channel_codec = 0;
-                model.create_channel_quality = 64;
-                model.create_channel_user_limit = 0;
-                model.create_channel_tab = 0;
+                open_create_channel_dialog(model, None);
             }
         });
     });
@@ -97,10 +89,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
             }
             ui.separator();
             if ui.button("Create channel").clicked() {
-                model.show_create_channel = true;
-                model.create_channel_parent_id = None;
-                model.create_channel_name.clear();
-                model.create_channel_description.clear();
+                open_create_channel_dialog(model, None);
                 ui.close();
             }
         });
@@ -480,10 +469,7 @@ fn show_channel(
             ui.close();
         }
         if ui.button("Create sub-channel").clicked() {
-            model.show_create_channel = true;
-            model.create_channel_parent_id = Some(ch.id.clone());
-            model.create_channel_name.clear();
-            model.create_channel_description.clear();
+            open_create_channel_dialog(model, Some(ch.id.clone()));
             ui.close();
         }
     });
@@ -495,6 +481,18 @@ fn show_channel(
             }
         });
     }
+}
+
+fn open_create_channel_dialog(model: &mut UiModel, parent_id: Option<String>) {
+    model.show_create_channel = true;
+    model.create_channel_parent_id = parent_id;
+    model.create_channel_name.clear();
+    model.create_channel_description.clear();
+    model.create_channel_type = 0;
+    model.create_channel_codec = 0;
+    model.create_channel_quality = 64;
+    model.create_channel_user_limit = 0;
+    model.create_channel_tab = 0;
 }
 
 fn show_channel_info_details(ui: &mut egui::Ui, ch: &crate::ui::model::ChannelEntry) {
