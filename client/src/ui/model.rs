@@ -291,11 +291,21 @@ pub enum UiEvent {
 
     // User profile
     UserProfileLoaded(UserProfileData),
-    UserProfileFetchFailed { user_id: String },
-    UserProfileCacheInvalidated { user_id: String },
+    UserProfileFetchFailed {
+        user_id: String,
+    },
+    UserProfileCacheInvalidated {
+        user_id: String,
+    },
     SelfProfileLoaded(UserProfileData),
-    AvatarUploadComplete { asset_id: String, preview_url: String },
-    BannerUploadComplete { asset_id: String, preview_url: String },
+    AvatarUploadComplete {
+        asset_id: String,
+        preview_url: String,
+    },
+    BannerUploadComplete {
+        asset_id: String,
+        preview_url: String,
+    },
     AvatarUploadFailed(String),
     BannerUploadFailed(String),
     ProfileUpdateComplete,
@@ -548,6 +558,13 @@ pub enum UiIntent {
     PermsAssignRoles {
         user_id: String,
         role_ids: Vec<String>,
+    },
+    GrantBadgeToUser {
+        user_id: String,
+        badge_id: String,
+        label: String,
+        icon_path: String,
+        tooltip: String,
     },
     PermsSetChannelOverride {
         channel_id: String,
@@ -2331,14 +2348,15 @@ impl UiModel {
     /// Build a stub UserProfileData from a MemberEntry for immediate display
     /// while the full profile fetch is pending (or not yet implemented).
     pub fn stub_profile_from_member(&self, user_id: &str) -> Option<UserProfileData> {
-        self.current_members().iter().find(|m| m.user_id == user_id).map(|m| {
-            UserProfileData {
+        self.current_members()
+            .iter()
+            .find(|m| m.user_id == user_id)
+            .map(|m| UserProfileData {
                 user_id: m.user_id.clone(),
                 display_name: m.display_name.clone(),
                 avatar_url: m.avatar_url.clone(),
                 ..Default::default()
-            }
-        })
+            })
     }
 
     pub fn open_member_connection_info_window(&mut self, user_id: String, display_name: String) {
@@ -2754,18 +2772,21 @@ impl UiModel {
                             .role_ids
                             .iter()
                             .filter_map(|rid| {
-                                self.permissions_roles.iter().find(|r| r.role_id == *rid).map(
-                                    |r| {
-                                        let color =
-                                            u32::from_str_radix(r.color_hex.trim_start_matches('#'), 16)
-                                                .unwrap_or(0);
+                                self.permissions_roles
+                                    .iter()
+                                    .find(|r| r.role_id == *rid)
+                                    .map(|r| {
+                                        let color = u32::from_str_radix(
+                                            r.color_hex.trim_start_matches('#'),
+                                            16,
+                                        )
+                                        .unwrap_or(0);
                                         RoleData {
                                             name: r.name.clone(),
                                             color,
                                             position: 0,
                                         }
-                                    },
-                                )
+                                    })
                             })
                             .collect();
                     }
@@ -2794,23 +2815,31 @@ impl UiModel {
                 }
                 self.self_profile = Some(profile);
             }
-            UiEvent::AvatarUploadComplete { asset_id, preview_url } => {
+            UiEvent::AvatarUploadComplete {
+                asset_id,
+                preview_url,
+            } => {
                 self.avatar_upload_in_flight = false;
                 self.edit_profile_draft.pending_avatar_asset_id = Some(asset_id);
                 self.edit_profile_draft.avatar_preview_url = Some(preview_url);
             }
-            UiEvent::BannerUploadComplete { asset_id, preview_url } => {
+            UiEvent::BannerUploadComplete {
+                asset_id,
+                preview_url,
+            } => {
                 self.banner_upload_in_flight = false;
                 self.edit_profile_draft.pending_banner_asset_id = Some(asset_id);
                 self.edit_profile_draft.banner_preview_url = Some(preview_url);
             }
             UiEvent::AvatarUploadFailed(err) => {
                 self.avatar_upload_in_flight = false;
-                self.log.push_back(format!("[profile] avatar upload failed: {err}"));
+                self.log
+                    .push_back(format!("[profile] avatar upload failed: {err}"));
             }
             UiEvent::BannerUploadFailed(err) => {
                 self.banner_upload_in_flight = false;
-                self.log.push_back(format!("[profile] banner upload failed: {err}"));
+                self.log
+                    .push_back(format!("[profile] banner upload failed: {err}"));
             }
             UiEvent::ProfileUpdateComplete => {
                 self.profile_save_in_flight = false;
@@ -2827,7 +2856,8 @@ impl UiModel {
                 self.show_custom_status_popover = false;
             }
             UiEvent::CustomStatusFailed(err) => {
-                self.log.push_back(format!("[profile] custom status failed: {err}"));
+                self.log
+                    .push_back(format!("[profile] custom status failed: {err}"));
             }
             UiEvent::SetSelfMuted(m) => self.self_muted = m,
             UiEvent::SetSelfDeafened(d) => self.self_deafened = d,
