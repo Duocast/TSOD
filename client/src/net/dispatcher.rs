@@ -665,7 +665,7 @@ impl ControlDispatcher {
         let req = pb::UpdateUserProfileRequest {
             display_name,
             description,
-            status: pb::OnlineStatus::Unspecified as i32,
+            status: pb::OnlineStatus::StatusUnspecified as i32,
             custom_status_text: None,
             custom_status_emoji: None,
             custom_status_expires: None,
@@ -994,7 +994,7 @@ pub fn pb_profile_to_ui(p: &pb::UserProfile) -> crate::ui::model::UserProfileDat
         pb::OnlineStatus::DoNotDisturb => OnlineStatus::DoNotDisturb,
         pb::OnlineStatus::Invisible => OnlineStatus::Invisible,
         pb::OnlineStatus::Offline => OnlineStatus::Offline,
-        pb::OnlineStatus::Unspecified => OnlineStatus::Online,
+        pb::OnlineStatus::StatusUnspecified => OnlineStatus::Online,
     };
 
     let avatar_url = if p.avatar_asset_url.is_empty() {
@@ -1034,7 +1034,7 @@ pub fn pb_profile_to_ui(p: &pb::UserProfile) -> crate::ui::model::UserProfileDat
         game_name: a.game_name.clone(),
         details: a.details.clone(),
         state: a.state.clone(),
-        started_at: a.started_at.as_ref().map(|t| t.ms as i64).unwrap_or(0),
+        started_at: a.started_at.as_ref().map(|t| t.unix_millis).unwrap_or(0),
         large_image_url: a.large_image_url.clone(),
     });
 
