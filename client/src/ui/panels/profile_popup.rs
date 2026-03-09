@@ -111,7 +111,7 @@ fn render_profile(
             banner_rect,
             egui::Image::from_uri(url)
                 .fit_to_exact_size(banner_rect.size())
-                .corner_radius(banner_rounding),
+                .corner_radius(clip_rounding),
         );
     } else {
         paint_vertical_gradient(
@@ -145,7 +145,7 @@ fn render_profile(
         ui.painter().text(
             avatar_center,
             egui::Align2::CENTER_CENTER,
-            initial,
+            fallback,
             egui::FontId::proportional(56.0),
             egui::Color32::WHITE,
         );
@@ -264,7 +264,7 @@ fn render_profile(
 
     if !profile.badges.is_empty() {
         ui.horizontal_wrapped(|ui| {
-            ui.add_space(CONTENT_X_PADDING);
+            ui.label(egui::RichText::new("BADGES").size(20.0).strong());
             for badge in &profile.badges {
                 if badge.icon_url.trim().is_empty() {
                     draw_tag_chip(ui, "⭐", &badge.label, theme::COLOR_MENTION)
