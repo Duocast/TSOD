@@ -6372,16 +6372,21 @@ fn hex_to_32(s: &str) -> Result<[u8; 32]> {
     Ok(out)
 }
 
-/// Load an image from disk, optionally resize it, encode to WebP, then upload it to the server
-/// as a profile asset (avatar or banner). Returns the verified asset_id.
+/// Load an image from disk, resize/crop it to exact target dimensions, encode to WebP,
+/// then upload it to the server as a profile asset (avatar or banner).
+/// Returns the verified asset_id.
+///
+/// For avatars (square): center-crops the source to a square, then resizes to `target_w×target_h`.
+/// For banners (wide): uses cover-fill to resize, then center-crops to `target_w×target_h`.
+/// This ensures the uploaded image always matches the expected dimensions exactly.
 async fn upload_profile_image(
     conn: &quinn::Connection,
     dispatcher: &net::dispatcher::ControlDispatcher,
     path: &std::path::Path,
     purpose: &str,
     max_bytes: u64,
-    max_w: u32,
-    max_h: u32,
+    target_w: u32,
+    target_h: u32,
 ) -> anyhow::Result<String> {
     use anyhow::Context as _;
 
@@ -6410,14 +6415,11 @@ async fn upload_profile_image(
     // Decode with the `image` crate for validation and resize.
     let img = image::load_from_memory(&raw).context("decode image")?;
 
-    // Resize if needed (maintain aspect ratio, fit within max dimensions).
-    let img = if img.width() > max_w || img.height() > max_h {
-        img.resize(max_w, max_h, image::imageops::FilterType::Lanczos3)
-    } else {
-        img
-    };
+    // Resize to exact target dimensions using cover-fill (crop excess).
+    // This fills the target rect completely, then center-crops to exact size.
+    let img = img.resize_to_fill(target_w, target_h, image::imageops::FilterType::Lanczos3);
 
-    // Encode as WebP.
+    // Encode as WebP for superior compression.
     let mut webp_bytes: Vec<u8> = Vec::new();
     img.write_to(
         &mut std::io::Cursor::new(&mut webp_bytes),

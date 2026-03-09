@@ -187,27 +187,75 @@ fn tab_profile(ui: &mut egui::Ui, model: &mut UiModel) {
     ui.label(egui::RichText::new("Accent Color").strong());
     ui.add_space(4.0);
 
+    // 18-color preset grid (3 rows × 6 columns).
+    const PRESET_COLORS: [(u32, &str); 18] = [
+        (0x5865F2, "Blurple"),
+        (0xEB459E, "Fuchsia"),
+        (0xED4245, "Red"),
+        (0xFEE75C, "Yellow"),
+        (0x57F287, "Green"),
+        (0x3BA55C, "Dark Green"),
+        (0x5BC0EB, "Sky Blue"),
+        (0x9B59B6, "Purple"),
+        (0xE67E22, "Orange"),
+        (0x1ABC9C, "Teal"),
+        (0xE91E63, "Pink"),
+        (0x607D8B, "Slate"),
+        (0x2C2F33, "Dark"),
+        (0x99AAB5, "Light"),
+        (0xFFFFFF, "White"),
+        (0x000000, "Black"),
+        (0x34495E, "Charcoal"),
+        (0x71368A, "Violet"),
+    ];
+    let swatch_size = 28.0;
+    let swatch_spacing = 4.0;
+    let cols = 6;
+
+    for row in 0..3 {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = swatch_spacing;
+            for col in 0..cols {
+                let idx = row * cols + col;
+                let (hex, label) = PRESET_COLORS[idx];
+                let color = egui::Color32::from_rgb(
+                    ((hex >> 16) & 0xFF) as u8,
+                    ((hex >> 8) & 0xFF) as u8,
+                    (hex & 0xFF) as u8,
+                );
+                let (rect, resp) =
+                    ui.allocate_exact_size(egui::vec2(swatch_size, swatch_size), egui::Sense::click());
+                ui.painter()
+                    .rect_filled(rect, 4.0, color);
+                // Border for very dark/light swatches so they're visible.
+                if hex == 0x000000 || hex == 0x2C2F33 {
+                    ui.painter()
+                        .rect_stroke(rect, 4.0, egui::Stroke::new(1.0, theme::text_muted()));
+                }
+                // Selection ring.
+                if model.edit_profile_draft.accent_color == hex {
+                    ui.painter().rect_stroke(
+                        rect.expand(2.0),
+                        6.0,
+                        egui::Stroke::new(2.0, egui::Color32::WHITE),
+                    );
+                }
+                if resp.clicked() {
+                    model.edit_profile_draft.accent_color = hex;
+                    model.edit_profile_draft.accent_hex_input = format!("#{:06X}", hex);
+                }
+                resp.on_hover_text(label);
+            }
+        });
+    }
+
+    ui.add_space(6.0);
+
+    // Hex input + live preview swatch.
     ui.horizontal(|ui| {
-        let current = model.edit_profile_draft.accent_color;
-        let r = ((current >> 16) & 0xFF) as u8;
-        let g = ((current >> 8) & 0xFF) as u8;
-        let b = (current & 0xFF) as u8;
-        let mut rgb = [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0];
-        if ui.color_edit_button_rgb(&mut rgb).changed() {
-            let r = (rgb[0] * 255.0) as u32;
-            let g = (rgb[1] * 255.0) as u32;
-            let b = (rgb[2] * 255.0) as u32;
-            model.edit_profile_draft.accent_color = (r << 16) | (g << 8) | b;
-            model.edit_profile_draft.accent_hex_input =
-                format!("#{:06X}", model.edit_profile_draft.accent_color);
-        }
-
-        ui.add_space(6.0);
-
-        // Hex input
         let hex = &mut model.edit_profile_draft.accent_hex_input;
         if hex.is_empty() {
-            *hex = format!("#{:06X}", current);
+            *hex = format!("#{:06X}", model.edit_profile_draft.accent_color);
         }
         let resp = ui.add(
             egui::TextEdit::singleline(hex)
@@ -220,40 +268,26 @@ fn tab_profile(ui: &mut egui::Ui, model: &mut UiModel) {
                 model.edit_profile_draft.accent_color = parsed;
             }
         }
-    });
 
-    ui.add_space(6.0);
+        ui.add_space(4.0);
 
-    // Preset swatches
-    ui.horizontal_wrapped(|ui| {
-        const SWATCHES: [(u32, &str); 8] = [
-            (0x5865F2, "Blurple"),
-            (0x57F287, "Green"),
-            (0xFEE75C, "Yellow"),
-            (0xEB459E, "Fuchsia"),
-            (0xED4245, "Red"),
-            (0xFFFFFF, "White"),
-            (0x99AAB5, "Greyple"),
-            (0x23A559, "Online"),
-        ];
-        for (hex, label) in SWATCHES {
-            let color = egui::Color32::from_rgb(
-                ((hex >> 16) & 0xFF) as u8,
-                ((hex >> 8) & 0xFF) as u8,
-                (hex & 0xFF) as u8,
-            );
-            let (rect, resp) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::click());
-            ui.painter().circle_filled(rect.center(), 10.0, color);
-            if model.edit_profile_draft.accent_color == hex {
-                ui.painter()
-                    .circle_stroke(rect.center(), 11.0, egui::Stroke::new(2.0, egui::Color32::WHITE));
-            }
-            if resp.clicked() {
-                model.edit_profile_draft.accent_color = hex;
-                model.edit_profile_draft.accent_hex_input = format!("#{:06X}", hex);
-            }
-            resp.on_hover_text(label);
-        }
+        // Preview circle of the current accent color.
+        let current = model.edit_profile_draft.accent_color;
+        let preview_color = egui::Color32::from_rgb(
+            ((current >> 16) & 0xFF) as u8,
+            ((current >> 8) & 0xFF) as u8,
+            (current & 0xFF) as u8,
+        );
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(20.0, 20.0), egui::Sense::hover());
+        ui.painter().circle_filled(rect.center(), 9.0, preview_color);
+        ui.painter()
+            .circle_stroke(rect.center(), 9.0, egui::Stroke::new(1.0, theme::text_muted()));
+
+        ui.label(
+            egui::RichText::new("Preview")
+                .color(theme::text_muted())
+                .size(11.0),
+        );
     });
 }
 

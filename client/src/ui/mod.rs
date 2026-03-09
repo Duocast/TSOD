@@ -13,6 +13,7 @@
 //! │ Panel   │                            │          │
 //! └─────────┴────────────────────────────┴──────────┘
 
+pub mod markdown;
 pub mod model;
 pub mod panels;
 pub mod sfx;
