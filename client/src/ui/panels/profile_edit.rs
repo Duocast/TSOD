@@ -453,7 +453,7 @@ fn tab_avatar(ui: &mut egui::Ui, model: &mut UiModel, tx: &Sender<UiIntent>) {
 
     ui.add_space(8.0);
     ui.label(
-        egui::RichText::new("Accepted: PNG, JPEG, WebP — max 8 MB")
+        egui::RichText::new("Target: 256×256 px — Accepted: PNG, JPEG, WebP — max 8 MB")
             .color(theme::text_muted())
             .size(11.0),
     );
