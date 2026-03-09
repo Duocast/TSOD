@@ -7,9 +7,7 @@ use eframe::egui;
 use std::time::Duration;
 
 const POPUP_SIZE: egui::Vec2 = egui::vec2(640.0, 650.0);
-const BANNER_HEIGHT: f32 = 120.0;
-const CARD_RADIUS: u8 = 18;
-const CONTENT_X_PADDING: f32 = 26.0;
+const BANNER_HEIGHT: f32 = 130.0;
 
 pub fn show(ctx: &egui::Context, model: &mut UiModel, tx_intent: &Sender<UiIntent>) {
     let Some(user_id) = model.profile_popup_user_id.clone() else {
@@ -34,8 +32,8 @@ pub fn show(ctx: &egui::Context, model: &mut UiModel, tx_intent: &Sender<UiInten
         .fixed_size(POPUP_SIZE)
         .frame(
             egui::Frame::window(&ctx.style())
-                .fill(egui::Color32::from_rgb(16, 20, 34))
-                .corner_radius(CARD_RADIUS as f32)
+                .fill(egui::Color32::from_rgb(18, 23, 40))
+                .corner_radius(18.0)
                 .inner_margin(egui::Margin::ZERO),
         )
         .open(&mut open)
@@ -87,9 +85,9 @@ fn render_profile(
     let card_rect = ui.max_rect();
     let banner_rect =
         egui::Rect::from_min_size(card_rect.min, egui::vec2(card_rect.width(), BANNER_HEIGHT));
-    let banner_rounding = egui::CornerRadius {
-        nw: CARD_RADIUS,
-        ne: CARD_RADIUS,
+    let clip_rounding = egui::CornerRadius {
+        nw: 18,
+        ne: 18,
         sw: 0,
         se: 0,
     };
@@ -97,16 +95,15 @@ fn render_profile(
     paint_vertical_gradient(
         ui,
         card_rect,
-        egui::Color32::from_rgb(19, 25, 45),
-        egui::Color32::from_rgb(17, 21, 36),
-        egui::CornerRadius::same(CARD_RADIUS),
+        egui::Color32::from_rgb(16, 22, 42),
+        egui::Color32::from_rgb(15, 19, 34),
+        egui::CornerRadius::same(18),
     );
     paint_horizontal_tint(
         ui,
         card_rect,
-        egui::Color32::from_rgb(32, 53, 127),
-        egui::Color32::from_rgb(78, 56, 149),
-        0.08,
+        egui::Color32::from_rgb(53, 77, 177),
+        egui::Color32::from_rgb(128, 79, 212),
     );
 
     if let Some(url) = profile.banner_url.as_ref().filter(|u| !u.is_empty()) {
@@ -120,49 +117,23 @@ fn render_profile(
         paint_vertical_gradient(
             ui,
             banner_rect,
-            egui::Color32::from_rgb(22, 34, 72),
-            egui::Color32::from_rgb(13, 19, 37),
-            banner_rounding,
-        );
-        paint_horizontal_tint(
-            ui,
-            banner_rect,
-            egui::Color32::from_rgb(65, 89, 186),
-            egui::Color32::from_rgb(149, 97, 232),
-            0.22,
+            lerp_color(accent, egui::Color32::from_rgb(84, 124, 243), 0.4),
+            egui::Color32::from_rgb(18, 25, 48),
+            clip_rounding,
         );
     }
 
-    let header_bg = egui::Rect::from_min_max(
-        egui::pos2(card_rect.left(), banner_rect.bottom() - 10.0),
-        egui::pos2(card_rect.right(), banner_rect.bottom() + 84.0),
-    );
-    ui.painter().rect_filled(
-        header_bg,
-        egui::CornerRadius::ZERO,
-        egui::Color32::from_rgba_unmultiplied(12, 17, 30, 176),
-    );
+    let avatar_center = egui::pos2(banner_rect.left() + 78.0, banner_rect.bottom() + 34.0);
+    ui.painter()
+        .circle_filled(avatar_center, 56.0, egui::Color32::from_rgb(227, 102, 47));
 
-    let avatar_center = egui::pos2(
-        banner_rect.left() + CONTENT_X_PADDING + 70.0,
-        banner_rect.bottom() + 34.0,
-    );
-    let avatar_size = 110.0;
-    let avatar_rect =
-        egui::Rect::from_center_size(avatar_center, egui::vec2(avatar_size, avatar_size));
-
-    ui.painter().circle_filled(
-        avatar_center,
-        avatar_size * 0.5,
-        egui::Color32::from_rgb(227, 102, 47),
-    );
-
+    let avatar_rect = egui::Rect::from_center_size(avatar_center, egui::vec2(106.0, 106.0));
     if let Some(url) = profile.avatar_url.as_ref().filter(|u| !u.is_empty()) {
         ui.put(
             avatar_rect,
             egui::Image::from_uri(url)
                 .fit_to_exact_size(avatar_rect.size())
-                .corner_radius(egui::CornerRadius::same((avatar_size * 0.5) as u8)),
+                .corner_radius(egui::CornerRadius::same(53)),
         );
     } else {
         let fallback = profile
@@ -174,52 +145,44 @@ fn render_profile(
         ui.painter().text(
             avatar_center,
             egui::Align2::CENTER_CENTER,
-            if fallback.is_empty() { "?" } else { &fallback },
-            egui::FontId::proportional(52.0),
+            initial,
+            egui::FontId::proportional(56.0),
             egui::Color32::WHITE,
         );
     }
 
-    let status_center = egui::pos2(avatar_rect.right() - 12.0, avatar_rect.bottom() - 12.0);
+    let status_center = egui::pos2(avatar_rect.right() - 8.0, avatar_rect.bottom() - 8.0);
     ui.painter()
-        .circle_filled(status_center, 22.0, egui::Color32::from_rgb(12, 17, 30));
-    ui.painter().circle_stroke(
-        status_center,
-        12.0,
-        egui::Stroke::new(2.0, status_color(profile.status)),
-    );
+        .circle_filled(status_center, 17.0, egui::Color32::from_rgb(14, 20, 34));
+    ui.painter()
+        .circle_filled(status_center, 10.0, status_color(profile.status));
 
-    ui.add_space(BANNER_HEIGHT + 18.0);
-    ui.add_space(CONTENT_X_PADDING);
-
+    ui.add_space(BANNER_HEIGHT + 22.0);
     ui.horizontal(|ui| {
-        ui.add_space(CONTENT_X_PADDING + 124.0);
+        ui.add_space(150.0);
         ui.vertical(|ui| {
             ui.label(
                 egui::RichText::new(&profile.display_name)
                     .strong()
-                    .size(62.0)
-                    .color(egui::Color32::from_rgb(240, 242, 248)),
+                    .size(52.0)
+                    .color(egui::Color32::from_rgb(239, 240, 246)),
             );
-            ui.add_space(2.0);
             ui.horizontal(|ui| {
                 ui.label(
                     egui::RichText::new("●")
-                        .size(26.0)
+                        .size(24.0)
                         .color(status_color(profile.status)),
                 );
                 ui.label(
                     egui::RichText::new(status_text(profile.status))
-                        .size(22.0)
-                        .color(egui::Color32::from_rgb(227, 232, 243)),
+                        .size(24.0)
+                        .color(egui::Color32::from_rgb(221, 226, 240)),
                 );
             });
         });
     });
-
-    ui.add_space(14.0);
     draw_divider(ui);
-    ui.add_space(12.0);
+    ui.add_space(8.0);
 
     if let Some(activity) = &profile.current_activity {
         let elapsed =
@@ -227,111 +190,98 @@ fn render_profile(
         let h = elapsed / 3600;
         let m = (elapsed % 3600) / 60;
         ui.horizontal(|ui| {
-            ui.add_space(CONTENT_X_PADDING);
-            ui.label(egui::RichText::new("🎮").size(30.0));
+            ui.label(egui::RichText::new("🎮").size(24.0));
             ui.label(
-                egui::RichText::new(format!("Playing {}  —  {}h  {}m", activity.game_name, h, m))
-                    .size(22.0)
-                    .color(egui::Color32::from_rgb(231, 234, 244)),
+                egui::RichText::new(format!("Playing {} — {}h {}m", activity.game_name, h, m))
+                    .strong()
+                    .size(22.0),
             );
         });
-        ui.add_space(12.0);
+        ui.add_space(8.0);
         draw_divider(ui);
-        ui.add_space(10.0);
+        ui.add_space(6.0);
         ui.ctx().request_repaint_after(Duration::from_secs(60));
     }
 
     if !profile.custom_status_text.trim().is_empty() {
         ui.horizontal(|ui| {
-            ui.add_space(CONTENT_X_PADDING);
-            ui.label(egui::RichText::new(profile.custom_status_emoji.to_string()).size(30.0));
-            ui.label(
-                egui::RichText::new(&profile.custom_status_text)
-                    .size(22.0)
-                    .color(egui::Color32::from_rgb(231, 234, 244)),
-            );
+            ui.label(egui::RichText::new(profile.custom_status_emoji.to_string()).size(24.0));
+            ui.label(egui::RichText::new(&profile.custom_status_text).size(22.0));
         });
-        ui.add_space(12.0);
+        ui.add_space(8.0);
         draw_divider(ui);
-        ui.add_space(10.0);
+        ui.add_space(6.0);
     }
 
-    ui.horizontal(|ui| {
-        ui.add_space(CONTENT_X_PADDING);
-        ui.label(
-            egui::RichText::new("ABOUT ME")
-                .size(18.0)
-                .color(egui::Color32::from_rgb(220, 225, 237)),
-        );
-    });
-    ui.add_space(4.0);
-    ui.horizontal(|ui| {
-        ui.add_space(CONTENT_X_PADDING);
-        let about = if profile.description.is_empty() {
-            "No profile description set."
-        } else {
-            &profile.description
-        };
-        if about.chars().count() > 190 {
-            let truncated: String = about.chars().take(190).chain("...".chars()).collect();
-            markdown::render_about_me(ui, &truncated);
-        } else {
-            markdown::render_about_me(ui, about);
-        }
-    });
-
-    ui.add_space(14.0);
-    draw_divider(ui);
+    ui.label(egui::RichText::new("ABOUT ME").size(22.0).strong());
+    let about = if profile.description.is_empty() {
+        "No profile description set."
+    } else {
+        &profile.description
+    };
+    // Truncate at 190 chars for display safety.
+    if about.chars().count() > 190 {
+        let truncated: String = about.chars().take(190).chain("...".chars()).collect();
+        markdown::render_about_me(ui, &truncated);
+    } else {
+        markdown::render_about_me(ui, about);
+    }
     ui.add_space(10.0);
+    draw_divider(ui);
+    ui.add_space(6.0);
 
     let mut roles = profile.roles.clone();
     roles.sort_by(|a, b| b.position.cmp(&a.position));
     if !roles.is_empty() {
         ui.horizontal_wrapped(|ui| {
-            ui.add_space(CONTENT_X_PADDING);
-            ui.label(egui::RichText::new("ROLES").size(18.0));
-            ui.add_space(10.0);
+            ui.label(egui::RichText::new("ROLES").size(20.0).strong());
             for role in roles {
-                draw_tag_chip(ui, "◈", &role.name, u32_to_color(role.color));
+                let role_color = u32_to_color(role.color);
+                draw_tag_chip(ui, platform_emoji("website"), &role.name, role_color);
             }
         });
-        ui.add_space(10.0);
+        ui.add_space(6.0);
     }
 
     if !profile.links.is_empty() {
         ui.horizontal_wrapped(|ui| {
-            ui.add_space(CONTENT_X_PADDING);
-            ui.label(egui::RichText::new("LINKS").size(18.0));
-            ui.add_space(10.0);
-            for link in &profile.links {
+            ui.label(egui::RichText::new("LINKS").size(20.0).strong());
+            for (i, link) in profile.links.iter().enumerate() {
                 let emoji = platform_emoji(&link.platform);
                 let label = if !link.display_text.is_empty() {
                     &link.display_text
                 } else {
                     &link.platform
                 };
-                draw_tag_chip(ui, emoji, label, egui::Color32::from_rgb(67, 91, 175))
-                    .on_hover_text(&link.url);
+                draw_tag_chip(ui, emoji, label, accent).on_hover_text(&link.url);
+                if i + 1 < profile.links.len() {
+                    ui.add_space(4.0);
+                }
             }
         });
-        ui.add_space(8.0);
+        ui.add_space(6.0);
     }
 
     if !profile.badges.is_empty() {
         ui.horizontal_wrapped(|ui| {
             ui.add_space(CONTENT_X_PADDING);
             for badge in &profile.badges {
-                draw_flat_badge(ui, &badge.label).on_hover_text(&badge.tooltip);
+                if badge.icon_url.trim().is_empty() {
+                    draw_tag_chip(ui, "⭐", &badge.label, theme::COLOR_MENTION)
+                        .on_hover_text(&badge.tooltip);
+                } else {
+                    draw_tag_chip(ui, "🏅", &badge.label, theme::COLOR_ACCENT)
+                        .on_hover_text(&badge.tooltip);
+                }
             }
         });
-        ui.add_space(12.0);
+        ui.add_space(10.0);
     }
 
     draw_divider(ui);
-    ui.add_space(12.0);
+    ui.add_space(8.0);
 
     ui.horizontal(|ui| {
-        ui.add_space(CONTENT_X_PADDING);
         ui.label(
             egui::RichText::new(format!(
                 "Member since {}",
@@ -344,7 +294,7 @@ fn render_profile(
             .size(22.0),
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.add_space(CONTENT_X_PADDING);
+            ui.add_space(8.0);
             ui.menu_button("···", |ui| {
                 if ui.button("Copy User ID").clicked() {
                     ui.ctx().copy_text(profile.user_id.clone());
@@ -406,7 +356,7 @@ fn render_profile(
                     ui.close();
                 }
             });
-            if ui.button(egui::RichText::new("Poke").size(18.0)).clicked() {
+            if ui.button(egui::RichText::new("Poke").size(22.0)).clicked() {
                 model.show_poke_dialog = true;
                 model.poke_target_user_id = profile.user_id.clone();
                 model.poke_target_display_name = profile.display_name.clone();
@@ -414,8 +364,8 @@ fn render_profile(
             }
             if ui
                 .add(
-                    egui::Button::new(egui::RichText::new("Message").size(18.0))
-                        .fill(egui::Color32::from_rgb(43, 49, 73)),
+                    egui::Button::new(egui::RichText::new("Message").size(22.0))
+                        .fill(egui::Color32::from_rgb(50, 58, 85)),
                 )
                 .clicked()
             {
@@ -430,8 +380,8 @@ fn render_profile(
 fn status_text(status: OnlineStatus) -> &'static str {
     match status {
         OnlineStatus::Online => "Online",
-        OnlineStatus::Idle => "Idle",
-        OnlineStatus::DoNotDisturb => "Do Not Disturb",
+        OnlineStatus::Idle => "🌙 Idle",
+        OnlineStatus::DoNotDisturb => "⛔ Do Not Disturb",
         OnlineStatus::Invisible => "Invisible",
         OnlineStatus::Offline => "Offline",
     }
@@ -447,14 +397,13 @@ fn status_color(status: OnlineStatus) -> egui::Color32 {
 }
 
 fn draw_divider(ui: &mut egui::Ui) {
-    let width = ui.available_width() - (CONTENT_X_PADDING * 2.0);
+    let width = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 1.0), egui::Sense::hover());
-    let line_rect = rect.translate(egui::vec2(CONTENT_X_PADDING, 0.0));
     ui.painter().line_segment(
-        [line_rect.left_center(), line_rect.right_center()],
+        [rect.left_center(), rect.right_center()],
         egui::Stroke::new(
             1.0,
-            egui::Color32::from_rgba_unmultiplied(164, 180, 225, 44),
+            egui::Color32::from_rgba_unmultiplied(155, 171, 220, 42),
         ),
     );
 }
@@ -467,27 +416,19 @@ fn draw_tag_chip(
 ) -> egui::Response {
     egui::Frame::new()
         .fill(color.linear_multiply(0.24))
-        .corner_radius(8.0)
+        .corner_radius(7.0)
         .inner_margin(egui::Margin::symmetric(10, 6))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(icon).size(16.0));
+                ui.label(egui::RichText::new(icon).size(18.0));
                 ui.label(
                     egui::RichText::new(label)
-                        .size(18.0)
+                        .size(20.0)
                         .color(egui::Color32::WHITE),
                 );
             });
         })
         .response
-}
-
-fn draw_flat_badge(ui: &mut egui::Ui, label: &str) -> egui::Response {
-    ui.label(
-        egui::RichText::new(format!("⭐ {label}"))
-            .size(20.0)
-            .color(egui::Color32::from_rgb(234, 238, 248)),
-    )
 }
 
 fn paint_vertical_gradient(
@@ -497,7 +438,7 @@ fn paint_vertical_gradient(
     end: egui::Color32,
     rounding: egui::CornerRadius,
 ) {
-    let steps = 24;
+    let steps = 28;
     for i in 0..steps {
         let t0 = i as f32 / steps as f32;
         let t1 = (i + 1) as f32 / steps as f32;
@@ -520,7 +461,6 @@ fn paint_horizontal_tint(
     rect: egui::Rect,
     left: egui::Color32,
     right: egui::Color32,
-    alpha_mult: f32,
 ) {
     let steps = 24;
     for i in 0..steps {
@@ -530,8 +470,8 @@ fn paint_horizontal_tint(
         let x1 = egui::lerp(rect.left()..=rect.right(), t1);
         ui.painter().rect_filled(
             egui::Rect::from_min_max(egui::pos2(x0, rect.top()), egui::pos2(x1, rect.bottom())),
-            egui::CornerRadius::ZERO,
-            lerp_color(left, right, t0).linear_multiply(alpha_mult),
+            egui::CornerRadius::same(0),
+            lerp_color(left, right, t0).linear_multiply(0.12),
         );
     }
 }
