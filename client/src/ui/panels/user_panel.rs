@@ -8,6 +8,7 @@ use eframe::egui;
 /// Renders the user panel as a self-contained vertical section.
 /// Designed to sit at the bottom of the left sidebar panel.
 pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>) {
+    let panel_width = ui.available_width();
     let card_bg = egui::Color32::from_rgb(29, 34, 44);
     let control_bg = egui::Color32::from_rgb(58, 66, 84);
     let control_hover = egui::Color32::from_rgb(70, 78, 98);
@@ -24,7 +25,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
             color: egui::Color32::from_black_alpha(120),
         })
         .show(ui, |ui: &mut egui::Ui| {
-            ui.set_width(ui.available_width());
+            ui.set_min_width(panel_width - 8.0);
 
             // ── Top section: avatar + identity/status block ───────────────────
             ui.horizontal(|ui: &mut egui::Ui| {
@@ -193,10 +194,8 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                         );
                     }
 
-                    let status_resp = ui.add_sized(
-                        egui::vec2(name_col_width, 0.0),
+                    let status_resp = ui.add(
                         egui::Label::new(block)
-                            .wrap()
                             .sense(egui::Sense::click())
                             .selectable(false),
                     );
@@ -227,11 +226,8 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
             let in_voice_channel = model.active_voice_channel_route != 0;
 
             ui.horizontal(|ui: &mut egui::Ui| {
-                let spacing = 8.0;
-                ui.spacing_mut().item_spacing.x = spacing;
-                let available = ui.available_width().max(160.0);
-                let btn_side = ((available - spacing * 3.0) / 4.0).clamp(40.0, 54.0);
-                let btn_size = egui::vec2(btn_side, btn_side);
+                ui.spacing_mut().item_spacing.x = 10.0;
+                let btn_size = egui::vec2(54.0, 54.0);
 
                 // Away
                 let away_btn = circle_icon_button(
@@ -364,8 +360,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
 
             // VAD row with segmented meter.
             ui.horizontal(|ui| {
-                let label_width = 38.0;
-                let bar_width = (ui.available_width() - label_width).max(120.0);
+                let bar_width = (ui.available_width() - 64.0).max(120.0);
                 let bar_height = 22.0;
                 let (rect, _) =
                     ui.allocate_exact_size(egui::vec2(bar_width, bar_height), egui::Sense::hover());
@@ -462,18 +457,11 @@ fn circle_icon_button(
         visuals.hovered.weak_bg_fill = hover;
         visuals.active.weak_bg_fill = active;
 
-        let icon_size = (size.x * 0.42).clamp(16.0, 22.0);
-
         ui.add_sized(
             size,
-            egui::Button::new(
-                egui::RichText::new(icon)
-                    .size(icon_size)
-                    .color(color)
-                    .strong(),
-            )
-            .stroke(egui::Stroke::NONE)
-            .corner_radius(size.x * 0.5),
+            egui::Button::new(egui::RichText::new(icon).size(22.0).color(color).strong())
+                .stroke(egui::Stroke::NONE)
+                .corner_radius(size.x * 0.5),
         )
         .on_hover_cursor(egui::CursorIcon::PointingHand)
     })
