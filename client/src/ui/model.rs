@@ -18,6 +18,12 @@ const MAX_MESSAGES_PER_CHANNEL: usize = 500;
 /// Maximum number of log lines.
 const MAX_LOG_LINES: usize = 1000;
 
+/// Profile cache time-to-live.
+const PROFILE_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Maximum number of cached profile entries before eviction.
+const PROFILE_CACHE_MAX_ENTRIES: usize = 100;
+
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash)]
 pub enum AudioBackend {
     Auto,
@@ -286,6 +292,7 @@ pub enum UiEvent {
     // User profile
     UserProfileLoaded(UserProfileData),
     UserProfileFetchFailed { user_id: String },
+    UserProfileCacheInvalidated { user_id: String },
 
     // Self state
     SetSelfMuted(bool),
@@ -2217,16 +2224,13 @@ impl UiModel {
         click_pos: egui::Pos2,
         tx_intent: &crossbeam_channel::Sender<UiIntent>,
     ) {
-        // Check cache first (60s TTL).
-        const PROFILE_CACHE_TTL_SECS: u64 = 60;
-        if let Some(cached) = self.profile_cache.get(&user_id) {
-            if cached.fetched_at.elapsed().as_secs() < PROFILE_CACHE_TTL_SECS {
-                self.profile_popup_data = Some(cached.data.clone());
-                self.profile_popup_loading = false;
-                self.profile_popup_user_id = Some(user_id);
-                self.profile_popup_anchor = Some(click_pos);
-                return;
-            }
+        // Check cache first.
+        if let Some(cached) = self.get_cached_profile(&user_id).cloned() {
+            self.profile_popup_data = Some(cached);
+            self.profile_popup_loading = false;
+            self.profile_popup_user_id = Some(user_id);
+            self.profile_popup_anchor = Some(click_pos);
+            return;
         }
         // No cache hit — show stub data from member list while fetching.
         let stub = self.stub_profile_from_member(&user_id);
@@ -2235,6 +2239,36 @@ impl UiModel {
         self.profile_popup_user_id = Some(user_id.clone());
         self.profile_popup_anchor = Some(click_pos);
         let _ = tx_intent.send(UiIntent::FetchUserProfile { user_id });
+    }
+
+    pub fn get_cached_profile(&self, user_id: &str) -> Option<&UserProfileData> {
+        self.profile_cache.get(user_id).and_then(|cached| {
+            if cached.fetched_at.elapsed() < PROFILE_CACHE_TTL {
+                Some(&cached.data)
+            } else {
+                None
+            }
+        })
+    }
+
+    pub fn insert_profile_cache(&mut self, user_id: String, data: UserProfileData) {
+        if self.profile_cache.len() >= PROFILE_CACHE_MAX_ENTRIES {
+            if let Some(oldest_key) = self
+                .profile_cache
+                .iter()
+                .min_by_key(|(_, v)| v.fetched_at)
+                .map(|(k, _)| k.clone())
+            {
+                self.profile_cache.remove(&oldest_key);
+            }
+        }
+        self.profile_cache.insert(
+            user_id,
+            CachedProfile {
+                data,
+                fetched_at: std::time::Instant::now(),
+            },
+        );
     }
 
     /// Build a stub UserProfileData from a MemberEntry for immediate display
@@ -2651,16 +2685,40 @@ impl UiModel {
                     kind: NotificationKind::Poke,
                 });
             }
-            UiEvent::UserProfileLoaded(profile) => {
+            UiEvent::UserProfileLoaded(mut profile) => {
+                // Enrich with role data from the permissions system if available.
+                if profile.roles.is_empty() {
+                    if let Some(member) = self
+                        .permissions_members
+                        .iter()
+                        .find(|m| m.user_id == profile.user_id)
+                    {
+                        profile.roles = member
+                            .role_ids
+                            .iter()
+                            .filter_map(|rid| {
+                                self.permissions_roles.iter().find(|r| r.role_id == *rid).map(
+                                    |r| {
+                                        let color =
+                                            u32::from_str_radix(r.color_hex.trim_start_matches('#'), 16)
+                                                .unwrap_or(0);
+                                        RoleData {
+                                            name: r.name.clone(),
+                                            color,
+                                            position: 0,
+                                        }
+                                    },
+                                )
+                            })
+                            .collect();
+                    }
+                }
                 self.profile_popup_loading = false;
                 self.profile_popup_data = Some(profile.clone());
-                self.profile_cache.insert(
-                    profile.user_id.clone(),
-                    CachedProfile {
-                        data: profile,
-                        fetched_at: std::time::Instant::now(),
-                    },
-                );
+                self.insert_profile_cache(profile.user_id.clone(), profile);
+            }
+            UiEvent::UserProfileCacheInvalidated { user_id } => {
+                self.profile_cache.remove(&user_id);
             }
             UiEvent::UserProfileFetchFailed { user_id } => {
                 // Clear the loading state so the user isn't stuck on an

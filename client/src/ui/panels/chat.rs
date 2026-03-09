@@ -784,26 +784,10 @@ fn show_message(
                     .sense(egui::Sense::click()),
                 );
                 if author_resp.clicked() {
-                    model.profile_popup_user_id = Some(msg.author_id.clone());
-                    model.profile_popup_anchor = author_resp.interact_pointer_pos();
-                    if let Some(cached) = model.profile_cache.get(&msg.author_id) {
-                        if cached.fetched_at.elapsed() < Duration::from_secs(60) {
-                            model.profile_popup_data = Some(cached.data.clone());
-                            model.profile_popup_loading = false;
-                        } else {
-                            model.profile_popup_loading = true;
-                            model.profile_popup_data = None;
-                            let _ = tx_intent.send(UiIntent::FetchUserProfile {
-                                user_id: msg.author_id.clone(),
-                            });
-                        }
-                    } else {
-                        model.profile_popup_loading = true;
-                        model.profile_popup_data = None;
-                        let _ = tx_intent.send(UiIntent::FetchUserProfile {
-                            user_id: msg.author_id.clone(),
-                        });
-                    }
+                    let click_pos = author_resp
+                        .interact_pointer_pos()
+                        .unwrap_or_else(|| author_resp.rect.right_top());
+                    model.open_profile_popup(msg.author_id.clone(), click_pos, tx_intent);
                 }
                 let ts = format_timestamp(msg.timestamp);
                 ui.label(egui::RichText::new(ts).small().color(theme::text_muted()));
