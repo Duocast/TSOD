@@ -111,7 +111,7 @@ fn render_profile(
             banner_rect,
             egui::Image::from_uri(url)
                 .fit_to_exact_size(banner_rect.size())
-                .corner_radius(clip_rounding),
+                .corner_radius(banner_rounding),
         );
     } else {
         paint_vertical_gradient(
@@ -136,13 +136,12 @@ fn render_profile(
                 .corner_radius(egui::CornerRadius::same(53)),
         );
     } else {
-        let initial = profile
+        let fallback = profile
             .display_name
             .chars()
-            .next()
-            .unwrap_or('?')
-            .to_uppercase()
-            .to_string();
+            .take(2)
+            .collect::<String>()
+            .to_uppercase();
         ui.painter().text(
             avatar_center,
             egui::Align2::CENTER_CENTER,
@@ -265,6 +264,7 @@ fn render_profile(
 
     if !profile.badges.is_empty() {
         ui.horizontal_wrapped(|ui| {
+            ui.add_space(CONTENT_X_PADDING);
             for badge in &profile.badges {
                 if badge.icon_url.trim().is_empty() {
                     draw_tag_chip(ui, "⭐", &badge.label, theme::COLOR_MENTION)
@@ -497,12 +497,12 @@ fn lerp_color(start: egui::Color32, end: egui::Color32, t: f32) -> egui::Color32
 
 fn platform_emoji(platform: &str) -> &'static str {
     match platform.to_lowercase().as_str() {
-        "steam" => "\u{1F3AE}",
-        "github" => "\u{1F419}",
-        "twitter" | "x" => "\u{1F426}",
-        "twitch" => "\u{1F4FA}",
-        "youtube" => "\u{25B6}\u{FE0F}",
-        "website" => "\u{1F310}",
-        _ => "\u{1F517}",
+        "steam" => "✱",
+        "github" => "✿",
+        "twitter" | "x" => "🐦",
+        "twitch" => "📺",
+        "youtube" => "▶️",
+        "website" => "🌐",
+        _ => "🔗",
     }
 }
