@@ -77,6 +77,10 @@ pub enum PushEvent {
         event: pb::UnsubscribeStream,
         event_seq: u64,
     },
+    UserProfile {
+        event: pb::UserProfileEvent,
+        event_seq: u64,
+    },
     Unknown(pb::ServerToClient),
 }
 
@@ -866,6 +870,12 @@ fn classify_push(msg: pb::ServerToClient) -> PushEvent {
         },
         Some(pb::server_to_client::Payload::UnsubscribeStream(event)) => {
             PushEvent::UnsubscribeStream {
+                event,
+                event_seq: msg.event_seq,
+            }
+        }
+        Some(pb::server_to_client::Payload::UserProfileEvent(event)) => {
+            PushEvent::UserProfile {
                 event,
                 event_seq: msg.event_seq,
             }

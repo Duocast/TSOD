@@ -221,6 +221,26 @@ fn render_profile(
         ui.separator();
     }
 
+    if !profile.links.is_empty() {
+        ui.label(egui::RichText::new("LINKS").small().strong());
+        ui.horizontal_wrapped(|ui| {
+            for (i, link) in profile.links.iter().enumerate() {
+                if i > 0 {
+                    ui.label("·");
+                }
+                let emoji = platform_emoji(&link.platform);
+                let label = if !link.display_text.is_empty() {
+                    &link.display_text
+                } else {
+                    &link.platform
+                };
+                ui.label(format!("{emoji} {label}"))
+                    .on_hover_text(&link.url);
+            }
+        });
+        ui.separator();
+    }
+
     if !profile.badges.is_empty() {
         ui.horizontal_wrapped(|ui| {
             for badge in &profile.badges {
@@ -351,4 +371,16 @@ fn lerp_color(start: egui::Color32, end: egui::Color32, t: f32) -> egui::Color32
     let g = start.g() as f32 + (end.g() as f32 - start.g() as f32) * t;
     let b = start.b() as f32 + (end.b() as f32 - start.b() as f32) * t;
     egui::Color32::from_rgb(r as u8, g as u8, b as u8)
+}
+
+fn platform_emoji(platform: &str) -> &'static str {
+    match platform.to_lowercase().as_str() {
+        "steam" => "\u{1F3AE}",
+        "github" => "\u{1F419}",
+        "twitter" | "x" => "\u{1F426}",
+        "twitch" => "\u{1F4FA}",
+        "youtube" => "\u{25B6}\u{FE0F}",
+        "website" => "\u{1F310}",
+        _ => "\u{1F517}",
+    }
 }

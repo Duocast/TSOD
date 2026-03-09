@@ -70,26 +70,10 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
             }
 
             if response.clicked() {
-                model.profile_popup_user_id = Some(member.user_id.clone());
-                model.profile_popup_anchor = response.interact_pointer_pos();
-                if let Some(cached) = model.profile_cache.get(&member.user_id) {
-                    if cached.fetched_at.elapsed() < Duration::from_secs(60) {
-                        model.profile_popup_data = Some(cached.data.clone());
-                        model.profile_popup_loading = false;
-                    } else {
-                        model.profile_popup_loading = true;
-                        model.profile_popup_data = None;
-                        let _ = tx_intent.send(UiIntent::FetchUserProfile {
-                            user_id: member.user_id.clone(),
-                        });
-                    }
-                } else {
-                    model.profile_popup_loading = true;
-                    model.profile_popup_data = None;
-                    let _ = tx_intent.send(UiIntent::FetchUserProfile {
-                        user_id: member.user_id.clone(),
-                    });
-                }
+                let click_pos = response
+                    .interact_pointer_pos()
+                    .unwrap_or_else(|| response.rect.right_top());
+                model.open_profile_popup(member.user_id.clone(), click_pos, tx_intent);
             }
 
             let avatar_size = 32.0;

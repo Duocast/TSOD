@@ -2924,6 +2924,31 @@ async fn connect_and_run_session(
                             event.stream_tag, event.codec
                         )));
                     }
+                    PushEvent::UserProfile { event, event_seq } => {
+                        maybe_note_event_gap(&tx_event, event_seq);
+                        if !should_apply_event_seq(&tx_event, &mut last_event_seq, event_seq) {
+                            continue;
+                        }
+                        match event.kind {
+                            Some(pb::user_profile_event::Kind::UserProfileUpdated(updated)) => {
+                                let uid = updated.user_id.map(|u| u.value).unwrap_or_default();
+                                let _ = tx_event.send(UiEvent::UserProfileCacheInvalidated {
+                                    user_id: uid.clone(),
+                                });
+                                let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                    "[profile] profile updated for {uid}"
+                                )));
+                            }
+                            Some(pb::user_profile_event::Kind::UserStatusChanged(changed)) => {
+                                let uid = changed.user_id.map(|u| u.value).unwrap_or_default();
+                                let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                    "[profile] status changed for {uid}: {:?}",
+                                    changed.status
+                                )));
+                            }
+                            None => {}
+                        }
+                    }
                     PushEvent::Unknown(_) => {}
                 }
             }
