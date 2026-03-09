@@ -245,7 +245,7 @@ pub enum UiEvent {
     VoiceSessionHealth(bool),
     TypingIndicator {
         channel_id: String,
-        user_name: String,
+        user_id: String,
     },
 
     // Members
@@ -2627,8 +2627,14 @@ impl UiModel {
             }
             UiEvent::TypingIndicator {
                 channel_id,
-                user_name,
+                user_id,
             } => {
+                let user_name = self
+                    .members
+                    .get(&channel_id)
+                    .and_then(|members| members.iter().find(|m| m.user_id == user_id))
+                    .map(|member| member.display_name.clone())
+                    .unwrap_or(user_id);
                 let typers = self.typing_users.entry(channel_id).or_default();
                 typers.retain(|(name, _)| name != &user_name);
                 typers.push((user_name, std::time::Instant::now()));

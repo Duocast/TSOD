@@ -2565,7 +2565,7 @@ async fn connect_and_run_session(
                                     if user_id != local_user_id {
                                         let _ = tx_event.send(UiEvent::TypingIndicator {
                                             channel_id,
-                                            user_name: user_id,
+                                            user_id,
                                         });
                                     }
                                 }
