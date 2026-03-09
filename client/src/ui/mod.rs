@@ -873,82 +873,92 @@ impl eframe::App for VpApp {
         panels::permissions_center::show_permissions_center(ctx, &mut self.model, &self.tx_intent);
 
         // Central panel: connection status + chat messages + input
-        egui::CentralPanel::default().show(ctx, |ui| {
-            let stage = self.model.connection_stage;
-            let panel_visible = stage.is_in_progress()
-                || stage == ConnectionStage::Failed
-                || (!self.model.connected && !self.model.connection_details.is_empty());
-            let stage_color = if stage == ConnectionStage::Failed {
-                theme::COLOR_DANGER
-            } else if stage == ConnectionStage::Connected {
-                theme::COLOR_ONLINE
-            } else if stage.is_in_progress() {
-                theme::COLOR_MENTION
-            } else {
-                theme::text_muted()
-            };
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::bg_dark())
+                    .inner_margin(egui::Margin::same(8)),
+            )
+            .show(ctx, |ui| {
+                let stage = self.model.connection_stage;
+                let panel_visible = stage.is_in_progress()
+                    || stage == ConnectionStage::Failed
+                    || (!self.model.connected && !self.model.connection_details.is_empty());
+                let stage_color = if stage == ConnectionStage::Failed {
+                    theme::COLOR_DANGER
+                } else if stage == ConnectionStage::Connected {
+                    theme::COLOR_ONLINE
+                } else if stage.is_in_progress() {
+                    theme::COLOR_MENTION
+                } else {
+                    theme::text_muted()
+                };
 
-            if panel_visible {
-                egui::Frame::group(ui.style()).show(ui, |ui| {
-                    ui.horizontal_wrapped(|ui| {
+                if panel_visible {
+                    egui::Frame::group(ui.style()).show(ui, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(
+                                egui::RichText::new(format!("Connection: {}", stage.label()))
+                                    .small()
+                                    .color(stage_color)
+                                    .strong(),
+                            );
+                            if stage.is_in_progress() {
+                                ui.label(egui::RichText::new("⏳ in progress").small());
+                            }
+                            if ui.small_button("Open Connections").clicked() {
+                                self.model.show_connections = true;
+                            }
+                            if stage.is_in_progress() && ui.small_button("Cancel").clicked() {
+                                let _ = self.tx_intent.send(UiIntent::CancelConnect);
+                            }
+                            if stage == ConnectionStage::Failed
+                                && ui.small_button("Retry").clicked()
+                            {
+                                let _ = self.launch_connect_attempt(false);
+                            }
+                            if ui.small_button("Copy details").clicked() {
+                                self.copy_connection_details(ctx);
+                            }
+                        });
+
+                        if stage == ConnectionStage::Failed
+                            && !self.model.connection_error.is_empty()
+                        {
+                            ui.colored_label(
+                                theme::COLOR_DANGER,
+                                egui::RichText::new(&self.model.connection_error).small(),
+                            );
+                        }
+
+                        for line in self.model.connection_details.iter().rev().take(4) {
+                            ui.label(egui::RichText::new(line).small().color(theme::text_dim()));
+                        }
+                    });
+                    ui.add_space(6.0);
+                } else {
+                    ui.horizontal(|ui| {
                         ui.label(
                             egui::RichText::new(format!("Connection: {}", stage.label()))
                                 .small()
-                                .color(stage_color)
-                                .strong(),
+                                .color(theme::text_dim()),
                         );
-                        if stage.is_in_progress() {
-                            ui.label(egui::RichText::new("⏳ in progress").small());
-                        }
-                        if ui.small_button("Open Connections").clicked() {
+                        if ui.small_button("Connections").clicked() {
                             self.model.show_connections = true;
                         }
-                        if stage.is_in_progress() && ui.small_button("Cancel").clicked() {
-                            let _ = self.tx_intent.send(UiIntent::CancelConnect);
-                        }
-                        if stage == ConnectionStage::Failed && ui.small_button("Retry").clicked() {
-                            let _ = self.launch_connect_attempt(false);
-                        }
-                        if ui.small_button("Copy details").clicked() {
-                            self.copy_connection_details(ctx);
-                        }
                     });
-
-                    if stage == ConnectionStage::Failed && !self.model.connection_error.is_empty() {
-                        ui.colored_label(
-                            theme::COLOR_DANGER,
-                            egui::RichText::new(&self.model.connection_error).small(),
-                        );
-                    }
-
-                    for line in self.model.connection_details.iter().rev().take(4) {
-                        ui.label(egui::RichText::new(line).small().color(theme::text_dim()));
-                    }
-                });
-                ui.add_space(6.0);
-            } else {
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new(format!("Connection: {}", stage.label()))
-                            .small()
-                            .color(theme::text_dim()),
-                    );
-                    if ui.small_button("Connections").clicked() {
-                        self.model.show_connections = true;
-                    }
-                });
-                ui.add_space(4.0);
-            }
-
-            match self.model.current_channel_type() {
-                Some(model::ChannelType::Streaming) => {
-                    panels::streaming::show(ui, &mut self.model);
+                    ui.add_space(4.0);
                 }
-                _ => {
-                    panels::chat::show(ui, &mut self.model, &self.tx_intent);
-                }
-            };
-        });
+
+                match self.model.current_channel_type() {
+                    Some(model::ChannelType::Streaming) => {
+                        panels::streaming::show(ui, &mut self.model);
+                    }
+                    _ => {
+                        panels::chat::show(ui, &mut self.model, &self.tx_intent);
+                    }
+                };
+            });
 
         // Handle keyboard shortcuts
         self.handle_shortcuts(ctx);
