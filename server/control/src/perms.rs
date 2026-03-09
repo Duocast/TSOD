@@ -11,6 +11,7 @@ pub enum Capability {
     ManageChannel,
     ModerateMembers,
     ManageRoles,
+    ManageBadges,
     MuteVoice,
 }
 
@@ -26,6 +27,7 @@ impl Capability {
             Capability::ManageChannel => "manage_channel",
             Capability::ModerateMembers => "moderate_members",
             Capability::ManageRoles => "manage_roles",
+            Capability::ManageBadges => "manage_badges",
             Capability::MuteVoice => "mute_voice",
         }
     }
@@ -40,6 +42,7 @@ impl Capability {
             "manage_channel" => Capability::ManageChannel,
             "moderate_members" => Capability::ModerateMembers,
             "manage_roles" => Capability::ManageRoles,
+            "manage_badges" => Capability::ManageBadges,
             "mute_voice" => Capability::MuteVoice,
             _ => return None,
         })

@@ -3,6 +3,7 @@ syntax = "proto3";
 package voiceplatform.v1;
 
 import "common.proto";
+import "user.proto";
 
 option go_package = "github.com/yourorg/voiceplatform/proto/gen/go/voiceplatform/v1;voiceplatformv1";
 
@@ -52,6 +53,7 @@ enum Permission {
   MANAGE_ROLES = 41;
   VIEW_AUDIT_LOG = 42;
   MANAGE_PRIVILEGE_KEYS = 43;
+  MANAGE_BADGES = 44;
 }
 
 // ── Roles ──────────────────────────────────────────────────────────────
@@ -386,6 +388,33 @@ message PermEvaluateEffectiveResponse {
   repeated PermEvaluateExplain explain = 2;
 }
 
+
+// ── Badge admin RPCs ──────────────────────────────────────────────────
+
+message CreateBadgeRequest {
+  string id = 1;           // slug, e.g. "early-adopter"
+  string label = 2;
+  AssetId icon_asset_id = 3;
+  string tooltip = 4;
+}
+
+message CreateBadgeResponse {
+  Badge badge = 1;
+}
+
+message GrantBadgeRequest {
+  UserId user_id = 1;
+  string badge_id = 2;
+}
+
+message GrantBadgeResponse {}
+
+message RevokeBadgeRequest {
+  UserId user_id = 1;
+  string badge_id = 2;
+}
+
+message RevokeBadgeResponse {}
 
 // ── Permission push events ────────────────────────────────────────────
 

@@ -151,6 +151,11 @@ message ClientToServer {
     PermAuditQueryRequest perm_audit_query = 207;
     PermEvaluateEffectiveRequest perm_eval_effective = 208;
     PermListUsersRequest perm_list_users = 209;
+
+    // Badge admin
+    CreateBadgeRequest create_badge = 215;
+    GrantBadgeRequest grant_badge = 216;
+    RevokeBadgeRequest revoke_badge = 217;
   }
 }
 
@@ -300,6 +305,11 @@ message ServerToClient {
     PermEvaluateEffectiveResponse perm_eval_effective = 208;
     PushEvent permissions_push_event = 209;
     PermListUsersResponse perm_list_users = 210;
+
+    // Badge admin responses
+    CreateBadgeResponse create_badge = 215;
+    GrantBadgeResponse grant_badge = 216;
+    RevokeBadgeResponse revoke_badge = 217;
   }
 }
 

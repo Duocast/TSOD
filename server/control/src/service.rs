@@ -1680,6 +1680,61 @@ impl<R: ControlRepo> ControlService<R> {
         Ok(badges)
     }
 
+    pub async fn create_badge(
+        &self,
+        ctx: &RequestContext,
+        id: &str,
+        label: &str,
+        icon_url: &str,
+        tooltip: &str,
+    ) -> ControlResult<crate::model::BadgeDefinitionRow> {
+        let mut tx = <R as ControlRepo>::tx(&self.repo).await?;
+        self.require(&mut tx, ctx, None, None, Capability::ManageBadges)
+            .await?;
+
+        let badge = crate::model::BadgeDefinitionRow {
+            id: id.to_string(),
+            server_id: ctx.server_id,
+            label: label.to_string(),
+            icon_url: icon_url.to_string(),
+            tooltip: tooltip.to_string(),
+            position: 0,
+        };
+        <R as ControlRepo>::create_badge_definition(&self.repo, &mut tx, &badge).await?;
+        tx.commit().await?;
+        Ok(badge)
+    }
+
+    pub async fn grant_badge(
+        &self,
+        ctx: &RequestContext,
+        user_id: UserId,
+        badge_id: &str,
+    ) -> ControlResult<()> {
+        let mut tx = <R as ControlRepo>::tx(&self.repo).await?;
+        self.require(&mut tx, ctx, None, None, Capability::ManageBadges)
+            .await?;
+        <R as ControlRepo>::grant_badge(&self.repo, &mut tx, user_id, badge_id, ctx.server_id)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn revoke_badge(
+        &self,
+        ctx: &RequestContext,
+        user_id: UserId,
+        badge_id: &str,
+    ) -> ControlResult<()> {
+        let mut tx = <R as ControlRepo>::tx(&self.repo).await?;
+        self.require(&mut tx, ctx, None, None, Capability::ManageBadges)
+            .await?;
+        <R as ControlRepo>::revoke_badge(&self.repo, &mut tx, user_id, badge_id, ctx.server_id)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     pub async fn get_user_roles_display(
         &self,
         ctx: &RequestContext,

@@ -366,6 +366,31 @@ pub trait ControlRepo: Send + Sync {
         server_id: ServerId,
     ) -> ControlResult<Vec<crate::model::UserBadgeRow>>;
 
+    /// Create a new badge definition.
+    async fn create_badge_definition(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        badge: &crate::model::BadgeDefinitionRow,
+    ) -> ControlResult<()>;
+
+    /// Grant a badge to a user.
+    async fn grant_badge(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        user_id: UserId,
+        badge_id: &str,
+        server_id: ServerId,
+    ) -> ControlResult<()>;
+
+    /// Revoke a badge from a user.
+    async fn revoke_badge(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        user_id: UserId,
+        badge_id: &str,
+        server_id: ServerId,
+    ) -> ControlResult<()>;
+
     /// Fetch role display info for a user.
     async fn get_user_roles_display(
         &self,
@@ -1861,6 +1886,75 @@ impl ControlRepo for PgControlRepo {
                 tooltip: r.get("tooltip"),
             })
             .collect())
+    }
+
+    async fn create_badge_definition(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        badge: &crate::model::BadgeDefinitionRow,
+    ) -> ControlResult<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO badge_definitions (id, server_id, label, icon_url, tooltip, position, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, NOW())
+            ON CONFLICT (id) DO UPDATE SET label = $3, icon_url = $4, tooltip = $5, position = $6
+            "#,
+        )
+        .bind(&badge.id)
+        .bind(badge.server_id.0)
+        .bind(&badge.label)
+        .bind(&badge.icon_url)
+        .bind(&badge.tooltip)
+        .bind(badge.position)
+        .execute(&mut **tx)
+        .await
+        .context("create badge definition")?;
+        Ok(())
+    }
+
+    async fn grant_badge(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        user_id: UserId,
+        badge_id: &str,
+        server_id: ServerId,
+    ) -> ControlResult<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO user_badges (user_id, badge_id, server_id, granted_at)
+            VALUES ($1, $2, $3, NOW())
+            ON CONFLICT (user_id, badge_id) DO NOTHING
+            "#,
+        )
+        .bind(user_id.0)
+        .bind(badge_id)
+        .bind(server_id.0)
+        .execute(&mut **tx)
+        .await
+        .context("grant badge")?;
+        Ok(())
+    }
+
+    async fn revoke_badge(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        user_id: UserId,
+        badge_id: &str,
+        server_id: ServerId,
+    ) -> ControlResult<()> {
+        sqlx::query(
+            r#"
+            DELETE FROM user_badges
+            WHERE user_id = $1 AND badge_id = $2 AND server_id = $3
+            "#,
+        )
+        .bind(user_id.0)
+        .bind(badge_id)
+        .bind(server_id.0)
+        .execute(&mut **tx)
+        .await
+        .context("revoke badge")?;
+        Ok(())
     }
 
     async fn get_user_roles_display(
