@@ -1644,6 +1644,76 @@ impl<R: ControlRepo> ControlService<R> {
         Ok(())
     }
 
+    pub async fn create_default_profile(
+        &self,
+        user_id: UserId,
+        server_id: ServerId,
+        display_name: &str,
+    ) -> ControlResult<()> {
+        let mut tx = <R as ControlRepo>::tx(&self.repo).await?;
+        <R as ControlRepo>::create_default_profile(
+            &self.repo,
+            &mut tx,
+            user_id,
+            server_id,
+            display_name,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn get_user_badges(
+        &self,
+        ctx: &RequestContext,
+        target_user_id: UserId,
+    ) -> ControlResult<Vec<crate::model::UserBadgeRow>> {
+        let mut tx = <R as ControlRepo>::tx(&self.repo).await?;
+        let badges = <R as ControlRepo>::get_user_badges(
+            &self.repo,
+            &mut tx,
+            target_user_id,
+            ctx.server_id,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(badges)
+    }
+
+    pub async fn get_user_roles_display(
+        &self,
+        ctx: &RequestContext,
+        target_user_id: UserId,
+    ) -> ControlResult<Vec<crate::model::UserRoleRow>> {
+        let mut tx = <R as ControlRepo>::tx(&self.repo).await?;
+        let roles = <R as ControlRepo>::get_user_roles_display(
+            &self.repo,
+            &mut tx,
+            target_user_id,
+            ctx.server_id,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(roles)
+    }
+
+    pub async fn verify_asset_ownership(
+        &self,
+        asset_id: &str,
+        user_id: UserId,
+    ) -> ControlResult<bool> {
+        let mut tx = <R as ControlRepo>::tx(&self.repo).await?;
+        let owned = <R as ControlRepo>::verify_asset_ownership(
+            &self.repo,
+            &mut tx,
+            asset_id,
+            user_id,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(owned)
+    }
+
     pub async fn get_asset_upload_session(
         &self,
         user_id: UserId,

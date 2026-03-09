@@ -348,6 +348,39 @@ pub trait ControlRepo: Send + Sync {
         session_id: Uuid,
         user_id: UserId,
     ) -> ControlResult<Option<crate::model::AssetUploadSession>>;
+
+    /// Create a default profile row for a new user (ON CONFLICT DO NOTHING).
+    async fn create_default_profile(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        user_id: UserId,
+        server_id: ServerId,
+        display_name: &str,
+    ) -> ControlResult<()>;
+
+    /// Fetch badges for a user (joined with badge_definitions).
+    async fn get_user_badges(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        user_id: UserId,
+        server_id: ServerId,
+    ) -> ControlResult<Vec<crate::model::UserBadgeRow>>;
+
+    /// Fetch role display info for a user.
+    async fn get_user_roles_display(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        user_id: UserId,
+        server_id: ServerId,
+    ) -> ControlResult<Vec<crate::model::UserRoleRow>>;
+
+    /// Verify that an asset_id exists and belongs to this user.
+    async fn verify_asset_ownership(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        asset_id: &str,
+        user_id: UserId,
+    ) -> ControlResult<bool>;
 }
 
 #[derive(Clone)]
@@ -1773,5 +1806,119 @@ impl ControlRepo for PgControlRepo {
             created_at: r.get("created_at"),
             expires_at: r.get("expires_at"),
         }))
+    }
+
+    async fn create_default_profile(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        user_id: UserId,
+        server_id: ServerId,
+        display_name: &str,
+    ) -> ControlResult<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO user_profiles (user_id, server_id, display_name, created_at, updated_at)
+            VALUES ($1, $2, $3, NOW(), NOW())
+            ON CONFLICT (user_id) DO NOTHING
+            "#,
+        )
+        .bind(user_id.0)
+        .bind(server_id.0)
+        .bind(display_name)
+        .execute(&mut **tx)
+        .await
+        .context("create default profile")?;
+        Ok(())
+    }
+
+    async fn get_user_badges(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        user_id: UserId,
+        server_id: ServerId,
+    ) -> ControlResult<Vec<crate::model::UserBadgeRow>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT bd.id AS badge_id, bd.label, bd.icon_url, bd.tooltip
+            FROM user_badges ub
+            JOIN badge_definitions bd ON bd.id = ub.badge_id AND bd.server_id = ub.server_id
+            WHERE ub.user_id = $1 AND ub.server_id = $2
+            ORDER BY bd.position ASC
+            "#,
+        )
+        .bind(user_id.0)
+        .bind(server_id.0)
+        .fetch_all(&mut **tx)
+        .await
+        .context("get user badges")?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| crate::model::UserBadgeRow {
+                badge_id: r.get("badge_id"),
+                label: r.get("label"),
+                icon_url: r.get("icon_url"),
+                tooltip: r.get("tooltip"),
+            })
+            .collect())
+    }
+
+    async fn get_user_roles_display(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        user_id: UserId,
+        server_id: ServerId,
+    ) -> ControlResult<Vec<crate::model::UserRoleRow>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT r.id AS role_id, r.name, r.color, r.position
+            FROM user_roles ur
+            JOIN roles r ON r.id = ur.role_id AND r.server_id = ur.server_id
+            WHERE ur.user_id = $1 AND ur.server_id = $2
+            ORDER BY r.position DESC
+            "#,
+        )
+        .bind(user_id.0)
+        .bind(server_id.0)
+        .fetch_all(&mut **tx)
+        .await
+        .context("get user roles display")?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| crate::model::UserRoleRow {
+                role_id: r.get("role_id"),
+                name: r.get("name"),
+                color: r.get("color"),
+                position: r.get("position"),
+            })
+            .collect())
+    }
+
+    async fn verify_asset_ownership(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        asset_id: &str,
+        user_id: UserId,
+    ) -> ControlResult<bool> {
+        let parsed = asset_id.parse::<Uuid>();
+        let Ok(asset_uuid) = parsed else {
+            return Ok(false);
+        };
+        let exists = sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS(
+                SELECT 1
+                FROM profile_asset_uploads
+                WHERE session_id = $1 AND user_id = $2 AND status = 'verified'
+            )
+            "#,
+        )
+        .bind(asset_uuid)
+        .bind(user_id.0)
+        .fetch_one(&mut **tx)
+        .await
+        .context("verify asset ownership")?;
+        Ok(exists)
     }
 }

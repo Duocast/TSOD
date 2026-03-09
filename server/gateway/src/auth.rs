@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use sqlx::{Pool, Postgres, Row};
+use tracing::warn;
 
 use crate::bootstrap::{
     ensure_baseline_role_assignment, ensure_core_roles, ensure_owner_exists, BootstrapConfig,
@@ -190,6 +191,10 @@ async fn lookup_or_create_user_for_device(
 
     ensure_baseline_role_assignment(&mut tx, server_id, user_id).await?;
 
+    // Auto-create a default profile row for the new user.
+    let default_display = format!("guest-{}", &device_id.to_string()[..8]);
+    create_default_profile(&mut tx, server_id, user_id, &default_display).await;
+
     let insert_res = sqlx::query(
         r#"
         INSERT INTO auth_devices (device_id, user_id, pubkey)
@@ -270,6 +275,31 @@ async fn lookup_or_create_user_for_device(
 
     tx.commit().await.context("commit new device auth")?;
     Ok(user_id)
+}
+
+/// Best-effort auto-creation of a default profile row for a user.
+async fn create_default_profile(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    server_id: uuid::Uuid,
+    user_id: uuid::Uuid,
+    display_name: &str,
+) {
+    let res = sqlx::query(
+        r#"
+        INSERT INTO user_profiles (user_id, server_id, display_name, created_at, updated_at)
+        VALUES ($1, $2, $3, NOW(), NOW())
+        ON CONFLICT (user_id) DO NOTHING
+        "#,
+    )
+    .bind(user_id)
+    .bind(server_id)
+    .bind(display_name)
+    .execute(&mut **tx)
+    .await;
+
+    if let Err(e) = res {
+        warn!("failed to create default profile: {:#}", e);
+    }
 }
 
 async fn is_user_admin(
