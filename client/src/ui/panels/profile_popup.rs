@@ -1,3 +1,4 @@
+use crate::ui::markdown;
 use crate::ui::model::{OnlineStatus, UiIntent, UiModel, UserProfileData};
 use crate::ui::theme;
 use chrono::{Local, TimeZone};
@@ -192,14 +193,18 @@ fn render_profile(
     }
 
     ui.label(egui::RichText::new("ABOUT ME").small().strong());
-    let mut about = profile.description.clone();
+    let about = if profile.description.is_empty() {
+        "No profile description set."
+    } else {
+        &profile.description
+    };
+    // Truncate at 190 chars for display safety.
     if about.chars().count() > 190 {
-        about = format!("{}...", about.chars().take(190).collect::<String>());
+        let truncated: String = about.chars().take(190).chain("...".chars()).collect();
+        markdown::render_about_me(ui, &truncated);
+    } else {
+        markdown::render_about_me(ui, about);
     }
-    if about.is_empty() {
-        about = "No profile description set.".into();
-    }
-    ui.label(about);
     ui.separator();
 
     let mut roles = profile.roles.clone();
