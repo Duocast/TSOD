@@ -23,6 +23,7 @@ pub fn show(ctx: &egui::Context, model: &mut UiModel, tx: &Sender<UiIntent>) {
     }
 
     let mut open = true;
+    let mut cancel_clicked = false;
     egui::Window::new("Edit Profile")
         .id(egui::Id::new("profile_edit_modal"))
         .open(&mut open)
@@ -83,13 +84,12 @@ pub fn show(ctx: &egui::Context, model: &mut UiModel, tx: &Sender<UiIntent>) {
                 }
 
                 if ui.button("Cancel").clicked() {
-                    cancel_edit(model);
-                    open = false;
+                    cancel_clicked = true;
                 }
             });
         });
 
-    if !open {
+    if !open || cancel_clicked {
         cancel_edit(model);
         model.show_edit_profile = false;
     }
@@ -230,7 +230,7 @@ fn tab_profile(ui: &mut egui::Ui, model: &mut UiModel) {
                 // Border for very dark/light swatches so they're visible.
                 if hex == 0x000000 || hex == 0x2C2F33 {
                     ui.painter()
-                        .rect_stroke(rect, 4.0, egui::Stroke::new(1.0, theme::text_muted()));
+                        .rect_stroke(rect, 4.0, egui::Stroke::new(1.0, theme::text_muted()), egui::StrokeKind::Outside);
                 }
                 // Selection ring.
                 if model.edit_profile_draft.accent_color == hex {
@@ -238,6 +238,7 @@ fn tab_profile(ui: &mut egui::Ui, model: &mut UiModel) {
                         rect.expand(2.0),
                         6.0,
                         egui::Stroke::new(2.0, egui::Color32::WHITE),
+                        egui::StrokeKind::Outside,
                     );
                 }
                 if resp.clicked() {

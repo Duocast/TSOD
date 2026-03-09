@@ -5,7 +5,7 @@ use crate::ui::panels::telemetry;
 use crate::ui::theme;
 use crossbeam_channel::Sender;
 use eframe::egui;
-use std::time::Duration;
+
 
 pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>) {
     ui.heading("Members");
