@@ -1962,6 +1962,7 @@ fn page_video_call(ui: &mut egui::Ui, s: &mut AppSettings) -> bool {
 
 /// Returns `(settings_dirty, open_edit_profile)`.
 fn page_security(ui: &mut egui::Ui, s: &mut AppSettings) -> (bool, bool) {
+    let mut dirty = false;
     let mut open_edit_profile = false;
 
     section(ui, "Identity");
