@@ -489,6 +489,21 @@ fn render_content_area(
                         }
                     }
                 });
+                ui.menu_button("Remove badge", |ui| {
+                    if profile.badges.is_empty() {
+                        ui.label("No badges to remove");
+                        return;
+                    }
+                    for badge in &profile.badges {
+                        if ui.button(&badge.id).clicked() {
+                            let _ = tx_intent.send(UiIntent::RevokeBadgeFromUser {
+                                user_id: profile.user_id.clone(),
+                                badge_id: badge.id.clone(),
+                            });
+                            ui.close();
+                        }
+                    }
+                });
             });
 
             // Poke button
