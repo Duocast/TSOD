@@ -4984,6 +4984,39 @@ async fn connect_and_run_session(
                                 )));
                             }
                         }
+                        UiIntent::GrantBadgeToUser { user_id, badge_id, label, icon_path, tooltip } => {
+                            let create_req = pb::CreateBadgeRequest {
+                                id: badge_id.clone(),
+                                label,
+                                icon_asset_id: Some(pb::AssetId { value: icon_path }),
+                                tooltip,
+                            };
+                            let _ = dispatcher
+                                .send_request(
+                                    pb::client_to_server::Payload::CreateBadge(create_req),
+                                    Duration::from_secs(5),
+                                )
+                                .await;
+                            let grant_req = pb::GrantBadgeRequest {
+                                user_id: Some(pb::UserId { value: user_id.clone() }),
+                                badge_id: badge_id.clone(),
+                            };
+                            if let Err(e) = dispatcher
+                                .send_request(
+                                    pb::client_to_server::Payload::GrantBadge(grant_req),
+                                    Duration::from_secs(5),
+                                )
+                                .await
+                            {
+                                let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                    "[perm] grant badge failed ({badge_id} -> {user_id}): {e:#}"
+                                )));
+                            } else {
+                                let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                    "[perm] granted badge {badge_id} to {user_id}"
+                                )));
+                            }
+                        }
                         UiIntent::PermsSetChannelOverride {
                             channel_id,
                             role_id,
@@ -6396,10 +6429,7 @@ async fn upload_profile_image(
         .with_context(|| format!("read image: {}", path.display()))?;
 
     if raw.len() as u64 > max_bytes {
-        anyhow::bail!(
-            "image too large ({} bytes, limit {max_bytes})",
-            raw.len()
-        );
+        anyhow::bail!("image too large ({} bytes, limit {max_bytes})", raw.len());
     }
 
     // Validate extension (GIF not accepted).
