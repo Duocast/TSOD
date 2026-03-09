@@ -357,11 +357,6 @@ impl eframe::App for VpApp {
 
         // Left panel: server/channel tree + user panel at bottom
         egui::SidePanel::left("server_tree")
-            .frame(
-                egui::Frame::new()
-                    .fill(theme::bg_dark())
-                    .inner_margin(egui::Margin::same(0)),
-            )
             .resizable(false)
             .default_width(280.0)
             .min_width(180.0)
@@ -397,11 +392,6 @@ impl eframe::App for VpApp {
 
         // Right panel: member list
         egui::SidePanel::right("members_panel")
-            .frame(
-                egui::Frame::new()
-                    .fill(theme::bg_dark())
-                    .inner_margin(egui::Margin::same(0)),
-            )
             .resizable(false)
             .default_width(200.0)
             .min_width(150.0)
