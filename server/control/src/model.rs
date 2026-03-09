@@ -210,6 +210,24 @@ pub struct UserProfileRow {
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// Badge row from user_badges joined with badge_definitions.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UserBadgeRow {
+    pub badge_id: String,
+    pub label: String,
+    pub icon_url: String,
+    pub tooltip: String,
+}
+
+/// Role display info for a user.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UserRoleRow {
+    pub role_id: String,
+    pub name: String,
+    pub color: i32,
+    pub position: i32,
+}
+
 /// In-progress profile asset upload session.
 #[derive(Clone, Debug)]
 pub struct AssetUploadSession {

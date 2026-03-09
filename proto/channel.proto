@@ -35,6 +35,11 @@ message ChannelMember {
   bool streaming = 7;         // screen sharing
   bool video_enabled = 8;
   bool is_whispering = 9;
+
+  // Denormalized profile fields for member list rendering.
+  string avatar_asset_url = 10;
+  string away_message = 11;
+  uint32 accent_color = 12;
 }
 
 message ChannelInfo {

@@ -159,6 +159,15 @@ impl Gateway {
             "authenticated"
         );
 
+        // Ensure default profile exists and update display name from preferred_display_name.
+        if let Err(e) = self.control.create_default_profile(
+            user_id,
+            server_id,
+            &identity.display_name,
+        ).await {
+            warn!("failed to ensure default profile: {:#}", e);
+        }
+
         // Client must explicitly request an authoritative snapshot via
         // GetInitialStateSnapshotRequest after auth.
 
@@ -1409,7 +1418,17 @@ impl Gateway {
                 Some(pb::client_to_server::Payload::GetUserProfileRequest(r)) => {
                     let target_uid = parse_user_id(r.user_id.as_ref())?;
                     let row = self.control.get_user_profile(&ctx, target_uid).await?;
-                    let profile = row.map(profile_row_to_pb);
+                    let mut profile = row.map(profile_row_to_pb);
+                    // Enrich with badges and roles.
+                    if let Some(ref mut p) = profile {
+                        let badges = self.control.get_user_badges(&ctx, target_uid).await.unwrap_or_default();
+                        p.badges = badges.into_iter().map(|b| pb::Badge {
+                            id: b.badge_id,
+                            label: b.label,
+                            icon_url: b.icon_url,
+                            tooltip: b.tooltip,
+                        }).collect();
+                    }
                     let resp = pb::ServerToClient {
                         request_id: req_id,
                         session_id: Some(pb::SessionId { value: session_id.clone() }),
@@ -1423,6 +1442,25 @@ impl Gateway {
                     if let Err(e) = write_delimited(&mut send, &resp).await { warn!("control write failed: {:#}", e); break; }
                 }
                 Some(pb::client_to_server::Payload::UpdateUserProfileRequest(r)) => {
+                    // Validate field lengths.
+                    if let Some(ref dn) = r.display_name {
+                        if dn.len() > 32 {
+                            return Err(anyhow!("display_name too long (max 32)"));
+                        }
+                    }
+                    if let Some(ref desc) = r.description {
+                        if desc.len() > 190 {
+                            return Err(anyhow!("description too long (max 190)"));
+                        }
+                    }
+                    if r.links.len() > 5 {
+                        return Err(anyhow!("too many links (max 5)"));
+                    }
+                    for link in &r.links {
+                        if link.url.len() > 256 {
+                            return Err(anyhow!("link URL too long (max 256)"));
+                        }
+                    }
                     let links_json = if r.links.is_empty() {
                         None
                     } else {
@@ -1441,6 +1479,10 @@ impl Gateway {
                     ).await?;
                     let row = self.control.get_user_profile(&ctx, user_id).await?;
                     let profile = row.map(profile_row_to_pb);
+                    // Broadcast UserProfileUpdated to all connected users.
+                    if let Some(ref p) = profile {
+                        self.broadcast_profile_updated(user_id, p.clone()).await;
+                    }
                     let resp = pb::ServerToClient {
                         request_id: req_id,
                         session_id: Some(pb::SessionId { value: session_id.clone() }),
@@ -1455,7 +1497,19 @@ impl Gateway {
                 }
                 Some(pb::client_to_server::Payload::SetAvatarRequest(r)) => {
                     let asset_url = r.asset_id.as_ref().map(|a| a.value.as_str()).unwrap_or("");
+                    // Verify asset ownership if a non-empty asset_id is provided.
+                    if !asset_url.is_empty() {
+                        let owned = self.control.verify_asset_ownership(asset_url, user_id).await?;
+                        if !owned {
+                            return Err(anyhow!("asset not found or does not belong to this user"));
+                        }
+                    }
                     self.control.set_avatar(&ctx, asset_url).await?;
+                    // Broadcast profile update.
+                    if let Ok(Some(row)) = self.control.get_user_profile(&ctx, user_id).await {
+                        let p = profile_row_to_pb(row);
+                        self.broadcast_profile_updated(user_id, p).await;
+                    }
                     let resp = pb::ServerToClient {
                         request_id: req_id,
                         session_id: Some(pb::SessionId { value: session_id.clone() }),
@@ -1470,7 +1524,19 @@ impl Gateway {
                 }
                 Some(pb::client_to_server::Payload::SetBannerRequest(r)) => {
                     let asset_url = r.asset_id.as_ref().map(|a| a.value.as_str()).unwrap_or("");
+                    // Verify asset ownership if a non-empty asset_id is provided.
+                    if !asset_url.is_empty() {
+                        let owned = self.control.verify_asset_ownership(asset_url, user_id).await?;
+                        if !owned {
+                            return Err(anyhow!("asset not found or does not belong to this user"));
+                        }
+                    }
                     self.control.set_banner(&ctx, asset_url).await?;
+                    // Broadcast profile update.
+                    if let Ok(Some(row)) = self.control.get_user_profile(&ctx, user_id).await {
+                        let p = profile_row_to_pb(row);
+                        self.broadcast_profile_updated(user_id, p).await;
+                    }
                     let resp = pb::ServerToClient {
                         request_id: req_id,
                         session_id: Some(pb::SessionId { value: session_id.clone() }),
@@ -1713,6 +1779,29 @@ impl Gateway {
         Ok(identity)
     }
 
+    async fn broadcast_profile_updated(&self, updated_user_id: UserId, profile: pb::UserProfile) {
+        let event = pb::UserProfileEvent {
+            at: Some(now_ts()),
+            kind: Some(pb::user_profile_event::Kind::UserProfileUpdated(
+                pb::UserProfileUpdated {
+                    user_id: Some(pb::UserId { value: updated_user_id.0.to_string() }),
+                    profile: Some(profile),
+                },
+            )),
+        };
+        let msg = pb::ServerToClient {
+            request_id: None,
+            session_id: None,
+            sent_at: Some(now_ts()),
+            error: None,
+            event_seq: 0,
+            payload: Some(pb::server_to_client::Payload::UserProfileEvent(event)),
+        };
+        for uid in self.push.connected_users() {
+            self.push.send_to(uid, msg.clone()).await;
+        }
+    }
+
     async fn broadcast_chat_event(&self, channel_id: ChannelId, kind: pb::chat_event::Kind) {
         let recipients = self.membership.members_of(channel_id).unwrap_or_default();
         let event = pb::ChatEvent {
@@ -1801,6 +1890,17 @@ impl Gateway {
                 members: pb_members,
             });
         }
+
+        // Fetch self-user's profile for the snapshot.
+        let self_profile = <PgControlRepo as ControlRepo>::get_user_profile(
+            self.control.repo(),
+            &mut tx,
+            user_id,
+            server_id,
+        )
+        .await?
+        .map(profile_row_to_pb);
+
         tx.commit().await?;
 
         info!(
@@ -1824,6 +1924,7 @@ impl Gateway {
             channel_members: members_scoped,
             default_channel_id,
             snapshot_version: unix_ms_u64(),
+            self_profile,
         })
     }
 }
