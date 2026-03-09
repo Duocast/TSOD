@@ -359,6 +359,7 @@ impl eframe::App for VpApp {
         egui::SidePanel::left("server_tree")
             .default_width(220.0)
             .min_width(180.0)
+            .max_width(320.0)
             .show(ctx, |ui| {
                 let total_height = ui.available_height();
                 let user_panel_height = 100.0;
@@ -386,6 +387,7 @@ impl eframe::App for VpApp {
         egui::SidePanel::right("members_panel")
             .default_width(200.0)
             .min_width(150.0)
+            .max_width(320.0)
             .show(ctx, |ui| {
                 panels::members::show(ui, &mut self.model, &self.tx_intent);
             });
