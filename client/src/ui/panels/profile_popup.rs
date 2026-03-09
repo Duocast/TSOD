@@ -6,8 +6,8 @@ use crossbeam_channel::Sender;
 use eframe::egui;
 use std::time::Duration;
 
-const POPUP_SIZE: egui::Vec2 = egui::vec2(340.0, 420.0);
-const BANNER_HEIGHT: f32 = 100.0;
+const POPUP_SIZE: egui::Vec2 = egui::vec2(640.0, 650.0);
+const BANNER_HEIGHT: f32 = 130.0;
 
 pub fn show(ctx: &egui::Context, model: &mut UiModel, tx_intent: &Sender<UiIntent>) {
     let Some(user_id) = model.profile_popup_user_id.clone() else {
@@ -32,8 +32,9 @@ pub fn show(ctx: &egui::Context, model: &mut UiModel, tx_intent: &Sender<UiInten
         .fixed_size(POPUP_SIZE)
         .frame(
             egui::Frame::window(&ctx.style())
-                .fill(theme::bg_medium())
-                .corner_radius(10.0),
+                .fill(egui::Color32::from_rgb(18, 23, 40))
+                .corner_radius(18.0)
+                .inner_margin(egui::Margin::ZERO),
         )
         .open(&mut open)
         .show(ctx, |ui| {
@@ -81,18 +82,29 @@ fn render_profile(
     profile: &UserProfileData,
 ) {
     let accent = u32_to_color(profile.accent_color);
-    let banner_rect = egui::Rect::from_min_size(
-        ui.min_rect().min,
-        egui::vec2(ui.available_width(), BANNER_HEIGHT),
-    );
+    let card_rect = ui.max_rect();
+    let banner_rect =
+        egui::Rect::from_min_size(card_rect.min, egui::vec2(card_rect.width(), BANNER_HEIGHT));
     let clip_rounding = egui::CornerRadius {
-        nw: 10,
-        ne: 10,
+        nw: 18,
+        ne: 18,
         sw: 0,
         se: 0,
     };
-    ui.painter()
-        .rect_filled(banner_rect, clip_rounding, theme::bg_dark());
+
+    paint_vertical_gradient(
+        ui,
+        card_rect,
+        egui::Color32::from_rgb(16, 22, 42),
+        egui::Color32::from_rgb(15, 19, 34),
+        egui::CornerRadius::same(18),
+    );
+    paint_horizontal_tint(
+        ui,
+        card_rect,
+        egui::Color32::from_rgb(53, 77, 177),
+        egui::Color32::from_rgb(128, 79, 212),
+    );
 
     if let Some(url) = profile.banner_url.as_ref().filter(|u| !u.is_empty()) {
         ui.put(
@@ -102,40 +114,26 @@ fn render_profile(
                 .corner_radius(clip_rounding),
         );
     } else {
-        let steps = 20;
-        for i in 0..steps {
-            let t0 = i as f32 / steps as f32;
-            let t1 = (i + 1) as f32 / steps as f32;
-            let y0 = egui::lerp(banner_rect.top()..=banner_rect.bottom(), t0);
-            let y1 = egui::lerp(banner_rect.top()..=banner_rect.bottom(), t1);
-            let color = lerp_color(accent, theme::bg_dark(), t0);
-            ui.painter().rect_filled(
-                egui::Rect::from_min_max(
-                    egui::pos2(banner_rect.left(), y0),
-                    egui::pos2(banner_rect.right(), y1),
-                ),
-                if i == 0 {
-                    clip_rounding
-                } else {
-                    egui::CornerRadius::ZERO
-                },
-                color,
-            );
-        }
+        paint_vertical_gradient(
+            ui,
+            banner_rect,
+            lerp_color(accent, egui::Color32::from_rgb(84, 124, 243), 0.4),
+            egui::Color32::from_rgb(18, 25, 48),
+            clip_rounding,
+        );
     }
 
-    let avatar_center = egui::pos2(banner_rect.left() + 44.0, banner_rect.bottom() + 20.0);
-    ui.painter().circle_filled(avatar_center, 35.0, accent);
+    let avatar_center = egui::pos2(banner_rect.left() + 78.0, banner_rect.bottom() + 34.0);
     ui.painter()
-        .circle_filled(avatar_center, 32.0, theme::bg_dark());
+        .circle_filled(avatar_center, 56.0, egui::Color32::from_rgb(227, 102, 47));
 
-    let avatar_rect = egui::Rect::from_center_size(avatar_center, egui::vec2(64.0, 64.0));
+    let avatar_rect = egui::Rect::from_center_size(avatar_center, egui::vec2(106.0, 106.0));
     if let Some(url) = profile.avatar_url.as_ref().filter(|u| !u.is_empty()) {
         ui.put(
             avatar_rect,
             egui::Image::from_uri(url)
                 .fit_to_exact_size(avatar_rect.size())
-                .corner_radius(egui::CornerRadius::same(32)),
+                .corner_radius(egui::CornerRadius::same(53)),
         );
     } else {
         let initial = profile
@@ -149,24 +147,43 @@ fn render_profile(
             avatar_center,
             egui::Align2::CENTER_CENTER,
             initial,
-            egui::FontId::proportional(26.0),
-            theme::text_color(),
+            egui::FontId::proportional(56.0),
+            egui::Color32::WHITE,
         );
     }
 
-    ui.add_space(BANNER_HEIGHT - 6.0);
+    let status_center = egui::pos2(avatar_rect.right() - 8.0, avatar_rect.bottom() - 8.0);
+    ui.painter()
+        .circle_filled(status_center, 17.0, egui::Color32::from_rgb(14, 20, 34));
+    ui.painter()
+        .circle_filled(status_center, 10.0, status_color(profile.status));
+
+    ui.add_space(BANNER_HEIGHT + 22.0);
     ui.horizontal(|ui| {
-        ui.add_space(84.0);
+        ui.add_space(150.0);
         ui.vertical(|ui| {
             ui.label(
                 egui::RichText::new(&profile.display_name)
                     .strong()
-                    .size(20.0),
+                    .size(52.0)
+                    .color(egui::Color32::from_rgb(239, 240, 246)),
             );
-            ui.label(egui::RichText::new(status_text(profile.status)).color(theme::text_muted()));
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("●")
+                        .size(24.0)
+                        .color(status_color(profile.status)),
+                );
+                ui.label(
+                    egui::RichText::new(status_text(profile.status))
+                        .size(24.0)
+                        .color(egui::Color32::from_rgb(221, 226, 240)),
+                );
+            });
         });
     });
-    ui.separator();
+    draw_divider(ui);
+    ui.add_space(8.0);
 
     if let Some(activity) = &profile.current_activity {
         let elapsed =
@@ -174,25 +191,30 @@ fn render_profile(
         let h = elapsed / 3600;
         let m = (elapsed % 3600) / 60;
         ui.horizontal(|ui| {
-            ui.label("🎮");
+            ui.label(egui::RichText::new("🎮").size(24.0));
             ui.label(
                 egui::RichText::new(format!("Playing {} — {}h {}m", activity.game_name, h, m))
-                    .strong(),
+                    .strong()
+                    .size(22.0),
             );
         });
-        ui.separator();
+        ui.add_space(8.0);
+        draw_divider(ui);
+        ui.add_space(6.0);
         ui.ctx().request_repaint_after(Duration::from_secs(60));
     }
 
     if !profile.custom_status_text.trim().is_empty() {
-        ui.label(format!(
-            "{} {}",
-            profile.custom_status_emoji, profile.custom_status_text
-        ));
-        ui.separator();
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(profile.custom_status_emoji.to_string()).size(24.0));
+            ui.label(egui::RichText::new(&profile.custom_status_text).size(22.0));
+        });
+        ui.add_space(8.0);
+        draw_divider(ui);
+        ui.add_space(6.0);
     }
 
-    ui.label(egui::RichText::new("ABOUT ME").small().strong());
+    ui.label(egui::RichText::new("ABOUT ME").size(22.0).strong());
     let about = if profile.description.is_empty() {
         "No profile description set."
     } else {
@@ -205,145 +227,151 @@ fn render_profile(
     } else {
         markdown::render_about_me(ui, about);
     }
-    ui.separator();
+    ui.add_space(10.0);
+    draw_divider(ui);
+    ui.add_space(6.0);
 
     let mut roles = profile.roles.clone();
     roles.sort_by(|a, b| b.position.cmp(&a.position));
     if !roles.is_empty() {
-        ui.label(egui::RichText::new("ROLES").small().strong());
         ui.horizontal_wrapped(|ui| {
+            ui.label(egui::RichText::new("ROLES").size(20.0).strong());
             for role in roles {
                 let role_color = u32_to_color(role.color);
-                egui::Frame::new()
-                    .fill(role_color.linear_multiply(0.2))
-                    .corner_radius(6.0)
-                    .inner_margin(egui::Margin::symmetric(8, 4))
-                    .show(ui, |ui| {
-                        ui.label(egui::RichText::new(role.name).color(role_color).small());
-                    });
+                draw_tag_chip(ui, platform_emoji("website"), &role.name, role_color);
             }
         });
-        ui.separator();
+        ui.add_space(6.0);
     }
 
     if !profile.links.is_empty() {
-        ui.label(egui::RichText::new("LINKS").small().strong());
         ui.horizontal_wrapped(|ui| {
+            ui.label(egui::RichText::new("LINKS").size(20.0).strong());
             for (i, link) in profile.links.iter().enumerate() {
-                if i > 0 {
-                    ui.label("·");
-                }
                 let emoji = platform_emoji(&link.platform);
                 let label = if !link.display_text.is_empty() {
                     &link.display_text
                 } else {
                     &link.platform
                 };
-                ui.label(format!("{emoji} {label}"))
-                    .on_hover_text(&link.url);
+                draw_tag_chip(ui, emoji, label, accent).on_hover_text(&link.url);
+                if i + 1 < profile.links.len() {
+                    ui.add_space(4.0);
+                }
             }
         });
-        ui.separator();
+        ui.add_space(6.0);
     }
 
     if !profile.badges.is_empty() {
         ui.horizontal_wrapped(|ui| {
             for badge in &profile.badges {
                 if badge.icon_url.trim().is_empty() {
-                    ui.label(&badge.label).on_hover_text(&badge.tooltip);
+                    draw_tag_chip(ui, "⭐", &badge.label, theme::COLOR_MENTION)
+                        .on_hover_text(&badge.tooltip);
                 } else {
-                    ui.add(
-                        egui::Image::from_uri(&badge.icon_url)
-                            .fit_to_exact_size(egui::vec2(16.0, 16.0))
-                            .sense(egui::Sense::hover()),
-                    )
-                    .on_hover_text(&badge.tooltip);
+                    draw_tag_chip(ui, "🏅", &badge.label, theme::COLOR_ACCENT)
+                        .on_hover_text(&badge.tooltip);
                 }
             }
         });
-        ui.separator();
+        ui.add_space(10.0);
     }
 
-    ui.label(format!(
-        "Member since {}",
-        Local
-            .timestamp_millis_opt(profile.created_at)
-            .single()
-            .map(|dt| dt.format("%b %d, %Y").to_string())
-            .unwrap_or_else(|| "Unknown".into())
-    ));
+    draw_divider(ui);
+    ui.add_space(8.0);
 
     ui.horizontal(|ui| {
-        if ui.add(egui::Button::new("Message").fill(accent)).clicked() {
-            let _ = tx_intent.send(UiIntent::CreateDmChannel {
-                participant_user_ids: vec![profile.user_id.clone()],
+        ui.label(
+            egui::RichText::new(format!(
+                "Member since {}",
+                Local
+                    .timestamp_millis_opt(profile.created_at)
+                    .single()
+                    .map(|dt| dt.format("%b %d, %Y").to_string())
+                    .unwrap_or_else(|| "Unknown".into())
+            ))
+            .size(22.0),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.add_space(8.0);
+            ui.menu_button("···", |ui| {
+                if ui.button("Copy User ID").clicked() {
+                    ui.ctx().copy_text(profile.user_id.clone());
+                    ui.close();
+                }
+                if ui.button("Roles").clicked() {
+                    model.show_permissions_center = true;
+                    model.permissions_tab = crate::ui::model::PermissionsTab::Members;
+                    let _ = tx_intent.send(UiIntent::PermsOpen);
+                    ui.close();
+                }
+                if ui.button("Connection Info").clicked() {
+                    model.open_member_connection_info_window(
+                        profile.user_id.clone(),
+                        profile.display_name.clone(),
+                    );
+                    ui.close();
+                }
+                ui.separator();
+                let mut local_muted = model.user_locally_muted(&profile.user_id);
+                if ui.checkbox(&mut local_muted, "Mute for me").changed() {
+                    model
+                        .settings
+                        .per_user_audio
+                        .entry(profile.user_id.clone())
+                        .or_default()
+                        .muted = local_muted;
+                }
+                let mut gain = model.user_output_gain(&profile.user_id);
+                if ui
+                    .add(egui::Slider::new(&mut gain, 0.0..=2.0).text("Volume"))
+                    .changed()
+                {
+                    model
+                        .settings
+                        .per_user_audio
+                        .entry(profile.user_id.clone())
+                        .or_default()
+                        .gain = gain;
+                    let _ = tx_intent.send(UiIntent::SetUserOutputGain {
+                        user_id: profile.user_id.clone(),
+                        gain,
+                    });
+                }
+                ui.separator();
+                if ui.button("Kick").clicked() {
+                    let _ = tx_intent.send(UiIntent::KickUser {
+                        user_id: profile.user_id.clone(),
+                        reason: String::new(),
+                    });
+                    ui.close();
+                }
+                if ui.button("Ban").clicked() {
+                    let _ = tx_intent.send(UiIntent::BanUser {
+                        user_id: profile.user_id.clone(),
+                        reason: String::new(),
+                        duration: 0,
+                    });
+                    ui.close();
+                }
             });
-        }
-        if ui.button("Poke").clicked() {
-            model.show_poke_dialog = true;
-            model.poke_target_user_id = profile.user_id.clone();
-            model.poke_target_display_name = profile.display_name.clone();
-            model.poke_message_draft = "Poke".into();
-        }
-        ui.menu_button("···", |ui| {
-            if ui.button("Copy User ID").clicked() {
-                ui.ctx().copy_text(profile.user_id.clone());
-                ui.close();
+            if ui.button(egui::RichText::new("Poke").size(22.0)).clicked() {
+                model.show_poke_dialog = true;
+                model.poke_target_user_id = profile.user_id.clone();
+                model.poke_target_display_name = profile.display_name.clone();
+                model.poke_message_draft = "Poke".into();
             }
-            if ui.button("Roles").clicked() {
-                model.show_permissions_center = true;
-                model.permissions_tab = crate::ui::model::PermissionsTab::Members;
-                let _ = tx_intent.send(UiIntent::PermsOpen);
-                ui.close();
-            }
-            if ui.button("Connection Info").clicked() {
-                model.open_member_connection_info_window(
-                    profile.user_id.clone(),
-                    profile.display_name.clone(),
-                );
-                ui.close();
-            }
-            ui.separator();
-            let mut local_muted = model.user_locally_muted(&profile.user_id);
-            if ui.checkbox(&mut local_muted, "Mute for me").changed() {
-                model
-                    .settings
-                    .per_user_audio
-                    .entry(profile.user_id.clone())
-                    .or_default()
-                    .muted = local_muted;
-            }
-            let mut gain = model.user_output_gain(&profile.user_id);
             if ui
-                .add(egui::Slider::new(&mut gain, 0.0..=2.0).text("Volume"))
-                .changed()
+                .add(
+                    egui::Button::new(egui::RichText::new("Message").size(22.0))
+                        .fill(egui::Color32::from_rgb(50, 58, 85)),
+                )
+                .clicked()
             {
-                model
-                    .settings
-                    .per_user_audio
-                    .entry(profile.user_id.clone())
-                    .or_default()
-                    .gain = gain;
-                let _ = tx_intent.send(UiIntent::SetUserOutputGain {
-                    user_id: profile.user_id.clone(),
-                    gain,
+                let _ = tx_intent.send(UiIntent::CreateDmChannel {
+                    participant_user_ids: vec![profile.user_id.clone()],
                 });
-            }
-            ui.separator();
-            if ui.button("Kick").clicked() {
-                let _ = tx_intent.send(UiIntent::KickUser {
-                    user_id: profile.user_id.clone(),
-                    reason: String::new(),
-                });
-                ui.close();
-            }
-            if ui.button("Ban").clicked() {
-                let _ = tx_intent.send(UiIntent::BanUser {
-                    user_id: profile.user_id.clone(),
-                    reason: String::new(),
-                    duration: 0,
-                });
-                ui.close();
             }
         });
     });
@@ -351,11 +379,100 @@ fn render_profile(
 
 fn status_text(status: OnlineStatus) -> &'static str {
     match status {
-        OnlineStatus::Online => "● Online",
+        OnlineStatus::Online => "Online",
         OnlineStatus::Idle => "🌙 Idle",
         OnlineStatus::DoNotDisturb => "⛔ Do Not Disturb",
         OnlineStatus::Invisible => "Invisible",
         OnlineStatus::Offline => "Offline",
+    }
+}
+
+fn status_color(status: OnlineStatus) -> egui::Color32 {
+    match status {
+        OnlineStatus::Online => egui::Color32::from_rgb(88, 214, 135),
+        OnlineStatus::Idle => theme::COLOR_IDLE,
+        OnlineStatus::DoNotDisturb => theme::COLOR_DND,
+        OnlineStatus::Invisible | OnlineStatus::Offline => theme::COLOR_OFFLINE,
+    }
+}
+
+fn draw_divider(ui: &mut egui::Ui) {
+    let width = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 1.0), egui::Sense::hover());
+    ui.painter().line_segment(
+        [rect.left_center(), rect.right_center()],
+        egui::Stroke::new(
+            1.0,
+            egui::Color32::from_rgba_unmultiplied(155, 171, 220, 42),
+        ),
+    );
+}
+
+fn draw_tag_chip(
+    ui: &mut egui::Ui,
+    icon: &str,
+    label: &str,
+    color: egui::Color32,
+) -> egui::Response {
+    egui::Frame::new()
+        .fill(color.linear_multiply(0.24))
+        .corner_radius(7.0)
+        .inner_margin(egui::Margin::symmetric(10, 6))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(icon).size(18.0));
+                ui.label(
+                    egui::RichText::new(label)
+                        .size(20.0)
+                        .color(egui::Color32::WHITE),
+                );
+            });
+        })
+        .response
+}
+
+fn paint_vertical_gradient(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    start: egui::Color32,
+    end: egui::Color32,
+    rounding: egui::CornerRadius,
+) {
+    let steps = 28;
+    for i in 0..steps {
+        let t0 = i as f32 / steps as f32;
+        let t1 = (i + 1) as f32 / steps as f32;
+        let y0 = egui::lerp(rect.top()..=rect.bottom(), t0);
+        let y1 = egui::lerp(rect.top()..=rect.bottom(), t1);
+        ui.painter().rect_filled(
+            egui::Rect::from_min_max(egui::pos2(rect.left(), y0), egui::pos2(rect.right(), y1)),
+            if i == 0 {
+                rounding
+            } else {
+                egui::CornerRadius::ZERO
+            },
+            lerp_color(start, end, t0),
+        );
+    }
+}
+
+fn paint_horizontal_tint(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    left: egui::Color32,
+    right: egui::Color32,
+) {
+    let steps = 24;
+    for i in 0..steps {
+        let t0 = i as f32 / steps as f32;
+        let t1 = (i + 1) as f32 / steps as f32;
+        let x0 = egui::lerp(rect.left()..=rect.right(), t0);
+        let x1 = egui::lerp(rect.left()..=rect.right(), t1);
+        ui.painter().rect_filled(
+            egui::Rect::from_min_max(egui::pos2(x0, rect.top()), egui::pos2(x1, rect.bottom())),
+            egui::CornerRadius::same(0),
+            lerp_color(left, right, t0).linear_multiply(0.12),
+        );
     }
 }
 
