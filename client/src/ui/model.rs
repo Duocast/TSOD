@@ -285,6 +285,7 @@ pub enum UiEvent {
 
     // User profile
     UserProfileLoaded(UserProfileData),
+    UserProfileFetchFailed { user_id: String },
 
     // Self state
     SetSelfMuted(bool),
@@ -1791,7 +1792,6 @@ pub struct UiModel {
     pub last_event_seq: u64,
 
     // User popup
-    pub show_user_popup: bool,
     pub profile_popup_user_id: Option<String>,
     pub profile_popup_data: Option<UserProfileData>,
     pub profile_popup_loading: bool,
@@ -2114,7 +2114,6 @@ impl Default for UiModel {
             channel_collapsed: HashMap::new(),
             default_channel_id: None,
             last_event_seq: 0,
-            show_user_popup: false,
             profile_popup_user_id: None,
             profile_popup_data: None,
             profile_popup_loading: false,
@@ -2212,28 +2211,30 @@ impl UiModel {
     }
 
     /// Open the profile popup for a given user, anchored near `click_pos`.
-    pub fn open_profile_popup(&mut self, user_id: String, click_pos: egui::Pos2) {
+    pub fn open_profile_popup(
+        &mut self,
+        user_id: String,
+        click_pos: egui::Pos2,
+        tx_intent: &crossbeam_channel::Sender<UiIntent>,
+    ) {
         // Check cache first (60s TTL).
         const PROFILE_CACHE_TTL_SECS: u64 = 60;
         if let Some(cached) = self.profile_cache.get(&user_id) {
             if cached.fetched_at.elapsed().as_secs() < PROFILE_CACHE_TTL_SECS {
                 self.profile_popup_data = Some(cached.data.clone());
                 self.profile_popup_loading = false;
-                self.show_user_popup = true;
                 self.profile_popup_user_id = Some(user_id);
                 self.profile_popup_anchor = Some(click_pos);
                 return;
             }
         }
-        // No cache hit — request from server.
-        self.show_user_popup = true;
-        self.profile_popup_user_id = Some(user_id);
-        self.profile_popup_data = None;
+        // No cache hit — show stub data from member list while fetching.
+        let stub = self.stub_profile_from_member(&user_id);
+        self.profile_popup_data = stub;
         self.profile_popup_loading = true;
+        self.profile_popup_user_id = Some(user_id.clone());
         self.profile_popup_anchor = Some(click_pos);
-        // NOTE: The actual GetUserProfileRequest is not yet wired in the
-        // backend, so for now we populate a stub profile from MemberEntry
-        // data available locally.
+        let _ = tx_intent.send(UiIntent::FetchUserProfile { user_id });
     }
 
     /// Build a stub UserProfileData from a MemberEntry for immediate display
@@ -2660,6 +2661,14 @@ impl UiModel {
                         fetched_at: std::time::Instant::now(),
                     },
                 );
+            }
+            UiEvent::UserProfileFetchFailed { user_id } => {
+                // Clear the loading state so the user isn't stuck on an
+                // infinite spinner.  If stub data was already populated from
+                // the member list it will remain visible.
+                if self.profile_popup_user_id.as_deref() == Some(&user_id) {
+                    self.profile_popup_loading = false;
+                }
             }
             UiEvent::SetSelfMuted(m) => self.self_muted = m,
             UiEvent::SetSelfDeafened(d) => self.self_deafened = d,

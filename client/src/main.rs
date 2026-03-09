@@ -4670,6 +4670,7 @@ async fn connect_and_run_session(
                                 }
                                 Ok(Err(e)) | Err(e) => {
                                     let _ = tx_event.send(UiEvent::AppendLog(format!("[profile] failed to fetch profile for {user_id}: {e:#}")));
+                                    let _ = tx_event.send(UiEvent::UserProfileFetchFailed { user_id });
                                 }
                             }
                         }
