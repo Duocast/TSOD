@@ -96,15 +96,15 @@ fn render_profile(
         card_rect,
         egui::Color32::from_rgb(24, 25, 34),
         egui::Color32::from_rgb(20, 21, 30),
-        egui::CornerRadius::same(CARD_ROUNDING as u32),
+        egui::CornerRadius::same(CARD_ROUNDING as u8),
     );
 
     // -- Banner --
     let banner_rect =
         egui::Rect::from_min_size(card_rect.min, egui::vec2(card_rect.width(), BANNER_HEIGHT));
     let clip_rounding = egui::CornerRadius {
-        nw: CARD_ROUNDING as u32,
-        ne: CARD_ROUNDING as u32,
+        nw: CARD_ROUNDING as u8,
+        ne: CARD_ROUNDING as u8,
         sw: 0,
         se: 0,
     };
@@ -158,7 +158,7 @@ fn render_profile(
             avatar_rect,
             egui::Image::from_uri(url)
                 .fit_to_exact_size(avatar_rect.size())
-                .corner_radius(egui::CornerRadius::same(AVATAR_HALF as u32)),
+                .corner_radius(egui::CornerRadius::same(AVATAR_HALF as u8)),
         );
     } else {
         let fallback = profile
