@@ -644,6 +644,178 @@ impl ControlDispatcher {
         Ok(())
     }
 
+    /// Update the user's profile text fields, accent color, and links.
+    pub async fn update_user_profile(
+        &self,
+        display_name: Option<String>,
+        description: Option<String>,
+        accent_color: Option<u32>,
+        links: Vec<crate::ui::model::ProfileLinkData>,
+    ) -> Result<()> {
+        let pb_links = links
+            .into_iter()
+            .map(|l| pb::ProfileLink {
+                platform: l.platform,
+                url: l.url,
+                display_text: l.display_text,
+                verified: l.verified,
+            })
+            .collect();
+
+        let req = pb::UpdateUserProfileRequest {
+            display_name,
+            description,
+            status: pb::OnlineStatus::Unspecified as i32,
+            custom_status_text: None,
+            custom_status_emoji: None,
+            custom_status_expires: None,
+            accent_color,
+            links: pb_links,
+        };
+
+        let resp = self
+            .send_request(
+                pb::client_to_server::Payload::UpdateUserProfileRequest(req),
+                Duration::from_secs(5),
+            )
+            .await??;
+
+        if let Some(err) = resp.error {
+            return Err(anyhow!("update_user_profile error: {:?}", err));
+        }
+        Ok(())
+    }
+
+    /// Set the user's custom status (emoji + text), clearing if both are empty.
+    pub async fn set_custom_status(
+        &self,
+        status_text: Option<String>,
+        status_emoji: Option<String>,
+    ) -> Result<()> {
+        let req = pb::SetCustomStatusRequest {
+            status_text,
+            status_emoji,
+        };
+        let resp = self
+            .send_request(
+                pb::client_to_server::Payload::SetCustomStatusRequest(req),
+                Duration::from_secs(3),
+            )
+            .await??;
+
+        if let Some(err) = resp.error {
+            return Err(anyhow!("set_custom_status error: {:?}", err));
+        }
+        Ok(())
+    }
+
+    /// Set the user's banner by verified asset_id.
+    pub async fn set_banner(&self, asset_id: &str) -> Result<()> {
+        let req = pb::SetBannerRequest {
+            asset_id: Some(pb::AssetId {
+                value: asset_id.to_string(),
+            }),
+        };
+        let resp = self
+            .send_request(
+                pb::client_to_server::Payload::SetBannerRequest(req),
+                Duration::from_secs(3),
+            )
+            .await??;
+
+        if let Some(err) = resp.error {
+            return Err(anyhow!("set_banner error: {:?}", err));
+        }
+        Ok(())
+    }
+
+    /// Upload a profile asset (avatar or banner) to the server over a new authenticated
+    /// Quinn bidi stream.  Returns the verified `asset_id` on success.
+    pub async fn upload_profile_asset(
+        &self,
+        conn: &quinn::Connection,
+        purpose: &str,
+        image_bytes: Vec<u8>,
+        mime_type: &str,
+    ) -> Result<String> {
+        use crate::net::frame::{read_delimited, write_delimited};
+
+        // Step 1: request upload session approval on the control stream.
+        let begin_req = pb::BeginProfileAssetUploadRequest {
+            purpose: purpose.to_string(),
+            mime_type: mime_type.to_string(),
+            byte_length: image_bytes.len() as u64,
+        };
+        let resp = self
+            .send_request(
+                pb::client_to_server::Payload::BeginProfileAssetUploadRequest(begin_req),
+                Duration::from_secs(5),
+            )
+            .await??;
+
+        if let Some(err) = resp.error {
+            return Err(anyhow!("begin_profile_asset_upload error: {:?}", err));
+        }
+
+        let session_id = match resp.payload {
+            Some(pb::server_to_client::Payload::BeginProfileAssetUploadResponse(r)) => r.session_id,
+            _ => return Err(anyhow!("unexpected response to BeginProfileAssetUploadRequest")),
+        };
+
+        // Step 2: open a new bidi stream and stream the asset bytes.
+        let (mut send, mut recv) = conn
+            .open_bi()
+            .await
+            .context("open profile asset upload stream")?;
+
+        // Send asset data request framed on the new stream.
+        let data_req = pb::UploadProfileAssetDataRequest {
+            session_id,
+            data: image_bytes,
+        };
+        write_delimited(&mut send, &data_req).await?;
+        send.finish().context("finish profile asset upload stream")?;
+
+        // Read back the CompleteProfileAssetUploadResponse.
+        let complete_resp: pb::CompleteProfileAssetUploadResponse =
+            read_delimited(&mut recv, 64 * 1024).await?;
+
+        let asset_id = complete_resp
+            .asset_id
+            .map(|a| a.value)
+            .ok_or_else(|| anyhow!("server returned no asset_id"))?;
+
+        Ok(asset_id)
+    }
+
+    /// Fetch the calling user's own profile.
+    pub async fn fetch_self_profile(&self, user_id: &str) -> Result<crate::ui::model::UserProfileData> {
+        let req = pb::GetUserProfileRequest {
+            user_id: Some(pb::UserId {
+                value: user_id.to_string(),
+            }),
+        };
+        let resp = self
+            .send_request(
+                pb::client_to_server::Payload::GetUserProfileRequest(req),
+                Duration::from_secs(5),
+            )
+            .await??;
+
+        if let Some(err) = resp.error {
+            return Err(anyhow!("fetch_self_profile error: {:?}", err));
+        }
+
+        let profile = match resp.payload {
+            Some(pb::server_to_client::Payload::GetUserProfileResponse(r)) => {
+                r.profile.ok_or_else(|| anyhow!("empty profile in response"))?
+            }
+            _ => return Err(anyhow!("unexpected response to GetUserProfileRequest")),
+        };
+
+        Ok(pb_profile_to_ui(&profile))
+    }
+
     /// Low-level request API with correlation.
     pub async fn send_request(
         &self,
@@ -809,6 +981,79 @@ async fn fail_all_pending(
     let mut map = pending.lock().await;
     for (_, tx) in map.drain() {
         let _ = tx.send(Err(anyhow!("dispatcher shutdown")));
+    }
+}
+
+/// Convert a protobuf UserProfile to the UI model type.
+pub fn pb_profile_to_ui(p: &pb::UserProfile) -> crate::ui::model::UserProfileData {
+    use crate::ui::model::*;
+
+    let status = match pb::OnlineStatus::try_from(p.status).unwrap_or_default() {
+        pb::OnlineStatus::Online => OnlineStatus::Online,
+        pb::OnlineStatus::Idle => OnlineStatus::Idle,
+        pb::OnlineStatus::DoNotDisturb => OnlineStatus::DoNotDisturb,
+        pb::OnlineStatus::Invisible => OnlineStatus::Invisible,
+        pb::OnlineStatus::Offline => OnlineStatus::Offline,
+        pb::OnlineStatus::Unspecified => OnlineStatus::Online,
+    };
+
+    let avatar_url = if p.avatar_asset_url.is_empty() {
+        None
+    } else {
+        Some(p.avatar_asset_url.clone())
+    };
+    let banner_url = if p.banner_asset_url.is_empty() {
+        None
+    } else {
+        Some(p.banner_asset_url.clone())
+    };
+
+    let badges = p
+        .badges
+        .iter()
+        .map(|b| BadgeData {
+            id: b.id.clone(),
+            label: b.label.clone(),
+            icon_url: b.icon_url.clone(),
+            tooltip: b.tooltip.clone(),
+        })
+        .collect();
+
+    let links = p
+        .links
+        .iter()
+        .map(|l| ProfileLinkData {
+            platform: l.platform.clone(),
+            url: l.url.clone(),
+            display_text: l.display_text.clone(),
+            verified: l.verified,
+        })
+        .collect();
+
+    let current_activity = p.current_activity.as_ref().map(|a| GameActivityData {
+        game_name: a.game_name.clone(),
+        details: a.details.clone(),
+        state: a.state.clone(),
+        started_at: a.started_at.as_ref().map(|t| t.ms as i64).unwrap_or(0),
+        large_image_url: a.large_image_url.clone(),
+    });
+
+    UserProfileData {
+        user_id: p.user_id.as_ref().map(|u| u.value.clone()).unwrap_or_default(),
+        display_name: p.display_name.clone(),
+        description: p.description.clone(),
+        status,
+        custom_status_text: p.custom_status_text.clone(),
+        custom_status_emoji: p.custom_status_emoji.clone(),
+        accent_color: p.accent_color,
+        avatar_url,
+        banner_url,
+        badges,
+        links,
+        created_at: 0,
+        last_seen_at: 0,
+        current_activity,
+        roles: Vec::new(),
     }
 }
 

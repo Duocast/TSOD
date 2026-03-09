@@ -1406,6 +1406,143 @@ impl Gateway {
                         }
                     }
                 }
+                Some(pb::client_to_server::Payload::GetUserProfileRequest(r)) => {
+                    let target_uid = parse_user_id(r.user_id.as_ref())?;
+                    let row = self.control.get_user_profile(&ctx, target_uid).await?;
+                    let profile = row.map(profile_row_to_pb);
+                    let resp = pb::ServerToClient {
+                        request_id: req_id,
+                        session_id: Some(pb::SessionId { value: session_id.clone() }),
+                        sent_at: Some(now_ts()),
+                        error: None,
+                        event_seq: 0,
+                        payload: Some(pb::server_to_client::Payload::GetUserProfileResponse(
+                            pb::GetUserProfileResponse { profile },
+                        )),
+                    };
+                    if let Err(e) = write_delimited(&mut send, &resp).await { warn!("control write failed: {:#}", e); break; }
+                }
+                Some(pb::client_to_server::Payload::UpdateUserProfileRequest(r)) => {
+                    let links_json = if r.links.is_empty() {
+                        None
+                    } else {
+                        Some(serde_json::to_value(&r.links.iter().map(|l| serde_json::json!({
+                            "platform": l.platform,
+                            "url": l.url,
+                            "display_text": l.display_text,
+                        })).collect::<Vec<_>>()).unwrap_or(serde_json::Value::Array(vec![])))
+                    };
+                    self.control.update_user_profile(
+                        &ctx,
+                        r.display_name.clone(),
+                        r.description.clone(),
+                        r.accent_color.map(|c| c as i32),
+                        links_json,
+                    ).await?;
+                    let row = self.control.get_user_profile(&ctx, user_id).await?;
+                    let profile = row.map(profile_row_to_pb);
+                    let resp = pb::ServerToClient {
+                        request_id: req_id,
+                        session_id: Some(pb::SessionId { value: session_id.clone() }),
+                        sent_at: Some(now_ts()),
+                        error: None,
+                        event_seq: 0,
+                        payload: Some(pb::server_to_client::Payload::UpdateUserProfileResponse(
+                            pb::UpdateUserProfileResponse { profile },
+                        )),
+                    };
+                    if let Err(e) = write_delimited(&mut send, &resp).await { warn!("control write failed: {:#}", e); break; }
+                }
+                Some(pb::client_to_server::Payload::SetAvatarRequest(r)) => {
+                    let asset_url = r.asset_id.as_ref().map(|a| a.value.as_str()).unwrap_or("");
+                    self.control.set_avatar(&ctx, asset_url).await?;
+                    let resp = pb::ServerToClient {
+                        request_id: req_id,
+                        session_id: Some(pb::SessionId { value: session_id.clone() }),
+                        sent_at: Some(now_ts()),
+                        error: None,
+                        event_seq: 0,
+                        payload: Some(pb::server_to_client::Payload::SetAvatarResponse(
+                            pb::SetAvatarResponse { avatar_asset_url: asset_url.to_string() },
+                        )),
+                    };
+                    if let Err(e) = write_delimited(&mut send, &resp).await { warn!("control write failed: {:#}", e); break; }
+                }
+                Some(pb::client_to_server::Payload::SetBannerRequest(r)) => {
+                    let asset_url = r.asset_id.as_ref().map(|a| a.value.as_str()).unwrap_or("");
+                    self.control.set_banner(&ctx, asset_url).await?;
+                    let resp = pb::ServerToClient {
+                        request_id: req_id,
+                        session_id: Some(pb::SessionId { value: session_id.clone() }),
+                        sent_at: Some(now_ts()),
+                        error: None,
+                        event_seq: 0,
+                        payload: Some(pb::server_to_client::Payload::SetBannerResponse(
+                            pb::SetBannerResponse { banner_asset_url: asset_url.to_string() },
+                        )),
+                    };
+                    if let Err(e) = write_delimited(&mut send, &resp).await { warn!("control write failed: {:#}", e); break; }
+                }
+                Some(pb::client_to_server::Payload::BeginProfileAssetUploadRequest(r)) => {
+                    let session_id_uuid = self.control.begin_profile_asset_upload(
+                        &ctx,
+                        &r.purpose,
+                        &r.mime_type,
+                        r.byte_length as i64,
+                    ).await?;
+                    let resp = pb::ServerToClient {
+                        request_id: req_id,
+                        session_id: Some(pb::SessionId { value: session_id.clone() }),
+                        sent_at: Some(now_ts()),
+                        error: None,
+                        event_seq: 0,
+                        payload: Some(pb::server_to_client::Payload::BeginProfileAssetUploadResponse(
+                            pb::BeginProfileAssetUploadResponse {
+                                session_id: session_id_uuid.to_string(),
+                            },
+                        )),
+                    };
+                    if let Err(e) = write_delimited(&mut send, &resp).await { warn!("control write failed: {:#}", e); break; }
+                }
+                Some(pb::client_to_server::Payload::UploadProfileAssetDataRequest(r)) => {
+                    let upload_session_uuid = r.session_id.parse::<uuid::Uuid>()
+                        .map_err(|_| anyhow!("invalid session_id"))?;
+                    // Validate and verify the uploaded asset data.
+                    let asset_data = verify_profile_asset_data(&r.data)?;
+                    self.control.store_verified_asset(user_id, upload_session_uuid, &asset_data).await?;
+                    let asset_id_str = upload_session_uuid.to_string();
+                    let resp = pb::ServerToClient {
+                        request_id: req_id,
+                        session_id: Some(pb::SessionId { value: session_id.clone() }),
+                        sent_at: Some(now_ts()),
+                        error: None,
+                        event_seq: 0,
+                        payload: Some(pb::server_to_client::Payload::CompleteProfileAssetUploadResponse(
+                            pb::CompleteProfileAssetUploadResponse {
+                                asset_id: Some(pb::AssetId { value: asset_id_str }),
+                            },
+                        )),
+                    };
+                    if let Err(e) = write_delimited(&mut send, &resp).await { warn!("control write failed: {:#}", e); break; }
+                }
+                Some(pb::client_to_server::Payload::SetCustomStatusRequest(r)) => {
+                    self.control.set_custom_status(
+                        &ctx,
+                        r.status_text.clone(),
+                        r.status_emoji.clone(),
+                    ).await?;
+                    let resp = pb::ServerToClient {
+                        request_id: req_id,
+                        session_id: Some(pb::SessionId { value: session_id.clone() }),
+                        sent_at: Some(now_ts()),
+                        error: None,
+                        event_seq: 0,
+                        payload: Some(pb::server_to_client::Payload::SetCustomStatusResponse(
+                            pb::SetCustomStatusResponse {},
+                        )),
+                    };
+                    if let Err(e) = write_delimited(&mut send, &resp).await { warn!("control write failed: {:#}", e); break; }
+                }
                 _ => {
                     // Ignore other messages for now.
                 }
@@ -1904,6 +2041,78 @@ fn unix_ms_u64() -> u64 {
 
 fn is_video_datagram(d: &[u8]) -> bool {
     d.len() >= 2 && d[0] == vp_voice::VIDEO_VERSION && d[1] == vp_voice::DATAGRAM_KIND_VIDEO
+}
+
+/// Convert a DB profile row to the proto UserProfile message.
+fn profile_row_to_pb(row: vp_control::model::UserProfileRow) -> pb::UserProfile {
+    let links: Vec<pb::ProfileLink> = row
+        .links
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| {
+                    Some(pb::ProfileLink {
+                        platform: v.get("platform")?.as_str()?.to_string(),
+                        url: v.get("url")?.as_str()?.to_string(),
+                        display_text: v
+                            .get("display_text")
+                            .and_then(|s| s.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        verified: false,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    pb::UserProfile {
+        user_id: Some(pb::UserId { value: row.user_id.0.to_string() }),
+        display_name: row.display_name,
+        avatar_asset_url: row.avatar_asset_url.clone(),
+        avatar_asset_id: if row.avatar_asset_url.is_empty() {
+            None
+        } else {
+            Some(pb::AssetId { value: row.avatar_asset_url })
+        },
+        description: row.description,
+        status: pb::OnlineStatus::Online as i32,
+        custom_status_text: row.custom_status_text,
+        badges: vec![],
+        created_at: Some(pb::Timestamp { unix_millis: row.created_at.timestamp_millis() }),
+        last_seen_at: None,
+        banner_asset_url: row.banner_asset_url.clone(),
+        banner_asset_id: if row.banner_asset_url.is_empty() {
+            None
+        } else {
+            Some(pb::AssetId { value: row.banner_asset_url })
+        },
+        accent_color: row.accent_color.max(0) as u32,
+        links,
+        custom_status_emoji: row.custom_status_emoji,
+        custom_status_expires: None,
+        current_activity: None,
+        audio_profile: None,
+    }
+}
+
+/// Minimal verification of uploaded profile asset data: check magic bytes and size.
+/// Returns the data unchanged if valid (further re-encoding happens on the client side).
+fn verify_profile_asset_data(data: &[u8]) -> Result<Vec<u8>> {
+    const MAX_SIZE: usize = 10 * 1024 * 1024; // 10 MB hard cap
+    if data.is_empty() {
+        return Err(anyhow!("asset data is empty"));
+    }
+    if data.len() > MAX_SIZE {
+        return Err(anyhow!("asset data exceeds maximum size"));
+    }
+    // Check magic bytes: PNG, JPEG, or WebP (RIFF....WEBP).
+    let is_png = data.starts_with(b"\x89PNG\r\n\x1a\n");
+    let is_jpeg = data.starts_with(b"\xff\xd8\xff");
+    let is_webp = data.len() >= 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"WEBP";
+    if !is_png && !is_jpeg && !is_webp {
+        return Err(anyhow!("asset data is not a recognized image format"));
+    }
+    Ok(data.to_vec())
 }
 
 #[cfg(test)]

@@ -90,6 +90,11 @@ message ClientToServer {
     CompleteUploadRequest complete_upload_request = 101;
     GetQuotaRequest get_quota_request = 102;
 
+    // Profile asset upload pipeline
+    BeginProfileAssetUploadRequest begin_profile_asset_upload_request = 103;
+    UploadProfileAssetDataRequest upload_profile_asset_data_request = 104;
+    SetCustomStatusRequest set_custom_status_request = 105;
+
     // Audit log
     GetAuditLogRequest get_audit_log_request = 110;
 
@@ -230,6 +235,11 @@ message ServerToClient {
     CreateUploadResponse create_upload_response = 100;
     CompleteUploadResponse complete_upload_response = 101;
     GetQuotaResponse get_quota_response = 102;
+
+    // Profile asset upload pipeline responses
+    BeginProfileAssetUploadResponse begin_profile_asset_upload_response = 103;
+    CompleteProfileAssetUploadResponse complete_profile_asset_upload_response = 104;
+    SetCustomStatusResponse set_custom_status_response = 105;
 
     // Audit log response
     GetAuditLogResponse get_audit_log_response = 110;

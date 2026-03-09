@@ -4316,6 +4316,161 @@ async fn connect_and_run_session(
                                 }
                             }
                         }
+                        UiIntent::UpdateUserProfile {
+                            display_name,
+                            description,
+                            accent_color,
+                            links,
+                        } => {
+                            match dispatcher
+                                .update_user_profile(display_name, description, accent_color, links)
+                                .await
+                            {
+                                Ok(()) => {
+                                    let _ = tx_event.send(UiEvent::ProfileUpdateComplete);
+                                    let _ = tx_event.send(UiEvent::AppendLog(
+                                        "[profile] profile saved".to_string(),
+                                    ));
+                                }
+                                Err(e) => {
+                                    let _ = tx_event.send(UiEvent::ProfileUpdateFailed(
+                                        e.to_string(),
+                                    ));
+                                }
+                            }
+                        }
+                        UiIntent::UploadProfileAvatar { path } => {
+                            match upload_profile_image(
+                                &conn,
+                                &dispatcher,
+                                &path,
+                                "profile_avatar",
+                                8 * 1024 * 1024,
+                                256,
+                                256,
+                            )
+                            .await
+                            {
+                                Ok(asset_id) => {
+                                    // Attach to profile.
+                                    match dispatcher.set_avatar(&asset_id).await {
+                                        Ok(()) => {
+                                            let preview = format!(
+                                                "file://{}",
+                                                path.to_string_lossy()
+                                            );
+                                            let _ = tx_event.send(UiEvent::AvatarUploadComplete {
+                                                asset_id,
+                                                preview_url: preview,
+                                            });
+                                        }
+                                        Err(e) => {
+                                            let _ = tx_event.send(UiEvent::AvatarUploadFailed(
+                                                format!("set avatar failed: {e:#}"),
+                                            ));
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    let _ = tx_event
+                                        .send(UiEvent::AvatarUploadFailed(e.to_string()));
+                                }
+                            }
+                        }
+                        UiIntent::UploadProfileBanner { path } => {
+                            match upload_profile_image(
+                                &conn,
+                                &dispatcher,
+                                &path,
+                                "profile_banner",
+                                10 * 1024 * 1024,
+                                680,
+                                240,
+                            )
+                            .await
+                            {
+                                Ok(asset_id) => {
+                                    match dispatcher.set_banner(&asset_id).await {
+                                        Ok(()) => {
+                                            let preview = format!(
+                                                "file://{}",
+                                                path.to_string_lossy()
+                                            );
+                                            let _ = tx_event.send(UiEvent::BannerUploadComplete {
+                                                asset_id,
+                                                preview_url: preview,
+                                            });
+                                        }
+                                        Err(e) => {
+                                            let _ = tx_event.send(UiEvent::BannerUploadFailed(
+                                                format!("set banner failed: {e:#}"),
+                                            ));
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    let _ = tx_event
+                                        .send(UiEvent::BannerUploadFailed(e.to_string()));
+                                }
+                            }
+                        }
+                        UiIntent::RemoveAvatar => {
+                            match dispatcher.set_avatar("").await {
+                                Ok(()) => {
+                                    let _ = tx_event.send(UiEvent::AppendLog(
+                                        "[profile] avatar removed".to_string(),
+                                    ));
+                                }
+                                Err(e) => {
+                                    let _ = tx_event.send(UiEvent::AppendLog(
+                                        format!("[profile] remove avatar failed: {e:#}"),
+                                    ));
+                                }
+                            }
+                        }
+                        UiIntent::RemoveBanner => {
+                            match dispatcher.set_banner("").await {
+                                Ok(()) => {
+                                    let _ = tx_event.send(UiEvent::AppendLog(
+                                        "[profile] banner removed".to_string(),
+                                    ));
+                                }
+                                Err(e) => {
+                                    let _ = tx_event.send(UiEvent::AppendLog(
+                                        format!("[profile] remove banner failed: {e:#}"),
+                                    ));
+                                }
+                            }
+                        }
+                        UiIntent::SetCustomStatus {
+                            status_text,
+                            status_emoji,
+                        } => {
+                            match dispatcher
+                                .set_custom_status(status_text, status_emoji)
+                                .await
+                            {
+                                Ok(()) => {
+                                    let _ = tx_event.send(UiEvent::CustomStatusSet);
+                                }
+                                Err(e) => {
+                                    let _ = tx_event
+                                        .send(UiEvent::CustomStatusFailed(e.to_string()));
+                                }
+                            }
+                        }
+                        UiIntent::FetchSelfProfile => {
+                            match dispatcher.fetch_self_profile(&local_user_id).await {
+                                Ok(profile) => {
+                                    let _ = tx_event.send(UiEvent::SelfProfileLoaded(profile));
+                                }
+                                Err(e) => {
+                                    let _ = tx_event.send(UiEvent::AppendLog(
+                                        format!("[profile] fetch self profile failed: {e:#}"),
+                                    ));
+                                }
+                            }
+                        }
                         UiIntent::ApplySettings(ref settings) => {
                             *saved_settings = (**settings).clone();
                             dsp_enabled.store(
@@ -6215,6 +6370,68 @@ fn hex_to_32(s: &str) -> Result<[u8; 32]> {
         out[i] = b;
     }
     Ok(out)
+}
+
+/// Load an image from disk, optionally resize it, encode to WebP, then upload it to the server
+/// as a profile asset (avatar or banner). Returns the verified asset_id.
+async fn upload_profile_image(
+    conn: &quinn::Connection,
+    dispatcher: &net::dispatcher::ControlDispatcher,
+    path: &std::path::Path,
+    purpose: &str,
+    max_bytes: u64,
+    max_w: u32,
+    max_h: u32,
+) -> anyhow::Result<String> {
+    use anyhow::Context as _;
+
+    // Read the file.
+    let raw = tokio::fs::read(path)
+        .await
+        .with_context(|| format!("read image: {}", path.display()))?;
+
+    if raw.len() as u64 > max_bytes {
+        anyhow::bail!(
+            "image too large ({} bytes, limit {max_bytes})",
+            raw.len()
+        );
+    }
+
+    // Validate extension (GIF not accepted).
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    if ext == "gif" {
+        anyhow::bail!("GIF is not accepted; please use PNG, JPEG, or WebP");
+    }
+
+    // Decode with the `image` crate for validation and resize.
+    let img = image::load_from_memory(&raw).context("decode image")?;
+
+    // Resize if needed (maintain aspect ratio, fit within max dimensions).
+    let img = if img.width() > max_w || img.height() > max_h {
+        img.resize(max_w, max_h, image::imageops::FilterType::Lanczos3)
+    } else {
+        img
+    };
+
+    // Encode as WebP.
+    let mut webp_bytes: Vec<u8> = Vec::new();
+    img.write_to(
+        &mut std::io::Cursor::new(&mut webp_bytes),
+        image::ImageFormat::WebP,
+    )
+    .context("encode image to WebP")?;
+
+    // Upload via the dispatcher (control stream begin + data stream).
+    let asset_id = dispatcher
+        .upload_profile_asset(conn, purpose, webp_bytes, "image/webp")
+        .await
+        .context("upload profile asset")?;
+
+    Ok(asset_id)
 }
 
 #[cfg(test)]

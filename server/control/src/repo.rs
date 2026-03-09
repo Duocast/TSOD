@@ -285,6 +285,69 @@ pub trait ControlRepo: Send + Sync {
         tx: &mut Transaction<'_, Postgres>,
         entry: &AuditEntry,
     ) -> ControlResult<()>;
+
+    // User profiles
+    async fn upsert_user_profile(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        user_id: UserId,
+        server_id: ServerId,
+        display_name: Option<&str>,
+        description: Option<&str>,
+        accent_color: Option<i32>,
+        custom_status_text: Option<&str>,
+        custom_status_emoji: Option<&str>,
+        links_json: Option<serde_json::Value>,
+    ) -> ControlResult<()>;
+
+    async fn get_user_profile(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        user_id: UserId,
+        server_id: ServerId,
+    ) -> ControlResult<Option<crate::model::UserProfileRow>>;
+
+    async fn set_profile_avatar(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        user_id: UserId,
+        server_id: ServerId,
+        avatar_url: &str,
+    ) -> ControlResult<()>;
+
+    async fn set_profile_banner(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        user_id: UserId,
+        server_id: ServerId,
+        banner_url: &str,
+    ) -> ControlResult<()>;
+
+    // Profile asset uploads
+    async fn create_asset_upload_session(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        session_id: Uuid,
+        user_id: UserId,
+        server_id: ServerId,
+        purpose: &str,
+        mime_type: &str,
+        byte_length: i64,
+    ) -> ControlResult<()>;
+
+    async fn store_verified_asset(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        session_id: Uuid,
+        asset_data: &[u8],
+    ) -> ControlResult<()>;
+
+    async fn get_asset_upload_session(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        session_id: Uuid,
+        user_id: UserId,
+    ) -> ControlResult<Option<crate::model::AssetUploadSession>>;
 }
 
 #[derive(Clone)]
@@ -1482,5 +1545,233 @@ impl ControlRepo for PgControlRepo {
         .await
         .context("insert audit")?;
         Ok(())
+    }
+
+    // ── User profiles ──────────────────────────────────────────────────
+
+    async fn upsert_user_profile(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        user_id: UserId,
+        server_id: ServerId,
+        display_name: Option<&str>,
+        description: Option<&str>,
+        accent_color: Option<i32>,
+        custom_status_text: Option<&str>,
+        custom_status_emoji: Option<&str>,
+        links_json: Option<Json>,
+    ) -> ControlResult<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO user_profiles
+                (user_id, server_id, display_name, description, accent_color,
+                 custom_status_text, custom_status_emoji, links, created_at, updated_at)
+            VALUES ($1, $2,
+                COALESCE($3, ''),
+                COALESCE($4, ''),
+                COALESCE($5, 0),
+                COALESCE($6, ''),
+                COALESCE($7, ''),
+                COALESCE($8, '[]'::jsonb),
+                NOW(), NOW())
+            ON CONFLICT (user_id) DO UPDATE SET
+                display_name       = CASE WHEN $3 IS NOT NULL THEN $3 ELSE user_profiles.display_name END,
+                description        = CASE WHEN $4 IS NOT NULL THEN $4 ELSE user_profiles.description END,
+                accent_color       = CASE WHEN $5 IS NOT NULL THEN $5 ELSE user_profiles.accent_color END,
+                custom_status_text = CASE WHEN $6 IS NOT NULL THEN $6 ELSE user_profiles.custom_status_text END,
+                custom_status_emoji= CASE WHEN $7 IS NOT NULL THEN $7 ELSE user_profiles.custom_status_emoji END,
+                links              = CASE WHEN $8 IS NOT NULL THEN $8 ELSE user_profiles.links END,
+                updated_at         = NOW()
+            "#,
+        )
+        .bind(user_id.0)
+        .bind(server_id.0)
+        .bind(display_name)
+        .bind(description)
+        .bind(accent_color)
+        .bind(custom_status_text)
+        .bind(custom_status_emoji)
+        .bind(links_json)
+        .execute(&mut **tx)
+        .await
+        .context("upsert user profile")?;
+        Ok(())
+    }
+
+    async fn get_user_profile(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        user_id: UserId,
+        server_id: ServerId,
+    ) -> ControlResult<Option<crate::model::UserProfileRow>> {
+        let row = sqlx::query(
+            r#"
+            SELECT
+                user_id, server_id,
+                COALESCE(display_name, '') AS display_name,
+                COALESCE(description, '')  AS description,
+                COALESCE(accent_color, 0)  AS accent_color,
+                COALESCE(custom_status_text, '')  AS custom_status_text,
+                COALESCE(custom_status_emoji, '') AS custom_status_emoji,
+                COALESCE(avatar_asset_url, '')    AS avatar_asset_url,
+                COALESCE(banner_asset_url, '')    AS banner_asset_url,
+                COALESCE(links, '[]'::jsonb)      AS links,
+                created_at, updated_at
+            FROM user_profiles
+            WHERE user_id = $1 AND server_id = $2
+            "#,
+        )
+        .bind(user_id.0)
+        .bind(server_id.0)
+        .fetch_optional(&mut **tx)
+        .await
+        .context("get user profile")?;
+
+        Ok(row.map(|r| crate::model::UserProfileRow {
+            user_id: UserId(r.get("user_id")),
+            server_id: ServerId(r.get("server_id")),
+            display_name: r.get("display_name"),
+            description: r.get("description"),
+            accent_color: r.get("accent_color"),
+            custom_status_text: r.get("custom_status_text"),
+            custom_status_emoji: r.get("custom_status_emoji"),
+            avatar_asset_url: r.get("avatar_asset_url"),
+            banner_asset_url: r.get("banner_asset_url"),
+            links: r.get("links"),
+            created_at: r.get("created_at"),
+            updated_at: r.get("updated_at"),
+        }))
+    }
+
+    async fn set_profile_avatar(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        user_id: UserId,
+        server_id: ServerId,
+        avatar_url: &str,
+    ) -> ControlResult<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO user_profiles (user_id, server_id, avatar_asset_url, created_at, updated_at)
+            VALUES ($1, $2, $3, NOW(), NOW())
+            ON CONFLICT (user_id) DO UPDATE SET
+                avatar_asset_url = $3,
+                updated_at = NOW()
+            "#,
+        )
+        .bind(user_id.0)
+        .bind(server_id.0)
+        .bind(avatar_url)
+        .execute(&mut **tx)
+        .await
+        .context("set profile avatar")?;
+        Ok(())
+    }
+
+    async fn set_profile_banner(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        user_id: UserId,
+        server_id: ServerId,
+        banner_url: &str,
+    ) -> ControlResult<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO user_profiles (user_id, server_id, banner_asset_url, created_at, updated_at)
+            VALUES ($1, $2, $3, NOW(), NOW())
+            ON CONFLICT (user_id) DO UPDATE SET
+                banner_asset_url = $3,
+                updated_at = NOW()
+            "#,
+        )
+        .bind(user_id.0)
+        .bind(server_id.0)
+        .bind(banner_url)
+        .execute(&mut **tx)
+        .await
+        .context("set profile banner")?;
+        Ok(())
+    }
+
+    async fn create_asset_upload_session(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        session_id: Uuid,
+        user_id: UserId,
+        server_id: ServerId,
+        purpose: &str,
+        mime_type: &str,
+        byte_length: i64,
+    ) -> ControlResult<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO profile_asset_uploads
+                (session_id, user_id, server_id, purpose, mime_type, byte_length, status, created_at, expires_at)
+            VALUES ($1, $2, $3, $4, $5, $6, 'pending', NOW(), NOW() + INTERVAL '10 minutes')
+            "#,
+        )
+        .bind(session_id)
+        .bind(user_id.0)
+        .bind(server_id.0)
+        .bind(purpose)
+        .bind(mime_type)
+        .bind(byte_length)
+        .execute(&mut **tx)
+        .await
+        .context("create asset upload session")?;
+        Ok(())
+    }
+
+    async fn store_verified_asset(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        session_id: Uuid,
+        asset_data: &[u8],
+    ) -> ControlResult<()> {
+        sqlx::query(
+            r#"
+            UPDATE profile_asset_uploads
+            SET status = 'verified', asset_data = $2
+            WHERE session_id = $1
+            "#,
+        )
+        .bind(session_id)
+        .bind(asset_data)
+        .execute(&mut **tx)
+        .await
+        .context("store verified asset")?;
+        Ok(())
+    }
+
+    async fn get_asset_upload_session(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        session_id: Uuid,
+        user_id: UserId,
+    ) -> ControlResult<Option<crate::model::AssetUploadSession>> {
+        let row = sqlx::query(
+            r#"
+            SELECT session_id, user_id, server_id, purpose, mime_type, byte_length, status, created_at, expires_at
+            FROM profile_asset_uploads
+            WHERE session_id = $1 AND user_id = $2 AND expires_at > NOW()
+            "#,
+        )
+        .bind(session_id)
+        .bind(user_id.0)
+        .fetch_optional(&mut **tx)
+        .await
+        .context("get asset upload session")?;
+
+        Ok(row.map(|r| crate::model::AssetUploadSession {
+            session_id: r.get("session_id"),
+            user_id: UserId(r.get("user_id")),
+            server_id: ServerId(r.get("server_id")),
+            purpose: r.get("purpose"),
+            mime_type: r.get("mime_type"),
+            byte_length: r.get("byte_length"),
+            status: r.get("status"),
+            created_at: r.get("created_at"),
+            expires_at: r.get("expires_at"),
+        }))
     }
 }

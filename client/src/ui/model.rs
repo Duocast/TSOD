@@ -293,6 +293,15 @@ pub enum UiEvent {
     UserProfileLoaded(UserProfileData),
     UserProfileFetchFailed { user_id: String },
     UserProfileCacheInvalidated { user_id: String },
+    SelfProfileLoaded(UserProfileData),
+    AvatarUploadComplete { asset_id: String, preview_url: String },
+    BannerUploadComplete { asset_id: String, preview_url: String },
+    AvatarUploadFailed(String),
+    BannerUploadFailed(String),
+    ProfileUpdateComplete,
+    ProfileUpdateFailed(String),
+    CustomStatusSet,
+    CustomStatusFailed(String),
 
     // Self state
     SetSelfMuted(bool),
@@ -459,6 +468,27 @@ pub enum UiIntent {
     SetAvatar {
         path: String,
     },
+
+    // Profile editing
+    UpdateUserProfile {
+        display_name: Option<String>,
+        description: Option<String>,
+        accent_color: Option<u32>,
+        links: Vec<ProfileLinkData>,
+    },
+    UploadProfileAvatar {
+        path: std::path::PathBuf,
+    },
+    UploadProfileBanner {
+        path: std::path::PathBuf,
+    },
+    RemoveAvatar,
+    RemoveBanner,
+    SetCustomStatus {
+        status_text: Option<String>,
+        status_emoji: Option<String>,
+    },
+    FetchSelfProfile,
 
     // Settings: Audio
     SetNoiseSuppression(bool),
@@ -1465,6 +1495,17 @@ pub struct UserProfileEditDraft {
     pub custom_status_text: String,
     pub custom_status_emoji: String,
     pub links: Vec<ProfileLinkData>,
+    // Link add form
+    pub add_link_platform: String,
+    pub add_link_url: String,
+    // Accent color hex input
+    pub accent_hex_input: String,
+    // Avatar/banner pending asset ids (set after successful upload, cleared on modal close/cancel)
+    pub pending_avatar_asset_id: Option<String>,
+    pub pending_banner_asset_id: Option<String>,
+    // Local preview URLs (file://) for immediate display before server confirmation
+    pub avatar_preview_url: Option<String>,
+    pub banner_preview_url: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1806,6 +1847,15 @@ pub struct UiModel {
     pub show_edit_profile: bool,
     pub edit_profile_tab: ProfileEditTab,
     pub edit_profile_draft: UserProfileEditDraft,
+    pub self_profile: Option<UserProfileData>,
+    // Upload in-flight flags
+    pub avatar_upload_in_flight: bool,
+    pub banner_upload_in_flight: bool,
+    pub profile_save_in_flight: bool,
+    // Custom status popover
+    pub show_custom_status_popover: bool,
+    pub custom_status_text_draft: String,
+    pub custom_status_emoji_draft: String,
     pub profile_cache: HashMap<String, CachedProfile>,
     pub show_away_message_dialog: bool,
     pub show_set_avatar_dialog: bool,
@@ -2128,6 +2178,13 @@ impl Default for UiModel {
             show_edit_profile: false,
             edit_profile_tab: ProfileEditTab::Profile,
             edit_profile_draft: UserProfileEditDraft::default(),
+            self_profile: None,
+            avatar_upload_in_flight: false,
+            banner_upload_in_flight: false,
+            profile_save_in_flight: false,
+            show_custom_status_popover: false,
+            custom_status_text_draft: String::new(),
+            custom_status_emoji_draft: String::new(),
             profile_cache: HashMap::new(),
             show_away_message_dialog: false,
             show_set_avatar_dialog: false,
@@ -2727,6 +2784,50 @@ impl UiModel {
                 if self.profile_popup_user_id.as_deref() == Some(&user_id) {
                     self.profile_popup_loading = false;
                 }
+            }
+            UiEvent::SelfProfileLoaded(profile) => {
+                // Update avatar URL for user panel display.
+                if let Some(ref url) = profile.avatar_url {
+                    if !url.is_empty() {
+                        self.avatar_url = Some(url.clone());
+                    }
+                }
+                self.self_profile = Some(profile);
+            }
+            UiEvent::AvatarUploadComplete { asset_id, preview_url } => {
+                self.avatar_upload_in_flight = false;
+                self.edit_profile_draft.pending_avatar_asset_id = Some(asset_id);
+                self.edit_profile_draft.avatar_preview_url = Some(preview_url);
+            }
+            UiEvent::BannerUploadComplete { asset_id, preview_url } => {
+                self.banner_upload_in_flight = false;
+                self.edit_profile_draft.pending_banner_asset_id = Some(asset_id);
+                self.edit_profile_draft.banner_preview_url = Some(preview_url);
+            }
+            UiEvent::AvatarUploadFailed(err) => {
+                self.avatar_upload_in_flight = false;
+                self.log.push_back(format!("[profile] avatar upload failed: {err}"));
+            }
+            UiEvent::BannerUploadFailed(err) => {
+                self.banner_upload_in_flight = false;
+                self.log.push_back(format!("[profile] banner upload failed: {err}"));
+            }
+            UiEvent::ProfileUpdateComplete => {
+                self.profile_save_in_flight = false;
+                // Invalidate our own cached profile so the popup refreshes.
+                if !self.user_id.is_empty() {
+                    self.profile_cache.remove(&self.user_id);
+                }
+            }
+            UiEvent::ProfileUpdateFailed(err) => {
+                self.profile_save_in_flight = false;
+                self.log.push_back(format!("[profile] save failed: {err}"));
+            }
+            UiEvent::CustomStatusSet => {
+                self.show_custom_status_popover = false;
+            }
+            UiEvent::CustomStatusFailed(err) => {
+                self.log.push_back(format!("[profile] custom status failed: {err}"));
             }
             UiEvent::SetSelfMuted(m) => self.self_muted = m,
             UiEvent::SetSelfDeafened(d) => self.self_deafened = d,

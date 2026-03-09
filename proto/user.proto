@@ -111,6 +111,43 @@ message SetBannerResponse {
   string banner_asset_url = 1;
 }
 
+// ── Profile asset upload pipeline ──────────────────────────────────────
+
+// Step 1: client declares intent to upload a profile asset.
+message BeginProfileAssetUploadRequest {
+  string purpose    = 1;   // "profile_avatar" or "profile_banner"
+  string mime_type  = 2;   // "image/webp", "image/png", "image/jpeg"
+  uint64 byte_length = 3;  // total byte length of the upload candidate
+}
+
+// Step 2: server approves (or rejects via Error) and issues a session token.
+message BeginProfileAssetUploadResponse {
+  string session_id = 1;   // opaque; required in UploadProfileAssetDataRequest
+}
+
+// Step 3: client sends the raw bytes (single message; control-stream framed).
+// Must be sent on the same Quinn stream immediately after approval.
+message UploadProfileAssetDataRequest {
+  string session_id = 1;   // from BeginProfileAssetUploadResponse
+  bytes  data       = 2;   // resized/encoded image bytes
+}
+
+// Step 4: server verifies, stores, re-encodes, and returns the canonical asset_id.
+message CompleteProfileAssetUploadResponse {
+  AssetId asset_id = 1;    // use in SetAvatarRequest or SetBannerRequest
+}
+
+// ── Custom status ───────────────────────────────────────────────────────
+
+message SetCustomStatusRequest {
+  optional string status_text  = 1;  // absent = clear; empty string = clear
+  optional string status_emoji = 2;  // single Unicode emoji or empty to clear
+}
+
+message SetCustomStatusResponse {
+  // empty on success
+}
+
 // ── Events ─────────────────────────────────────────────────────────────
 
 message UserProfileEvent {
