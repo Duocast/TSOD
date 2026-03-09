@@ -8,6 +8,7 @@ use eframe::egui;
 /// Renders the user panel as a self-contained vertical section.
 /// Designed to sit at the bottom of the left sidebar panel.
 pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>) {
+    let panel_width = ui.available_width();
     let card_bg = egui::Color32::from_rgb(29, 34, 44);
     let control_bg = egui::Color32::from_rgb(58, 66, 84);
     let control_hover = egui::Color32::from_rgb(70, 78, 98);
@@ -24,7 +25,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
             color: egui::Color32::from_black_alpha(120),
         })
         .show(ui, |ui: &mut egui::Ui| {
-            ui.set_width(ui.available_width());
+            ui.set_min_width(panel_width - 8.0);
 
             // ── Top section: avatar + identity/status block ───────────────────
             ui.horizontal(|ui: &mut egui::Ui| {
@@ -125,7 +126,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                 }
 
                 // ── Name / status / activity column (clickable) ─────────
-                let name_col_width = ui.available_width().clamp(80.0, 170.0);
+                let name_col_width = ui.available_width().max(40.0);
                 ui.vertical(|ui: &mut egui::Ui| {
                     ui.set_max_width(name_col_width);
 
@@ -143,55 +144,61 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                         .and_then(|p| p.current_activity.as_ref())
                         .map(|a| format!("Playing {}", a.game_name));
 
-                    let status_resp = ui.add_sized(
-                        egui::vec2(name_col_width, 0.0),
-                        egui::Button::new(
-                            egui::RichText::new(&display_name)
-                                .size(20.0)
-                                .strong()
-                                .color(egui::Color32::WHITE),
-                        )
-                        .fill(egui::Color32::TRANSPARENT)
-                        .stroke(egui::Stroke::NONE)
-                        .corner_radius(6.0),
+                    let mut block = egui::text::LayoutJob::default();
+                    block.append(
+                        &display_name,
+                        0.0,
+                        egui::TextFormat {
+                            font_id: egui::FontId::proportional(20.0),
+                            color: egui::Color32::WHITE,
+                            ..Default::default()
+                        },
+                    );
+                    block.append(
+                        "\n✨  ",
+                        0.0,
+                        egui::TextFormat {
+                            font_id: egui::FontId::proportional(15.0),
+                            color: egui::Color32::from_rgb(247, 203, 79),
+                            ..Default::default()
+                        },
+                    );
+                    block.append(
+                        &status_text,
+                        0.0,
+                        egui::TextFormat {
+                            font_id: egui::FontId::proportional(15.0),
+                            color: egui::Color32::from_rgb(231, 236, 242),
+                            ..Default::default()
+                        },
                     );
 
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(
-                            egui::RichText::new("✨")
-                                .size(15.0)
-                                .color(egui::Color32::from_rgb(247, 203, 79)),
-                        );
-                        ui.add_sized(
-                            egui::vec2((name_col_width - 22.0).max(24.0), 0.0),
-                            egui::Label::new(
-                                egui::RichText::new(&status_text)
-                                    .size(15.0)
-                                    .color(egui::Color32::from_rgb(231, 236, 242)),
-                            )
-                            .wrap(),
-                        );
-                    });
-
                     if let Some(activity_text) = activity_text {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label(
-                                egui::RichText::new("🎮")
-                                    .size(15.0)
-                                    .color(egui::Color32::from_rgb(163, 108, 255)),
-                            );
-                            ui.add_sized(
-                                egui::vec2((name_col_width - 22.0).max(24.0), 0.0),
-                                egui::Label::new(
-                                    egui::RichText::new(&activity_text)
-                                        .size(15.0)
-                                        .color(egui::Color32::from_rgb(207, 214, 225)),
-                                )
-                                .wrap(),
-                            );
-                        });
+                        block.append(
+                            "\n🎮  ",
+                            0.0,
+                            egui::TextFormat {
+                                font_id: egui::FontId::proportional(15.0),
+                                color: egui::Color32::from_rgb(163, 108, 255),
+                                ..Default::default()
+                            },
+                        );
+                        block.append(
+                            &activity_text,
+                            0.0,
+                            egui::TextFormat {
+                                font_id: egui::FontId::proportional(15.0),
+                                color: egui::Color32::from_rgb(207, 214, 225),
+                                ..Default::default()
+                            },
+                        );
                     }
 
+                    let status_resp = ui.add(
+                        egui::Label::new(block)
+                            .sense(egui::Sense::click())
+                            .selectable(false),
+                    );
                     if status_resp.clicked() {
                         if let Some(ref p) = model.self_profile {
                             model.custom_status_text_draft = p.custom_status_text.clone();
@@ -219,11 +226,8 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
             let in_voice_channel = model.active_voice_channel_route != 0;
 
             ui.horizontal(|ui: &mut egui::Ui| {
-                let spacing = 8.0;
-                ui.spacing_mut().item_spacing.x = spacing;
-                let available = ui.available_width();
-                let btn_side = ((available - spacing * 3.0) / 4.0).clamp(40.0, 54.0);
-                let btn_size = egui::vec2(btn_side, btn_side);
+                ui.spacing_mut().item_spacing.x = 10.0;
+                let btn_size = egui::vec2(54.0, 54.0);
 
                 // Away
                 let away_btn = circle_icon_button(
@@ -356,8 +360,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
 
             // VAD row with segmented meter.
             ui.horizontal(|ui| {
-                let label_width = 38.0;
-                let bar_width = (ui.available_width() - label_width).max(0.0);
+                let bar_width = (ui.available_width() - 64.0).max(120.0);
                 let bar_height = 22.0;
                 let (rect, _) =
                     ui.allocate_exact_size(egui::vec2(bar_width, bar_height), egui::Sense::hover());
@@ -454,18 +457,11 @@ fn circle_icon_button(
         visuals.hovered.weak_bg_fill = hover;
         visuals.active.weak_bg_fill = active;
 
-        let icon_size = (size.x * 0.42).clamp(16.0, 22.0);
-
         ui.add_sized(
             size,
-            egui::Button::new(
-                egui::RichText::new(icon)
-                    .size(icon_size)
-                    .color(color)
-                    .strong(),
-            )
-            .stroke(egui::Stroke::NONE)
-            .corner_radius(size.x * 0.5),
+            egui::Button::new(egui::RichText::new(icon).size(22.0).color(color).strong())
+                .stroke(egui::Stroke::NONE)
+                .corner_radius(size.x * 0.5),
         )
         .on_hover_cursor(egui::CursorIcon::PointingHand)
     })
