@@ -232,7 +232,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                 // Away
                 let away_btn = circle_icon_button(
                     ui,
-                    "☾",
+                    "🌙",
                     egui::Color32::from_rgb(242, 204, 81),
                     control_bg,
                     control_hover,
