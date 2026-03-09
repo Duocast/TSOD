@@ -26,7 +26,7 @@ use eframe::egui;
 
 use crate::BUILD_VERSION;
 
-const TSOD_LOGO: egui::ImageSource<'static> = egui::include_image!("../../assets/tsod-logo.svg");
+const TSOD_LOGO: egui::ImageSource<'static> = egui::include_image!("../../assets/tsod-logo.png");
 const THIRD_PARTY_LICENSES: &str = include_str!("../../assets/third_party_licenses.tsv");
 
 fn share_source_card(
