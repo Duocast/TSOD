@@ -1,6 +1,7 @@
 pub mod chat;
 pub mod members;
 pub mod permissions_center;
+pub mod profile_edit;
 pub mod profile_popup;
 pub mod server_tree;
 pub mod settings;

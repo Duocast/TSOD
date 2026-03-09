@@ -7,9 +7,9 @@ use crate::{
     errors::{ControlError, ControlResult},
     ids::{ChannelId, MessageId, OutboxId, ServerId, UserId},
     model::{
-        AuditEntry, Channel, ChannelCreate, ChatMessage, JoinChannel, Member, OutboxEvent,
-        OutboxEventRow, PermAuditRow, PermChannelOverrideRecord, PermRoleRecord,
-        PermUserSummaryRecord, PermissionRequest, SendMessage,
+        AuditEntry, AssetUploadSession, Channel, ChannelCreate, ChatMessage, JoinChannel, Member,
+        OutboxEvent, OutboxEventRow, PermAuditRow, PermChannelOverrideRecord, PermRoleRecord,
+        PermUserSummaryRecord, PermissionRequest, SendMessage, UserProfileRow,
     },
     perms::{Capability, Decision},
     repo::ControlRepo,
@@ -1479,6 +1479,218 @@ impl<R: ControlRepo> ControlService<R> {
     pub async fn ack_outbox_published(&self, token: Uuid, ids: &[OutboxId]) -> ControlResult<()> {
         let mut tx = <R as ControlRepo>::tx(&self.repo).await?;
         <R as ControlRepo>::ack_outbox_published(&self.repo, &mut tx, ids, token).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    // -------------------------------------------------------------------------
+    // User profiles
+    // -------------------------------------------------------------------------
+
+    pub async fn get_user_profile(
+        &self,
+        ctx: &RequestContext,
+        target_user_id: UserId,
+    ) -> ControlResult<Option<UserProfileRow>> {
+        let mut tx = <R as ControlRepo>::tx(&self.repo).await?;
+        let row = <R as ControlRepo>::get_user_profile(
+            &self.repo,
+            &mut tx,
+            target_user_id,
+            ctx.server_id,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(row)
+    }
+
+    pub async fn update_user_profile(
+        &self,
+        ctx: &RequestContext,
+        display_name: Option<String>,
+        description: Option<String>,
+        accent_color: Option<i32>,
+        links_json: Option<serde_json::Value>,
+    ) -> ControlResult<()> {
+        if let Some(ref dn) = display_name {
+            if dn.len() > 32 {
+                return Err(ControlError::InvalidArgument("display_name too long"));
+            }
+        }
+        if let Some(ref desc) = description {
+            if desc.len() > 190 {
+                return Err(ControlError::InvalidArgument("description too long"));
+            }
+        }
+        let mut tx = <R as ControlRepo>::tx(&self.repo).await?;
+        <R as ControlRepo>::upsert_user_profile(
+            &self.repo,
+            &mut tx,
+            ctx.user_id,
+            ctx.server_id,
+            display_name.as_deref(),
+            description.as_deref(),
+            accent_color,
+            None,
+            None,
+            links_json,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn set_avatar(
+        &self,
+        ctx: &RequestContext,
+        avatar_url: &str,
+    ) -> ControlResult<()> {
+        let mut tx = <R as ControlRepo>::tx(&self.repo).await?;
+        <R as ControlRepo>::set_profile_avatar(
+            &self.repo,
+            &mut tx,
+            ctx.user_id,
+            ctx.server_id,
+            avatar_url,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn set_banner(
+        &self,
+        ctx: &RequestContext,
+        banner_url: &str,
+    ) -> ControlResult<()> {
+        let mut tx = <R as ControlRepo>::tx(&self.repo).await?;
+        <R as ControlRepo>::set_profile_banner(
+            &self.repo,
+            &mut tx,
+            ctx.user_id,
+            ctx.server_id,
+            banner_url,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn begin_profile_asset_upload(
+        &self,
+        ctx: &RequestContext,
+        purpose: &str,
+        mime_type: &str,
+        byte_length: i64,
+    ) -> ControlResult<Uuid> {
+        const MAX_AVATAR_BYTES: i64 = 8 * 1024 * 1024;
+        const MAX_BANNER_BYTES: i64 = 10 * 1024 * 1024;
+
+        match purpose {
+            "profile_avatar" | "profile_banner" => {}
+            _ => return Err(ControlError::InvalidArgument("unknown purpose")),
+        }
+        match mime_type {
+            "image/png" | "image/jpeg" | "image/webp" => {}
+            _ => return Err(ControlError::InvalidArgument("unsupported mime_type")),
+        }
+        let limit = if purpose == "profile_avatar" {
+            MAX_AVATAR_BYTES
+        } else {
+            MAX_BANNER_BYTES
+        };
+        if byte_length <= 0 || byte_length > limit {
+            return Err(ControlError::InvalidArgument("byte_length out of range"));
+        }
+
+        let session_id = Uuid::new_v4();
+        let mut tx = <R as ControlRepo>::tx(&self.repo).await?;
+        <R as ControlRepo>::create_asset_upload_session(
+            &self.repo,
+            &mut tx,
+            session_id,
+            ctx.user_id,
+            ctx.server_id,
+            purpose,
+            mime_type,
+            byte_length,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(session_id)
+    }
+
+    pub async fn store_verified_asset(
+        &self,
+        user_id: UserId,
+        session_id: Uuid,
+        asset_data: &[u8],
+    ) -> ControlResult<()> {
+        // Re-verify ownership.
+        let mut tx = <R as ControlRepo>::tx(&self.repo).await?;
+        let session = <R as ControlRepo>::get_asset_upload_session(
+            &self.repo,
+            &mut tx,
+            session_id,
+            user_id,
+        )
+        .await?;
+        if session.is_none() {
+            return Err(ControlError::NotFound("asset upload session not found or expired"));
+        }
+        <R as ControlRepo>::store_verified_asset(&self.repo, &mut tx, session_id, asset_data)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn get_asset_upload_session(
+        &self,
+        user_id: UserId,
+        session_id: Uuid,
+    ) -> ControlResult<Option<AssetUploadSession>> {
+        let mut tx = <R as ControlRepo>::tx(&self.repo).await?;
+        let session = <R as ControlRepo>::get_asset_upload_session(
+            &self.repo,
+            &mut tx,
+            session_id,
+            user_id,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(session)
+    }
+
+    pub async fn set_custom_status(
+        &self,
+        ctx: &RequestContext,
+        status_text: Option<String>,
+        status_emoji: Option<String>,
+    ) -> ControlResult<()> {
+        if let Some(ref t) = status_text {
+            if t.len() > 128 {
+                return Err(ControlError::InvalidArgument("status_text too long"));
+            }
+        }
+        if let Some(ref e) = status_emoji {
+            if e.len() > 64 {
+                return Err(ControlError::InvalidArgument("status_emoji too long"));
+            }
+        }
+        let mut tx = <R as ControlRepo>::tx(&self.repo).await?;
+        <R as ControlRepo>::upsert_user_profile(
+            &self.repo,
+            &mut tx,
+            ctx.user_id,
+            ctx.server_id,
+            None,
+            None,
+            None,
+            status_text.as_deref(),
+            status_emoji.as_deref(),
+            None,
+        )
+        .await?;
         tx.commit().await?;
         Ok(())
     }

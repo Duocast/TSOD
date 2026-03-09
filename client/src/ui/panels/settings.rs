@@ -138,7 +138,19 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                             SettingsPage::VideoCall => {
                                 page_video_call(ui, &mut model.settings_draft)
                             }
-                            SettingsPage::Security => page_security(ui, &mut model.settings_draft),
+                            SettingsPage::Security => {
+                                let (security_dirty, open_edit) =
+                                    page_security(ui, &mut model.settings_draft);
+                                if open_edit {
+                                    crate::ui::panels::profile_edit::init_draft_from_profile(model);
+                                    model.edit_profile_tab = crate::ui::model::ProfileEditTab::Profile;
+                                    model.show_edit_profile = true;
+                                    if model.self_profile.is_none() {
+                                        let _ = tx_intent.send(UiIntent::FetchSelfProfile);
+                                    }
+                                }
+                                security_dirty
+                            }
                         };
                         if dirty {
                             model.settings_dirty = true;
@@ -1948,14 +1960,20 @@ fn page_video_call(ui: &mut egui::Ui, s: &mut AppSettings) -> bool {
 
 // ── Security ──────────────────────────────────────────────────────────
 
-fn page_security(ui: &mut egui::Ui, s: &mut AppSettings) -> bool {
-    let mut dirty = false;
+/// Returns `(settings_dirty, open_edit_profile)`.
+fn page_security(ui: &mut egui::Ui, s: &mut AppSettings) -> (bool, bool) {
+    let mut open_edit_profile = false;
 
     section(ui, "Identity");
     hint(
         ui,
         "Nickname is configured from the Connections window and used when connecting/joining channels.",
     );
+    ui.add_space(4.0);
+    if ui.button("Edit Profile…").clicked() {
+        open_edit_profile = true;
+    }
+    ui.add_space(8.0);
 
     section(ui, "Connection");
 
@@ -2024,5 +2042,5 @@ fn page_security(ui: &mut egui::Ui, s: &mut AppSettings) -> bool {
               certificate pinning (VP_TLS_PIN_SHA256_HEX). Dev mode accepts all certificates.",
     );
 
-    dirty
+    (dirty, open_edit_profile)
 }

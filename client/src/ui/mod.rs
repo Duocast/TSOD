@@ -671,43 +671,30 @@ impl eframe::App for VpApp {
             }
         }
 
+        // Legacy set-avatar dialog is no longer shown; redirected to profile edit modal.
         if self.model.show_set_avatar_dialog {
-            let mut open = true;
-            egui::Window::new("Set Avatar")
-                .constrain(false)
-                .open(&mut open)
-                .default_width(420.0)
-                .min_width(380.0)
-                .collapsible(false)
-                .resizable(false)
-                .show(ctx, |ui| {
-                    ui.label("Choose an image file for your avatar.");
-                    ui.add_space(8.0);
-
-                    ui.label("Enter a local image path (png, jpg, jpeg, gif, or webp):");
-                    ui.add_sized(
-                        [ui.available_width(), 24.0],
-                        egui::TextEdit::singleline(&mut self.model.avatar_path_draft),
-                    );
-
-                    ui.add_space(10.0);
-                    ui.horizontal(|ui| {
-                        if ui.button("Apply").clicked() {
-                            let chosen = self.model.avatar_path_draft.trim().to_string();
-                            if !chosen.is_empty() {
-                                self.model.avatar_url = Some(format!("file://{chosen}"));
-                                let _ = self.tx_intent.send(UiIntent::SetAvatar { path: chosen });
-                                self.model.show_set_avatar_dialog = false;
-                            }
-                        }
-                        if ui.button("Cancel").clicked() {
-                            self.model.show_set_avatar_dialog = false;
-                        }
-                    });
-                });
-            if !open {
-                self.model.show_set_avatar_dialog = false;
+            self.model.show_set_avatar_dialog = false;
+            panels::profile_edit::init_draft_from_profile(&mut self.model);
+            self.model.edit_profile_tab = model::ProfileEditTab::Avatar;
+            self.model.show_edit_profile = true;
+            if self.model.self_profile.is_none() {
+                let _ = self.tx_intent.send(UiIntent::FetchSelfProfile);
             }
+        }
+
+        // Profile edit modal
+        panels::profile_edit::show(ctx, &mut self.model, &self.tx_intent);
+
+        // Custom status popover (anchored near user panel status text)
+        if self.model.show_custom_status_popover {
+            // Anchor near bottom-left (user panel area).
+            let anchor = egui::pos2(8.0, ctx.available_rect().max.y - 120.0);
+            panels::profile_edit::show_custom_status_popover(
+                ctx,
+                &mut self.model,
+                &self.tx_intent,
+                anchor,
+            );
         }
 
         if self.model.show_share_content_dialog {

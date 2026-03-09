@@ -193,6 +193,37 @@ pub struct PermUserSummaryRecord {
     pub role_ids: Vec<String>,
     pub is_admin: bool,
 }
+/// User profile row returned from the database.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UserProfileRow {
+    pub user_id: UserId,
+    pub server_id: ServerId,
+    pub display_name: String,
+    pub description: String,
+    pub accent_color: i32,
+    pub custom_status_text: String,
+    pub custom_status_emoji: String,
+    pub avatar_asset_url: String,
+    pub banner_asset_url: String,
+    pub links: serde_json::Value,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// In-progress profile asset upload session.
+#[derive(Clone, Debug)]
+pub struct AssetUploadSession {
+    pub session_id: uuid::Uuid,
+    pub user_id: UserId,
+    pub server_id: ServerId,
+    pub purpose: String,
+    pub mime_type: String,
+    pub byte_length: i64,
+    pub status: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+}
+
 /// Permission check request (repo decides allow/deny)
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PermissionRequest {

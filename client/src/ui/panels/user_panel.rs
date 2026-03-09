@@ -71,31 +71,51 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                 ui.painter().circle_filled(dot_pos, 4.0, status_color);
 
                 if response.clicked() {
-                    model.show_set_avatar_dialog = true;
+                    // Open the full profile edit modal on the Avatar tab.
+                    crate::ui::panels::profile_edit::init_draft_from_profile(model);
+                    model.edit_profile_tab = crate::ui::model::ProfileEditTab::Avatar;
+                    model.show_edit_profile = true;
+                    // Request self profile if not yet loaded.
+                    if model.self_profile.is_none() {
+                        let _ = tx_intent.send(UiIntent::FetchSelfProfile);
+                    }
                 }
-                response.on_hover_text("Set Avatar");
+                response.on_hover_text("Edit Profile");
 
                 // Name and status text
                 ui.vertical(|ui: &mut egui::Ui| {
+                    let display_name = model
+                        .self_profile
+                        .as_ref()
+                        .map(|p| p.display_name.clone())
+                        .filter(|n| !n.is_empty())
+                        .unwrap_or_else(|| model.nick.clone());
                     ui.label(
-                        egui::RichText::new(&model.nick)
+                        egui::RichText::new(&display_name)
                             .strong()
                             .size(13.0)
                             .color(theme::text_color()),
                     );
-                    let mut status_text = if model.connected {
-                        "Online".to_string()
-                    } else {
-                        "Offline".to_string()
-                    };
-                    if !model.away_message.is_empty() {
-                        status_text = format!("Away: {}", model.away_message);
-                    }
-                    ui.label(
-                        egui::RichText::new(status_text)
-                            .size(11.0)
-                            .color(theme::text_muted()),
+
+                    // Clickable status/custom status area
+                    let status_text = build_status_text(model);
+                    let status_resp = ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(&status_text)
+                                .size(11.0)
+                                .color(theme::text_muted()),
+                        )
+                        .sense(egui::Sense::click()),
                     );
+                    if status_resp.clicked() {
+                        // Open custom status popover
+                        if let Some(ref p) = model.self_profile {
+                            model.custom_status_text_draft = p.custom_status_text.clone();
+                            model.custom_status_emoji_draft = p.custom_status_emoji.clone();
+                        }
+                        model.show_custom_status_popover = !model.show_custom_status_popover;
+                    }
+                    status_resp.on_hover_text("Set custom status");
                 });
             });
 
@@ -285,4 +305,28 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                 ui.painter().rect_filled(filled, 2.0, color);
             }
         });
+}
+
+fn build_status_text(model: &crate::ui::model::UiModel) -> String {
+    // Show custom status if set.
+    if let Some(ref p) = model.self_profile {
+        let mut parts = String::new();
+        if !p.custom_status_emoji.is_empty() {
+            parts.push_str(&p.custom_status_emoji);
+            parts.push(' ');
+        }
+        if !p.custom_status_text.is_empty() {
+            parts.push_str(&p.custom_status_text);
+            return parts;
+        }
+    }
+    // Fall back to away message or connection state.
+    if !model.away_message.is_empty() {
+        return format!("Away: {}", model.away_message);
+    }
+    if model.connected {
+        "Online".to_string()
+    } else {
+        "Offline".to_string()
+    }
 }
