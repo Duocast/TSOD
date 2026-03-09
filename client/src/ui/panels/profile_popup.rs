@@ -38,13 +38,6 @@ pub fn show(ctx: &egui::Context, model: &mut UiModel, tx_intent: &Sender<UiInten
         .show(ctx, |ui| {
             popup_rect = ui.max_rect();
             ui.set_min_size(POPUP_SIZE);
-            if model.profile_popup_loading {
-                ui.centered_and_justified(|ui| {
-                    ui.label(egui::RichText::new("Loading profile...").color(theme::text_muted()));
-                });
-                return;
-            }
-
             if let Some(profile) = model
                 .profile_popup_data
                 .as_ref()
@@ -52,6 +45,11 @@ pub fn show(ctx: &egui::Context, model: &mut UiModel, tx_intent: &Sender<UiInten
                 .cloned()
             {
                 render_profile(ui, model, tx_intent, &profile);
+            } else if model.profile_popup_loading {
+                ui.centered_and_justified(|ui| {
+                    ui.spinner();
+                    ui.label(egui::RichText::new("Loading profile...").color(theme::text_muted()));
+                });
             } else {
                 ui.centered_and_justified(|ui| {
                     ui.label(egui::RichText::new("Profile unavailable").color(theme::text_muted()));

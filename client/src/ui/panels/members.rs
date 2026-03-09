@@ -59,7 +59,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
             // Left-click opens profile popup; middle-click opens connection info.
             if response.clicked() {
                 let click_pos = response.rect.right_top() + egui::vec2(8.0, 0.0);
-                model.open_profile_popup(member.user_id.clone(), click_pos);
+                model.open_profile_popup(member.user_id.clone(), click_pos, tx_intent);
             }
 
             if response.middle_clicked() {
@@ -194,7 +194,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
             response.context_menu(|ui| {
                 if ui.button("View Profile").clicked() {
                     let click_pos = ui.min_rect().right_top() + egui::vec2(8.0, 0.0);
-                    model.open_profile_popup(member.user_id.clone(), click_pos);
+                    model.open_profile_popup(member.user_id.clone(), click_pos, tx_intent);
                     ui.close();
                 }
                 ui.separator();
