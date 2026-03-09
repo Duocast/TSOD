@@ -356,45 +356,6 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                 });
             });
 
-            ui.add_space(12.0);
-
-            // VAD row with segmented meter.
-            ui.horizontal(|ui| {
-                let bar_width = (ui.available_width() - 64.0).max(120.0);
-                let bar_height = 22.0;
-                let (rect, _) =
-                    ui.allocate_exact_size(egui::vec2(bar_width, bar_height), egui::Sense::hover());
-
-                ui.painter()
-                    .rect_filled(rect, 4.0, egui::Color32::from_rgb(25, 30, 40));
-
-                let level = model.vad_level.unwrap_or(0.0).clamp(0.0, 1.0);
-                let segments = 26;
-                let gap = 1.5;
-                let seg_width = (rect.width() - gap * (segments as f32 + 1.0)) / segments as f32;
-                let filled = (level * segments as f32).round() as usize;
-
-                for idx in 0..segments {
-                    let x = rect.left() + gap + idx as f32 * (seg_width + gap);
-                    let seg_rect = egui::Rect::from_min_size(
-                        egui::pos2(x, rect.top() + 2.0),
-                        egui::vec2(seg_width, rect.height() - 4.0),
-                    );
-                    let color = if idx < filled {
-                        egui::Color32::from_rgb(233, 237, 244)
-                    } else {
-                        egui::Color32::from_rgb(53, 66, 100)
-                    };
-                    ui.painter().rect_filled(seg_rect, 1.0, color);
-                }
-
-                ui.add_space(8.0);
-                ui.label(
-                    egui::RichText::new("VAD")
-                        .size(15.0)
-                        .color(egui::Color32::from_rgb(233, 237, 244)),
-                );
-            });
         });
 }
 
