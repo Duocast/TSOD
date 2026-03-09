@@ -357,13 +357,13 @@ impl eframe::App for VpApp {
 
         // Left panel: server/channel tree + user panel at bottom
         egui::SidePanel::left("server_tree")
-            .default_width(220.0)
+            .default_width(280.0)
             .min_width(180.0)
             .max_width(320.0)
             .show(ctx, |ui| {
                 let total_height = ui.available_height();
-                let user_panel_height = 100.0;
-                let tree_height = (total_height - user_panel_height).max(100.0);
+                let reserved_user_panel_height = 250.0;
+                let tree_height = (total_height - reserved_user_panel_height).max(100.0);
 
                 // Channel tree (scrollable, takes most space)
                 ui.allocate_ui_with_layout(
@@ -374,13 +374,19 @@ impl eframe::App for VpApp {
                     },
                 );
 
-                // Push the user panel to the bottom of the sidebar.
-                let spacer = (ui.available_height() - 112.0).max(4.0);
-                ui.add_space(spacer);
+                ui.add_space(6.0);
                 ui.separator();
+                ui.add_space(6.0);
 
                 // User panel at the bottom of the sidebar
-                panels::user_panel::show(ui, &mut self.model, &self.tx_intent);
+                let user_panel_height = ui.available_height().max(140.0);
+                ui.allocate_ui_with_layout(
+                    egui::vec2(ui.available_width(), user_panel_height),
+                    egui::Layout::top_down(egui::Align::LEFT),
+                    |ui| {
+                        panels::user_panel::show(ui, &mut self.model, &self.tx_intent);
+                    },
+                );
             });
 
         // Right panel: member list
