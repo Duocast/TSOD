@@ -73,8 +73,7 @@ impl VideoFrameQueue {
             self.total_frags += 1;
         }
     }
-    fn pop_next(&mut self, now: Instant) -> Option<Bytes> {
-        self.drop_expired(now);
+    fn pop_next(&mut self) -> Option<Bytes> {
         let key = self.order.front().copied()?;
         let frame = self.frames.get_mut(&key)?;
         let b = frame.fragments.pop_front()?;
@@ -188,6 +187,12 @@ impl EgressScheduler {
             Instant::now() + Duration::from_millis(200),
             bytes,
         );
+        let n = q.enforce_bounds();
+        if n > 0 {
+            self.stats
+                .drop_queue_full
+                .fetch_add(n as u64, Ordering::Relaxed);
+        }
         drop(q);
         self.notify.notify_one();
     }
@@ -202,7 +207,7 @@ impl EgressScheduler {
                         .drop_deadline
                         .fetch_add(dropped as u64, Ordering::Relaxed);
                 }
-                q.pop_next(Instant::now())
+                q.pop_next()
             };
             let Some(bytes) = maybe else {
                 let _ = timeout(Duration::from_millis(10), self.notify.notified()).await;
