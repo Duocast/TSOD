@@ -732,11 +732,9 @@ impl ControlRepo for PgControlRepo {
     ) -> ControlResult<Option<Member>> {
         let row = sqlx::query(
             r#"
-            SELECT m.channel_id, m.user_id, m.display_name, m.muted, m.deafened, m.joined_at,
-                   up.avatar_asset_url
-            FROM members m
-            LEFT JOIN user_profiles up ON up.server_id = m.server_id AND up.user_id = m.user_id
-            WHERE m.server_id = $1 AND m.channel_id = $2 AND m.user_id = $3
+            SELECT channel_id, user_id, display_name, muted, deafened, joined_at
+            FROM members
+            WHERE server_id = $1 AND channel_id = $2 AND user_id = $3
             "#,
         )
         .bind(server.0)
@@ -753,10 +751,6 @@ impl ControlRepo for PgControlRepo {
             muted: r.get::<bool, _>("muted"),
             deafened: r.get::<bool, _>("deafened"),
             joined_at: r.get::<DateTime<Utc>, _>("joined_at"),
-            avatar_asset_url: r
-                .try_get::<Option<String>, _>("avatar_asset_url")
-                .ok()
-                .flatten(),
         }))
     }
 
@@ -768,12 +762,10 @@ impl ControlRepo for PgControlRepo {
     ) -> ControlResult<Vec<Member>> {
         let rows = sqlx::query(
             r#"
-            SELECT m.channel_id, m.user_id, m.display_name, m.muted, m.deafened, m.joined_at,
-                   up.avatar_asset_url
-            FROM members m
-            LEFT JOIN user_profiles up ON up.server_id = m.server_id AND up.user_id = m.user_id
-            WHERE m.server_id = $1 AND m.channel_id = $2
-            ORDER BY m.joined_at ASC
+            SELECT channel_id, user_id, display_name, muted, deafened, joined_at
+            FROM members
+            WHERE server_id = $1 AND channel_id = $2
+            ORDER BY joined_at ASC
             "#,
         )
         .bind(server.0)
@@ -791,10 +783,6 @@ impl ControlRepo for PgControlRepo {
                 muted: r.get::<bool, _>("muted"),
                 deafened: r.get::<bool, _>("deafened"),
                 joined_at: r.get::<DateTime<Utc>, _>("joined_at"),
-                avatar_asset_url: r
-                    .try_get::<Option<String>, _>("avatar_asset_url")
-                    .ok()
-                    .flatten(),
             });
         }
         Ok(out)
