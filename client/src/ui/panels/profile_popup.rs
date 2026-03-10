@@ -375,15 +375,17 @@ fn render_content_area(
             for badge in &profile.badges {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
-                    if !badge.icon_url.trim().is_empty() {
+                    if let Some((uri, bytes)) = badge_icon_from_icon_url(&badge.icon_url)
+                        .or_else(|| badge_icon_fallback(&badge.id))
+                    {
                         ui.add(
-                            crate::ui::image_from_source(&badge.icon_url)
+                            egui::Image::from_bytes(uri, bytes)
                                 .fit_to_exact_size(egui::vec2(16.0, 16.0))
                                 .corner_radius(2.0),
                         );
-                    } else if let Some((uri, bytes)) = badge_icon_fallback(&badge.id) {
+                    } else if !badge.icon_url.trim().is_empty() {
                         ui.add(
-                            egui::Image::from_bytes(uri, bytes)
+                            crate::ui::image_from_source(&badge.icon_url)
                                 .fit_to_exact_size(egui::vec2(16.0, 16.0))
                                 .corner_radius(2.0),
                         );
@@ -681,6 +683,17 @@ fn badge_icon_fallback(badge_id: &str) -> Option<(&'static str, &'static [u8])> 
         "developer" => Some(("bytes://badge/code", BADGE_CODE)),
         "founder" => Some(("bytes://badge/trophy", BADGE_TROPHY)),
         "early-adopter" => Some(("bytes://badge/level_up", BADGE_LEVEL_UP)),
+        _ => None,
+    }
+}
+
+fn badge_icon_from_icon_url(icon_url: &str) -> Option<(&'static str, &'static [u8])> {
+    match icon_url.trim() {
+        "client/assets/Badges/24_crown.png" => Some(("bytes://badge/crown", BADGE_CROWN)),
+        "client/assets/Badges/14_shield.png" => Some(("bytes://badge/shield", BADGE_SHIELD)),
+        "client/assets/Badges/07_code.png" => Some(("bytes://badge/code", BADGE_CODE)),
+        "client/assets/Badges/23_trophy.png" => Some(("bytes://badge/trophy", BADGE_TROPHY)),
+        "client/assets/Badges/40_level_up.png" => Some(("bytes://badge/level_up", BADGE_LEVEL_UP)),
         _ => None,
     }
 }
