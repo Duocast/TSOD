@@ -1365,6 +1365,7 @@ pub struct ChatMessage {
     pub channel_id: String,
     pub author_id: String,
     pub author_name: String,
+    pub author_avatar_url: Option<String>,
     pub text: String,
     pub timestamp: i64, // unix millis
     pub attachments: Vec<AttachmentData>,
@@ -2491,12 +2492,18 @@ impl UiModel {
                         .or_insert(now);
                 }
                 self.members.insert(channel_id, members);
+                self.refresh_message_author_metadata();
             }
             UiEvent::MessageReceived(mut msg) => {
                 msg.author_name = self.resolve_message_author_name(
                     &msg.channel_id,
                     &msg.author_id,
                     &msg.author_name,
+                );
+                msg.author_avatar_url = self.resolve_message_author_avatar_url(
+                    &msg.channel_id,
+                    &msg.author_id,
+                    msg.author_avatar_url.as_deref(),
                 );
                 let local_user_id = self.user_id.clone();
                 let ch = msg.channel_id.clone();
@@ -3098,6 +3105,77 @@ impl UiModel {
         "User".to_string()
     }
 
+    fn resolve_message_author_avatar_url(
+        &self,
+        channel_id: &str,
+        author_id: &str,
+        fallback_author_avatar_url: Option<&str>,
+    ) -> Option<String> {
+        if !author_id.trim().is_empty() {
+            if let Some(avatar_url) = self.members.get(channel_id).and_then(|members| {
+                members
+                    .iter()
+                    .find(|member| member.user_id == author_id)
+                    .and_then(|member| member.avatar_url.as_ref())
+                    .map(|avatar| avatar.trim())
+                    .filter(|avatar| !avatar.is_empty())
+            }) {
+                return Some(avatar_url.to_string());
+            }
+
+            if !self.user_id.is_empty() && self.user_id == author_id {
+                if let Some(avatar_url) = self.avatar_url.as_ref().map(|a| a.trim()) {
+                    if !avatar_url.is_empty() {
+                        return Some(avatar_url.to_string());
+                    }
+                }
+            }
+        }
+
+        fallback_author_avatar_url
+            .map(str::trim)
+            .filter(|avatar| !avatar.is_empty())
+            .map(str::to_string)
+    }
+
+    fn refresh_message_author_metadata(&mut self) {
+        let channel_ids = self.messages.keys().cloned().collect::<Vec<_>>();
+        for channel_id in channel_ids {
+            let resolved_metadata = self
+                .messages
+                .get(&channel_id)
+                .map(|messages| {
+                    messages
+                        .iter()
+                        .map(|message| {
+                            (
+                                self.resolve_message_author_name(
+                                    &channel_id,
+                                    &message.author_id,
+                                    &message.author_name,
+                                ),
+                                self.resolve_message_author_avatar_url(
+                                    &channel_id,
+                                    &message.author_id,
+                                    message.author_avatar_url.as_deref(),
+                                ),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+
+            if let Some(messages) = self.messages.get_mut(&channel_id) {
+                for (message, (author_name, author_avatar_url)) in
+                    messages.iter_mut().zip(resolved_metadata.into_iter())
+                {
+                    message.author_name = author_name;
+                    message.author_avatar_url = author_avatar_url;
+                }
+            }
+        }
+    }
+
     /// Sync persisted settings into runtime model state.
     pub fn sync_settings_to_runtime(&mut self) {
         self.ptt_enabled = self.settings.capture_mode == CaptureMode::PushToTalk;
@@ -3305,6 +3383,7 @@ mod tests {
             channel_id: "lounge-1".into(),
             author_id: "user-1".into(),
             author_name: "user-1".into(),
+            author_avatar_url: None,
             text: "hello".into(),
             timestamp: 1_710_000_000_000,
             attachments: vec![],
@@ -3327,6 +3406,7 @@ mod tests {
             channel_id: "lounge-1".into(),
             author_id: "unknown".into(),
             author_name: "".into(),
+            author_avatar_url: None,
             text: "fallback".into(),
             timestamp: 1_710_000_000_100,
             attachments: vec![],
@@ -3697,6 +3777,7 @@ mod tests {
             channel_id: "lounge-1".into(),
             author_id: "remote-user".into(),
             author_name: "Dresk".into(),
+            author_avatar_url: None,
             text: "hello".into(),
             timestamp: 1_710_000_000_000,
             attachments: vec![],
@@ -3722,6 +3803,7 @@ mod tests {
             channel_id: "lounge-1".into(),
             author_id: "local-user".into(),
             author_name: "Overdose".into(),
+            author_avatar_url: None,
             text: "indeed".into(),
             timestamp: 1_710_000_000_000,
             attachments: vec![],
@@ -3736,6 +3818,7 @@ mod tests {
             channel_id: "lounge-1".into(),
             author_id: "local-user".into(),
             author_name: "Overdose".into(),
+            author_avatar_url: None,
             text: "indeed".into(),
             timestamp: 1_710_000_005_000,
             attachments: vec![],
@@ -3760,6 +3843,7 @@ mod tests {
             channel_id: "lounge-1".into(),
             author_id: "local-user".into(),
             author_name: "Overdose".into(),
+            author_avatar_url: None,
             text: "indeed".into(),
             timestamp: 1_710_000_000_000,
             attachments: vec![],
@@ -3773,6 +3857,7 @@ mod tests {
             channel_id: "lounge-1".into(),
             author_id: "local-user".into(),
             author_name: "Overdose".into(),
+            author_avatar_url: None,
             text: "indeed".into(),
             timestamp: 1_710_000_001_000,
             attachments: vec![],

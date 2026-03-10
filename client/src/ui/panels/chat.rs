@@ -773,6 +773,9 @@ fn show_message(
     tx_intent: &Sender<UiIntent>,
 ) {
     ui.horizontal(|ui| {
+        show_message_avatar(ui, msg);
+        ui.add_space(8.0);
+
         ui.vertical(|ui| {
             ui.horizontal(|ui| {
                 let author_resp = ui.add(
@@ -805,6 +808,45 @@ fn show_message(
             show_message_content(ui, msg, tx_intent);
         });
     });
+}
+
+fn show_message_avatar(ui: &mut egui::Ui, msg: &ChatMessage) {
+    let avatar_size = egui::vec2(40.0, 40.0);
+    let (avatar_rect, _) = ui.allocate_exact_size(avatar_size, egui::Sense::hover());
+    let avatar_center = avatar_rect.center();
+
+    ui.painter()
+        .circle_filled(avatar_center, 20.0, egui::Color32::from_rgb(68, 78, 100));
+
+    if let Some(avatar_url) = msg
+        .author_avatar_url
+        .as_deref()
+        .filter(|url| !url.is_empty())
+    {
+        ui.put(
+            avatar_rect,
+            crate::ui::image_from_source(avatar_url)
+                .fit_to_exact_size(avatar_size)
+                .corner_radius(egui::CornerRadius::same(20)),
+        );
+        return;
+    }
+
+    let fallback = msg
+        .author_name
+        .chars()
+        .find(|ch| !ch.is_whitespace())
+        .map(|ch| ch.to_string())
+        .unwrap_or_else(|| "?".to_string())
+        .to_uppercase();
+
+    ui.painter().text(
+        avatar_center,
+        egui::Align2::CENTER_CENTER,
+        fallback,
+        egui::FontId::proportional(18.0),
+        egui::Color32::WHITE,
+    );
 }
 
 fn show_date_separator(ui: &mut egui::Ui, date: NaiveDate) {
