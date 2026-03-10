@@ -438,7 +438,14 @@ impl<R: ControlRepo> ControlService<R> {
             muted: false,
             deafened: false,
             joined_at: Utc::now(),
+            avatar_asset_url: None,
         };
+
+        let avatar_asset_url =
+            <R as ControlRepo>::get_user_profile(&self.repo, &mut tx, ctx.user_id, ctx.server_id)
+                .await?
+                .map(|p| p.avatar_asset_url)
+                .filter(|u| !u.trim().is_empty());
 
         debug!(
             server_id = %ctx.server_id.0,
@@ -474,6 +481,7 @@ impl<R: ControlRepo> ControlService<R> {
                     "channel_id": req.channel_id.0,
                     "user_id": ctx.user_id.0,
                     "display_name": m.display_name,
+                    "avatar_asset_url": avatar_asset_url,
                     "muted": m.muted,
                     "deafened": m.deafened,
                 }),
