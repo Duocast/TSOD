@@ -4377,10 +4377,11 @@ async fn connect_and_run_session(
                         }
                         UiIntent::UploadProfileAvatar { path } => {
                             match upload_profile_image(
+                                &conn,
                                 &dispatcher,
                                 &path,
                                 "profile_avatar",
-                                8 * 1024 * 1024,
+                                3 * 1024 * 1024,
                                 256,
                                 256,
                             )
@@ -4414,6 +4415,7 @@ async fn connect_and_run_session(
                         }
                         UiIntent::UploadProfileBanner { path } => {
                             match upload_profile_image(
+                                &conn,
                                 &dispatcher,
                                 &path,
                                 "profile_banner",
@@ -5193,6 +5195,12 @@ async fn upload_attachment_quic(
     use tokio::io::AsyncReadExt;
 
     let (mut send, mut recv) = conn.open_bi().await.context("open media stream")?;
+     
+    // Write stream-type discriminator so the server routes to the media handler.
+    send.write_all(&[net::dispatcher::STREAM_TYPE_MEDIA])
+        .await
+        .context("write stream type")?;
+ 
     let local_path = pending_local_path(attachment)?;
     let mut file = tokio::fs::File::open(&local_path)
         .await
@@ -5283,6 +5291,12 @@ async fn download_attachment_quic(
     use tokio::io::AsyncWriteExt;
 
     let (mut send, mut recv) = conn.open_bi().await.context("open media stream")?;
+     
+    // Write stream-type discriminator so the server routes to the media handler.
+    send.write_all(&[net::dispatcher::STREAM_TYPE_MEDIA])
+        .await
+        .context("write stream type")?;
+ 
     let req = pb::MediaRequest {
         payload: Some(pb::media_request::Payload::DownloadRequest(
             pb::DownloadRequest {
@@ -6515,6 +6529,7 @@ fn hex_to_32(s: &str) -> Result<[u8; 32]> {
 /// For banners (wide): uses cover-fill to resize, then center-crops to `target_w×target_h`.
 /// This ensures the uploaded image always matches the expected dimensions exactly.
 async fn upload_profile_image(
+    conn: &quinn::Connection,
     dispatcher: &net::dispatcher::ControlDispatcher,
     path: &std::path::Path,
     purpose: &str,
@@ -6558,9 +6573,9 @@ async fn upload_profile_image(
     )
     .context("encode image to WebP")?;
 
-    // Upload via the dispatcher (control stream).
+    // Upload via a dedicated bidi stream.
     let asset_id = dispatcher
-        .upload_profile_asset(purpose, webp_bytes, "image/webp")
+        .upload_profile_asset(conn, purpose, webp_bytes, "image/webp")
         .await
         .context("upload profile asset")?;
 
