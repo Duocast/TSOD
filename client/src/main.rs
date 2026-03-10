@@ -4397,6 +4397,19 @@ async fn connect_and_run_session(
                                                 asset_id,
                                                 preview_bytes,
                                             });
+                                            if let Ok(mut profile) = dispatcher.fetch_self_profile(&local_user_id).await {
+                                                if let Some(raw) = profile.avatar_url.as_deref() {
+                                                    if let Ok(resolved) = resolve_profile_asset_uri(&conn, raw).await {
+                                                        profile.avatar_url = resolved;
+                                                    }
+                                                }
+                                                if let Some(raw) = profile.banner_url.as_deref() {
+                                                    if let Ok(resolved) = resolve_profile_asset_uri(&conn, raw).await {
+                                                        profile.banner_url = resolved;
+                                                    }
+                                                }
+                                                let _ = tx_event.send(UiEvent::SelfProfileLoaded(profile));
+                                            }
                                         }
                                         Err(e) => {
                                             let _ = tx_event.send(UiEvent::AvatarUploadFailed(
@@ -4432,6 +4445,19 @@ async fn connect_and_run_session(
                                                 asset_id,
                                                 preview_bytes,
                                             });
+                                            if let Ok(mut profile) = dispatcher.fetch_self_profile(&local_user_id).await {
+                                                if let Some(raw) = profile.avatar_url.as_deref() {
+                                                    if let Ok(resolved) = resolve_profile_asset_uri(&conn, raw).await {
+                                                        profile.avatar_url = resolved;
+                                                    }
+                                                }
+                                                if let Some(raw) = profile.banner_url.as_deref() {
+                                                    if let Ok(resolved) = resolve_profile_asset_uri(&conn, raw).await {
+                                                        profile.banner_url = resolved;
+                                                    }
+                                                }
+                                                let _ = tx_event.send(UiEvent::SelfProfileLoaded(profile));
+                                            }
                                         }
                                         Err(e) => {
                                             let _ = tx_event.send(UiEvent::BannerUploadFailed(
@@ -4493,7 +4519,27 @@ async fn connect_and_run_session(
                         }
                         UiIntent::FetchSelfProfile => {
                             match dispatcher.fetch_self_profile(&local_user_id).await {
-                                Ok(profile) => {
+                                Ok(mut profile) => {
+                                    if let Some(raw) = profile.avatar_url.as_deref() {
+                                        match resolve_profile_asset_uri(&conn, raw).await {
+                                            Ok(resolved) => profile.avatar_url = resolved,
+                                            Err(e) => {
+                                                let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                                    "[profile] resolve avatar failed: {e:#}"
+                                                )));
+                                            }
+                                        }
+                                    }
+                                    if let Some(raw) = profile.banner_url.as_deref() {
+                                        match resolve_profile_asset_uri(&conn, raw).await {
+                                            Ok(resolved) => profile.banner_url = resolved,
+                                            Err(e) => {
+                                                let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                                    "[profile] resolve banner failed: {e:#}"
+                                                )));
+                                            }
+                                        }
+                                    }
                                     let _ = tx_event.send(UiEvent::SelfProfileLoaded(profile));
                                 }
                                 Err(e) => {
@@ -4843,6 +4889,32 @@ async fn connect_and_run_session(
                                 Ok(Ok(resp)) => {
                                     if let Some(pb::server_to_client::Payload::GetUserProfileResponse(payload)) = resp.payload {
                                         if let Some(profile) = payload.profile {
+                                            let avatar_url = if profile.avatar_asset_url.is_empty() {
+                                                None
+                                            } else {
+                                                match resolve_profile_asset_uri(&conn, &profile.avatar_asset_url).await {
+                                                    Ok(url) => url,
+                                                    Err(e) => {
+                                                        let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                                            "[profile] resolve avatar failed for {user_id}: {e:#}"
+                                                        )));
+                                                        Some(profile.avatar_asset_url.clone())
+                                                    }
+                                                }
+                                            };
+                                            let banner_url = if profile.banner_asset_url.is_empty() {
+                                                None
+                                            } else {
+                                                match resolve_profile_asset_uri(&conn, &profile.banner_asset_url).await {
+                                                    Ok(url) => url,
+                                                    Err(e) => {
+                                                        let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                                            "[profile] resolve banner failed for {user_id}: {e:#}"
+                                                        )));
+                                                        Some(profile.banner_asset_url.clone())
+                                                    }
+                                                }
+                                            };
                                             let user_profile = ui::model::UserProfileData {
                                                 user_id: profile.user_id.map(|u| u.value).unwrap_or_default(),
                                                 display_name: profile.display_name,
@@ -4851,8 +4923,8 @@ async fn connect_and_run_session(
                                                 custom_status_text: profile.custom_status_text,
                                                 custom_status_emoji: profile.custom_status_emoji,
                                                 accent_color: profile.accent_color,
-                                                avatar_url: (!profile.avatar_asset_url.is_empty()).then_some(profile.avatar_asset_url),
-                                                banner_url: (!profile.banner_asset_url.is_empty()).then_some(profile.banner_asset_url),
+                                                avatar_url,
+                                                banner_url,
                                                 badges: profile.badges.into_iter().map(|badge| ui::model::BadgeData {
                                                     id: badge.id,
                                                     label: badge.label,
@@ -5191,12 +5263,12 @@ async fn upload_attachment_quic(
     use tokio::io::AsyncReadExt;
 
     let (mut send, mut recv) = conn.open_bi().await.context("open media stream")?;
-     
+
     // Write stream-type discriminator so the server routes to the media handler.
     send.write_all(&[net::dispatcher::STREAM_TYPE_MEDIA])
         .await
         .context("write stream type")?;
- 
+
     let local_path = pending_local_path(attachment)?;
     let mut file = tokio::fs::File::open(&local_path)
         .await
@@ -5279,6 +5351,43 @@ async fn resolve_attachment_local_path(
     Ok(local_path)
 }
 
+async fn resolve_profile_asset_uri(
+    conn: &quinn::Connection,
+    raw_asset_ref: &str,
+) -> anyhow::Result<Option<String>> {
+    let raw = raw_asset_ref.trim();
+    if raw.is_empty() {
+        return Ok(None);
+    }
+
+    // Already a URI we can hand to egui as-is (file/http/https/bytes/data...).
+    if raw.contains("://") {
+        return Ok(Some(raw.to_string()));
+    }
+
+    // Profile API currently transports uploaded assets by verified UUID.
+    // Resolve them to a local cached file URI so egui can display the image.
+    let parsed = match uuid::Uuid::parse_str(raw) {
+        Ok(uuid) => uuid,
+        Err(_) => return Ok(Some(raw.to_string())),
+    };
+
+    let cache_dir = dirs::cache_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("tsod")
+        .join("profile-asset-cache");
+    tokio::fs::create_dir_all(&cache_dir)
+        .await
+        .with_context(|| format!("create profile asset cache dir: {}", cache_dir.display()))?;
+
+    let local_path = cache_dir.join(format!("{parsed}.img"));
+    if tokio::fs::metadata(&local_path).await.is_err() {
+        download_attachment_quic(conn, raw, &local_path).await?;
+    }
+
+    Ok(Some(format!("file://{}", local_path.display())))
+}
+
 async fn download_attachment_quic(
     conn: &quinn::Connection,
     asset_id: &str,
@@ -5287,12 +5396,12 @@ async fn download_attachment_quic(
     use tokio::io::AsyncWriteExt;
 
     let (mut send, mut recv) = conn.open_bi().await.context("open media stream")?;
-     
+
     // Write stream-type discriminator so the server routes to the media handler.
     send.write_all(&[net::dispatcher::STREAM_TYPE_MEDIA])
         .await
         .context("write stream type")?;
- 
+
     let req = pb::MediaRequest {
         payload: Some(pb::media_request::Payload::DownloadRequest(
             pb::DownloadRequest {
@@ -5602,7 +5711,8 @@ async fn voice_send_loop(
             .map(|m| m.bitrate_bps)
             .unwrap_or(64_000);
         if let Ok(mut enc) = encoder.try_lock() {
-            let _ = apply_network_class_encoder_settings(&mut enc, NetworkClass::Good, init_bitrate);
+            let _ =
+                apply_network_class_encoder_settings(&mut enc, NetworkClass::Good, init_bitrate);
         }
     }
 
@@ -5675,7 +5785,9 @@ async fn voice_send_loop(
             .unwrap_or_default();
         if let Some(new_class) = adaptation.update(sample) {
             let mut enc = encoder.lock().await;
-            if let Err(e) = apply_network_class_encoder_settings(&mut enc, new_class, channel_mode.bitrate_bps) {
+            if let Err(e) =
+                apply_network_class_encoder_settings(&mut enc, new_class, channel_mode.bitrate_bps)
+            {
                 warn!("[audio] failed to apply network-class opus settings: {e:#}");
             }
         }
