@@ -188,8 +188,8 @@ fn tab_profile(ui: &mut egui::Ui, model: &mut UiModel) {
 
     ui.add_space(10.0);
 
-    // Accent Color
-    ui.label(egui::RichText::new("Accent Color").strong());
+    // Username Color
+    ui.label(egui::RichText::new("Username Color").strong());
     ui.add_space(4.0);
 
     // 18-color preset grid (3 rows × 6 columns).
@@ -299,9 +299,29 @@ fn tab_profile(ui: &mut egui::Ui, model: &mut UiModel) {
         );
 
         ui.label(
-            egui::RichText::new("Preview")
+            egui::RichText::new("Name preview")
                 .color(theme::text_muted())
                 .size(11.0),
+        );
+    });
+
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new("Chat preview:")
+                .color(theme::text_muted())
+                .size(11.0),
+        );
+        let preview_name = model.edit_profile_draft.display_name.trim();
+        let preview_name = if preview_name.is_empty() {
+            "Username"
+        } else {
+            preview_name
+        };
+        ui.label(
+            egui::RichText::new(preview_name)
+                .strong()
+                .color(accent_color32(model.edit_profile_draft.accent_color)),
         );
     });
 }
