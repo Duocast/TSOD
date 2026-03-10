@@ -446,7 +446,7 @@ fn tab_avatar(ui: &mut egui::Ui, model: &mut UiModel, tx: &Sender<UiIntent>) {
         );
     } else if let Some(url) = &preview_url {
         ui.add(
-            egui::Image::from_uri(url)
+            crate::ui::image_from_source(url)
                 .fit_to_exact_size(preview_size)
                 .corner_radius(64.0),
         );
@@ -568,7 +568,7 @@ fn tab_banner(ui: &mut egui::Ui, model: &mut UiModel, tx: &Sender<UiIntent>) {
         );
     } else if let Some(url) = &preview_url {
         ui.add(
-            egui::Image::from_uri(url)
+            crate::ui::image_from_source(url)
                 .fit_to_exact_size(egui::vec2(avail_w, banner_h))
                 .corner_radius(8.0),
         );

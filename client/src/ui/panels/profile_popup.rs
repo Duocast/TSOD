@@ -127,7 +127,7 @@ fn render_profile(
     if let Some(url) = profile.banner_url.as_ref().filter(|u| !u.is_empty()) {
         ui.put(
             banner_rect,
-            egui::Image::from_uri(url)
+            crate::ui::image_from_source(url)
                 .fit_to_exact_size(banner_rect.size())
                 .corner_radius(clip_rounding),
         );
@@ -171,7 +171,7 @@ fn render_profile(
     if let Some(url) = profile.avatar_url.as_ref().filter(|u| !u.is_empty()) {
         ui.put(
             avatar_rect,
-            egui::Image::from_uri(url)
+            crate::ui::image_from_source(url)
                 .fit_to_exact_size(avatar_rect.size())
                 .corner_radius(egui::CornerRadius::same(AVATAR_HALF as u8)),
         );
@@ -377,7 +377,7 @@ fn render_content_area(
                     ui.spacing_mut().item_spacing.x = 4.0;
                     if !badge.icon_url.trim().is_empty() {
                         ui.add(
-                            egui::Image::from_uri(&badge.icon_url)
+                            crate::ui::image_from_source(&badge.icon_url)
                                 .fit_to_exact_size(egui::vec2(16.0, 16.0))
                                 .corner_radius(2.0),
                         );

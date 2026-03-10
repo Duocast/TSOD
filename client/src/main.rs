@@ -5419,7 +5419,22 @@ async fn resolve_profile_asset_uri(
         }
     };
 
-    Ok(Some(format!("file://{}", local_path.display())))
+    Ok(Some(file_uri_from_path(&local_path)))
+}
+
+fn file_uri_from_path(path: &Path) -> String {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
+
+    match url::Url::from_file_path(&absolute) {
+        Ok(url) => url.into(),
+        Err(_) => format!("file://{}", absolute.display()),
+    }
 }
 
 fn extension_for_mime(mime: &str) -> &'static str {
