@@ -30,6 +30,40 @@ use crate::BUILD_VERSION;
 const TSOD_LOGO: egui::ImageSource<'static> = egui::include_image!("../../assets/tsod-logo.png");
 const THIRD_PARTY_LICENSES: &str = include_str!("../../assets/third_party_licenses.tsv");
 
+pub fn image_from_source(source: &str) -> egui::Image<'static> {
+    if let Some(bytes) = load_local_image_bytes(source) {
+        return egui::Image::from_bytes(format!("bytes://local-image/{source}"), bytes);
+    }
+
+    egui::Image::from_uri(source.to_owned())
+}
+
+fn load_local_image_bytes(source: &str) -> Option<Vec<u8>> {
+    let path = local_path_from_source(source)?;
+    std::fs::read(path).ok()
+}
+
+fn local_path_from_source(source: &str) -> Option<std::path::PathBuf> {
+    let trimmed = source.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Ok(url) = url::Url::parse(trimmed) {
+        return if url.scheme() == "file" {
+            url.to_file_path().ok()
+        } else {
+            None
+        };
+    }
+
+    if trimmed.contains("://") {
+        return None;
+    }
+
+    Some(std::path::PathBuf::from(trimmed))
+}
+
 fn share_source_card(
     ui: &mut egui::Ui,
     selection: &model::ShareSourceSelection,

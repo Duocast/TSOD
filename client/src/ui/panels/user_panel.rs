@@ -53,7 +53,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                         egui::Rect::from_center_size(rect.center(), egui::vec2(64.0, 64.0));
                     ui.put(
                         image_rect,
-                        egui::Image::from_uri(avatar_url)
+                        crate::ui::image_from_source(avatar_url)
                             .fit_to_exact_size(egui::vec2(64.0, 64.0))
                             .corner_radius(32.0),
                     );
