@@ -9,22 +9,25 @@ mod validate;
 use tc::TcRunner;
 
 #[derive(Parser, Debug)]
-#[command(name="vp-netem", about="Linux tc netem injector (loss/jitter/delay)")]
+#[command(
+    name = "vp-netem",
+    about = "Linux tc netem injector (loss/jitter/delay)"
+)]
 struct Args {
     /// Network interface (e.g. eth0, lo)
     #[arg(long)]
     iface: String,
 
     /// Also apply to ingress using IFB redirect (requires `modprobe ifb` capability)
-    #[arg(long, default_value_t=false)]
+    #[arg(long, default_value_t = false)]
     ingress: bool,
 
     /// IFB device name used for ingress shaping
-    #[arg(long, default_value="ifb0")]
+    #[arg(long, default_value = "ifb0")]
     ifb: String,
 
     /// Do not execute tc/ip; just print actions
-    #[arg(long, default_value_t=false)]
+    #[arg(long, default_value_t = false)]
     dry_run: bool,
 
     #[command(subcommand)]
@@ -36,27 +39,27 @@ enum Cmd {
     /// Apply/replace netem qdisc
     Apply {
         /// Base delay, e.g. "20ms"
-        #[arg(long, default_value="0ms")]
+        #[arg(long, default_value = "0ms")]
         delay: String,
 
         /// Jitter, e.g. "5ms" (requires delay > 0)
-        #[arg(long, default_value="0ms")]
+        #[arg(long, default_value = "0ms")]
         jitter: String,
 
         /// Packet loss percent (0..100), e.g. 1.5
-        #[arg(long, default_value_t=0.0)]
+        #[arg(long, default_value_t = 0.0)]
         loss: f32,
 
         /// Packet duplication percent (0..100)
-        #[arg(long, default_value_t=0.0)]
+        #[arg(long, default_value_t = 0.0)]
         duplicate: f32,
 
         /// Packet reordering percent (0..100)
-        #[arg(long, default_value_t=0.0)]
+        #[arg(long, default_value_t = 0.0)]
         reorder: f32,
 
         /// Correlation percent for reorder (0..100), used by tc netem
-        #[arg(long, default_value_t=0.0)]
+        #[arg(long, default_value_t = 0.0)]
         reorder_corr: f32,
 
         /// Optional distribution: normal, pareto, paretonormal
@@ -82,22 +85,51 @@ fn main() -> Result<()> {
     let tc = TcRunner::new(args.dry_run);
 
     match args.cmd {
-        Cmd::Apply { delay, jitter, loss, duplicate, reorder, reorder_corr, distribution } => {
-            validate::pct_0_100(loss, "loss")?;
-            validate::pct_0_100(duplicate, "duplicate")?;
-            validate::pct_0_100(reorder, "reorder")?;
-            validate::pct_0_100(reorder_corr, "reorder_corr")?;
-
+        Cmd::Apply {
+            delay,
+            jitter,
+            loss,
+            duplicate,
+            reorder,
+            reorder_corr,
+            distribution,
+        } => {
             let delay_dur = humantime::parse_duration(&delay).context("parse --delay")?;
             let jitter_dur = humantime::parse_duration(&jitter).context("parse --jitter")?;
-            if jitter_dur.as_millis() > 0 && delay_dur.as_millis() == 0 {
-                return Err(anyhow!("--jitter requires --delay > 0"));
-            }
+            validate_apply_params(
+                delay_dur,
+                jitter_dur,
+                loss,
+                duplicate,
+                reorder,
+                reorder_corr,
+            )?;
 
-            apply_egress(&tc, &args.iface, delay_dur, jitter_dur, loss, duplicate, reorder, reorder_corr, distribution.as_deref())?;
+            apply_egress(
+                &tc,
+                &args.iface,
+                delay_dur,
+                jitter_dur,
+                loss,
+                duplicate,
+                reorder,
+                reorder_corr,
+                distribution.as_deref(),
+            )?;
 
             if args.ingress {
-                apply_ingress(&tc, &args.iface, &args.ifb, delay_dur, jitter_dur, loss, duplicate, reorder, reorder_corr, distribution.as_deref())?;
+                apply_ingress(
+                    &tc,
+                    &args.iface,
+                    &args.ifb,
+                    delay_dur,
+                    jitter_dur,
+                    loss,
+                    duplicate,
+                    reorder,
+                    reorder_corr,
+                    distribution.as_deref(),
+                )?;
             }
 
             info!("netem applied");
@@ -120,6 +152,34 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+fn validate_apply_params(
+    delay: std::time::Duration,
+    jitter: std::time::Duration,
+    loss: f32,
+    duplicate: f32,
+    reorder: f32,
+    reorder_corr: f32,
+) -> Result<()> {
+    validate::pct_0_100(loss, "loss")?;
+    validate::pct_0_100(duplicate, "duplicate")?;
+    validate::pct_0_100(reorder, "reorder")?;
+    validate::pct_0_100(reorder_corr, "reorder_corr")?;
+
+    if jitter.as_millis() > 0 && delay.as_millis() == 0 {
+        return Err(anyhow!("--jitter requires --delay > 0"));
+    }
+
+    if reorder > 0.0 && delay.as_millis() == 0 {
+        return Err(anyhow!("--reorder requires --delay > 0"));
+    }
+
+    if reorder_corr > 0.0 && reorder == 0.0 {
+        return Err(anyhow!("--reorder-corr requires --reorder > 0"));
+    }
+
+    Ok(())
+}
+
 fn apply_egress(
     tc: &TcRunner,
     iface: &str,
@@ -133,10 +193,13 @@ fn apply_egress(
 ) -> Result<()> {
     // Use "qdisc replace" for idempotency.
     let mut args: Vec<String> = vec![
-        "qdisc".into(), "replace".into(),
-        "dev".into(), iface.into(),
+        "qdisc".into(),
+        "replace".into(),
+        "dev".into(),
+        iface.into(),
         "root".into(),
-        "handle".into(), "1:".into(),
+        "handle".into(),
+        "1:".into(),
         "netem".into(),
     ];
 
@@ -190,17 +253,29 @@ fn apply_ingress(
     tc.ip(&["link", "set", "dev", ifb, "up"])?;
 
     // Add ingress qdisc on iface
-    tc.tc(&["qdisc", "replace", "dev", iface, "handle", "ffff:", "ingress"])?;
+    tc.tc(&[
+        "qdisc", "replace", "dev", iface, "handle", "ffff:", "ingress",
+    ])?;
 
     // Redirect all ingress traffic to IFB
     // Requires act_mirred kernel module usually available.
     tc.tc(&[
-        "filter","replace","dev",iface,"parent","ffff:","protocol","all","prio","1",
-        "matchall","action","mirred","egress","redirect","dev",ifb
+        "filter", "replace", "dev", iface, "parent", "ffff:", "protocol", "all", "prio", "1",
+        "matchall", "action", "mirred", "egress", "redirect", "dev", ifb,
     ])?;
 
     // Apply netem on IFB egress root
-    apply_egress(tc, ifb, delay, jitter, loss, duplicate, reorder, reorder_corr, distribution)?;
+    apply_egress(
+        tc,
+        ifb,
+        delay,
+        jitter,
+        loss,
+        duplicate,
+        reorder,
+        reorder_corr,
+        distribution,
+    )?;
     Ok(())
 }
 
@@ -225,4 +300,40 @@ fn clear_ingress(tc: &TcRunner, iface: &str, ifb: &str) -> Result<()> {
     let _ = tc.tc(&["qdisc", "del", "dev", ifb, "root"]);
     // keep IFB device; it may be shared
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_apply_params;
+    use std::time::Duration;
+
+    #[test]
+    fn rejects_reorder_without_delay() {
+        let err = validate_apply_params(
+            Duration::from_millis(0),
+            Duration::from_millis(0),
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+        )
+        .expect_err("reorder without delay must fail");
+        assert!(err.to_string().contains("--reorder requires --delay > 0"));
+    }
+
+    #[test]
+    fn rejects_reorder_corr_without_reorder() {
+        let err = validate_apply_params(
+            Duration::from_millis(20),
+            Duration::from_millis(0),
+            0.0,
+            0.0,
+            0.0,
+            50.0,
+        )
+        .expect_err("reorder correlation without reorder must fail");
+        assert!(err
+            .to_string()
+            .contains("--reorder-corr requires --reorder > 0"));
+    }
 }
