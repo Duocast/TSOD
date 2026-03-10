@@ -29,17 +29,13 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
 
             // ── Top section: avatar + identity/status block ───────────────────
             ui.horizontal(|ui: &mut egui::Ui| {
-                let initials = model
+                let preferred_name = model
                     .self_profile
                     .as_ref()
-                    .and_then(|p| {
-                        if p.display_name.is_empty() {
-                            None
-                        } else {
-                            Some(initials_from_name(&p.display_name))
-                        }
-                    })
-                    .unwrap_or_else(|| initials_from_name(&model.nick));
+                    .map(|p| p.display_name.clone())
+                    .filter(|name| !should_prefer_fallback_name(name))
+                    .unwrap_or_else(|| model.nick.clone());
+                let initials = initials_from_name(&preferred_name);
 
                 let status_color = online_status_color(model);
 
@@ -134,7 +130,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                         .self_profile
                         .as_ref()
                         .map(|p| p.display_name.clone())
-                        .filter(|n| !n.is_empty())
+                        .filter(|name| !should_prefer_fallback_name(name))
                         .unwrap_or_else(|| model.nick.clone());
 
                     let status_text = build_status_text(model);
@@ -355,7 +351,6 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                     "Join a voice channel to share"
                 });
             });
-
         });
 }
 
@@ -377,6 +372,11 @@ fn online_status_color(model: &UiModel) -> egui::Color32 {
     } else {
         theme::COLOR_OFFLINE
     }
+}
+
+fn should_prefer_fallback_name(name: &str) -> bool {
+    let trimmed = name.trim();
+    trimmed.is_empty() || trimmed.starts_with("guest-") || trimmed.starts_with("user-")
 }
 
 fn initials_from_name(name: &str) -> String {
