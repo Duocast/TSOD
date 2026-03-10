@@ -13,8 +13,14 @@ const MODAL_HEIGHT: f32 = 560.0;
 const DISPLAY_NAME_MAX: usize = 32;
 const DESCRIPTION_MAX: usize = 190;
 const LINKS_MAX: usize = 5;
-const SUPPORTED_PLATFORMS: &[&str] =
-    &["Steam", "GitHub", "Twitter/X", "Twitch", "YouTube", "Website"];
+const SUPPORTED_PLATFORMS: &[&str] = &[
+    "Steam",
+    "GitHub",
+    "Twitter/X",
+    "Twitch",
+    "YouTube",
+    "Website",
+];
 
 /// Show the profile edit window. Call each frame when `model.show_edit_profile` is true.
 pub fn show(ctx: &egui::Context, model: &mut UiModel, tx: &Sender<UiIntent>) {
@@ -126,7 +132,6 @@ fn tab_profile(ui: &mut egui::Ui, model: &mut UiModel) {
     ui.add_space(2.0);
 
     let dn = &mut model.edit_profile_draft.display_name;
-    let before = dn.clone();
     ui.add(
         egui::TextEdit::singleline(dn)
             .desired_width(f32::INFINITY)
@@ -134,7 +139,7 @@ fn tab_profile(ui: &mut egui::Ui, model: &mut UiModel) {
             .char_limit(DISPLAY_NAME_MAX),
     );
     // Strip newlines and control chars from single-line field.
-    *dn = sanitize_single_line(dn, &before);
+    *dn = sanitize_single_line(dn);
 
     if dn.len() >= DISPLAY_NAME_MAX {
         ui.label(
@@ -223,14 +228,19 @@ fn tab_profile(ui: &mut egui::Ui, model: &mut UiModel) {
                     ((hex >> 8) & 0xFF) as u8,
                     (hex & 0xFF) as u8,
                 );
-                let (rect, resp) =
-                    ui.allocate_exact_size(egui::vec2(swatch_size, swatch_size), egui::Sense::click());
-                ui.painter()
-                    .rect_filled(rect, 4.0, color);
+                let (rect, resp) = ui.allocate_exact_size(
+                    egui::vec2(swatch_size, swatch_size),
+                    egui::Sense::click(),
+                );
+                ui.painter().rect_filled(rect, 4.0, color);
                 // Border for very dark/light swatches so they're visible.
                 if hex == 0x000000 || hex == 0x2C2F33 {
-                    ui.painter()
-                        .rect_stroke(rect, 4.0, egui::Stroke::new(1.0, theme::text_muted()), egui::StrokeKind::Outside);
+                    ui.painter().rect_stroke(
+                        rect,
+                        4.0,
+                        egui::Stroke::new(1.0, theme::text_muted()),
+                        egui::StrokeKind::Outside,
+                    );
                 }
                 // Selection ring.
                 if model.edit_profile_draft.accent_color == hex {
@@ -280,9 +290,13 @@ fn tab_profile(ui: &mut egui::Ui, model: &mut UiModel) {
             (current & 0xFF) as u8,
         );
         let (rect, _) = ui.allocate_exact_size(egui::vec2(20.0, 20.0), egui::Sense::hover());
-        ui.painter().circle_filled(rect.center(), 9.0, preview_color);
         ui.painter()
-            .circle_stroke(rect.center(), 9.0, egui::Stroke::new(1.0, theme::text_muted()));
+            .circle_filled(rect.center(), 9.0, preview_color);
+        ui.painter().circle_stroke(
+            rect.center(),
+            9.0,
+            egui::Stroke::new(1.0, theme::text_muted()),
+        );
 
         ui.label(
             egui::RichText::new("Preview")
@@ -415,7 +429,12 @@ fn tab_avatar(ui: &mut egui::Ui, model: &mut UiModel, tx: &Sender<UiIntent>) {
         .edit_profile_draft
         .avatar_preview_url
         .clone()
-        .or_else(|| model.self_profile.as_ref().and_then(|p| p.avatar_url.clone()))
+        .or_else(|| {
+            model
+                .self_profile
+                .as_ref()
+                .and_then(|p| p.avatar_url.clone())
+        })
         .or_else(|| model.avatar_url.clone());
 
     let preview_size = egui::vec2(128.0, 128.0);
@@ -507,18 +526,18 @@ fn tab_avatar(ui: &mut egui::Ui, model: &mut UiModel, tx: &Sender<UiIntent>) {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.spinner();
-            ui.label(
-                egui::RichText::new("Uploading avatar…").color(theme::text_muted()),
-            );
+            ui.label(egui::RichText::new("Uploading avatar…").color(theme::text_muted()));
         });
     }
 
     ui.add_space(8.0);
     ui.label(
-        egui::RichText::new("Avatar changes take effect immediately after upload is verified by the server.")
-            .color(theme::text_muted())
-            .size(11.0)
-            .italics(),
+        egui::RichText::new(
+            "Avatar changes take effect immediately after upload is verified by the server.",
+        )
+        .color(theme::text_muted())
+        .size(11.0)
+        .italics(),
     );
 }
 
@@ -531,7 +550,12 @@ fn tab_banner(ui: &mut egui::Ui, model: &mut UiModel, tx: &Sender<UiIntent>) {
         .edit_profile_draft
         .banner_preview_url
         .clone()
-        .or_else(|| model.self_profile.as_ref().and_then(|p| p.banner_url.clone()));
+        .or_else(|| {
+            model
+                .self_profile
+                .as_ref()
+                .and_then(|p| p.banner_url.clone())
+        });
 
     let avail_w = ui.available_width().min(480.0);
     let banner_h = avail_w * (240.0 / 680.0);
@@ -555,10 +579,11 @@ fn tab_banner(ui: &mut egui::Ui, model: &mut UiModel, tx: &Sender<UiIntent>) {
         let dark = theme::bg_dark();
         ui.painter().rect_filled(rect, 8.0, dark);
         // Draw a simple tinted overlay
-        ui.painter()
-            .rect_filled(rect, 8.0, egui::Color32::from_rgba_unmultiplied(
-                accent.r(), accent.g(), accent.b(), 60,
-            ));
+        ui.painter().rect_filled(
+            rect,
+            8.0,
+            egui::Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 60),
+        );
     }
 
     ui.add_space(4.0);
@@ -610,9 +635,7 @@ fn tab_banner(ui: &mut egui::Ui, model: &mut UiModel, tx: &Sender<UiIntent>) {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.spinner();
-            ui.label(
-                egui::RichText::new("Uploading banner…").color(theme::text_muted()),
-            );
+            ui.label(egui::RichText::new("Uploading banner…").color(theme::text_muted()));
         });
     }
 }
@@ -728,7 +751,11 @@ fn commit_save(model: &mut UiModel, tx: &Sender<UiIntent>) {
 fn cancel_edit(model: &mut UiModel) {
     // Reset draft back to current live profile.
     if let Some(ref p) = model.self_profile.clone() {
-        model.edit_profile_draft.display_name = p.display_name.clone();
+        model.edit_profile_draft.display_name = if is_generated_guest_name(&p.display_name) {
+            model.nick.clone()
+        } else {
+            p.display_name.clone()
+        };
         model.edit_profile_draft.description = p.description.clone();
         model.edit_profile_draft.accent_color = p.accent_color;
         model.edit_profile_draft.links = p.links.clone();
@@ -790,17 +817,22 @@ fn validate_link_url(platform: &str, raw_url: &str) -> Result<String, &'static s
 }
 
 /// Strip newlines and non-printable control characters from a single-line field.
-fn sanitize_single_line(current: &str, before: &str) -> String {
+fn sanitize_single_line(current: &str) -> String {
     let cleaned: String = current
         .chars()
         .filter(|&c| c != '\n' && c != '\r' && !c.is_control())
         .collect();
-    // If something was stripped and value changed, use cleaned; otherwise keep as-is.
+    // If something was stripped and value changed, use cleaned; otherwise keep current.
     if cleaned != current {
         cleaned
     } else {
-        before.to_string()
+        current.to_string()
     }
+}
+
+fn is_generated_guest_name(name: &str) -> bool {
+    let trimmed = name.trim();
+    trimmed.starts_with("guest-") || trimmed.starts_with("user-")
 }
 
 /// Strip control characters except standard line breaks from a multiline field.
@@ -832,7 +864,11 @@ fn accent_color32(argb: u32) -> egui::Color32 {
 /// Populate the edit draft from the user's current profile.
 pub fn init_draft_from_profile(model: &mut UiModel) {
     if let Some(ref p) = model.self_profile.clone() {
-        model.edit_profile_draft.display_name = p.display_name.clone();
+        model.edit_profile_draft.display_name = if is_generated_guest_name(&p.display_name) {
+            model.nick.clone()
+        } else {
+            p.display_name.clone()
+        };
         model.edit_profile_draft.description = p.description.clone();
         model.edit_profile_draft.accent_color = p.accent_color;
         model.edit_profile_draft.accent_hex_input = format!("#{:06X}", p.accent_color);
@@ -849,3 +885,18 @@ pub fn init_draft_from_profile(model: &mut UiModel) {
     model.edit_profile_draft.banner_preview_bytes = None;
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_single_line_keeps_user_edits() {
+        assert_eq!(sanitize_single_line("Overdose"), "Overdose");
+        assert_eq!(sanitize_single_line(""), "");
+    }
+
+    #[test]
+    fn sanitize_single_line_strips_control_chars() {
+        assert_eq!(sanitize_single_line("Over\ndose"), "Overdose");
+    }
+}
