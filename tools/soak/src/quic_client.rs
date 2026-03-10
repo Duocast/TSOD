@@ -1,9 +1,8 @@
 use anyhow::{anyhow, Result};
 use prost::Message;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use std::time::Duration;
 
-use crate::pb;
+use crate::pb::voiceplatform::v1 as pb;
 
 const MAX_CTRL_MSG: usize = 256 * 1024;
 
@@ -34,7 +33,10 @@ impl Ctrl {
         }
 
         let auth = pb::AuthRequest {
-            method: Some(pb::auth_request::Method::DevToken(pb::DevTokenAuth{ token: dev_token.into() })),
+            preferred_display_name: "vp-soak".into(),
+            method: Some(pb::auth_request::Method::OidcToken(pb::OidcTokenAuth {
+                id_token: dev_token.into(),
+            })),
         };
         let resp = self.req(pb::client_to_server::Payload::AuthRequest(auth), Duration::from_secs(5)).await?;
         if resp.error.is_some() {
@@ -90,7 +92,6 @@ async fn write_delimited<M: Message>(send: &mut quinn::SendStream, msg: &M) -> R
     msg.encode(&mut body)?;
     write_varint_u64(send, body.len() as u64).await?;
     send.write_all(&body).await?;
-    send.flush().await?;
     Ok(())
 }
 
@@ -144,9 +145,19 @@ fn default_caps(alpn: &str) -> pb::ClientCaps {
             supports_streaming: false,
             supports_drag_drop_upload: false,
             supports_relay_mode: false,
+            supports_screen_share: false,
+            supports_video_call: false,
+            supports_e2ee: false,
+            supports_spatial_audio: false,
+            supports_whisper: false,
+            supports_noise_suppression: false,
+            supports_echo_cancellation: false,
+            supports_agc: false,
         }),
         voice_audio: None,
         screen_video: None,
         caps_hash: Some(pb::CapabilityHash { sha256: alpn.as_bytes().to_vec() }),
+        screen_share: None,
+        camera_video: None,
     }
 }
