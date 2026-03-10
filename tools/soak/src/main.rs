@@ -18,7 +18,6 @@ pub mod pb {
         }
     }
 }
-use pb::voiceplatform::v1 as pb;
 
 #[derive(Parser, Debug, Clone)]
 #[command(name="vp-soak", about="QUIC connect/disconnect soak tester")]
@@ -93,7 +92,7 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let pin = args.pin_sha256_hex.clone().or_else(|| std::env::var("VP_TLS_PIN_SHA256_HEX").ok());
 
-    let (endpoint, server_name) = tls::make_endpoint(&args.bind, &args.server_name, pin, args.insecure)?;
+    let endpoint = tls::make_endpoint(&args.bind, &args.server_name, pin, args.insecure)?;
 
     let stop_at = args.duration_secs.map(|s| Instant::now() + Duration::from_secs(s));
 
@@ -106,13 +105,12 @@ async fn main() -> Result<()> {
     for worker_id in 0..args.concurrency {
         let args = args.clone();
         let endpoint = endpoint.clone();
-        let server_name = server_name.clone();
         let report = report.clone();
         let connect_samples = connect_samples.clone();
         let auth_samples = auth_samples.clone();
 
         handles.push(tokio::spawn(async move {
-            worker_loop(worker_id, args, endpoint, server_name, stop_at, report, connect_samples, auth_samples).await
+            worker_loop(worker_id, args, endpoint, stop_at, report, connect_samples, auth_samples).await
         }));
     }
 
@@ -156,7 +154,6 @@ async fn worker_loop(
     worker_id: usize,
     args: Args,
     endpoint: quinn::Endpoint,
-    server_name: rustls::pki_types::ServerName<'static>,
     stop_at: Option<Instant>,
     report: Arc<Mutex<SoakReport>>,
     connect_samples: Arc<Mutex<Vec<u64>>>,
@@ -181,7 +178,7 @@ async fn worker_loop(
 
         // connect
         let t0 = Instant::now();
-        let connecting = endpoint.connect(addr, server_name.clone()).context("connect start")?;
+        let connecting = endpoint.connect(addr, &args.server_name).context("connect start")?;
         let conn = match tokio::time::timeout(connect_timeout, connecting).await {
             Ok(Ok(c)) => {
                 report.lock().await.counters.connect_ok += 1;

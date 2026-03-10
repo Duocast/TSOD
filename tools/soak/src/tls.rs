@@ -1,13 +1,14 @@
 use anyhow::{anyhow, Result};
 use quinn::{ClientConfig, Endpoint};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::{DigitallySignedStruct, SignatureScheme};
 use std::{net::SocketAddr, sync::Arc};
 
-pub fn make_endpoint(listen: &str, server_name: &str, pin_hex: Option<String>, insecure: bool) -> Result<(Endpoint, ServerName<'static>)> {
+pub fn make_endpoint(listen: &str, server_name: &str, pin_hex: Option<String>, insecure: bool) -> Result<Endpoint> {
     let addr: SocketAddr = listen.parse()?;
     let mut ep = Endpoint::client(addr)?;
 
-    let sn = ServerName::try_from(server_name.to_string()).map_err(|_| anyhow!("bad server_name"))?;
+    let _sn = ServerName::try_from(server_name.to_string()).map_err(|_| anyhow!("bad server_name"))?;
 
     let cfg = if let Some(pin_hex) = pin_hex {
         let pin = hex_to_32(&pin_hex)?;
@@ -19,10 +20,11 @@ pub fn make_endpoint(listen: &str, server_name: &str, pin_hex: Option<String>, i
     };
 
     ep.set_default_client_config(cfg);
-    Ok((ep, sn))
+    Ok(ep)
 }
 
 fn pinned_client_config(pin_sha256: [u8; 32]) -> Result<ClientConfig> {
+    #[derive(Debug)]
     struct Pinner { pin: [u8; 32] }
 
     impl rustls::client::danger::ServerCertVerifier for Pinner {
@@ -41,6 +43,40 @@ fn pinned_client_config(pin_sha256: [u8; 32]) -> Result<ClientConfig> {
                 Err(rustls::Error::General("cert pin mismatch".into()))
             }
         }
+
+        fn verify_tls12_signature(
+            &self,
+            message: &[u8],
+            cert: &CertificateDer<'_>,
+            dss: &DigitallySignedStruct,
+        ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+            rustls::crypto::verify_tls12_signature(
+                message,
+                cert,
+                dss,
+                &rustls::crypto::ring::default_provider().signature_verification_algorithms,
+            )
+        }
+
+        fn verify_tls13_signature(
+            &self,
+            message: &[u8],
+            cert: &CertificateDer<'_>,
+            dss: &DigitallySignedStruct,
+        ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+            rustls::crypto::verify_tls13_signature(
+                message,
+                cert,
+                dss,
+                &rustls::crypto::ring::default_provider().signature_verification_algorithms,
+            )
+        }
+
+        fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+            rustls::crypto::ring::default_provider()
+                .signature_verification_algorithms
+                .supported_schemes()
+        }
     }
 
     let crypto = rustls::ClientConfig::builder()
@@ -52,6 +88,7 @@ fn pinned_client_config(pin_sha256: [u8; 32]) -> Result<ClientConfig> {
 }
 
 fn insecure_client_config() -> Result<ClientConfig> {
+    #[derive(Debug)]
     struct AcceptAny;
     impl rustls::client::danger::ServerCertVerifier for AcceptAny {
         fn verify_server_cert(
@@ -63,6 +100,40 @@ fn insecure_client_config() -> Result<ClientConfig> {
             _now: UnixTime,
         ) -> std::result::Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
             Ok(rustls::client::danger::ServerCertVerified::assertion())
+        }
+
+        fn verify_tls12_signature(
+            &self,
+            message: &[u8],
+            cert: &CertificateDer<'_>,
+            dss: &DigitallySignedStruct,
+        ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+            rustls::crypto::verify_tls12_signature(
+                message,
+                cert,
+                dss,
+                &rustls::crypto::ring::default_provider().signature_verification_algorithms,
+            )
+        }
+
+        fn verify_tls13_signature(
+            &self,
+            message: &[u8],
+            cert: &CertificateDer<'_>,
+            dss: &DigitallySignedStruct,
+        ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+            rustls::crypto::verify_tls13_signature(
+                message,
+                cert,
+                dss,
+                &rustls::crypto::ring::default_provider().signature_verification_algorithms,
+            )
+        }
+
+        fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+            rustls::crypto::ring::default_provider()
+                .signature_verification_algorithms
+                .supported_schemes()
         }
     }
 
