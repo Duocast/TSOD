@@ -2715,7 +2715,11 @@ async fn connect_and_run_session(
                                                 self_deafened: member.self_deafened,
                                                 streaming: member.streaming,
                                                 speaking: false,
-                                                avatar_url: None,
+                                                avatar_url: (!member
+                                                    .avatar_asset_url
+                                                    .trim()
+                                                    .is_empty())
+                                                .then(|| member.avatar_asset_url.clone()),
                                             },
                                         });
                                     }
@@ -3671,7 +3675,8 @@ async fn connect_and_run_session(
                                                 self_deafened: m.self_deafened,
                                                 streaming: m.streaming,
                                                 speaking: false,
-                                                avatar_url: None,
+                                                avatar_url: (!m.avatar_asset_url.trim().is_empty())
+                                                    .then(|| m.avatar_asset_url),
                                             })
                                             .collect(),
                                     });
