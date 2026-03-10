@@ -32,6 +32,11 @@ use vp_media::voice_forwarder::VoiceForwarder;
 
 const CONTROL_STREAM_MAX_MSG: usize = 256 * 1024; // 256KB
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+ 
+/// Stream-type discriminator bytes written as the first byte on each bidi stream.
+const STREAM_TYPE_MEDIA: u8 = 0x01;
+const STREAM_TYPE_PROFILE_ASSET: u8 = 0x02;
+const PROFILE_ASSET_MAX_MSG: usize = 3 * 1024 * 1024; // 3 MB
 const VOICE_INGRESS_CAP: usize = 16; // Do not increase without justification; latency risk.
 const VOICE_MAX_AGE: Duration = Duration::from_millis(250);
 const VOICE_DRAIN_KEEP_LATEST: usize = 4;
@@ -368,13 +373,35 @@ impl Gateway {
         };
 
         let media = self.media.clone();
+        let control_svc = self.control.clone();
         let conn_media = conn.clone();
         tokio::spawn(async move {
-            while let Ok((send_s, recv_s)) = conn_media.accept_bi().await {
+            while let Ok((send_s, mut recv_s)) = conn_media.accept_bi().await {
                 let media = media.clone();
+                let control_svc = control_svc.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = media.handle_stream(send_s, recv_s, user_id).await {
-                        warn!("media stream failed: {:#}", e);
+                    // Read stream-type discriminator byte.
+                    let mut tag = [0u8; 1];
+                    if let Err(e) = recv_s.read_exact(&mut tag).await {
+                        warn!("bidi stream type read failed: {:#}", e);
+                        return;
+                    }
+                    match tag[0] {
+                        STREAM_TYPE_MEDIA => {
+                            if let Err(e) = media.handle_stream(send_s, recv_s, user_id).await {
+                                warn!("media stream failed: {:#}", e);
+                            }
+                        }
+                        STREAM_TYPE_PROFILE_ASSET => {
+                            if let Err(e) = handle_profile_asset_stream(
+                                send_s, recv_s, user_id, &control_svc,
+                            ).await {
+                                warn!("profile asset stream failed: {:#}", e);
+                            }
+                        }
+                        other => {
+                            warn!(tag = other, "unknown bidi stream type");
+                        }
                     }
                 });
             }
@@ -1588,27 +1615,6 @@ impl Gateway {
                     };
                     if let Err(e) = write_delimited(&mut send, &resp).await { warn!("control write failed: {:#}", e); break; }
                 }
-                Some(pb::client_to_server::Payload::UploadProfileAssetDataRequest(r)) => {
-                    let upload_session_uuid = r.session_id.parse::<uuid::Uuid>()
-                        .map_err(|_| anyhow!("invalid session_id"))?;
-                    // Validate and verify the uploaded asset data.
-                    let asset_data = verify_profile_asset_data(&r.data)?;
-                    self.control.store_verified_asset(user_id, upload_session_uuid, &asset_data).await?;
-                    let asset_id_str = upload_session_uuid.to_string();
-                    let resp = pb::ServerToClient {
-                        request_id: req_id,
-                        session_id: Some(pb::SessionId { value: session_id.clone() }),
-                        sent_at: Some(now_ts()),
-                        error: None,
-                        event_seq: 0,
-                        payload: Some(pb::server_to_client::Payload::CompleteProfileAssetUploadResponse(
-                            pb::CompleteProfileAssetUploadResponse {
-                                asset_id: Some(pb::AssetId { value: asset_id_str }),
-                            },
-                        )),
-                    };
-                    if let Err(e) = write_delimited(&mut send, &resp).await { warn!("control write failed: {:#}", e); break; }
-                }
                 Some(pb::client_to_server::Payload::SetCustomStatusRequest(r)) => {
                     self.control.set_custom_status(
                         &ctx,
@@ -1721,7 +1727,7 @@ impl Gateway {
             session_id: Some(pb::SessionId {
                 value: session_id.clone(),
             }),
-            max_message_size_bytes: CONTROL_STREAM_MAX_MSG as u32,
+            max_message_size_bytes: 64 * 1024,
             max_upload_size_bytes: 50 * 1024 * 1024,
             ping_interval_ms: 15_000,
             auth_challenge: auth_challenge.to_vec(),
@@ -2212,6 +2218,33 @@ fn profile_row_to_pb(row: vp_control::model::UserProfileRow) -> pb::UserProfile 
         current_activity: None,
         audio_profile: None,
     }
+}
+
+/// Handle a profile asset upload on a dedicated bidi stream (type 0x02).
+async fn handle_profile_asset_stream(
+    mut send: quinn::SendStream,
+    mut recv: quinn::RecvStream,
+    user_id: UserId,
+    control: &ControlService<PgControlRepo>,
+) -> Result<()> {
+    let req: pb::UploadProfileAssetDataRequest =
+        read_delimited(&mut recv, PROFILE_ASSET_MAX_MSG).await?;
+    let upload_session_uuid = req
+        .session_id
+        .parse::<uuid::Uuid>()
+        .map_err(|_| anyhow!("invalid session_id"))?;
+    let asset_data = verify_profile_asset_data(&req.data)?;
+    control
+        .store_verified_asset(user_id, upload_session_uuid, &asset_data)
+        .await?;
+    let resp = pb::CompleteProfileAssetUploadResponse {
+        asset_id: Some(pb::AssetId {
+            value: upload_session_uuid.to_string(),
+        }),
+    };
+    write_delimited(&mut send, &resp).await?;
+    send.finish()?;
+    Ok(())
 }
 
 /// Minimal verification of uploaded profile asset data: check magic bytes and size.
