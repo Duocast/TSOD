@@ -3484,7 +3484,7 @@ async fn connect_and_run_session(
                                         channel_id: ch.clone(),
                                         author_id: local_user_id.clone(),
                                         author_name: cfg.display_name.clone(),
-                                        author_avatar_url: cfg.avatar_url.clone(),
+                                        author_avatar_url: None,
                                         text: text.clone(),
                                         timestamp: now_ms,
                                         attachments: uploaded_attachments.clone(),
