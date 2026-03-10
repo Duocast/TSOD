@@ -5380,19 +5380,69 @@ async fn resolve_profile_asset_uri(
         .await
         .with_context(|| format!("create profile asset cache dir: {}", cache_dir.display()))?;
 
-    let local_path = cache_dir.join(format!("{parsed}.img"));
-    if tokio::fs::metadata(&local_path).await.is_err() {
-        download_attachment_quic(conn, raw, &local_path).await?;
-    }
+    let preferred_path = cache_dir.join(format!("{parsed}.webp"));
+    let local_path = if tokio::fs::metadata(&preferred_path).await.is_ok() {
+        preferred_path
+    } else {
+        // Legacy clients cached profile assets as "*.img", which prevents egui from selecting
+        // an image loader on some platforms. If a legacy file exists, remove it and re-download
+        // with an image extension so it can be decoded reliably.
+        let legacy_path = cache_dir.join(format!("{parsed}.img"));
+        let _ = tokio::fs::remove_file(&legacy_path).await;
+
+        let download = download_attachment_quic(conn, raw, &preferred_path).await?;
+        let resolved = cache_dir.join(format!("{parsed}.{}", extension_for_mime(&download.mime)));
+        if resolved != preferred_path {
+            if tokio::fs::rename(&preferred_path, &resolved).await.is_err() {
+                // Cross-device rename fallback.
+                tokio::fs::copy(&preferred_path, &resolved)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "copy downloaded profile asset {} -> {}",
+                            preferred_path.display(),
+                            resolved.display()
+                        )
+                    })?;
+                tokio::fs::remove_file(&preferred_path)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "remove temporary profile asset {}",
+                            preferred_path.display()
+                        )
+                    })?;
+            }
+            resolved
+        } else {
+            preferred_path
+        }
+    };
 
     Ok(Some(format!("file://{}", local_path.display())))
+}
+
+fn extension_for_mime(mime: &str) -> &'static str {
+    match mime.trim().to_ascii_lowercase().as_str() {
+        "image/jpeg" => "jpg",
+        "image/png" => "png",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        "image/bmp" => "bmp",
+        "image/tiff" => "tiff",
+        _ => "webp",
+    }
+}
+
+struct MediaDownloadMeta {
+    mime: String,
 }
 
 async fn download_attachment_quic(
     conn: &quinn::Connection,
     asset_id: &str,
     output_path: &Path,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<MediaDownloadMeta> {
     use tokio::io::AsyncWriteExt;
 
     let (mut send, mut recv) = conn.open_bi().await.context("open media stream")?;
@@ -5414,13 +5464,14 @@ async fn download_attachment_quic(
     net::frame::write_delimited(&mut send, &req).await?;
 
     let meta: pb::MediaResponse = net::frame::read_delimited(&mut recv, 64 * 1024).await?;
-    let expected_size = match meta.payload {
-        Some(pb::media_response::Payload::DownloadMeta(meta)) => meta.size_bytes,
+    let meta = match meta.payload {
+        Some(pb::media_response::Payload::DownloadMeta(meta)) => meta,
         Some(pb::media_response::Payload::Error(e)) => {
             return Err(anyhow!("media download rejected: {}", e.message));
         }
         _ => return Err(anyhow!("unexpected media download response")),
     };
+    let expected_size = meta.size_bytes;
 
     if let Some(parent) = output_path.parent() {
         tokio::fs::create_dir_all(parent)
@@ -5443,7 +5494,7 @@ async fn download_attachment_quic(
             copied
         ));
     }
-    Ok(())
+    Ok(MediaDownloadMeta { mime: meta.mime })
 }
 
 fn pending_local_path(attachment: &ui::model::AttachmentData) -> anyhow::Result<&Path> {
