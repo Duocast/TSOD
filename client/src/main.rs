@@ -1948,7 +1948,8 @@ fn apply_authoritative_snapshot(
                 self_deafened: m.self_deafened,
                 streaming: m.streaming,
                 speaking: false,
-                avatar_url: None,
+                avatar_url: (!m.avatar_asset_url.trim().is_empty())
+                    .then(|| m.avatar_asset_url.clone()),
             })
             .collect::<Vec<_>>();
         let _ = tx_event.send(UiEvent::UpdateChannelMembers {
@@ -2681,6 +2682,28 @@ async fn connect_and_run_session(
                                     if let (Some(channel_id), Some(member)) =
                                         (mj.channel_id, mj.member)
                                     {
+                                        let avatar_url = if member
+                                            .avatar_asset_url
+                                            .trim()
+                                            .is_empty()
+                                        {
+                                            None
+                                        } else {
+                                            match resolve_profile_asset_uri(
+                                                &conn,
+                                                &member.avatar_asset_url,
+                                            )
+                                            .await
+                                            {
+                                                Ok(resolved) => resolved,
+                                                Err(e) => {
+                                                    let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                                        "[profile] resolve member avatar failed: {e:#}"
+                                                    )));
+                                                    Some(member.avatar_asset_url.clone())
+                                                }
+                                            }
+                                        };
                                         let user_id = member
                                             .user_id
                                             .as_ref()
@@ -2715,11 +2738,7 @@ async fn connect_and_run_session(
                                                 self_deafened: member.self_deafened,
                                                 streaming: member.streaming,
                                                 speaking: false,
-                                                avatar_url: (!member
-                                                    .avatar_asset_url
-                                                    .trim()
-                                                    .is_empty())
-                                                .then(|| member.avatar_asset_url.clone()),
+                                                avatar_url,
                                             },
                                         });
                                     }
@@ -3660,25 +3679,39 @@ async fn connect_and_run_session(
                                     active_voice_channel_route.store(route, Ordering::Relaxed);
                                     let _ = tx_event.send(UiEvent::SetActiveVoiceRoute(route));
                                     let _ = tx_event.send(UiEvent::SetChannelName(channel_id.clone()));
+                                                                        let mut members = Vec::with_capacity(state.members.len());
+                                    for m in state.members {
+                                        let avatar_url = if m.avatar_asset_url.trim().is_empty() {
+                                            None
+                                        } else {
+                                            match resolve_profile_asset_uri(&conn, &m.avatar_asset_url)
+                                                .await
+                                            {
+                                                Ok(resolved) => resolved,
+                                                Err(e) => {
+                                                    let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                                        "[profile] resolve member avatar failed: {e:#}"
+                                                    )));
+                                                    Some(m.avatar_asset_url.clone())
+                                                }
+                                            }
+                                        };
+                                        members.push(ui::model::MemberEntry {
+                                            user_id: m.user_id.map(|u| u.value).unwrap_or_default(),
+                                            display_name: m.display_name,
+                                            away_message: String::new(),
+                                            muted: m.muted,
+                                            deafened: m.deafened,
+                                            self_muted: m.self_muted,
+                                            self_deafened: m.self_deafened,
+                                            streaming: m.streaming,
+                                            speaking: false,
+                                            avatar_url,
+                                        });
+                                    }
                                     let _ = tx_event.send(UiEvent::UpdateChannelMembers {
                                         channel_id: channel_id.clone(),
-                                        members: state
-                                            .members
-                                            .into_iter()
-                                            .map(|m| ui::model::MemberEntry {
-                                                user_id: m.user_id.map(|u| u.value).unwrap_or_default(),
-                                                display_name: m.display_name,
-                                                away_message: String::new(),
-                                                muted: m.muted,
-                                                deafened: m.deafened,
-                                                self_muted: m.self_muted,
-                                                self_deafened: m.self_deafened,
-                                                streaming: m.streaming,
-                                                speaking: false,
-                                                avatar_url: (!m.avatar_asset_url.trim().is_empty())
-                                                    .then(|| m.avatar_asset_url),
-                                            })
-                                            .collect(),
+                                        members,
                                     });
                                     let _ = tx_event.send(UiEvent::AppendLog(
                                         format!("[ctl] joined channel {channel_id}"),
