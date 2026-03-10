@@ -4391,13 +4391,11 @@ async fn connect_and_run_session(
                                     // Attach to profile.
                                     match dispatcher.set_avatar(&asset_id).await {
                                         Ok(()) => {
-                                            let preview = format!(
-                                                "file://{}",
-                                                path.to_string_lossy()
-                                            );
+                                            let preview_bytes = std::fs::read(&path)
+                                                .unwrap_or_default();
                                             let _ = tx_event.send(UiEvent::AvatarUploadComplete {
                                                 asset_id,
-                                                preview_url: preview,
+                                                preview_bytes,
                                             });
                                         }
                                         Err(e) => {
@@ -4428,13 +4426,11 @@ async fn connect_and_run_session(
                                 Ok(asset_id) => {
                                     match dispatcher.set_banner(&asset_id).await {
                                         Ok(()) => {
-                                            let preview = format!(
-                                                "file://{}",
-                                                path.to_string_lossy()
-                                            );
+                                            let preview_bytes = std::fs::read(&path)
+                                                .unwrap_or_default();
                                             let _ = tx_event.send(UiEvent::BannerUploadComplete {
                                                 asset_id,
-                                                preview_url: preview,
+                                                preview_bytes,
                                             });
                                         }
                                         Err(e) => {

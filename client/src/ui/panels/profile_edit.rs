@@ -410,6 +410,7 @@ fn tab_links(ui: &mut egui::Ui, model: &mut UiModel, tx: &Sender<UiIntent>) {
 
 fn tab_avatar(ui: &mut egui::Ui, model: &mut UiModel, tx: &Sender<UiIntent>) {
     // Preview (128×128)
+    let preview_bytes = model.edit_profile_draft.avatar_preview_bytes.clone();
     let preview_url = model
         .edit_profile_draft
         .avatar_preview_url
@@ -418,7 +419,13 @@ fn tab_avatar(ui: &mut egui::Ui, model: &mut UiModel, tx: &Sender<UiIntent>) {
         .or_else(|| model.avatar_url.clone());
 
     let preview_size = egui::vec2(128.0, 128.0);
-    if let Some(url) = &preview_url {
+    if let Some(bytes) = &preview_bytes {
+        ui.add(
+            egui::Image::from_bytes("bytes://avatar_preview", bytes.clone())
+                .fit_to_exact_size(preview_size)
+                .corner_radius(64.0),
+        );
+    } else if let Some(url) = &preview_url {
         ui.add(
             egui::Image::from_uri(url)
                 .fit_to_exact_size(preview_size)
@@ -490,6 +497,7 @@ fn tab_avatar(ui: &mut egui::Ui, model: &mut UiModel, tx: &Sender<UiIntent>) {
             {
                 model.edit_profile_draft.pending_avatar_asset_id = Some(String::new()); // empty = clear
                 model.edit_profile_draft.avatar_preview_url = None;
+                model.edit_profile_draft.avatar_preview_bytes = None;
                 let _ = tx.send(UiIntent::RemoveAvatar);
             }
         }
@@ -518,6 +526,7 @@ fn tab_avatar(ui: &mut egui::Ui, model: &mut UiModel, tx: &Sender<UiIntent>) {
 
 fn tab_banner(ui: &mut egui::Ui, model: &mut UiModel, tx: &Sender<UiIntent>) {
     // Preview scaled to available width
+    let preview_bytes = model.edit_profile_draft.banner_preview_bytes.clone();
     let preview_url = model
         .edit_profile_draft
         .banner_preview_url
@@ -527,7 +536,13 @@ fn tab_banner(ui: &mut egui::Ui, model: &mut UiModel, tx: &Sender<UiIntent>) {
     let avail_w = ui.available_width().min(480.0);
     let banner_h = avail_w * (240.0 / 680.0);
 
-    if let Some(url) = &preview_url {
+    if let Some(bytes) = &preview_bytes {
+        ui.add(
+            egui::Image::from_bytes("bytes://banner_preview", bytes.clone())
+                .fit_to_exact_size(egui::vec2(avail_w, banner_h))
+                .corner_radius(8.0),
+        );
+    } else if let Some(url) = &preview_url {
         ui.add(
             egui::Image::from_uri(url)
                 .fit_to_exact_size(egui::vec2(avail_w, banner_h))
@@ -585,6 +600,7 @@ fn tab_banner(ui: &mut egui::Ui, model: &mut UiModel, tx: &Sender<UiIntent>) {
             {
                 model.edit_profile_draft.pending_banner_asset_id = Some(String::new());
                 model.edit_profile_draft.banner_preview_url = None;
+                model.edit_profile_draft.banner_preview_bytes = None;
                 let _ = tx.send(UiIntent::RemoveBanner);
             }
         }
@@ -719,6 +735,8 @@ fn cancel_edit(model: &mut UiModel) {
         model.edit_profile_draft.avatar_preview_url = p.avatar_url.clone();
         model.edit_profile_draft.banner_preview_url = p.banner_url.clone();
     }
+    model.edit_profile_draft.avatar_preview_bytes = None;
+    model.edit_profile_draft.banner_preview_bytes = None;
     model.edit_profile_draft.pending_avatar_asset_id = None;
     model.edit_profile_draft.pending_banner_asset_id = None;
     model.edit_profile_draft.add_link_platform.clear();
@@ -827,5 +845,7 @@ pub fn init_draft_from_profile(model: &mut UiModel) {
             model.edit_profile_draft.display_name = model.nick.clone();
         }
     }
+    model.edit_profile_draft.avatar_preview_bytes = None;
+    model.edit_profile_draft.banner_preview_bytes = None;
 }
 

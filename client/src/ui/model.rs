@@ -300,11 +300,11 @@ pub enum UiEvent {
     SelfProfileLoaded(UserProfileData),
     AvatarUploadComplete {
         asset_id: String,
-        preview_url: String,
+        preview_bytes: Vec<u8>,
     },
     BannerUploadComplete {
         asset_id: String,
-        preview_url: String,
+        preview_bytes: Vec<u8>,
     },
     AvatarUploadFailed(String),
     BannerUploadFailed(String),
@@ -1524,9 +1524,12 @@ pub struct UserProfileEditDraft {
     // Avatar/banner pending asset ids (set after successful upload, cleared on modal close/cancel)
     pub pending_avatar_asset_id: Option<String>,
     pub pending_banner_asset_id: Option<String>,
-    // Local preview URLs (file://) for immediate display before server confirmation
+    // Server preview URLs for display
     pub avatar_preview_url: Option<String>,
     pub banner_preview_url: Option<String>,
+    // Local preview image bytes for immediate display after upload
+    pub avatar_preview_bytes: Option<Vec<u8>>,
+    pub banner_preview_bytes: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone)]
@@ -2827,19 +2830,21 @@ impl UiModel {
             }
             UiEvent::AvatarUploadComplete {
                 asset_id,
-                preview_url,
+                preview_bytes,
             } => {
                 self.avatar_upload_in_flight = false;
                 self.edit_profile_draft.pending_avatar_asset_id = Some(asset_id);
-                self.edit_profile_draft.avatar_preview_url = Some(preview_url);
+                self.edit_profile_draft.avatar_preview_url = None;
+                self.edit_profile_draft.avatar_preview_bytes = Some(preview_bytes);
             }
             UiEvent::BannerUploadComplete {
                 asset_id,
-                preview_url,
+                preview_bytes,
             } => {
                 self.banner_upload_in_flight = false;
                 self.edit_profile_draft.pending_banner_asset_id = Some(asset_id);
-                self.edit_profile_draft.banner_preview_url = Some(preview_url);
+                self.edit_profile_draft.banner_preview_url = None;
+                self.edit_profile_draft.banner_preview_bytes = Some(preview_bytes);
             }
             UiEvent::AvatarUploadFailed(err) => {
                 self.avatar_upload_in_flight = false;

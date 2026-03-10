@@ -14,7 +14,14 @@ const AVATAR_SIZE: f32 = 84.0;
 const AVATAR_HALF: f32 = AVATAR_SIZE / 2.0;
 const CARD_ROUNDING: f32 = 14.0;
 const CONTENT_PAD: f32 = 20.0;
-const BADGE_ICON_MAP: &[(&str, &str)] = &[
+const BADGE_CROWN: &[u8] = include_bytes!("../../../assets/Badges/24_crown.png");
+const BADGE_SHIELD: &[u8] = include_bytes!("../../../assets/Badges/14_shield.png");
+const BADGE_CODE: &[u8] = include_bytes!("../../../assets/Badges/07_code.png");
+const BADGE_TROPHY: &[u8] = include_bytes!("../../../assets/Badges/23_trophy.png");
+const BADGE_LEVEL_UP: &[u8] = include_bytes!("../../../assets/Badges/40_level_up.png");
+
+/// Badge definitions: (badge_id, asset_path_for_server)
+const BADGE_DEFS: &[(&str, &str)] = &[
     ("staff", "client/assets/Badges/24_crown.png"),
     ("admin", "client/assets/Badges/24_crown.png"),
     ("mod", "client/assets/Badges/14_shield.png"),
@@ -366,16 +373,17 @@ fn render_content_area(
     if !profile.badges.is_empty() {
         ui.horizontal_wrapped(|ui| {
             for badge in &profile.badges {
-                let icon_uri = if badge.icon_url.trim().is_empty() {
-                    badge_icon_fallback(&badge.id)
-                } else {
-                    Some(badge.icon_url.as_str())
-                };
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
-                    if let Some(uri) = icon_uri {
+                    if !badge.icon_url.trim().is_empty() {
                         ui.add(
-                            egui::Image::from_uri(uri)
+                            egui::Image::from_uri(&badge.icon_url)
+                                .fit_to_exact_size(egui::vec2(16.0, 16.0))
+                                .corner_radius(2.0),
+                        );
+                    } else if let Some((uri, bytes)) = badge_icon_fallback(&badge.id) {
+                        ui.add(
+                            egui::Image::from_bytes(uri, bytes)
                                 .fit_to_exact_size(egui::vec2(16.0, 16.0))
                                 .corner_radius(2.0),
                         );
@@ -475,7 +483,7 @@ fn render_content_area(
                 .on_disabled_hover_text("Ban is currently disabled from this menu");
                 ui.separator();
                 ui.menu_button("Grant badge", |ui| {
-                    for (badge_id, path) in BADGE_ICON_MAP {
+                    for (badge_id, path) in BADGE_DEFS {
                         if ui.button(*badge_id).clicked() {
                             let label = title_case_badge_label(badge_id);
                             let _ = tx_intent.send(UiIntent::GrantBadgeToUser {
@@ -666,10 +674,15 @@ fn lerp_color(start: egui::Color32, end: egui::Color32, t: f32) -> egui::Color32
     egui::Color32::from_rgb(r as u8, g as u8, b as u8)
 }
 
-fn badge_icon_fallback(badge_id: &str) -> Option<&'static str> {
-    BADGE_ICON_MAP
-        .iter()
-        .find_map(|(id, path)| (*id == badge_id).then_some(*path))
+fn badge_icon_fallback(badge_id: &str) -> Option<(&'static str, &'static [u8])> {
+    match badge_id {
+        "staff" | "admin" => Some(("bytes://badge/crown", BADGE_CROWN)),
+        "mod" => Some(("bytes://badge/shield", BADGE_SHIELD)),
+        "developer" => Some(("bytes://badge/code", BADGE_CODE)),
+        "founder" => Some(("bytes://badge/trophy", BADGE_TROPHY)),
+        "early-adopter" => Some(("bytes://badge/level_up", BADGE_LEVEL_UP)),
+        _ => None,
+    }
 }
 
 fn title_case_badge_label(badge_id: &str) -> String {
