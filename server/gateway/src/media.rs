@@ -217,6 +217,38 @@ impl MediaService {
         .await?;
 
         let Some(row) = row else {
+            // Profile avatar/banner assets are stored in `profile_asset_uploads` instead of
+            // `attachments`. Accept those UUIDs as media downloads as well so profile image
+            // resolution can reuse the same client download path.
+            let profile_asset = sqlx::query(
+                r#"SELECT mime_type, asset_data
+                   FROM profile_asset_uploads
+                   WHERE session_id = $1 AND status = 'verified'"#,
+            )
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
+
+            if let Some(profile_row) = profile_asset {
+                let mime: String = profile_row.get("mime_type");
+                let bytes: Vec<u8> = profile_row.get("asset_data");
+                let meta = pb::MediaResponse {
+                    payload: Some(pb::media_response::Payload::DownloadMeta(
+                        pb::DownloadMeta {
+                            mime: mime.clone(),
+                            filename: format!("{id}"),
+                            size_bytes: bytes.len() as u64,
+                            sha256: String::new(),
+                            safe_inline: self.inline_safe_mime.contains(mime.as_str()),
+                        },
+                    )),
+                };
+                write_delimited(send, &meta).await?;
+                send.write_all(&bytes).await?;
+                send.finish()?;
+                return Ok(());
+            }
+
             return self.write_error(send, "attachment not found").await;
         };
 
