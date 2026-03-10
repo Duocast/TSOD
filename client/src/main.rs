@@ -2406,6 +2406,39 @@ async fn connect_and_run_session(
     server_deafened.store(initially_server_deafened, Ordering::Relaxed);
     apply_authoritative_snapshot(&snapshot, tx_event, initial_active_channel.as_deref());
 
+    // Prime the self profile immediately after initial sync so the user panel
+    // avatar/status render without requiring the Edit Profile modal to be opened.
+    match dispatcher.fetch_self_profile(&local_user_id).await {
+        Ok(mut profile) => {
+            if let Some(raw) = profile.avatar_url.as_deref() {
+                match resolve_profile_asset_uri(&conn, raw).await {
+                    Ok(resolved) => profile.avatar_url = resolved,
+                    Err(e) => {
+                        let _ = tx_event.send(UiEvent::AppendLog(format!(
+                            "[profile] resolve avatar failed: {e:#}"
+                        )));
+                    }
+                }
+            }
+            if let Some(raw) = profile.banner_url.as_deref() {
+                match resolve_profile_asset_uri(&conn, raw).await {
+                    Ok(resolved) => profile.banner_url = resolved,
+                    Err(e) => {
+                        let _ = tx_event.send(UiEvent::AppendLog(format!(
+                            "[profile] resolve banner failed: {e:#}"
+                        )));
+                    }
+                }
+            }
+            let _ = tx_event.send(UiEvent::SelfProfileLoaded(profile));
+        }
+        Err(e) => {
+            let _ = tx_event.send(UiEvent::AppendLog(format!(
+                "[profile] fetch self profile failed: {e:#}"
+            )));
+        }
+    }
+
     // Server push consumer
     let mut push_rx = dispatcher.take_push_receiver().await;
     {
