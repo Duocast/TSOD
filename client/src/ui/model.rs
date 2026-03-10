@@ -3148,27 +3148,6 @@ impl UiModel {
             .map(str::to_string)
     }
 
-    pub fn resolve_message_author_color(&self, author_id: &str) -> Option<u32> {
-        if author_id.trim().is_empty() {
-            return None;
-        }
-
-        if self.user_id == author_id {
-            if let Some(color) = self
-                .self_profile
-                .as_ref()
-                .map(|profile| profile.accent_color)
-                .filter(|color| *color != 0)
-            {
-                return Some(color);
-            }
-        }
-
-        self.get_cached_profile(author_id)
-            .map(|profile| profile.accent_color)
-            .filter(|color| *color != 0)
-    }
-
     fn refresh_message_author_metadata(&mut self) {
         let channel_ids = self.messages.keys().cloned().collect::<Vec<_>>();
         for channel_id in channel_ids {
