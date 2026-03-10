@@ -2552,9 +2552,10 @@ async fn connect_and_run_session(
                                         let tx_event = tx_event.clone();
                                         let dispatcher = dispatcher.clone();
                                         let conn = conn.clone();
+                                        let spawn_author_id = author_id.clone();
                                         tokio::spawn(async move {
                                             if let Ok(mut profile) =
-                                                dispatcher.fetch_user_profile(&author_id).await
+                                                dispatcher.fetch_user_profile(&spawn_author_id).await
                                             {
                                                 if let Some(raw) = profile.avatar_url.as_deref() {
                                                     if let Ok(resolved) =
