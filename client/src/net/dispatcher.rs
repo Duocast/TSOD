@@ -823,6 +823,33 @@ impl ControlDispatcher {
         Ok(pb_profile_to_ui(&profile))
     }
 
+    pub async fn fetch_user_profile(&self, user_id: &str) -> Result<crate::ui::model::UserProfileData> {
+        let req = pb::GetUserProfileRequest {
+            user_id: Some(pb::UserId {
+                value: user_id.to_string(),
+            }),
+        };
+        let resp = self
+            .send_request(
+                pb::client_to_server::Payload::GetUserProfileRequest(req),
+                Duration::from_secs(5),
+            )
+            .await??;
+
+        if let Some(err) = resp.error {
+            return Err(anyhow!("fetch_user_profile error: {:?}", err));
+        }
+
+        let profile = match resp.payload {
+            Some(pb::server_to_client::Payload::GetUserProfileResponse(r)) => {
+                r.profile.ok_or_else(|| anyhow!("empty profile in response"))?
+            }
+            _ => return Err(anyhow!("unexpected response to GetUserProfileRequest")),
+        };
+
+        Ok(pb_profile_to_ui(&profile))
+    }
+
     /// Low-level request API with correlation.
     pub async fn send_request(
         &self,
