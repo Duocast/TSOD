@@ -729,17 +729,15 @@ impl ControlDispatcher {
         Ok(())
     }
 
-    /// Upload a profile asset (avatar or banner) to the server over a new authenticated
-    /// Quinn bidi stream.  Returns the verified `asset_id` on success.
+    /// Upload a profile asset (avatar or banner) over the control stream.
+    /// Returns the verified `asset_id` on success.
     pub async fn upload_profile_asset(
         &self,
-        conn: &quinn::Connection,
+        _conn: &quinn::Connection,
         purpose: &str,
         image_bytes: Vec<u8>,
         mime_type: &str,
     ) -> Result<String> {
-        use crate::net::frame::{read_delimited, write_delimited};
-
         // Step 1: request upload session approval on the control stream.
         let begin_req = pb::BeginProfileAssetUploadRequest {
             purpose: purpose.to_string(),
@@ -762,28 +760,33 @@ impl ControlDispatcher {
             _ => return Err(anyhow!("unexpected response to BeginProfileAssetUploadRequest")),
         };
 
-        // Step 2: open a new bidi stream and stream the asset bytes.
-        let (mut send, mut recv) = conn
-            .open_bi()
-            .await
-            .context("open profile asset upload stream")?;
-
-        // Send asset data request framed on the new stream.
+        // Step 2: send the asset bytes on the control stream.
         let data_req = pb::UploadProfileAssetDataRequest {
             session_id,
             data: image_bytes,
         };
-        write_delimited(&mut send, &data_req).await?;
-        send.finish().context("finish profile asset upload stream")?;
+        let resp = self
+            .send_request(
+                pb::client_to_server::Payload::UploadProfileAssetDataRequest(data_req),
+                Duration::from_secs(10),
+            )
+            .await??;
 
-        // Read back the CompleteProfileAssetUploadResponse.
-        let complete_resp: pb::CompleteProfileAssetUploadResponse =
-            read_delimited(&mut recv, 64 * 1024).await?;
+        if let Some(err) = resp.error {
+            return Err(anyhow!("upload_profile_asset_data error: {:?}", err));
+        }
 
-        let asset_id = complete_resp
-            .asset_id
-            .map(|a| a.value)
-            .ok_or_else(|| anyhow!("server returned no asset_id"))?;
+        let asset_id = match resp.payload {
+            Some(pb::server_to_client::Payload::CompleteProfileAssetUploadResponse(done)) => done
+                .asset_id
+                .map(|a| a.value)
+                .ok_or_else(|| anyhow!("server returned no asset_id"))?,
+            _ => {
+                return Err(anyhow!(
+                    "unexpected response to UploadProfileAssetDataRequest"
+                ))
+            }
+        };
 
         Ok(asset_id)
     }
