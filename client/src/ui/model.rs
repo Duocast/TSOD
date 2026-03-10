@@ -2774,6 +2774,18 @@ impl UiModel {
                 });
             }
             UiEvent::UserProfileLoaded(mut profile) => {
+                if should_prefer_fallback_name(&profile.display_name) {
+                    if let Some(member_name) = self
+                        .current_members()
+                        .iter()
+                        .find(|member| member.user_id == profile.user_id)
+                        .map(|member| member.display_name.trim())
+                        .filter(|name| !should_prefer_fallback_name(name))
+                    {
+                        profile.display_name = member_name.to_owned();
+                    }
+                }
+
                 // Enrich with role data from the permissions system if available.
                 if profile.roles.is_empty() {
                     if let Some(member) = self
@@ -3153,6 +3165,11 @@ impl UiModel {
             .map(|typers| typers.iter().map(|(name, _)| name.as_str()).collect())
             .unwrap_or_default()
     }
+}
+
+fn should_prefer_fallback_name(name: &str) -> bool {
+    let trimmed = name.trim();
+    trimmed.is_empty() || trimmed.starts_with("guest-") || trimmed.starts_with("user-")
 }
 
 #[cfg(test)]
