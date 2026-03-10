@@ -1721,7 +1721,7 @@ impl Gateway {
             session_id: Some(pb::SessionId {
                 value: session_id.clone(),
             }),
-            max_message_size_bytes: 64 * 1024,
+            max_message_size_bytes: CONTROL_STREAM_MAX_MSG as u32,
             max_upload_size_bytes: 50 * 1024 * 1024,
             ping_interval_ms: 15_000,
             auth_challenge: auth_challenge.to_vec(),

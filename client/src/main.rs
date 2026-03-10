@@ -4377,7 +4377,6 @@ async fn connect_and_run_session(
                         }
                         UiIntent::UploadProfileAvatar { path } => {
                             match upload_profile_image(
-                                &conn,
                                 &dispatcher,
                                 &path,
                                 "profile_avatar",
@@ -4415,7 +4414,6 @@ async fn connect_and_run_session(
                         }
                         UiIntent::UploadProfileBanner { path } => {
                             match upload_profile_image(
-                                &conn,
                                 &dispatcher,
                                 &path,
                                 "profile_banner",
@@ -6517,7 +6515,6 @@ fn hex_to_32(s: &str) -> Result<[u8; 32]> {
 /// For banners (wide): uses cover-fill to resize, then center-crops to `target_w×target_h`.
 /// This ensures the uploaded image always matches the expected dimensions exactly.
 async fn upload_profile_image(
-    conn: &quinn::Connection,
     dispatcher: &net::dispatcher::ControlDispatcher,
     path: &std::path::Path,
     purpose: &str,
@@ -6561,9 +6558,9 @@ async fn upload_profile_image(
     )
     .context("encode image to WebP")?;
 
-    // Upload via the dispatcher (control stream begin + data stream).
+    // Upload via the dispatcher (control stream).
     let asset_id = dispatcher
-        .upload_profile_asset(conn, purpose, webp_bytes, "image/webp")
+        .upload_profile_asset(purpose, webp_bytes, "image/webp")
         .await
         .context("upload profile asset")?;
 
