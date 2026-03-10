@@ -7,7 +7,7 @@ use crate::{
     errors::{ControlError, ControlResult},
     ids::{ChannelId, MessageId, OutboxId, ServerId, UserId},
     model::{
-        AuditEntry, AssetUploadSession, Channel, ChannelCreate, ChatMessage, JoinChannel, Member,
+        AssetUploadSession, AuditEntry, Channel, ChannelCreate, ChatMessage, JoinChannel, Member,
         OutboxEvent, OutboxEventRow, PermAuditRow, PermChannelOverrideRecord, PermRoleRecord,
         PermUserSummaryRecord, PermissionRequest, SendMessage, UserProfileRow,
     },
@@ -1540,11 +1540,7 @@ impl<R: ControlRepo> ControlService<R> {
         Ok(())
     }
 
-    pub async fn set_avatar(
-        &self,
-        ctx: &RequestContext,
-        avatar_url: &str,
-    ) -> ControlResult<()> {
+    pub async fn set_avatar(&self, ctx: &RequestContext, avatar_url: &str) -> ControlResult<()> {
         let mut tx = <R as ControlRepo>::tx(&self.repo).await?;
         <R as ControlRepo>::set_profile_avatar(
             &self.repo,
@@ -1558,11 +1554,7 @@ impl<R: ControlRepo> ControlService<R> {
         Ok(())
     }
 
-    pub async fn set_banner(
-        &self,
-        ctx: &RequestContext,
-        banner_url: &str,
-    ) -> ControlResult<()> {
+    pub async fn set_banner(&self, ctx: &RequestContext, banner_url: &str) -> ControlResult<()> {
         let mut tx = <R as ControlRepo>::tx(&self.repo).await?;
         <R as ControlRepo>::set_profile_banner(
             &self.repo,
@@ -1628,15 +1620,13 @@ impl<R: ControlRepo> ControlService<R> {
     ) -> ControlResult<()> {
         // Re-verify ownership.
         let mut tx = <R as ControlRepo>::tx(&self.repo).await?;
-        let session = <R as ControlRepo>::get_asset_upload_session(
-            &self.repo,
-            &mut tx,
-            session_id,
-            user_id,
-        )
-        .await?;
+        let session =
+            <R as ControlRepo>::get_asset_upload_session(&self.repo, &mut tx, session_id, user_id)
+                .await?;
         if session.is_none() {
-            return Err(ControlError::NotFound("asset upload session not found or expired"));
+            return Err(ControlError::NotFound(
+                "asset upload session not found or expired",
+            ));
         }
         <R as ControlRepo>::store_verified_asset(&self.repo, &mut tx, session_id, asset_data)
             .await?;
@@ -1669,13 +1659,9 @@ impl<R: ControlRepo> ControlService<R> {
         target_user_id: UserId,
     ) -> ControlResult<Vec<crate::model::UserBadgeRow>> {
         let mut tx = <R as ControlRepo>::tx(&self.repo).await?;
-        let badges = <R as ControlRepo>::get_user_badges(
-            &self.repo,
-            &mut tx,
-            target_user_id,
-            ctx.server_id,
-        )
-        .await?;
+        let badges =
+            <R as ControlRepo>::get_user_badges(&self.repo, &mut tx, target_user_id, ctx.server_id)
+                .await?;
         tx.commit().await?;
         Ok(badges)
     }
@@ -1758,13 +1744,9 @@ impl<R: ControlRepo> ControlService<R> {
         user_id: UserId,
     ) -> ControlResult<bool> {
         let mut tx = <R as ControlRepo>::tx(&self.repo).await?;
-        let owned = <R as ControlRepo>::verify_asset_ownership(
-            &self.repo,
-            &mut tx,
-            asset_id,
-            user_id,
-        )
-        .await?;
+        let owned =
+            <R as ControlRepo>::verify_asset_ownership(&self.repo, &mut tx, asset_id, user_id)
+                .await?;
         tx.commit().await?;
         Ok(owned)
     }
@@ -1775,13 +1757,9 @@ impl<R: ControlRepo> ControlService<R> {
         session_id: Uuid,
     ) -> ControlResult<Option<AssetUploadSession>> {
         let mut tx = <R as ControlRepo>::tx(&self.repo).await?;
-        let session = <R as ControlRepo>::get_asset_upload_session(
-            &self.repo,
-            &mut tx,
-            session_id,
-            user_id,
-        )
-        .await?;
+        let session =
+            <R as ControlRepo>::get_asset_upload_session(&self.repo, &mut tx, session_id, user_id)
+                .await?;
         tx.commit().await?;
         Ok(session)
     }
@@ -1816,6 +1794,33 @@ impl<R: ControlRepo> ControlService<R> {
             None,
         )
         .await?;
+
+        let member_channels = <R as ControlRepo>::list_member_channels_for_user(
+            &self.repo,
+            &mut tx,
+            ctx.server_id,
+            ctx.user_id,
+        )
+        .await?;
+        let custom_status_text = status_text.unwrap_or_default();
+        for channel_id in member_channels {
+            <R as ControlRepo>::insert_outbox(
+                &self.repo,
+                &mut tx,
+                &OutboxEvent {
+                    id: OutboxId(Uuid::new_v4()),
+                    server_id: ctx.server_id,
+                    topic: "presence.user_online_status_changed".to_string(),
+                    payload_json: json!({
+                        "channel_id": channel_id.0,
+                        "user_id": ctx.user_id.0,
+                        "custom_status_text": custom_status_text,
+                    }),
+                },
+            )
+            .await?;
+        }
+
         tx.commit().await?;
         Ok(())
     }
