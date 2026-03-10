@@ -205,6 +205,34 @@ fn translate_record(rec: &OutboxEventRow) -> Result<(ChannelId, pb::ServerToClie
                 server_push(pb::server_to_client::Payload::PresenceEvent(ev)),
             ))
         }
+        "presence.user_online_status_changed" => {
+            let channel_id = parse_channel_id_field(&rec.payload_json, "channel_id")?;
+            let user_id = parse_user_id_field(&rec.payload_json, "user_id")?;
+            let custom_status_text = rec
+                .payload_json
+                .get("custom_status_text")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+
+            let ev = pb::PresenceEvent {
+                at: Some(now_ts()),
+                kind: Some(pb::presence_event::Kind::UserOnlineStatusChanged(
+                    pb::UserOnlineStatusChanged {
+                        user_id: Some(pb::UserId {
+                            value: user_id.0.to_string(),
+                        }),
+                        status: pb::OnlineStatus::Online as i32,
+                        custom_status_text,
+                    },
+                )),
+            };
+
+            Ok((
+                channel_id,
+                server_push(pb::server_to_client::Payload::PresenceEvent(ev)),
+            ))
+        }
         "chat.message_posted" => {
             let channel_id = parse_channel_id_field(&rec.payload_json, "channel_id")?;
             let message_id = parse_message_id_field(&rec.payload_json, "message_id")?;
@@ -676,6 +704,9 @@ fn apply_cache_side_effects(membership: &MembershipCache, rec: &OutboxEventRow) 
                 .unwrap_or(false);
             membership.update_voice_state(user_id, channel_id, muted, deafened);
         }
+        "presence.user_online_status_changed" => {
+            // no membership cache side effects
+        }
         "moderation.user_muted" => {
             let channel_id = parse_channel_id_field(&rec.payload_json, "channel_id")?;
             let user_id = parse_user_id_field(&rec.payload_json, "target_user_id")?;
@@ -873,6 +904,36 @@ mod tests {
         let (parsed_channel, _push) =
             translate_record(&rec).expect("channels.created alias should be supported");
         assert_eq!(parsed_channel.0, channel_id);
+    }
+
+    #[test]
+    fn translate_presence_user_online_status_changed_is_supported() {
+        let channel_id = uuid::Uuid::new_v4();
+        let user_id = uuid::Uuid::new_v4();
+        let rec = OutboxEventRow {
+            id: OutboxId(uuid::Uuid::new_v4()),
+            server_id: ServerId(uuid::Uuid::new_v4()),
+            topic: "presence.user_online_status_changed".to_string(),
+            payload_json: json!({
+                "channel_id": channel_id,
+                "user_id": user_id,
+                "custom_status_text": "Lunch"
+            }),
+        };
+
+        let (parsed_channel, push) = translate_record(&rec)
+            .expect("presence.user_online_status_changed should be supported");
+        assert_eq!(parsed_channel.0, channel_id);
+        match push.payload {
+            Some(pb::server_to_client::Payload::PresenceEvent(ev)) => match ev.kind {
+                Some(pb::presence_event::Kind::UserOnlineStatusChanged(status)) => {
+                    assert_eq!(status.user_id.expect("user id").value, user_id.to_string());
+                    assert_eq!(status.custom_status_text, "Lunch");
+                }
+                other => panic!("unexpected presence event: {:?}", other),
+            },
+            other => panic!("unexpected payload: {:?}", other),
+        }
     }
 
     #[test]
