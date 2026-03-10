@@ -32,7 +32,7 @@ use vp_media::voice_forwarder::VoiceForwarder;
 
 const CONTROL_STREAM_MAX_MSG: usize = 256 * 1024; // 256KB
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
- 
+
 /// Stream-type discriminator bytes written as the first byte on each bidi stream.
 const STREAM_TYPE_MEDIA: u8 = 0x01;
 const STREAM_TYPE_PROFILE_ASSET: u8 = 0x02;
@@ -165,11 +165,11 @@ impl Gateway {
         );
 
         // Ensure default profile exists and update display name from preferred_display_name.
-        if let Err(e) = self.control.create_default_profile(
-            user_id,
-            server_id,
-            &identity.display_name,
-        ).await {
+        if let Err(e) = self
+            .control
+            .create_default_profile(user_id, server_id, &identity.display_name)
+            .await
+        {
             warn!("failed to ensure default profile: {:#}", e);
         }
 
@@ -393,9 +393,10 @@ impl Gateway {
                             }
                         }
                         STREAM_TYPE_PROFILE_ASSET => {
-                            if let Err(e) = handle_profile_asset_stream(
-                                send_s, recv_s, user_id, &control_svc,
-                            ).await {
+                            if let Err(e) =
+                                handle_profile_asset_stream(send_s, recv_s, user_id, &control_svc)
+                                    .await
+                            {
                                 warn!("profile asset stream failed: {:#}", e);
                             }
                         }
@@ -520,6 +521,7 @@ impl Gateway {
                                 display_name: m.display_name,
                                 muted: m.muted,
                                 deafened: m.deafened,
+                                avatar_asset_url: m.avatar_asset_url.unwrap_or_default(),
                                 ..Default::default()
                             })
                             .collect(),
@@ -1808,7 +1810,9 @@ impl Gateway {
             at: Some(now_ts()),
             kind: Some(pb::user_profile_event::Kind::UserProfileUpdated(
                 pb::UserProfileUpdated {
-                    user_id: Some(pb::UserId { value: updated_user_id.0.to_string() }),
+                    user_id: Some(pb::UserId {
+                        value: updated_user_id.0.to_string(),
+                    }),
                     profile: Some(profile),
                 },
             )),
@@ -1903,6 +1907,7 @@ impl Gateway {
                     display_name: m.display_name,
                     muted: m.muted,
                     deafened: m.deafened,
+                    avatar_asset_url: m.avatar_asset_url.unwrap_or_default(),
                     ..Default::default()
                 })
                 .collect::<Vec<_>>();
@@ -2191,25 +2196,33 @@ fn profile_row_to_pb(row: vp_control::model::UserProfileRow) -> pb::UserProfile 
         })
         .unwrap_or_default();
     pb::UserProfile {
-        user_id: Some(pb::UserId { value: row.user_id.0.to_string() }),
+        user_id: Some(pb::UserId {
+            value: row.user_id.0.to_string(),
+        }),
         display_name: row.display_name,
         avatar_asset_url: row.avatar_asset_url.clone(),
         avatar_asset_id: if row.avatar_asset_url.is_empty() {
             None
         } else {
-            Some(pb::AssetId { value: row.avatar_asset_url })
+            Some(pb::AssetId {
+                value: row.avatar_asset_url,
+            })
         },
         description: row.description,
         status: pb::OnlineStatus::Online as i32,
         custom_status_text: row.custom_status_text,
         badges: vec![],
-        created_at: Some(pb::Timestamp { unix_millis: row.created_at.timestamp_millis() }),
+        created_at: Some(pb::Timestamp {
+            unix_millis: row.created_at.timestamp_millis(),
+        }),
         last_seen_at: None,
         banner_asset_url: row.banner_asset_url.clone(),
         banner_asset_id: if row.banner_asset_url.is_empty() {
             None
         } else {
-            Some(pb::AssetId { value: row.banner_asset_url })
+            Some(pb::AssetId {
+                value: row.banner_asset_url,
+            })
         },
         accent_color: row.accent_color.max(0) as u32,
         links,

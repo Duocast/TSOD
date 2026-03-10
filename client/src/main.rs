@@ -1950,7 +1950,7 @@ fn apply_authoritative_snapshot(
                 self_deafened: m.self_deafened,
                 streaming: m.streaming,
                 speaking: false,
-                avatar_url: None,
+                avatar_url: (!m.avatar_asset_url.is_empty()).then_some(m.avatar_asset_url.clone()),
             })
             .collect::<Vec<_>>();
         let _ = tx_event.send(UiEvent::UpdateChannelMembers {
@@ -2688,7 +2688,8 @@ async fn connect_and_run_session(
                                                 self_deafened: member.self_deafened,
                                                 streaming: member.streaming,
                                                 speaking: false,
-                                                avatar_url: None,
+                                                avatar_url: (!member.avatar_asset_url.is_empty())
+                                                    .then_some(member.avatar_asset_url),
                                             },
                                         });
                                     }
@@ -3643,7 +3644,8 @@ async fn connect_and_run_session(
                                                 self_deafened: m.self_deafened,
                                                 streaming: m.streaming,
                                                 speaking: false,
-                                                avatar_url: None,
+                                                avatar_url: (!m.avatar_asset_url.is_empty())
+                                                    .then_some(m.avatar_asset_url),
                                             })
                                             .collect(),
                                     });

@@ -124,6 +124,12 @@ fn translate_record(rec: &OutboxEventRow) -> Result<(ChannelId, pb::ServerToClie
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string();
+            let avatar_asset_url = rec
+                .payload_json
+                .get("avatar_asset_url")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
 
             let ev = pb::PresenceEvent {
                 at: Some(now_ts()),
@@ -138,6 +144,7 @@ fn translate_record(rec: &OutboxEventRow) -> Result<(ChannelId, pb::ServerToClie
                         display_name,
                         muted: false,
                         deafened: false,
+                        avatar_asset_url,
                         ..Default::default()
                     }),
                 })),
