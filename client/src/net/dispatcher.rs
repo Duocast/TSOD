@@ -21,6 +21,10 @@ use crate::{
 
 const MAX_CTRL_MSG: usize = 256 * 1024;
 
+/// Stream-type discriminator bytes written as the first byte on each bidi stream.
+pub const STREAM_TYPE_MEDIA: u8 = 0x01;
+pub const STREAM_TYPE_PROFILE_ASSET: u8 = 0x02;
+ 
 /// Server-push events emitted by the dispatcher.
 /// Keep this fairly low-level; app layer can transform into UI state.
 #[derive(Clone, Debug)]
@@ -733,6 +737,7 @@ impl ControlDispatcher {
     /// Quinn bidi stream.  Returns the verified `asset_id` on success.
     pub async fn upload_profile_asset(
         &self,
+        conn: &quinn::Connection,
         purpose: &str,
         image_bytes: Vec<u8>,
         mime_type: &str,
@@ -760,26 +765,27 @@ impl ControlDispatcher {
             _ => return Err(anyhow!("unexpected response to BeginProfileAssetUploadRequest")),
         };
 
-        // Step 2: send asset data on the control stream.
+        // Step 2: open a dedicated bidi stream for the asset data.
+        let (mut send, mut recv) = conn
+            .open_bi()
+            .await
+            .context("open profile asset upload stream")?;
+ 
+        // Write stream-type discriminator so the server routes correctly.
+        send.write_all(&[STREAM_TYPE_PROFILE_ASSET])
+            .await
+            .context("write stream type")?;
+ 
         let data_req = pb::UploadProfileAssetDataRequest {
             session_id,
             data: image_bytes,
         };
-        let complete_resp = self
-            .send_request(
-                pb::client_to_server::Payload::UploadProfileAssetDataRequest(data_req),
-                Duration::from_secs(10),
-            )
-            .await??;
+        write_delimited(&mut send, &data_req).await?;
+        send.finish().context("finish profile asset upload stream")?;
 
-        if let Some(err) = complete_resp.error {
-            return Err(anyhow!("upload_profile_asset_data error: {:?}", err));
-        }
-
-        let complete_resp = match complete_resp.payload {
-            Some(pb::server_to_client::Payload::CompleteProfileAssetUploadResponse(r)) => r,
-            _ => return Err(anyhow!("unexpected response to UploadProfileAssetDataRequest")),
-        };
+        // Read back the CompleteProfileAssetUploadResponse.
+        let complete_resp: pb::CompleteProfileAssetUploadResponse =
+            read_delimited(&mut recv, 64 * 1024).await?;
 
         let asset_id = complete_resp
             .asset_id
