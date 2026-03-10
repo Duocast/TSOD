@@ -5818,12 +5818,24 @@ async fn voice_send_loop(
     loop {
         tick.tick().await;
 
+        let mut waited_ms = 0u64;
+        let mut backoff_ms = 2u64;
         loop {
             let capture_stream = capture.read().await.clone();
             if capture_stream.read_frame(&mut pcm) {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(1)).await;
+
+            // Avoid a hot 1ms polling loop on capture underflow. This path can
+            // consume significant CPU (especially on Linux audio graph hiccups)
+            // without improving capture recovery.
+            if waited_ms >= frame_ms as u64 {
+                continue;
+            }
+
+            tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+            waited_ms += backoff_ms;
+            backoff_ms = (backoff_ms * 2).min(10);
         }
 
         // Reserve fixed headroom on the capture/send path before any user gain so
