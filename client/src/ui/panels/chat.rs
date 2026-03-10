@@ -778,15 +778,11 @@ fn show_message(
 
         ui.vertical(|ui| {
             ui.horizontal(|ui| {
-                let author_color = model
-                    .resolve_message_author_color(&msg.author_id)
-                    .map(argb_to_rgb_color32)
-                    .unwrap_or_else(theme::text_color);
                 let author_resp = ui.add(
                     egui::Label::new(
                         egui::RichText::new(&msg.author_name)
                             .strong()
-                            .color(author_color),
+                            .color(theme::text_color()),
                     )
                     .sense(egui::Sense::click()),
                 );
@@ -812,14 +808,6 @@ fn show_message(
             show_message_content(ui, msg, tx_intent);
         });
     });
-}
-
-fn argb_to_rgb_color32(argb: u32) -> egui::Color32 {
-    egui::Color32::from_rgb(
-        ((argb >> 16) & 0xFF) as u8,
-        ((argb >> 8) & 0xFF) as u8,
-        (argb & 0xFF) as u8,
-    )
 }
 
 fn show_message_avatar(ui: &mut egui::Ui, msg: &ChatMessage) {
