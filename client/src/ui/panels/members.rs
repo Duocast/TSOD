@@ -96,20 +96,53 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
             ui.painter()
                 .circle_filled(center, radius, theme::bg_light());
 
-            let initial = member
-                .display_name
-                .chars()
-                .next()
-                .unwrap_or('?')
-                .to_uppercase()
-                .to_string();
-            ui.painter().text(
-                center,
-                egui::Align2::CENTER_CENTER,
-                &initial,
-                egui::FontId::proportional(14.0),
-                theme::text_color(),
-            );
+            let avatar_url = member
+                .avatar_url
+                .as_deref()
+                .filter(|url| !url.is_empty())
+                .map(str::to_owned)
+                .or_else(|| {
+                    if member.user_id == model.user_id {
+                        model
+                            .avatar_url
+                            .as_deref()
+                            .filter(|url| !url.is_empty())
+                            .map(str::to_owned)
+                    } else {
+                        None
+                    }
+                })
+                .or_else(|| {
+                    model
+                        .get_cached_profile(&member.user_id)
+                        .and_then(|profile| profile.avatar_url.as_deref())
+                        .filter(|url| !url.is_empty())
+                        .map(str::to_owned)
+                });
+
+            if let Some(avatar_url) = avatar_url {
+                ui.put(
+                    avatar_rect,
+                    crate::ui::image_from_source(&avatar_url)
+                        .fit_to_exact_size(avatar_rect.size())
+                        .corner_radius(egui::CornerRadius::same(16)),
+                );
+            } else {
+                let initial = member
+                    .display_name
+                    .chars()
+                    .next()
+                    .unwrap_or('?')
+                    .to_uppercase()
+                    .to_string();
+                ui.painter().text(
+                    center,
+                    egui::Align2::CENTER_CENTER,
+                    &initial,
+                    egui::FontId::proportional(14.0),
+                    theme::text_color(),
+                );
+            }
 
             if is_speaking {
                 ui.painter().circle_stroke(
