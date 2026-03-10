@@ -31,9 +31,7 @@ use net::voice_datagram::{
     make_voice_datagram, VOICE_FORWARDED_HDR_LEN, VOICE_HDR_LEN, VOICE_VERSION,
 };
 use proto::voiceplatform::v1 as pb;
-use std::collections::HashMap;
-#[cfg(debug_assertions)]
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering},
@@ -2449,7 +2447,9 @@ async fn connect_and_run_session(
         let active_voice_channel_route = active_voice_channel_route.clone();
         let server_deafened = server_deafened.clone();
         let stream_state = stream_state.clone();
+        let dispatcher = dispatcher.clone();
         tokio::spawn(async move {
+            let mut prefetched_chat_profile_user_ids = HashSet::new();
             while let Some(ev) = push_rx.recv().await {
                 match ev {
                     PushEvent::Chat {
@@ -2544,6 +2544,30 @@ async fn connect_and_run_session(
                                             edited: mp.edited_at.is_some(),
                                         },
                                     ));
+                                    if !author_id.is_empty()
+                                        && author_id != local_user_id
+                                        && prefetched_chat_profile_user_ids
+                                            .insert(author_id.clone())
+                                    {
+                                        let tx_event = tx_event.clone();
+                                        let dispatcher = dispatcher.clone();
+                                        let conn = conn.clone();
+                                        tokio::spawn(async move {
+                                            if let Ok(mut profile) =
+                                                dispatcher.fetch_user_profile(&author_id).await
+                                            {
+                                                if let Some(raw) = profile.avatar_url.as_deref() {
+                                                    if let Ok(resolved) =
+                                                        resolve_profile_asset_uri(&conn, raw).await
+                                                    {
+                                                        profile.avatar_url = resolved;
+                                                    }
+                                                }
+                                                let _ = tx_event
+                                                    .send(UiEvent::UserProfileLoaded(profile));
+                                            }
+                                        });
+                                    }
                                     if author_id != local_user_id {
                                         let _ = tx_event.send(UiEvent::PlayChatMessageSfx);
                                     }

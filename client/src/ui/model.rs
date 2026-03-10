@@ -2826,6 +2826,7 @@ impl UiModel {
                 self.profile_popup_loading = false;
                 self.profile_popup_data = Some(profile.clone());
                 self.insert_profile_cache(profile.user_id.clone(), profile);
+                self.refresh_message_author_metadata();
             }
             UiEvent::UserProfileCacheInvalidated { user_id } => {
                 self.profile_cache.remove(&user_id);
@@ -3129,6 +3130,15 @@ impl UiModel {
                         return Some(avatar_url.to_string());
                     }
                 }
+            }
+
+            if let Some(avatar_url) = self
+                .get_cached_profile(author_id)
+                .and_then(|profile| profile.avatar_url.as_ref())
+                .map(|avatar| avatar.trim())
+                .filter(|avatar| !avatar.is_empty())
+            {
+                return Some(avatar_url.to_string());
             }
         }
 
