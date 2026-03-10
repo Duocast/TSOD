@@ -6,7 +6,6 @@ use crate::ui::theme;
 use crossbeam_channel::Sender;
 use eframe::egui;
 
-
 pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>) {
     ui.heading("Members");
 
@@ -43,7 +42,17 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                 .copied()
                 .unwrap_or(0.0)
                 .clamp(0.0, 1.0);
-            let row_height = ui.spacing().interact_size.y.max(36.0);
+            let has_member_status = member.muted
+                || member.self_muted
+                || member.deafened
+                || member.self_deafened
+                || member.streaming
+                || !member.away_message.trim().is_empty();
+            let row_height = if has_member_status {
+                ui.spacing().interact_size.y.max(40.0)
+            } else {
+                ui.spacing().interact_size.y.max(36.0)
+            };
             let row_width = ui.available_width().max(1.0);
             let (row_rect, response) =
                 ui.allocate_exact_size(egui::vec2(row_width, row_height), egui::Sense::click());
@@ -167,7 +176,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
             }
             if !status_parts.is_empty() {
                 ui.painter().text(
-                    egui::pos2(text_x, row_rect.bottom() - 8.0),
+                    egui::pos2(text_x, row_rect.bottom() - 4.0),
                     egui::Align2::LEFT_BOTTOM,
                     status_parts.join(", "),
                     egui::TextStyle::Small.resolve(ui.style()),
