@@ -782,7 +782,7 @@ fn show_message(
                     egui::Label::new(
                         egui::RichText::new(&msg.author_name)
                             .strong()
-                            .color(theme::text_color()),
+                            .color(author_name_color(msg.author_name_color)),
                     )
                     .sense(egui::Sense::click()),
                 );
@@ -808,6 +808,19 @@ fn show_message(
             show_message_content(ui, msg, tx_intent);
         });
     });
+}
+
+fn author_name_color(color: Option<u32>) -> egui::Color32 {
+    let Some(color) = color else {
+        return theme::text_color();
+    };
+    if color == 0 {
+        return theme::text_color();
+    }
+    let r = ((color >> 16) & 0xFF) as u8;
+    let g = ((color >> 8) & 0xFF) as u8;
+    let b = (color & 0xFF) as u8;
+    egui::Color32::from_rgb(r, g, b)
 }
 
 fn show_message_avatar(ui: &mut egui::Ui, msg: &ChatMessage) {

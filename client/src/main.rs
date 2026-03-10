@@ -2447,9 +2447,9 @@ async fn connect_and_run_session(
         let active_voice_channel_route = active_voice_channel_route.clone();
         let server_deafened = server_deafened.clone();
         let stream_state = stream_state.clone();
-		let dispatcher = dispatcher.clone();
+        let dispatcher = dispatcher.clone();
         tokio::spawn(async move {
-			let mut prefetched_chat_profile_user_ids = HashSet::new();
+            let mut prefetched_chat_profile_user_ids = HashSet::new();
             while let Some(ev) = push_rx.recv().await {
                 match ev {
                     PushEvent::Chat {
@@ -2533,6 +2533,7 @@ async fn connect_and_run_session(
                                             message_id,
                                             channel_id,
                                             author_name: author_id.clone(),
+                                            author_name_color: None,
                                             author_id: author_id.clone(),
                                             author_avatar_url: None,
                                             text: mp.text.clone(),
@@ -2544,7 +2545,7 @@ async fn connect_and_run_session(
                                             edited: mp.edited_at.is_some(),
                                         },
                                     ));
-									if !author_id.is_empty()
+                                    if !author_id.is_empty()
                                         && author_id != local_user_id
                                         && prefetched_chat_profile_user_ids
                                             .insert(author_id.clone())
@@ -2554,8 +2555,9 @@ async fn connect_and_run_session(
                                         let conn = conn.clone();
                                         let spawn_author_id = author_id.clone();
                                         tokio::spawn(async move {
-                                            if let Ok(mut profile) =
-                                                dispatcher.fetch_user_profile(&spawn_author_id).await
+                                            if let Ok(mut profile) = dispatcher
+                                                .fetch_user_profile(&spawn_author_id)
+                                                .await
                                             {
                                                 if let Some(raw) = profile.avatar_url.as_deref() {
                                                     if let Ok(resolved) =
@@ -3509,6 +3511,7 @@ async fn connect_and_run_session(
                                         channel_id: ch.clone(),
                                         author_id: local_user_id.clone(),
                                         author_name: cfg.display_name.clone(),
+                                        author_name_color: None,
                                         author_avatar_url: None,
                                         text: text.clone(),
                                         timestamp: now_ms,

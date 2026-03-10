@@ -1365,6 +1365,7 @@ pub struct ChatMessage {
     pub channel_id: String,
     pub author_id: String,
     pub author_name: String,
+    pub author_name_color: Option<u32>,
     pub author_avatar_url: Option<String>,
     pub text: String,
     pub timestamp: i64, // unix millis
@@ -2500,6 +2501,8 @@ impl UiModel {
                     &msg.author_id,
                     &msg.author_name,
                 );
+                msg.author_name_color =
+                    self.resolve_message_author_name_color(&msg.author_id, msg.author_name_color);
                 msg.author_avatar_url = self.resolve_message_author_avatar_url(
                     &msg.channel_id,
                     &msg.author_id,
@@ -3148,6 +3151,32 @@ impl UiModel {
             .map(str::to_string)
     }
 
+    fn resolve_message_author_name_color(
+        &self,
+        author_id: &str,
+        fallback_author_name_color: Option<u32>,
+    ) -> Option<u32> {
+        if !author_id.trim().is_empty() {
+            if !self.user_id.is_empty() && self.user_id == author_id {
+                if let Some(profile) = self.self_profile.as_ref() {
+                    if profile.accent_color != 0 {
+                        return Some(profile.accent_color);
+                    }
+                }
+            }
+
+            if let Some(color) = self
+                .get_cached_profile(author_id)
+                .map(|profile| profile.accent_color)
+                .filter(|color| *color != 0)
+            {
+                return Some(color);
+            }
+        }
+
+        fallback_author_name_color.filter(|color| *color != 0)
+    }
+
     fn refresh_message_author_metadata(&mut self) {
         let channel_ids = self.messages.keys().cloned().collect::<Vec<_>>();
         for channel_id in channel_ids {
@@ -3169,6 +3198,10 @@ impl UiModel {
                                     &message.author_id,
                                     message.author_avatar_url.as_deref(),
                                 ),
+                                self.resolve_message_author_name_color(
+                                    &message.author_id,
+                                    message.author_name_color,
+                                ),
                             )
                         })
                         .collect::<Vec<_>>()
@@ -3176,11 +3209,12 @@ impl UiModel {
                 .unwrap_or_default();
 
             if let Some(messages) = self.messages.get_mut(&channel_id) {
-                for (message, (author_name, author_avatar_url)) in
+                for (message, (author_name, author_avatar_url, author_name_color)) in
                     messages.iter_mut().zip(resolved_metadata.into_iter())
                 {
                     message.author_name = author_name;
                     message.author_avatar_url = author_avatar_url;
+                    message.author_name_color = author_name_color;
                 }
             }
         }
@@ -3393,6 +3427,7 @@ mod tests {
             channel_id: "lounge-1".into(),
             author_id: "user-1".into(),
             author_name: "user-1".into(),
+            author_name_color: None,
             author_avatar_url: None,
             text: "hello".into(),
             timestamp: 1_710_000_000_000,
@@ -3416,6 +3451,7 @@ mod tests {
             channel_id: "lounge-1".into(),
             author_id: "unknown".into(),
             author_name: "".into(),
+            author_name_color: None,
             author_avatar_url: None,
             text: "fallback".into(),
             timestamp: 1_710_000_000_100,
@@ -3787,6 +3823,7 @@ mod tests {
             channel_id: "lounge-1".into(),
             author_id: "remote-user".into(),
             author_name: "Dresk".into(),
+            author_name_color: None,
             author_avatar_url: None,
             text: "hello".into(),
             timestamp: 1_710_000_000_000,
@@ -3813,6 +3850,7 @@ mod tests {
             channel_id: "lounge-1".into(),
             author_id: "local-user".into(),
             author_name: "Overdose".into(),
+            author_name_color: None,
             author_avatar_url: None,
             text: "indeed".into(),
             timestamp: 1_710_000_000_000,
@@ -3828,6 +3866,7 @@ mod tests {
             channel_id: "lounge-1".into(),
             author_id: "local-user".into(),
             author_name: "Overdose".into(),
+            author_name_color: None,
             author_avatar_url: None,
             text: "indeed".into(),
             timestamp: 1_710_000_005_000,
@@ -3853,6 +3892,7 @@ mod tests {
             channel_id: "lounge-1".into(),
             author_id: "local-user".into(),
             author_name: "Overdose".into(),
+            author_name_color: None,
             author_avatar_url: None,
             text: "indeed".into(),
             timestamp: 1_710_000_000_000,
@@ -3867,6 +3907,7 @@ mod tests {
             channel_id: "lounge-1".into(),
             author_id: "local-user".into(),
             author_name: "Overdose".into(),
+            author_name_color: None,
             author_avatar_url: None,
             text: "indeed".into(),
             timestamp: 1_710_000_001_000,
