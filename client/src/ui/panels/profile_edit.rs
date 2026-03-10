@@ -188,8 +188,8 @@ fn tab_profile(ui: &mut egui::Ui, model: &mut UiModel) {
 
     ui.add_space(10.0);
 
-    // Username Color
-    ui.label(egui::RichText::new("Username Color").strong());
+    // Accent Color
+    ui.label(egui::RichText::new("Accent Color").strong());
     ui.add_space(4.0);
 
     // 18-color preset grid (3 rows × 6 columns).
@@ -282,7 +282,7 @@ fn tab_profile(ui: &mut egui::Ui, model: &mut UiModel) {
 
         ui.add_space(4.0);
 
-        // Preview circle of the current username color.
+        // Preview circle of the current accent color.
         let current = model.edit_profile_draft.accent_color;
         let preview_color = egui::Color32::from_rgb(
             ((current >> 16) & 0xFF) as u8,
@@ -299,7 +299,7 @@ fn tab_profile(ui: &mut egui::Ui, model: &mut UiModel) {
         );
 
         ui.label(
-            egui::RichText::new("Username preview")
+            egui::RichText::new("Preview")
                 .color(theme::text_muted())
                 .size(11.0),
         );
