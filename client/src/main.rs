@@ -4905,8 +4905,48 @@ async fn connect_and_run_session(
                                 )
                                 .await
                             {
-                                Ok(Ok(_)) => {
-                                    let _ = tx_event.send(UiEvent::AppendLog("[dm] opened direct message".into()));
+                                Ok(Ok(resp)) => {
+                                    let Some(pb::server_to_client::Payload::CreateDmChannelResponse(
+                                        payload,
+                                    )) = resp.payload
+                                    else {
+                                        let _ = tx_event.send(UiEvent::AppendLog(
+                                            "[dm] unexpected response while opening direct message"
+                                                .into(),
+                                        ));
+                                        continue;
+                                    };
+
+                                    let Some(dm_channel_id) = payload
+                                        .channel
+                                        .and_then(|channel| channel.dm_channel_id)
+                                        .map(|id| id.value)
+                                    else {
+                                        let _ = tx_event.send(UiEvent::AppendLog(
+                                            "[dm] open failed: response did not include channel id"
+                                                .into(),
+                                        ));
+                                        continue;
+                                    };
+
+                                    match dispatcher.join_channel(&dm_channel_id).await {
+                                        Ok(_) => {
+                                            active_channel = Some(dm_channel_id.clone());
+                                            *active_channel_for_reports.write().await =
+                                                active_channel.clone();
+                                            let _ = tx_event.send(UiEvent::SetChannelName(
+                                                dm_channel_id.clone(),
+                                            ));
+                                            let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                                "[dm] opened direct message {dm_channel_id}"
+                                            )));
+                                        }
+                                        Err(e) => {
+                                            let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                                "[dm] open failed: could not switch to dm channel: {e:#}"
+                                            )));
+                                        }
+                                    }
                                 }
                                 Ok(Err(e)) | Err(e) => {
                                     let _ = tx_event.send(UiEvent::AppendLog(format!("[dm] open failed: {e:#}")));
