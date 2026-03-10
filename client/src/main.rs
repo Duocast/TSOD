@@ -587,11 +587,16 @@ enum NetworkClass {
 }
 
 impl NetworkClass {
-    fn opus_target_bitrate_bps(self) -> i32 {
+    /// Returns the target bitrate scaled relative to the channel's configured bitrate.
+    /// For high-bitrate music channels this preserves quality instead of collapsing
+    /// to the old hardcoded VoIP values (36 / 28 / 20 kbps).
+    fn opus_target_bitrate_bps(self, channel_bitrate_bps: u32) -> i32 {
+        // Use the channel bitrate (or a sane floor) as the "Good" reference.
+        let base = (channel_bitrate_bps as i32).max(32_000);
         match self {
-            Self::Good => 36_000,
-            Self::Moderate => 28_000,
-            Self::Poor => 20_000,
+            Self::Good => base,
+            Self::Moderate => (base as f32 * 0.75) as i32,
+            Self::Poor => (base as f32 * 0.50).max(16_000.0) as i32,
         }
     }
 
@@ -630,30 +635,60 @@ impl Default for OpusAdaptationController {
 }
 
 impl OpusAdaptationController {
+    /// Classify network quality from a telemetry sample.
+    ///
+    /// The classifier uses a weighted-score approach instead of OR-ing individual
+    /// thresholds.  Each metric contributes a score of 0–2 and the total is
+    /// compared against tier boundaries.  This prevents a single borderline
+    /// metric (e.g. 25 ms jitter on a healthy link) from immediately tanking
+    /// the bitrate for the entire channel.
     fn classify(&self, sample: NetworkSample) -> NetworkClass {
-        let in_poor = sample.loss_rate >= 0.12
-            || sample.rtt_ms >= 280
-            || sample.jitter_ms >= 50
-            || sample.jitter_buffer_depth >= 10;
-        if in_poor {
-            return NetworkClass::Poor;
+        let mut score: u32 = 0;
+
+        // Loss: strongest signal of real congestion.
+        if sample.loss_rate >= 0.12 {
+            score += 4;
+        } else if sample.loss_rate >= 0.06 {
+            score += 2;
+        } else if sample.loss_rate >= 0.03 {
+            score += 1;
         }
 
-        let in_moderate = sample.loss_rate >= 0.04
-            || sample.rtt_ms >= 140
-            || sample.jitter_ms >= 25
-            || sample.jitter_buffer_depth >= 6;
-        if in_moderate {
-            return NetworkClass::Moderate;
+        // RTT
+        if sample.rtt_ms >= 350 {
+            score += 2;
+        } else if sample.rtt_ms >= 200 {
+            score += 1;
         }
-        NetworkClass::Good
+
+        // Jitter
+        if sample.jitter_ms >= 80 {
+            score += 2;
+        } else if sample.jitter_ms >= 40 {
+            score += 1;
+        }
+
+        // Jitter-buffer depth
+        if sample.jitter_buffer_depth >= 12 {
+            score += 2;
+        } else if sample.jitter_buffer_depth >= 8 {
+            score += 1;
+        }
+
+        if score >= 5 {
+            NetworkClass::Poor
+        } else if score >= 3 {
+            NetworkClass::Moderate
+        } else {
+            NetworkClass::Good
+        }
     }
 
     fn promote_threshold(target: NetworkClass) -> u32 {
         match target {
-            NetworkClass::Poor => 2,
+            NetworkClass::Poor => 3,
             NetworkClass::Moderate => 3,
-            NetworkClass::Good => 4,
+            NetworkClass::Good => 3,
         }
     }
 
@@ -1015,15 +1050,16 @@ fn apply_fec_encoder_settings(
 fn apply_network_class_encoder_settings(
     encoder: &mut audio::opus::OpusEncoder,
     class: NetworkClass,
+    channel_bitrate_bps: u32,
 ) -> Result<()> {
-    let bitrate = class.opus_target_bitrate_bps();
+    let bitrate = class.opus_target_bitrate_bps(channel_bitrate_bps);
     let (enable_fec, loss_perc) = class.encoder_fec_params();
     encoder.set_bitrate(bitrate)?;
     encoder.set_inband_fec(enable_fec)?;
     encoder.set_packet_loss_perc(loss_perc)?;
     info!(
-        "[audio] network_class={class:?} apply opus bitrate={} fec={} packet_loss_perc={}",
-        bitrate, enable_fec, loss_perc
+        "[audio] network_class={class:?} channel_bitrate={} apply opus bitrate={} fec={} packet_loss_perc={}",
+        channel_bitrate_bps, bitrate, enable_fec, loss_perc
     );
     Ok(())
 }
@@ -5512,8 +5548,14 @@ async fn voice_send_loop(
     let mut vad_hysteresis =
         audio::dsp::vad::VadHysteresis::from_timing(0.6, 0.45, 60, 300, frame_ms);
     let mut adaptation = OpusAdaptationController::default();
-    if let Ok(mut enc) = encoder.try_lock() {
-        let _ = apply_network_class_encoder_settings(&mut enc, NetworkClass::Good);
+    {
+        let init_bitrate = active_channel_audio_mode
+            .read()
+            .map(|m| m.bitrate_bps)
+            .unwrap_or(64_000);
+        if let Ok(mut enc) = encoder.try_lock() {
+            let _ = apply_network_class_encoder_settings(&mut enc, NetworkClass::Good, init_bitrate);
+        }
     }
 
     loop {
@@ -5579,17 +5621,16 @@ async fn voice_send_loop(
             jitter_ms: network_telemetry.jitter_ms.load(Ordering::Relaxed),
             jitter_buffer_depth: voice_counters.jitter_buffer_depth.load(Ordering::Relaxed) as u32,
         };
-        if let Some(new_class) = adaptation.update(sample) {
-            let mut enc = encoder.lock().await;
-            if let Err(e) = apply_network_class_encoder_settings(&mut enc, new_class) {
-                warn!("[audio] failed to apply network-class opus settings: {e:#}");
-            }
-        }
-
         let channel_mode = active_channel_audio_mode
             .read()
             .map(|mode| *mode)
             .unwrap_or_default();
+        if let Some(new_class) = adaptation.update(sample) {
+            let mut enc = encoder.lock().await;
+            if let Err(e) = apply_network_class_encoder_settings(&mut enc, new_class, channel_mode.bitrate_bps) {
+                warn!("[audio] failed to apply network-class opus settings: {e:#}");
+            }
+        }
         let music_channel = is_music_channel(channel_mode);
 
         // Apply DSP pipeline (noise suppression + AGC + VAD)
