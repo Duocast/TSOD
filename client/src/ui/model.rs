@@ -1903,10 +1903,10 @@ pub struct UiModel {
     pub sharing_active: bool,
     pub start_share_in_flight: bool,
     pub stream_debug: StreamDebugView,
-    pub latest_stream_frame: Option<StreamFrameView>,
-    pub latest_stream_decoded_frame: Option<StreamFrameDecodedView>,
-    pub latest_stream_frame_texture: Option<egui::TextureHandle>,
-    pub latest_stream_frame_key: Option<(u64, u32)>,
+    pub latest_stream_frames: HashMap<u64, StreamFrameView>,
+    pub latest_stream_decoded_frames: HashMap<u64, StreamFrameDecodedView>,
+    pub latest_stream_frame_textures: HashMap<u64, egui::TextureHandle>,
+    pub last_presented_stream_frame_key: HashMap<u64, u32>,
     pub show_stream_stats: bool,
     pub avatar_path_draft: String,
     pub show_poke_dialog: bool,
@@ -2233,10 +2233,10 @@ impl Default for UiModel {
             sharing_active: false,
             start_share_in_flight: false,
             stream_debug: StreamDebugView::default(),
-            latest_stream_frame: None,
-            latest_stream_decoded_frame: None,
-            latest_stream_frame_texture: None,
-            latest_stream_frame_key: None,
+            latest_stream_frames: HashMap::new(),
+            latest_stream_decoded_frames: HashMap::new(),
+            latest_stream_frame_textures: HashMap::new(),
+            last_presented_stream_frame_key: HashMap::new(),
             show_stream_stats: false,
             avatar_path_draft: String::new(),
             show_poke_dialog: false,
@@ -2448,11 +2448,25 @@ impl UiModel {
                 self.stream_debug = snapshot;
             }
             UiEvent::StreamFrame(frame) => {
-                self.latest_stream_frame = Some(frame);
+                let should_store = self
+                    .latest_stream_frames
+                    .get(&frame.stream_tag)
+                    .map(|current| frame.frame_seq > current.frame_seq)
+                    .unwrap_or(true);
+                if should_store {
+                    self.latest_stream_frames.insert(frame.stream_tag, frame);
+                }
             }
             UiEvent::StreamFrameDecoded(frame) => {
-                self.latest_stream_decoded_frame = Some(frame);
-                self.latest_stream_frame_key = None;
+                let should_store = self
+                    .latest_stream_decoded_frames
+                    .get(&frame.stream_tag)
+                    .map(|current| frame.frame_seq > current.frame_seq)
+                    .unwrap_or(true);
+                if should_store {
+                    self.latest_stream_decoded_frames
+                        .insert(frame.stream_tag, frame);
+                }
             }
             UiEvent::SetAwayMessage(message) => {
                 self.away_message = message.clone();
