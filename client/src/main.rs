@@ -106,6 +106,21 @@ trait ScreenEncoder: Send {
     fn encode(&mut self, frame: CapturedFrame) -> anyhow::Result<EncodedFrame>;
 }
 
+#[derive(Debug, Default)]
+struct ActiveShareSession {
+    force_next_keyframe: AtomicBool,
+    active_layer_id: AtomicU8,
+    stream_id: tokio::sync::Mutex<Option<String>>,
+    stream_tags: tokio::sync::Mutex<HashSet<u64>>,
+}
+
+impl ActiveShareSession {
+    fn clear(&self) {
+        self.force_next_keyframe.store(false, Ordering::Relaxed);
+        self.active_layer_id.store(0, Ordering::Relaxed);
+    }
+}
+
 struct Av1AvifEncoder {
     frame_seq: u32,
 }
@@ -2486,7 +2501,7 @@ async fn connect_and_run_session(
         }
     }
 
-    let force_keyframe_requests = Arc::new(tokio::sync::Mutex::new(HashSet::<u64>::new()));
+    let active_share_session = Arc::new(ActiveShareSession::default());
 
     // Server push consumer
     let mut push_rx = dispatcher.take_push_receiver().await;
@@ -2499,7 +2514,7 @@ async fn connect_and_run_session(
         let server_deafened = server_deafened.clone();
         let stream_state = stream_state.clone();
         let dispatcher = dispatcher.clone();
-        let force_keyframe_requests = force_keyframe_requests.clone();
+        let active_share_session = active_share_session.clone();
         tokio::spawn(async move {
             let mut prefetched_chat_profile_user_ids = HashSet::new();
             while let Some(ev) = push_rx.recv().await {
@@ -3115,9 +3130,24 @@ async fn connect_and_run_session(
                             "[video] sender recovery requested stream_tag={}",
                             event.stream_tag
                         )));
-                        {
-                            let mut guard = force_keyframe_requests.lock().await;
-                            guard.insert(event.stream_tag);
+                        let should_force_recovery = {
+                            let stream_tags = active_share_session.stream_tags.lock().await;
+                            stream_tags.contains(&event.stream_tag)
+                        };
+                        if should_force_recovery {
+                            active_share_session
+                                .force_next_keyframe
+                                .store(true, Ordering::Relaxed);
+                            let stream_id = {
+                                let stream_id = active_share_session.stream_id.lock().await;
+                                stream_id.clone().unwrap_or_else(|| "unknown".to_string())
+                            };
+                            let layer_id =
+                                active_share_session.active_layer_id.load(Ordering::Relaxed);
+                            let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                "[video] forcing next keyframe stream_id={} stream_tag={} layer_id={}",
+                                stream_id, event.stream_tag, layer_id
+                            )));
                         }
                     }
                     PushEvent::UserProfile { event, event_seq } => {
@@ -4263,6 +4293,32 @@ async fn connect_and_run_session(
                                             }
                                         }
 
+                                        let active_layer_id = r
+                                            .accepted_layer_ids
+                                            .iter()
+                                            .copied()
+                                            .find(|layer| *layer == requested_layer_id)
+                                            .or_else(|| r.accepted_layer_ids.first().copied())
+                                            .unwrap_or(requested_layer_id);
+
+                                        active_share_session
+                                            .active_layer_id
+                                            .store(active_layer_id as u8, Ordering::Relaxed);
+                                        active_share_session
+                                            .force_next_keyframe
+                                            .store(false, Ordering::Relaxed);
+                                        {
+                                            let mut stream_tags = active_share_session.stream_tags.lock().await;
+                                            stream_tags.clear();
+                                            for (stream_tag, _) in &negotiated_streams {
+                                                stream_tags.insert(*stream_tag);
+                                            }
+                                        }
+                                        {
+                                            let mut stream_id = active_share_session.stream_id.lock().await;
+                                            *stream_id = r.stream_id.as_ref().map(|sid| sid.value.clone());
+                                        }
+
                                         active_local_stream_id = r.stream_id.clone();
                                         {
                                             let mut streams = stream_state.active_streams.write().await;
@@ -4295,14 +4351,21 @@ async fn connect_and_run_session(
                                         let egress_send = egress.clone();
                                         let video_counters = stream_state.counters.clone();
                                         let selected_profile = saved_settings.screen_share_profile.clone();
-                                        let force_keyframe_requests = force_keyframe_requests.clone();
+                                        let active_share_session = active_share_session.clone();
                                         tokio::spawn(async move {
                                             let stream_senders = negotiated_streams
                                                 .into_iter()
                                                 .filter_map(|(stream_tag, codec)| {
                                                     let codec_name = video_codec_encoder_name(codec)?;
                                                     let mut sender =
-                                                        VideoSender::new(stream_tag, 0, negotiated_profile, mtu);
+                                                        VideoSender::new(
+                                                            stream_tag,
+                                                            active_share_session
+                                                                .active_layer_id
+                                                                .load(Ordering::Relaxed),
+                                                            negotiated_profile,
+                                                            mtu,
+                                                        );
                                                     sender.set_pacing_enabled(false);
                                                     Some((stream_tag, codec_name.to_string(), sender))
                                                 })
@@ -4402,11 +4465,10 @@ async fn connect_and_run_session(
                                                             }
                                                         };
 
-                                                        let force_keyframe = {
-                                                            let mut guard = force_keyframe_requests.lock().await;
-                                                            guard.remove(stream_tag)
-                                                        };
-                                                        if force_keyframe {
+                                                        if active_share_session
+                                                            .force_next_keyframe
+                                                            .swap(false, Ordering::Relaxed)
+                                                        {
                                                             encoded.is_keyframe = true;
                                                         }
 
@@ -4496,6 +4558,15 @@ async fn connect_and_run_session(
                         }
                         UiIntent::StopScreenShare => {
                             share_state = ShareState::Idle;
+                            active_share_session.clear();
+                            {
+                                let mut stream_tags = active_share_session.stream_tags.lock().await;
+                                stream_tags.clear();
+                            }
+                            {
+                                let mut stream_id = active_share_session.stream_id.lock().await;
+                                *stream_id = None;
+                            }
                             if let Some(stop_tx) = active_share_stop.take() {
                                 let _ = stop_tx.send(true);
                             }
