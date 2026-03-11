@@ -819,6 +819,16 @@ fn is_video_datagram(datagram: &Bytes) -> bool {
         && datagram[1] == vp_voice::DATAGRAM_KIND_VIDEO
 }
 
+fn select_active_share_layer(requested_layer_id: i32, accepted_layer_ids: &[i32]) -> Option<i32> {
+    if accepted_layer_ids.contains(&requested_layer_id) {
+        return Some(requested_layer_id);
+    }
+    if accepted_layer_ids.contains(&1) {
+        return Some(1);
+    }
+    None
+}
+
 async fn datagram_demux_loop(
     conn: quinn::Connection,
     voice_ingress_q: Arc<OverwriteQueue<StampedBytes>>,
@@ -4279,27 +4289,21 @@ async fn connect_and_run_session(
 
                                         let requested_layer_id = profile_layer.layer_id;
                                         let mut negotiated_profile = sender_profile;
-                                        if !r.accepted_layer_ids.contains(&requested_layer_id) {
-                                            if r.accepted_layer_ids.contains(&1) {
-                                                negotiated_profile = VideoStreamProfile::P1080p60;
-                                            } else {
-                                                share_state = ShareState::Idle;
-                                                let _ = tx_event.send(UiEvent::AppendLog(format!(
-                                                    "[video] start share rejected: requested layer {} was not accepted ({:?})",
-                                                    requested_layer_id,
-                                                    r.accepted_layer_ids
-                                                )));
-                                                continue;
-                                            }
+                                        let Some(active_layer_id) = select_active_share_layer(
+                                            requested_layer_id,
+                                            &r.accepted_layer_ids,
+                                        ) else {
+                                            share_state = ShareState::Idle;
+                                            let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                                "[video] start share rejected: requested layer {} was not accepted ({:?})",
+                                                requested_layer_id,
+                                                r.accepted_layer_ids
+                                            )));
+                                            continue;
+                                        };
+                                        if active_layer_id == 1 && requested_layer_id != 1 {
+                                            negotiated_profile = VideoStreamProfile::P1080p60;
                                         }
-
-                                        let active_layer_id = r
-                                            .accepted_layer_ids
-                                            .iter()
-                                            .copied()
-                                            .find(|layer| *layer == requested_layer_id)
-                                            .or_else(|| r.accepted_layer_ids.first().copied())
-                                            .unwrap_or(requested_layer_id);
 
                                         active_share_session
                                             .active_layer_id
@@ -7102,7 +7106,9 @@ async fn upload_profile_image(
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_authoritative_snapshot, choose_initial_selected_channel};
+    use super::{
+        apply_authoritative_snapshot, choose_initial_selected_channel, select_active_share_layer,
+    };
     use crate::{
         proto::voiceplatform::v1 as pb,
         ui::{model::ChannelType, UiEvent},
@@ -7266,5 +7272,12 @@ mod tests {
     fn voice_ingress_cap_guardrail() {
         // Do not increase without justification; latency risk.
         assert!(super::VOICE_INGRESS_CAP <= 64);
+    }
+
+    #[test]
+    fn rejected_1440_request_cannot_continue_as_active_layer() {
+        assert_eq!(select_active_share_layer(2, &[0]), None);
+        assert_eq!(select_active_share_layer(2, &[1]), Some(1));
+        assert_eq!(select_active_share_layer(2, &[2]), Some(2));
     }
 }
