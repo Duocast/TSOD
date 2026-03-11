@@ -195,6 +195,7 @@ impl Gateway {
         let mut current_channel: Option<ChannelId> = None;
         let mut recovery_forwarded_at: HashMap<u64, Instant> = HashMap::new();
         let mut stream_session_tags: HashMap<String, Vec<u64>> = HashMap::new();
+        let mut stream_layer_by_tag: HashMap<u64, u8> = HashMap::new();
         let video_forwarder = self.video.clone();
         defer! {
             self.push.unregister(user_id, &session_id);
@@ -1329,10 +1330,24 @@ impl Gateway {
                         None
                     };
 
+                    let accepted_layer_ids = r
+                        .layers
+                        .iter()
+                        .filter(|layer| allow_1440p60 || (layer.width <= 1920 && layer.height <= 1080))
+                        .map(|l| l.layer_id)
+                        .collect::<Vec<_>>();
+                    let selected_layer_id = accepted_layer_ids
+                        .first()
+                        .copied()
+                        .unwrap_or(0) as u8;
+
                     let stream_id = format!("{:016x}", primary_tag);
                     let mut stream_tags = vec![primary_tag];
                     if let Some((tag, _)) = fallback_tag {
                         stream_tags.push(tag);
+                    }
+                    for stream_tag in &stream_tags {
+                        stream_layer_by_tag.insert(*stream_tag, selected_layer_id);
                     }
                     stream_session_tags.insert(stream_id.clone(), stream_tags);
                     let resp = pb::ServerToClient {
@@ -1344,12 +1359,7 @@ impl Gateway {
                         payload: Some(pb::server_to_client::Payload::StartScreenShareResponse(
                             pb::StartScreenShareResponse {
                                 stream_id: Some(pb::StreamId { value: stream_id }),
-                                accepted_layer_ids: r
-                                    .layers
-                                    .iter()
-                                    .filter(|layer| allow_1440p60 || (layer.width <= 1920 && layer.height <= 1080))
-                                    .map(|l| l.layer_id)
-                                    .collect(),
+                                accepted_layer_ids,
                                 primary_stream_tag: primary_tag,
                                 primary_codec: plan.primary as i32,
                                 fallback_stream_tag: fallback_tag.as_ref().map(|v| v.0),
@@ -1373,6 +1383,7 @@ impl Gateway {
                             })
                             .unwrap_or_default();
                         for stream_tag in stream_tags {
+                            stream_layer_by_tag.remove(&stream_tag);
                             for viewer in self.video.subscribers_for_stream(stream_tag).await {
                                 self.push.send_to(viewer, pb::ServerToClient {
                                     request_id: None,
@@ -1421,28 +1432,40 @@ impl Gateway {
                     }
                 }
                 Some(pb::client_to_server::Payload::RequestKeyframeRequest(r)) => {
-                    if let Some(sid) = r.stream_id.as_ref() {
-                        if let Ok(stream_tag) = u64::from_str_radix(&sid.value, 16) {
-                            let now = Instant::now();
-                            let should_forward = recovery_forwarded_at
-                                .get(&stream_tag)
-                                .map(|t| now.duration_since(*t) >= Duration::from_millis(500))
-                                .unwrap_or(true);
-                            if should_forward {
-                                recovery_forwarded_at.insert(stream_tag, now);
-                                self.video.note_recovery_request();
-                                if let Some(sender_uid) = self.video.sender_for_stream(stream_tag).await {
-                                    self.push.send_to(sender_uid, pb::ServerToClient {
-                                        request_id: None,
-                                        session_id: None,
-                                        sent_at: Some(now_ts()),
-                                        error: None,
-                                        event_seq: 0,
-                                        payload: Some(pb::server_to_client::Payload::RequestRecovery(pb::RequestRecovery { stream_tag })),
-                                    }).await;
-                                }
-                            }
-                        }
+                    let sid = r
+                        .stream_id
+                        .as_ref()
+                        .ok_or(ControlError::InvalidArgument("stream_id missing"))?;
+                    let stream_tag = u64::from_str_radix(&sid.value, 16)
+                        .map_err(|_| ControlError::InvalidArgument("invalid stream_id"))?;
+                    let now = Instant::now();
+                    let should_forward = recovery_forwarded_at
+                        .get(&stream_tag)
+                        .map(|t| now.duration_since(*t) >= Duration::from_millis(500))
+                        .unwrap_or(true);
+                    if should_forward {
+                        recovery_forwarded_at.insert(stream_tag, now);
+                        self.video.note_recovery_request();
+                        let sender_uid = self
+                            .video
+                            .sender_for_stream(stream_tag)
+                            .await
+                            .ok_or(ControlError::InvalidArgument("unknown stream_tag"))?;
+                        let layer_id = stream_layer_by_tag.get(&stream_tag).copied().unwrap_or(0);
+                        info!(
+                            stream_id = %sid.value,
+                            stream_tag,
+                            layer_id,
+                            "forwarding recovery intent to sender"
+                        );
+                        self.push.send_to(sender_uid, pb::ServerToClient {
+                            request_id: None,
+                            session_id: None,
+                            sent_at: Some(now_ts()),
+                            error: None,
+                            event_seq: 0,
+                            payload: Some(pb::server_to_client::Payload::RequestRecovery(pb::RequestRecovery { stream_tag })),
+                        }).await;
                     }
                     let resp = pb::ServerToClient {
                         request_id: req_id,
@@ -1458,6 +1481,11 @@ impl Gateway {
                     }
                 }
                 Some(pb::client_to_server::Payload::RequestRecovery(r)) => {
+                    let sender_uid = self
+                        .video
+                        .sender_for_stream(r.stream_tag)
+                        .await
+                        .ok_or(ControlError::InvalidArgument("unknown stream_tag"))?;
                     let now = Instant::now();
                     let should_forward = recovery_forwarded_at
                         .get(&r.stream_tag)
@@ -1466,16 +1494,21 @@ impl Gateway {
                     if should_forward {
                         recovery_forwarded_at.insert(r.stream_tag, now);
                         self.video.note_recovery_request();
-                        if let Some(sender_uid) = self.video.sender_for_stream(r.stream_tag).await {
-                            self.push.send_to(sender_uid, pb::ServerToClient {
-                                request_id: None,
-                                session_id: None,
-                                sent_at: Some(now_ts()),
-                                error: None,
-                                event_seq: 0,
-                                payload: Some(pb::server_to_client::Payload::RequestRecovery(pb::RequestRecovery { stream_tag: r.stream_tag })),
-                            }).await;
-                        }
+                        let layer_id = stream_layer_by_tag.get(&r.stream_tag).copied().unwrap_or(0);
+                        info!(
+                            stream_id = "n/a",
+                            stream_tag = r.stream_tag,
+                            layer_id,
+                            "forwarding explicit recovery intent to sender"
+                        );
+                        self.push.send_to(sender_uid, pb::ServerToClient {
+                            request_id: None,
+                            session_id: None,
+                            sent_at: Some(now_ts()),
+                            error: None,
+                            event_seq: 0,
+                            payload: Some(pb::server_to_client::Payload::RequestRecovery(pb::RequestRecovery { stream_tag: r.stream_tag })),
+                        }).await;
                     }
                 }
                 Some(pb::client_to_server::Payload::VoiceReceiverReport(r)) => {
