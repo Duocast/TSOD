@@ -143,7 +143,8 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                                     page_security(ui, &mut model.settings_draft);
                                 if open_edit {
                                     crate::ui::panels::profile_edit::init_draft_from_profile(model);
-                                    model.edit_profile_tab = crate::ui::model::ProfileEditTab::Profile;
+                                    model.edit_profile_tab =
+                                        crate::ui::model::ProfileEditTab::Profile;
                                     model.show_edit_profile = true;
                                     if model.self_profile.is_none() {
                                         let _ = tx_intent.send(UiIntent::FetchSelfProfile);
@@ -1731,7 +1732,12 @@ fn page_screen_share(ui: &mut egui::Ui, s: &mut AppSettings) -> bool {
                     .or_else(|| available_codecs.first().copied())
                     .unwrap_or("VP9")
                     .to_string();
-                s.screen_share_profile = "1440p60".into();
+                s.screen_share_profile = if crate::net::dispatcher::can_offer_1440p60() {
+                    "1440p60"
+                } else {
+                    "1080p60"
+                }
+                .into();
                 dirty = true;
             }
         });
@@ -1761,14 +1767,21 @@ fn page_screen_share(ui: &mut egui::Ui, s: &mut AppSettings) -> bool {
         }
 
         cols[0].label("Stream Profile");
-        let profiles = ["1080p60", "1440p60"];
+        let profiles = crate::net::dispatcher::available_screen_share_profiles();
+        if !profiles
+            .iter()
+            .any(|p| *p == s.screen_share_profile.as_str())
+        {
+            s.screen_share_profile = "1080p60".into();
+            dirty = true;
+        }
         egui::ComboBox::from_id_salt("ss_profile")
             .selected_text(&s.screen_share_profile)
             .width(120.0)
             .show_ui(&mut cols[1], |ui: &mut egui::Ui| {
                 for p in &profiles {
                     if ui
-                        .selectable_value(&mut s.screen_share_profile, p.to_string(), *p)
+                        .selectable_value(&mut s.screen_share_profile, (*p).to_string(), *p)
                         .changed()
                     {
                         dirty = true;

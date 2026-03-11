@@ -1,7 +1,10 @@
 use anyhow::{anyhow, Context, Result};
 use std::{
     collections::HashMap,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU32, Ordering},
+        Arc, OnceLock,
+    },
     time::{Duration, Instant},
 };
 use tokio::{
@@ -20,6 +23,17 @@ use crate::{
 };
 
 const MAX_CTRL_MSG: usize = 256 * 1024;
+const FPS_SCALE: f32 = 100.0;
+
+static MEDIA_CAPS_CACHE: OnceLock<MeasuredMediaCaps> = OnceLock::new();
+static RUNTIME_HEADROOM_FPS_X100: AtomicU32 = AtomicU32::new(0);
+
+#[derive(Clone, Debug)]
+struct MeasuredMediaCaps {
+    caps: pb::ClientMediaCapabilities,
+    startup_encode_fps: f32,
+    supports_1440p60: bool,
+}
 
 /// Stream-type discriminator bytes written as the first byte on each bidi stream.
 pub const STREAM_TYPE_MEDIA: u8 = 0x01;
@@ -1203,6 +1217,14 @@ pub fn available_screen_share_codecs() -> Vec<&'static str> {
         .collect()
 }
 
+pub fn available_screen_share_profiles() -> Vec<&'static str> {
+    if can_offer_1440p60() {
+        vec!["1080p60", "1440p60"]
+    } else {
+        vec!["1080p60"]
+    }
+}
+
 fn available_video_codecs() -> Vec<pb::VideoCodec> {
     let mut codecs = Vec::with_capacity(2);
     if cfg!(feature = "video-av1") {
@@ -1217,20 +1239,92 @@ fn available_video_codecs() -> Vec<pb::VideoCodec> {
 }
 
 fn default_media_capabilities() -> pb::ClientMediaCapabilities {
-    let codecs: Vec<i32> = available_video_codecs()
-        .into_iter()
-        .map(|codec| codec as i32)
-        .collect();
+    measured_media_caps().caps
+}
 
-    pb::ClientMediaCapabilities {
-        decode: codecs.clone(),
-        encode: codecs,
-        hw_encode_av1: false,
+pub fn can_offer_1440p60() -> bool {
+    let measured = measured_media_caps();
+    measured.supports_1440p60 && runtime_headroom_fps() >= 55.0
+}
+
+pub fn report_runtime_encode_fps(fps: f32) {
+    let scaled = (fps.max(0.0) * FPS_SCALE) as u32;
+    RUNTIME_HEADROOM_FPS_X100.store(scaled, Ordering::Relaxed);
+}
+
+fn runtime_headroom_fps() -> f32 {
+    let sampled = RUNTIME_HEADROOM_FPS_X100.load(Ordering::Relaxed);
+    if sampled == 0 {
+        measured_media_caps().startup_encode_fps
+    } else {
+        sampled as f32 / FPS_SCALE
+    }
+}
+
+fn measured_media_caps() -> MeasuredMediaCaps {
+    MEDIA_CAPS_CACHE.get_or_init(measure_media_caps).clone()
+}
+
+fn measure_media_caps() -> MeasuredMediaCaps {
+    let codecs = available_video_codecs();
+    let encode: Vec<i32> = codecs.iter().map(|codec| *codec as i32).collect();
+    let decode = encode.clone();
+    let startup_encode_fps = benchmark_realtime_encode_fps(2560, 1440, 10);
+    let hw_av1 = codecs.contains(&pb::VideoCodec::Av1)
+        && std::env::var("VP_AV1_DISABLE_HW").ok().as_deref() != Some("1")
+        && startup_encode_fps >= 45.0;
+    let supports_1440p60 = startup_encode_fps >= 60.0;
+
+    let caps = pb::ClientMediaCapabilities {
+        decode,
+        encode,
+        hw_encode_av1: hw_av1,
         hw_encode_vp9: false,
         hw_encode_vp8: false,
-        hw_decode_av1: false,
+        hw_decode_av1: hw_av1,
         hw_decode_vp9: false,
         hw_decode_vp8: false,
+    };
+
+    report_runtime_encode_fps(startup_encode_fps);
+    info!(
+        startup_encode_fps,
+        supports_1440p60, hw_av1, "measured media capabilities"
+    );
+
+    MeasuredMediaCaps {
+        caps,
+        startup_encode_fps,
+        supports_1440p60,
+    }
+}
+
+fn benchmark_realtime_encode_fps(width: usize, height: usize, iterations: usize) -> f32 {
+    let stride = width * 4;
+    let src = vec![128_u8; stride * height];
+    let start = Instant::now();
+
+    for _ in 0..iterations {
+        let mut bgra = vec![0_u8; width * height * 4];
+        for y in 0..height {
+            let src_row = &src[y * stride..(y + 1) * stride];
+            let dst_row = &mut bgra[y * stride..(y + 1) * stride];
+            dst_row.copy_from_slice(src_row);
+        }
+        let mut encoded = Vec::with_capacity(16 + bgra.len());
+        encoded.extend_from_slice(b"TSRV");
+        encoded.push(1);
+        encoded.push(0);
+        encoded.extend_from_slice(&(width as u32).to_le_bytes());
+        encoded.extend_from_slice(&(height as u32).to_le_bytes());
+        encoded.extend_from_slice(&bgra);
+    }
+
+    let elapsed = start.elapsed().as_secs_f32();
+    if elapsed <= f32::EPSILON {
+        0.0
+    } else {
+        iterations as f32 / elapsed
     }
 }
 
@@ -1244,6 +1338,7 @@ fn platform_has_capture_backend() -> bool {
 
 fn default_caps(alpn: &str) -> pb::ClientCaps {
     let media_caps = default_media_capabilities();
+    let supports_1440p60 = measured_media_caps().supports_1440p60;
     let screen_video_codecs: Vec<i32> = media_caps
         .encode
         .iter()
@@ -1290,21 +1385,25 @@ fn default_caps(alpn: &str) -> pb::ClientCaps {
         }),
         screen_video: Some(pb::VideoCaps {
             codecs: screen_video_codecs,
-            max_width: 1920,
-            max_height: 1080,
+            max_width: if supports_1440p60 { 2560 } else { 1920 },
+            max_height: if supports_1440p60 { 1440 } else { 1080 },
             max_fps: 60,
             max_bitrate_bps: 8_000_000,
-            hw_encode_available: false,
+            hw_encode_available: media_caps.hw_encode_av1,
         }),
         caps_hash: Some(pb::CapabilityHash {
             sha256: alpn.as_bytes().to_vec(),
         }),
         screen_share: preferred_screenshare_codec.map(|codec| pb::ScreenShareCaps {
             codec,
-            max_width: 1920,
-            max_height: 1080,
+            max_width: if supports_1440p60 { 2560 } else { 1920 },
+            max_height: if supports_1440p60 { 1440 } else { 1080 },
             max_fps: 60,
-            max_bitrate_bps: 8_000_000,
+            max_bitrate_bps: if supports_1440p60 {
+                16_000_000
+            } else {
+                8_000_000
+            },
             max_simulcast_layers: 1,
             supports_system_audio: false,
         }),

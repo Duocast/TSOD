@@ -4270,7 +4270,9 @@ async fn connect_and_run_session(
                                 "VP8" => pb::video_caps::Codec::Vp8,
                                 _ => pb::video_caps::Codec::Vp9,
                             };
-                            let (profile_layer, sender_profile) = if saved_settings.screen_share_profile == "1440p60" {
+                            let request_1440p60 = saved_settings.screen_share_profile == "1440p60"
+                                && net::dispatcher::can_offer_1440p60();
+                            let (profile_layer, sender_profile) = if request_1440p60 {
                                 (pb::SimulcastLayer {
                                     layer_id: 2,
                                     width: 2560,
@@ -4287,6 +4289,11 @@ async fn connect_and_run_session(
                                     max_bitrate_bps: 8_000_000,
                                 }, VideoStreamProfile::P1080p60)
                             };
+                            if saved_settings.screen_share_profile == "1440p60" && !request_1440p60 {
+                                let _ = tx_event.send(UiEvent::AppendLog(
+                                    "[video] 1440p60 unavailable (startup benchmark/runtime headroom); using 1080p60".into(),
+                                ));
+                            }
                             let req = pb::StartScreenShareRequest {
                                 channel_id: active_channel.as_ref().map(|id| pb::ChannelId { value: id.clone() }),
                                 codec: preferred_codec as i32,
@@ -4477,9 +4484,20 @@ async fn connect_and_run_session(
                                                     return;
                                                 }
 
+                                                let mut frames_since_sample: u32 = 0;
+                                                let mut sample_window_start = std::time::Instant::now();
                                                 while let Some(mut frame) = capture_rx.recv().await {
                                                     while let Ok(next) = capture_rx.try_recv() {
                                                         frame = next;
+                                                    }
+
+                                                    frames_since_sample = frames_since_sample.saturating_add(1);
+                                                    let window_elapsed = sample_window_start.elapsed();
+                                                    if window_elapsed >= std::time::Duration::from_secs(2) {
+                                                        let fps = frames_since_sample as f32 / window_elapsed.as_secs_f32();
+                                                        net::dispatcher::report_runtime_encode_fps(fps);
+                                                        frames_since_sample = 0;
+                                                        sample_window_start = std::time::Instant::now();
                                                     }
 
                                                     for (stream_tag, sender, encoder, frame_idx) in
