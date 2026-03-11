@@ -32,9 +32,7 @@ use net::dispatcher::{ControlDispatcher, PushEvent};
 use net::egress::EgressScheduler;
 use net::overwrite_queue::{pop_voice_realtime, OverwriteQueue, StampedBytes};
 use net::video_datagram::VideoHeader;
-use net::video_encode::build_screen_encoder;
-use net::video_frame::VideoFrame;
-use net::video_transport::{VideoReceiver, VideoSender, VideoStreamProfile};
+use net::video_transport::{VideoReceiver, VideoStreamProfile};
 use net::voice_datagram::{
     make_voice_datagram, VOICE_FORWARDED_HDR_LEN, VOICE_HDR_LEN, VOICE_VERSION,
 };
@@ -80,8 +78,8 @@ pub enum ShareSource {
 
 #[derive(Debug, Default)]
 struct ActiveShareSession {
-    force_next_keyframe: AtomicBool,
-    active_layer_id: AtomicU8,
+    force_next_keyframe: Arc<AtomicBool>,
+    active_layer_id: Arc<AtomicU8>,
     stream_id: tokio::sync::Mutex<Option<String>>,
     stream_tags: tokio::sync::Mutex<HashSet<u64>>,
 }
@@ -100,10 +98,6 @@ fn map_share_selection(selection: ShareSourceSelection) -> ShareSource {
         ShareSourceSelection::LinuxPortal(token) => ShareSource::LinuxPortal(token),
         ShareSourceSelection::X11Window(window_id) => ShareSource::X11Window(window_id),
     }
-}
-
-fn platform_supports_system_audio() -> bool {
-    false
 }
 
 #[derive(Clone)]
@@ -330,13 +324,13 @@ impl OpusAdaptationController {
 }
 
 #[derive(Default)]
-struct VideoRuntimeCounters {
+pub(crate) struct VideoRuntimeCounters {
     video_datagrams: AtomicU64,
-    video_tx_datagrams: AtomicU64,
+    pub(crate) video_tx_datagrams: AtomicU64,
     video_tx_bytes: AtomicU64,
     video_tx_blocked: AtomicU64,
-    video_tx_drop_queue_full: AtomicU64,
-    video_tx_drop_deadline: AtomicU64,
+    pub(crate) video_tx_drop_queue_full: AtomicU64,
+    pub(crate) video_tx_drop_deadline: AtomicU64,
     voice_tx_drop_queue_full: AtomicU64,
     rx_oversized_datagram_drops: AtomicU64,
     voice_rx_stale_drops: AtomicU64,
@@ -345,7 +339,7 @@ struct VideoRuntimeCounters {
     completed_frames: AtomicU64,
     dropped_no_subscription: AtomicU64,
     dropped_channel_full: AtomicU64,
-    sender_frame_errors: AtomicU64,
+    pub(crate) sender_frame_errors: AtomicU64,
     last_frame_size_bytes: AtomicU64,
     last_frame_seq: AtomicU32,
     last_frame_ts_ms: AtomicU32,
@@ -395,7 +389,7 @@ impl SharedStreamState {
     }
 }
 
-fn video_codec_name(codec: pb::VideoCodec) -> &'static str {
+pub(crate) fn video_codec_name(codec: pb::VideoCodec) -> &'static str {
     match codec {
         pb::VideoCodec::Av1 => "AV1",
         pb::VideoCodec::Vp9 => "VP9",
@@ -3004,16 +2998,10 @@ async fn connect_and_run_session(
             }
         }
     });
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum ShareState {
-        Idle,
-        Starting,
-        Active,
-    }
-
     let mut active_share_stop: Option<watch::Sender<bool>> = None;
+    let mut active_share_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut active_local_stream_id: Option<pb::StreamId> = None;
-    let mut share_state = ShareState::Idle;
+    let mut share_state = screen_share::fsm::ShareState::Idle;
 
     tokio::pin!(ctl_keepalive);
     let mut audio_health_tick = tokio::time::interval(Duration::from_secs(1));
@@ -3837,15 +3825,16 @@ async fn connect_and_run_session(
                             ));
                         }
                         UiIntent::StartScreenShare { selection } => {
-                            if !matches!(share_state, ShareState::Idle) {
+                            if !matches!(share_state, screen_share::fsm::ShareState::Idle) {
                                 let _ = tx_event.send(UiEvent::AppendLog(format!(
                                     "[video] start share ignored (state={share_state:?})"
                                 )));
                                 continue;
                             }
                             let source = map_share_selection(selection);
+                            let probed_caps = screen_share::runtime_probe::probe_media_caps(&source);
                             let include_audio = saved_settings.screen_share_capture_audio
-                                && platform_supports_system_audio();
+                                && probed_caps.supports_system_audio;
                             let available_codecs = net::dispatcher::available_screen_share_codecs();
                             if available_codecs.is_empty() {
                                 let _ = tx_event.send(UiEvent::AppendLog(
@@ -3890,6 +3879,8 @@ async fn connect_and_run_session(
                                     "[video] 1440p60 unavailable (startup benchmark/runtime headroom); using 1080p60".into(),
                                 ));
                             }
+                            let request_id = uuid::Uuid::new_v4();
+                            share_state = screen_share::fsm::ShareState::Starting { request_id };
                             let req = pb::StartScreenShareRequest {
                                 channel_id: active_channel.as_ref().map(|id| pb::ChannelId { value: id.clone() }),
                                 codec: preferred_codec as i32,
@@ -3924,7 +3915,7 @@ async fn connect_and_run_session(
                                             requested_layer_id,
                                             &r.accepted_layer_ids,
                                         ) else {
-                                            share_state = ShareState::Idle;
+                                            share_state = screen_share::fsm::ShareState::Idle;
                                             let _ = tx_event.send(UiEvent::AppendLog(format!(
                                                 "[video] start share rejected: requested layer {} was not accepted ({:?})",
                                                 requested_layer_id,
@@ -3979,239 +3970,41 @@ async fn connect_and_run_session(
                                         let _ = tx_event.send(UiEvent::AppendLog(format!(
                                             "[video] StartScreenShareRequest ok streams=[{stream_descriptions}] source={source:?} include_audio={include_audio}"
                                         )));
-                                        share_state = ShareState::Active;
+                                        share_state = screen_share::fsm::ShareState::Active { stream_id: r.stream_id.as_ref().map(|sid| sid.value.clone()).unwrap_or_default() };
                                         let (share_stop_tx, share_stop_rx) = watch::channel(false);
                                         active_share_stop = Some(share_stop_tx);
 
-                                        let egress_send = egress.clone();
-                                        let video_counters = stream_state.counters.clone();
-                                        let active_share_session = active_share_session.clone();
-                                        tokio::spawn(async move {
-                                            let stream_senders = negotiated_streams
-                                                .into_iter()
-                                                .filter_map(|(stream_tag, codec)| {
-                                                    video_codec_encoder_name(codec)?;
-                                                    let mut sender =
-                                                        VideoSender::new(
-                                                            stream_tag,
-                                                            active_share_session
-                                                                .active_layer_id
-                                                                .load(Ordering::Relaxed),
-                                                            negotiated_profile,
-                                                            mtu,
-                                                        );
-                                                    sender.set_pacing_enabled(false);
-                                                    Some((stream_tag, codec, sender))
-                                                })
-                                                .collect::<Vec<_>>();
+                                        let runtime_caps = std::sync::Arc::new(probed_caps);
+                                        let session_streams = negotiated_streams
+                                            .iter()
+                                            .map(|(stream_tag, codec)| screen_share::session::SessionStream {
+                                                stream_tag: *stream_tag,
+                                                codec: *codec,
+                                            })
+                                            .collect::<Vec<_>>();
+                                        let capture_queue_len_gauge = Arc::new(AtomicU64::new(0));
+                                        let capture_queue_overflow_total = Arc::new(AtomicU64::new(0));
 
-                                            if stream_senders.is_empty() {
-                                                warn!(
-                                                    "[video] no encodable stream codecs negotiated; aborting local send"
-                                                );
-                                                return;
-                                            }
-
-                                            let (capture_tx, mut capture_rx) = mpsc::channel::<VideoFrame>(4);
-                                            let stop_flag = Arc::new(AtomicBool::new(false));
-
-                                            let watcher_flag = stop_flag.clone();
-                                            let mut stop_watch = share_stop_rx.clone();
-                                            let stop_watch_task = tokio::spawn(async move {
-                                                while stop_watch.changed().await.is_ok() {
-                                                    if *stop_watch.borrow() {
-                                                        watcher_flag.store(true, Ordering::Relaxed);
-                                                        break;
-                                                    }
-                                                }
-                                            });
-
-                                            let capture_source = source.clone();
-                                            let runtime_caps = std::sync::Arc::new(
-                                                screen_share::runtime_probe::probe_media_caps(
-                                                    &capture_source,
-                                                ),
-                                            );
-                                            let capture_stop = stop_flag.clone();
-                                            let capture_caps = runtime_caps.clone();
-                                            let capture_task = tokio::task::spawn_blocking(move || {
-                                                let mut cap = match screen_share::capture::build_capture_backend(
-                                                    &capture_source,
-                                                    capture_caps.as_ref(),
-                                                ) {
-                                                    Ok(cap) => cap,
-                                                    Err(e) => {
-                                                        warn!(error=?e, "[video] failed to build screen capture backend");
-                                                        return;
-                                                    }
-                                                };
-                                                while !capture_stop.load(Ordering::Relaxed) {
-                                                    match cap.next_frame() {
-                                                        Ok(frame) => {
-                                                            let _ = capture_tx.try_send(frame);
-                                                        }
-                                                        Err(e) => {
-                                                            warn!(error=?e, "[video] capture frame failed");
-                                                            break;
-                                                        }
-                                                    }
-                                                }
-                                            });
-
-                                            let send_task = tokio::spawn(async move {
-                                                let mut stream_encoders = stream_senders
-                                                    .into_iter()
-                                                    .filter_map(|(stream_tag, codec, sender)| {
-                                                        let encoder = match build_screen_encoder(
-                                                            codec,
-                                                            crate::screen_share::config::SenderPolicy::from_settings_or_env(None),
-                                                            runtime_caps.as_ref(),
-                                                        ) {
-                                                            Ok(enc) => enc,
-                                                            Err(e) => {
-                                                                warn!(
-                                                                    error=?e,
-                                                                    stream_tag,
-                                                                    codec=%video_codec_name(codec),
-                                                                    "[video] failed to build screen encoder"
-                                                                );
-                                                                return None;
-                                                            }
-                                                        };
-                                                        Some((stream_tag, sender, encoder, 0_u32, false))
-                                                    })
-                                                    .collect::<Vec<_>>();
-
-                                                if stream_encoders.is_empty() {
-                                                    warn!(
-                                                        "[video] no screen encoders available for negotiated stream set"
-                                                    );
-                                                    return;
-                                                }
-
-                                                let mut frames_since_sample: u32 = 0;
-                                                let mut sample_window_start = std::time::Instant::now();
-                                                while let Some(mut frame) = capture_rx.recv().await {
-                                                    while let Ok(next) = capture_rx.try_recv() {
-                                                        frame = next;
-                                                    }
-
-                                                    frames_since_sample = frames_since_sample.saturating_add(1);
-                                                    let window_elapsed = sample_window_start.elapsed();
-                                                    if window_elapsed >= std::time::Duration::from_secs(2) {
-                                                        let fps = frames_since_sample as f32 / window_elapsed.as_secs_f32();
-                                                        net::dispatcher::report_runtime_encode_fps(fps);
-                                                        frames_since_sample = 0;
-                                                        sample_window_start = std::time::Instant::now();
-                                                    }
-
-                                                    for (stream_tag, sender, encoder, frame_idx, configured) in
-                                                        &mut stream_encoders
-                                                    {
-                                                        if !*configured {
-                                                            if let Err(e) = encoder.configure_session(VideoSessionConfig {
-                                                                width: frame.width,
-                                                                height: frame.height,
-                                                                fps: 30,
-                                                                target_bitrate_bps: 2_000_000,
-                                                                low_latency: true,
-                                                                allow_frame_drop: true,
-                                                            }) {
-                                                                warn!(error=?e, stream_tag, "[video] failed to configure encoder session");
-                                                                continue;
-                                                            }
-                                                            *configured = true;
-                                                        }
-
-                                                        if active_share_session
-                                                            .force_next_keyframe
-                                                            .swap(false, Ordering::Relaxed)
-                                                        {
-                                                            if let Err(e) = encoder.request_keyframe() {
-                                                                warn!(error=?e, stream_tag, "[video] failed to request keyframe");
-                                                            }
-                                                        }
-
-                                                        let encoded = match encoder.encode(frame.clone()) {
-                                                            Ok(encoded) => encoded,
-                                                            Err(e) => {
-                                                                warn!(
-                                                                    error=?e,
-                                                                    stream_tag,
-                                                                    "[video] encode failed"
-                                                                );
-                                                                continue;
-                                                            }
-                                                        };
-
-                                                        if let Err(e) = sender
-                                                            .send_frame_async(
-                                                                encoded.ts_ms,
-                                                                encoded.is_keyframe,
-                                                                &encoded.data,
-                                                                |dg| {
-                                                                    match egress_send.enqueue_video_fragment(
-                                                                        *stream_tag,
-                                                                        *frame_idx,
-                                                                        encoded.is_keyframe,
-                                                                        std::time::Instant::now(),
-                                                                        dg,
-                                                                    ) {
-                                                                        Ok(report) => {
-                                                                            video_counters
-                                                                                .video_tx_datagrams
-                                                                                .fetch_add(1, Ordering::Relaxed);
-                                                                            if let Some(dropped) = report.dropped {
-                                                                                video_counters
-                                                                                    .video_tx_drop_queue_full
-                                                                                    .fetch_add(
-                                                                                        dropped.count as u64,
-                                                                                        Ordering::Relaxed,
-                                                                                    );
-                                                                            }
-                                                                        }
-                                                                        Err(reason) => {
-                                                                            video_counters
-                                                                                .video_tx_drop_deadline
-                                                                                .fetch_add(1, Ordering::Relaxed);
-                                                                            warn!(
-                                                                                ?reason,
-                                                                                stream_tag,
-                                                                                frame_idx,
-                                                                                "[video] enqueue rejected"
-                                                                            );
-                                                                        }
-                                                                    }
-                                                                },
-                                                            )
-                                                            .await
-                                                        {
-                                                            video_counters
-                                                                .sender_frame_errors
-                                                                .fetch_add(1, Ordering::Relaxed);
-                                                            warn!(
-                                                                error=?e,
-                                                                stream_tag,
-                                                                frame_size=encoded.data.len(),
-                                                                "[video] send_frame failed"
-                                                            );
-                                                            break;
-                                                        }
-                                                        *frame_idx = frame_idx.wrapping_add(1);
-                                                    }
-                                                }
-                                            });
-
-                                            if include_audio {
-                                                warn!("[audio] include_audio requested but system audio capture is currently disabled");
-                                            }
-
-                                            let _ = stop_watch_task.await;
-                                            let _ = capture_task.await;
-                                            let _ = send_task.await;
-                                        });
+                                        active_share_task = Some(tokio::spawn(screen_share::session::start_local_share(
+                                            screen_share::session::StartLocalShareParams {
+                                                source: source.clone(),
+                                                include_audio,
+                                                streams: session_streams,
+                                                negotiated_profile,
+                                                mtu,
+                                                active_layer_id: active_share_session.active_layer_id.clone(),
+                                                force_next_keyframe: active_share_session.force_next_keyframe.clone(),
+                                                counters: stream_state.counters.clone(),
+                                                egress: egress.clone(),
+                                                runtime_caps,
+                                                sender_policy: crate::screen_share::config::SenderPolicy::from_settings_or_env(None),
+                                                stop_rx: share_stop_rx,
+                                                capture_queue_len_gauge,
+                                                capture_queue_overflow_total,
+                                            },
+                                        )));
                                     } else {
-                                        share_state = ShareState::Idle;
+                                        share_state = screen_share::fsm::ShareState::Idle;
                                         let _ = tx_event.send(UiEvent::AppendLog(
                                             "[video] start share failed: missing StartScreenShareResponse payload"
                                                 .into(),
@@ -4219,17 +4012,17 @@ async fn connect_and_run_session(
                                     }
                                 }
                                 Ok(Err(e)) => {
-                                    share_state = ShareState::Idle;
+                                    share_state = screen_share::fsm::ShareState::Idle;
                                     let _ = tx_event.send(UiEvent::AppendLog(format!("[video] start share rejected: {e:#}")));
                                 }
                                 Err(e) => {
-                                    share_state = ShareState::Idle;
+                                    share_state = screen_share::fsm::ShareState::Idle;
                                     let _ = tx_event.send(UiEvent::AppendLog(format!("[video] start share failed: {e:#}")));
                                 }
                             }
                         }
                         UiIntent::StopScreenShare => {
-                            share_state = ShareState::Idle;
+                            share_state = screen_share::fsm::ShareState::Stopping { reason: screen_share::fsm::StopReason::UserRequested };
                             active_share_session.clear();
                             {
                                 let mut stream_tags = active_share_session.stream_tags.lock().await;
@@ -4242,6 +4035,9 @@ async fn connect_and_run_session(
                             if let Some(stop_tx) = active_share_stop.take() {
                                 let _ = stop_tx.send(true);
                             }
+                            if let Some(task) = active_share_task.take() {
+                                task.abort();
+                            }
                             if let Some(stream_id) = active_local_stream_id.take() {
                                 let req = pb::StopScreenShareRequest { stream_id: Some(stream_id.clone()) };
                                 let _ = dispatcher
@@ -4249,6 +4045,7 @@ async fn connect_and_run_session(
                                     .await;
                                 let _ = tx_event.send(UiEvent::AppendLog(format!("[video] StopScreenShareRequest stream_id={}", stream_id.value)));
                             }
+                            share_state = screen_share::fsm::ShareState::Idle;
                         }
                         UiIntent::SetInputDevice(dev) => {
                             {

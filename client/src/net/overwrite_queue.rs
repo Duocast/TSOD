@@ -69,6 +69,35 @@ impl<T> OverwriteQueue<T> {
     pub fn overflow_evictions_swap(&self) -> u64 {
         self.overflow_evictions_total.swap(0, Ordering::Relaxed)
     }
+
+    pub async fn pop_latest_or_wait(&self) -> Option<T> {
+        loop {
+            let mut should_wait = false;
+            let item = {
+                let mut q = self.q.lock().expect("overwrite queue mutex poisoned");
+                if q.is_empty() {
+                    if self.is_closed() {
+                        return None;
+                    }
+                    should_wait = true;
+                    None
+                } else {
+                    while q.len() > 1 {
+                        q.pop_front();
+                    }
+                    q.pop_front()
+                }
+            };
+
+            if item.is_some() {
+                return item;
+            }
+
+            if should_wait {
+                self.notify.notified().await;
+            }
+        }
+    }
 }
 
 pub async fn pop_voice_realtime(

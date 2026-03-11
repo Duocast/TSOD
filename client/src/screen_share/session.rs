@@ -1,1 +1,241 @@
-//! Screen-share session lifecycle scaffolding.
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering},
+    Arc,
+};
+
+use tokio::sync::watch;
+use tracing::warn;
+
+use crate::media_codec::VideoSessionConfig;
+use crate::net::egress::EgressScheduler;
+use crate::net::overwrite_queue::OverwriteQueue;
+use crate::net::video_encode::build_screen_encoder;
+use crate::net::video_frame::VideoFrame;
+use crate::net::video_transport::{VideoSender, VideoStreamProfile};
+use crate::proto::voiceplatform::v1 as pb;
+use crate::screen_share::config::SenderPolicy;
+use crate::screen_share::runtime_probe::MediaRuntimeCaps;
+
+use crate::{video_codec_name, ShareSource, VideoRuntimeCounters};
+
+const CAPTURE_QUEUE_DEPTH: usize = 3;
+const ENCODE_QUEUE_DEPTH: usize = 2;
+const PACKETIZATION_QUEUE_DEPTH: usize = 2;
+
+struct EncodedFrame {
+    ts_ms: u32,
+    is_keyframe: bool,
+    data: bytes::Bytes,
+}
+
+#[derive(Clone)]
+pub struct SessionStream {
+    pub stream_tag: u64,
+    pub codec: pb::VideoCodec,
+}
+
+pub struct StartLocalShareParams {
+    pub source: ShareSource,
+    pub include_audio: bool,
+    pub streams: Vec<SessionStream>,
+    pub negotiated_profile: VideoStreamProfile,
+    pub mtu: usize,
+    pub active_layer_id: Arc<AtomicU8>,
+    pub force_next_keyframe: Arc<AtomicBool>,
+    pub counters: Arc<VideoRuntimeCounters>,
+    pub egress: Arc<EgressScheduler>,
+    pub runtime_caps: Arc<MediaRuntimeCaps>,
+    pub sender_policy: SenderPolicy,
+    pub stop_rx: watch::Receiver<bool>,
+    pub capture_queue_len_gauge: Arc<AtomicU64>,
+    pub capture_queue_overflow_total: Arc<AtomicU64>,
+}
+
+pub async fn start_local_share(params: StartLocalShareParams) {
+    if params.include_audio {
+        warn!("[audio] include_audio requested but system audio capture is currently disabled");
+    }
+
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    let capture_queue = Arc::new(OverwriteQueue::<VideoFrame>::new(CAPTURE_QUEUE_DEPTH));
+
+    let mut stop_watch = params.stop_rx.clone();
+    let stop_for_watch = stop_flag.clone();
+    let capture_for_watch = capture_queue.clone();
+    let stop_watch_task = tokio::spawn(async move {
+        while stop_watch.changed().await.is_ok() {
+            if *stop_watch.borrow() {
+                stop_for_watch.store(true, Ordering::Relaxed);
+                capture_for_watch.close();
+                break;
+            }
+        }
+    });
+
+    let capture_stop = stop_flag.clone();
+    let capture_source = params.source.clone();
+    let capture_caps = params.runtime_caps.clone();
+    let capture_q = capture_queue.clone();
+    let capture_len = params.capture_queue_len_gauge.clone();
+    let capture_ovf = params.capture_queue_overflow_total.clone();
+    let capture_task = tokio::task::spawn_blocking(move || {
+        let mut cap = match crate::screen_share::capture::build_capture_backend(
+            &capture_source,
+            capture_caps.as_ref(),
+        ) {
+            Ok(cap) => cap,
+            Err(e) => {
+                warn!(error=?e, "[video] failed to build screen capture backend");
+                return;
+            }
+        };
+
+        while !capture_stop.load(Ordering::Relaxed) {
+            match cap.next_frame() {
+                Ok(frame) => {
+                    capture_q.push(frame);
+                    capture_len.store(capture_q.len() as u64, Ordering::Relaxed);
+                    let ovf = capture_q.overflow_evictions_swap();
+                    if ovf > 0 {
+                        capture_ovf.fetch_add(ovf, Ordering::Relaxed);
+                    }
+                }
+                Err(e) => {
+                    warn!(error=?e, "[video] capture frame failed");
+                    break;
+                }
+            }
+        }
+        capture_q.close();
+    });
+
+    let mut stream_workers = Vec::new();
+    for stream in params.streams {
+        let mut sender = VideoSender::new(
+            stream.stream_tag,
+            params.active_layer_id.load(Ordering::Relaxed),
+            params.negotiated_profile,
+            params.mtu,
+        );
+        sender.set_pacing_enabled(false);
+
+        let mut encoder = match build_screen_encoder(
+            stream.codec,
+            params.sender_policy,
+            params.runtime_caps.as_ref(),
+        ) {
+            Ok(enc) => enc,
+            Err(e) => {
+                warn!(error=?e, stream_tag=stream.stream_tag, codec=%video_codec_name(stream.codec), "[video] failed to build screen encoder");
+                continue;
+            }
+        };
+
+        let encode_queue = Arc::new(OverwriteQueue::<VideoFrame>::new(ENCODE_QUEUE_DEPTH));
+        let packet_queue = Arc::new(OverwriteQueue::<EncodedFrame>::new(
+            PACKETIZATION_QUEUE_DEPTH,
+        ));
+
+        let stream_capture_q = capture_queue.clone();
+        let stream_encode_q = encode_queue.clone();
+        let stop_for_fanout = stop_flag.clone();
+        let fanout_task = tokio::spawn(async move {
+            while !stop_for_fanout.load(Ordering::Relaxed) {
+                let Some(frame) = stream_capture_q.pop_latest_or_wait().await else {
+                    break;
+                };
+                stream_encode_q.push(frame);
+            }
+            stream_encode_q.close();
+        });
+
+        let stream_encode_q = encode_queue.clone();
+        let stream_packet_q = packet_queue.clone();
+        let force_keyframe = params.force_next_keyframe.clone();
+        let stream_tag = stream.stream_tag;
+        let encode_task = tokio::spawn(async move {
+            let mut configured = false;
+            while let Some(frame) = stream_encode_q.pop_latest_or_wait().await {
+                if !configured {
+                    if let Err(e) = encoder.configure_session(VideoSessionConfig {
+                        width: frame.width,
+                        height: frame.height,
+                        fps: 30,
+                        target_bitrate_bps: 2_000_000,
+                        low_latency: true,
+                        allow_frame_drop: true,
+                    }) {
+                        warn!(error=?e, stream_tag, "[video] failed to configure encoder session");
+                        continue;
+                    }
+                    configured = true;
+                }
+
+                if force_keyframe.swap(false, Ordering::Relaxed) {
+                    let _ = encoder.request_keyframe();
+                }
+
+                match encoder.encode(frame) {
+                    Ok(encoded) => stream_packet_q.push(EncodedFrame {
+                        ts_ms: encoded.ts_ms,
+                        is_keyframe: encoded.is_keyframe,
+                        data: encoded.data,
+                    }),
+                    Err(e) => warn!(error=?e, stream_tag, "[video] encode failed"),
+                }
+            }
+            stream_packet_q.close();
+        });
+
+        let stream_packet_q = packet_queue.clone();
+        let egress = params.egress.clone();
+        let counters = params.counters.clone();
+        let send_task = tokio::spawn(async move {
+            let mut frame_idx = 0_u32;
+            while let Some(encoded) = stream_packet_q.pop_latest_or_wait().await {
+                if let Err(e) = sender
+                    .send_frame_async(encoded.ts_ms, encoded.is_keyframe, &encoded.data, |dg| {
+                        match egress.enqueue_video_fragment(
+                            stream_tag,
+                            frame_idx,
+                            encoded.is_keyframe,
+                            std::time::Instant::now(),
+                            dg,
+                        ) {
+                            Ok(report) => {
+                                counters.video_tx_datagrams.fetch_add(1, Ordering::Relaxed);
+                                if let Some(dropped) = report.dropped {
+                                    counters
+                                        .video_tx_drop_queue_full
+                                        .fetch_add(dropped.count as u64, Ordering::Relaxed);
+                                }
+                            }
+                            Err(reason) => {
+                                counters
+                                    .video_tx_drop_deadline
+                                    .fetch_add(1, Ordering::Relaxed);
+                                warn!(?reason, stream_tag, frame_idx, "[video] enqueue rejected");
+                            }
+                        }
+                    })
+                    .await
+                {
+                    counters.sender_frame_errors.fetch_add(1, Ordering::Relaxed);
+                    warn!(error=?e, stream_tag, frame_size=encoded.data.len(), "[video] send_frame failed");
+                    break;
+                }
+                frame_idx = frame_idx.wrapping_add(1);
+            }
+        });
+
+        stream_workers.push(fanout_task);
+        stream_workers.push(encode_task);
+        stream_workers.push(send_task);
+    }
+
+    for worker in stream_workers {
+        let _ = worker.await;
+    }
+    let _ = stop_watch_task.await;
+    let _ = capture_task.await;
+}
