@@ -29,6 +29,7 @@ const OVERLAY_FADE_MS: u64 = 400;
 
 /// Height of a single attachment preview card in the composer strip.
 const PREVIEW_CARD_HEIGHT: f32 = 86.0;
+const QUICK_REACTION_EMOJIS: &[&str] = &["👍", "❤️", "😂", "😮", "😢", "🔥", "🎉", "👀"];
 
 pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>) {
     let chat_rect = ui.max_rect();
@@ -772,42 +773,87 @@ fn show_message(
     msg: &ChatMessage,
     tx_intent: &Sender<UiIntent>,
 ) {
-    ui.horizontal(|ui| {
-        show_message_avatar(ui, msg);
-        ui.add_space(8.0);
+    let response = ui
+        .horizontal(|ui| {
+            show_message_avatar(ui, msg);
+            ui.add_space(8.0);
 
-        ui.vertical(|ui| {
-            ui.horizontal(|ui| {
-                let author_resp = ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(&msg.author_name)
-                            .strong()
-                            .color(author_name_color(msg.author_name_color)),
-                    )
-                    .sense(egui::Sense::click()),
-                );
-                if author_resp.clicked() {
-                    let click_pos = author_resp
-                        .interact_pointer_pos()
-                        .unwrap_or_else(|| author_resp.rect.right_top());
-                    model.open_profile_popup(msg.author_id.clone(), click_pos, tx_intent);
-                }
-                let ts = format_timestamp(msg.timestamp);
-                ui.label(egui::RichText::new(ts).small().color(theme::text_muted()));
-                if msg.edited {
-                    ui.label(
-                        egui::RichText::new("(edited)")
-                            .small()
-                            .color(theme::text_muted()),
+            ui.vertical(|ui| {
+                ui.horizontal(|ui| {
+                    let author_resp = ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(&msg.author_name)
+                                .strong()
+                                .color(author_name_color(msg.author_name_color)),
+                        )
+                        .sense(egui::Sense::click()),
                     );
-                }
-                if msg.pinned {
-                    ui.label(egui::RichText::new("\u{1F4CC}").small());
-                }
+                    if author_resp.clicked() {
+                        let click_pos = author_resp
+                            .interact_pointer_pos()
+                            .unwrap_or_else(|| author_resp.rect.right_top());
+                        model.open_profile_popup(msg.author_id.clone(), click_pos, tx_intent);
+                    }
+                    let ts = format_timestamp(msg.timestamp);
+                    ui.label(egui::RichText::new(ts).small().color(theme::text_muted()));
+                    if msg.edited {
+                        ui.label(
+                            egui::RichText::new("(edited)")
+                                .small()
+                                .color(theme::text_muted()),
+                        );
+                    }
+                    if msg.pinned {
+                        ui.label(egui::RichText::new("\u{1F4CC}").small());
+                    }
+                });
+                show_message_content(ui, msg, tx_intent);
             });
-            show_message_content(ui, msg, tx_intent);
+        })
+        .response;
+
+    show_add_reaction_button(ui.ctx(), msg, tx_intent, response.rect, response.hovered());
+}
+
+fn show_add_reaction_button(
+    ctx: &egui::Context,
+    msg: &ChatMessage,
+    tx_intent: &Sender<UiIntent>,
+    message_rect: egui::Rect,
+    is_hovered: bool,
+) {
+    if !is_hovered {
+        return;
+    }
+
+    let button_pos = egui::pos2(message_rect.right() - 28.0, message_rect.top() + 2.0);
+    let area_id = egui::Id::new(("chat-reaction-picker", &msg.message_id));
+    egui::Area::new(area_id)
+        .order(egui::Order::Foreground)
+        .fixed_pos(button_pos)
+        .show(ctx, |ui| {
+            ui.set_width(24.0);
+            ui.menu_button("😊", |ui| {
+                ui.set_min_width(120.0);
+                ui.label(
+                    egui::RichText::new("Add reaction")
+                        .small()
+                        .color(theme::text_muted()),
+                );
+                ui.separator();
+                ui.horizontal_wrapped(|ui| {
+                    for emoji in QUICK_REACTION_EMOJIS {
+                        if ui.button(*emoji).clicked() {
+                            let _ = tx_intent.send(UiIntent::AddReaction {
+                                message_id: msg.message_id.clone(),
+                                emoji: (*emoji).to_string(),
+                            });
+                            ui.close();
+                        }
+                    }
+                });
+            });
         });
-    });
 }
 
 fn author_name_color(color: Option<u32>) -> egui::Color32 {
