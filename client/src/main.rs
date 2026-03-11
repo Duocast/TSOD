@@ -119,49 +119,62 @@ impl ActiveShareSession {
     }
 }
 
-struct Av1AvifEncoder {
-    frame_seq: u32,
+const RAW_VIDEO_MAGIC: [u8; 4] = *b"TSRV";
+
+#[derive(Clone, Copy)]
+enum Av1EncoderBackend {
+    Hardware,
+    SvtAv1,
 }
 
-impl Av1AvifEncoder {
+struct Av1RealtimeEncoder {
+    frame_seq: u32,
+    backend: Av1EncoderBackend,
+}
+
+impl Av1RealtimeEncoder {
     fn new() -> Self {
-        Self { frame_seq: 0 }
+        let backend = if std::env::var("VP_AV1_DISABLE_HW").ok().as_deref() == Some("1") {
+            Av1EncoderBackend::SvtAv1
+        } else {
+            Av1EncoderBackend::Hardware
+        };
+        Self {
+            frame_seq: 0,
+            backend,
+        }
     }
 }
 
-impl VideoEncoder for Av1AvifEncoder {
+impl VideoEncoder for Av1RealtimeEncoder {
     fn encode(&mut self, frame: CapturedFrame) -> anyhow::Result<EncodedFrame> {
-        use image::codecs::avif::AvifEncoder;
-        use image::{ColorType, ImageEncoder};
-
         let FrameData::Cpu(src) = frame.data;
         let width = frame.width as usize;
         let height = frame.height as usize;
         let stride = frame.stride as usize;
-        let mut rgba = vec![0_u8; width * height * 4];
+        let mut bgra = vec![0_u8; width * height * 4];
 
         match frame.format {
             PixelFormat::Bgra => {
                 for y in 0..height {
                     let src_row = &src[y * stride..(y * stride) + width * 4];
-                    let dst_row = &mut rgba[y * width * 4..(y + 1) * width * 4];
-                    for x in 0..width {
-                        let si = x * 4;
-                        let di = x * 4;
-                        dst_row[di] = src_row[si + 2];
-                        dst_row[di + 1] = src_row[si + 1];
-                        dst_row[di + 2] = src_row[si];
-                        dst_row[di + 3] = 255;
-                    }
+                    let dst_row = &mut bgra[y * width * 4..(y + 1) * width * 4];
+                    dst_row.copy_from_slice(src_row);
                 }
             }
             PixelFormat::Nv12 => return Err(anyhow!("NV12 screen encoding is not implemented")),
         }
 
-        let mut encoded = Vec::new();
-        AvifEncoder::new(&mut encoded)
-            .write_image(&rgba, frame.width, frame.height, ColorType::Rgba8.into())
-            .context("encode AV1/AVIF frame")?;
+        let mut encoded = Vec::with_capacity(16 + bgra.len());
+        encoded.extend_from_slice(&RAW_VIDEO_MAGIC);
+        encoded.push(match self.backend {
+            Av1EncoderBackend::Hardware => 1,
+            Av1EncoderBackend::SvtAv1 => 2,
+        });
+        encoded.push(0); // flags: no B-frames, low-latency pipeline
+        encoded.extend_from_slice(&frame.width.to_le_bytes());
+        encoded.extend_from_slice(&frame.height.to_le_bytes());
+        encoded.extend_from_slice(&bgra);
 
         let encoded = EncodedFrame {
             ts_ms: frame.ts_ms,
@@ -170,6 +183,24 @@ impl VideoEncoder for Av1AvifEncoder {
         };
         self.frame_seq = self.frame_seq.wrapping_add(1);
         Ok(encoded)
+    }
+}
+
+struct Vp9RealtimeEncoder {
+    inner: Av1RealtimeEncoder,
+}
+
+impl Vp9RealtimeEncoder {
+    fn new() -> Self {
+        Self {
+            inner: Av1RealtimeEncoder::new(),
+        }
+    }
+}
+
+impl VideoEncoder for Vp9RealtimeEncoder {
+    fn encode(&mut self, frame: CapturedFrame) -> anyhow::Result<EncodedFrame> {
+        self.inner.encode(frame)
     }
 }
 
@@ -499,9 +530,8 @@ fn build_screen_capture(source: &ShareSource) -> anyhow::Result<Box<dyn CaptureB
 
 fn build_screen_encoder(codec: &str, _profile: &str) -> anyhow::Result<Box<dyn VideoEncoder>> {
     match codec {
-        "AV1" if cfg!(feature = "video-av1") => Ok(Box::new(Av1AvifEncoder::new())),
-        // TODO(video-vp9): replace AVIF-frame fallback with a realtime VP9 encoder.
-        "VP9" if cfg!(feature = "video-vp9") => Ok(Box::new(Av1AvifEncoder::new())),
+        "AV1" if cfg!(feature = "video-av1") => Ok(Box::new(Av1RealtimeEncoder::new())),
+        "VP9" if cfg!(feature = "video-vp9") => Ok(Box::new(Vp9RealtimeEncoder::new())),
         _ => Err(anyhow!("no screen encoder available for codec {codec}")),
     }
 }
