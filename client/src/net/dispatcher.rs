@@ -1171,6 +1171,7 @@ fn classify_push(msg: pb::ServerToClient) -> PushEvent {
                 event_seq: msg.event_seq,
             }
         }
+        // Recovery requests are a dedicated push path used by stream freeze handling.
         Some(pb::server_to_client::Payload::RequestRecovery(event)) => PushEvent::RequestRecovery {
             event,
             event_seq: msg.event_seq,

@@ -743,7 +743,29 @@ struct SharedStreamState {
     active_streams: Arc<RwLock<HashMap<u64, Arc<Mutex<VideoReceiver>>>>>,
     stream_codecs: Arc<RwLock<HashMap<u64, pb::VideoCodec>>>,
     video_decoders: Arc<RwLock<HashMap<u64, net::video_decode::VideoDecoderCache>>>,
+    freeze_states: Arc<Mutex<HashMap<u64, StreamFreezeState>>>,
     counters: Arc<VideoRuntimeCounters>,
+}
+
+#[derive(Debug, Clone)]
+struct StreamFreezeState {
+    last_frame_received_at: Instant,
+    last_keyframe_request_at: Option<Instant>,
+    last_recovery_request_at: Option<Instant>,
+    consecutive_freeze_intervals: u32,
+    unanswered_keyframe_requests: u32,
+}
+
+impl StreamFreezeState {
+    fn new(now: Instant) -> Self {
+        Self {
+            last_frame_received_at: now,
+            last_keyframe_request_at: None,
+            last_recovery_request_at: None,
+            consecutive_freeze_intervals: 0,
+            unanswered_keyframe_requests: 0,
+        }
+    }
 }
 
 impl SharedStreamState {
@@ -752,6 +774,7 @@ impl SharedStreamState {
             active_streams: Arc::new(RwLock::new(HashMap::new())),
             stream_codecs: Arc::new(RwLock::new(HashMap::new())),
             video_decoders: Arc::new(RwLock::new(HashMap::new())),
+            freeze_states: Arc::new(Mutex::new(HashMap::new())),
             counters: Arc::new(VideoRuntimeCounters::default()),
         }
     }
@@ -868,6 +891,16 @@ async fn video_recv_loop(
 
         let mut rx = receiver.lock().await;
         if let Some(frame) = rx.receive(&datagram) {
+            {
+                let now = Instant::now();
+                let mut freeze_states = state.freeze_states.lock().await;
+                let freeze_state = freeze_states
+                    .entry(frame.stream_tag)
+                    .or_insert_with(|| StreamFreezeState::new(now));
+                freeze_state.last_frame_received_at = now;
+                freeze_state.consecutive_freeze_intervals = 0;
+                freeze_state.unanswered_keyframe_requests = 0;
+            }
             let size = frame.payload.len();
             let codec = {
                 state
@@ -3035,6 +3068,10 @@ async fn connect_and_run_session(
                             let mut video_decoders = stream_state.video_decoders.write().await;
                             video_decoders.remove(&event.stream_tag);
                         }
+                        {
+                            let mut freeze_states = stream_state.freeze_states.lock().await;
+                            freeze_states.remove(&event.stream_tag);
+                        }
                         let _ = tx_event.send(UiEvent::AppendLog(format!(
                             "[video] unsubscribed stream_tag={}",
                             event.stream_tag
@@ -3054,6 +3091,11 @@ async fn connect_and_run_session(
                                     vp_voice::MAX_FRAGS_PER_FRAME,
                                 ))),
                             );
+                        }
+                        {
+                            let mut freeze_states = stream_state.freeze_states.lock().await;
+                            freeze_states
+                                .insert(event.stream_tag, StreamFreezeState::new(Instant::now()));
                         }
                         if let Ok(codec) = pb::VideoCodec::try_from(event.codec) {
                             let mut stream_codecs = stream_state.stream_codecs.write().await;
@@ -3321,10 +3363,10 @@ async fn connect_and_run_session(
     tokio::pin!(ctl_keepalive);
     let mut audio_health_tick = tokio::time::interval(Duration::from_secs(1));
     let mut stream_ui_tick = tokio::time::interval(Duration::from_secs(1));
-    let mut viewer_recovery_tick = tokio::time::interval(Duration::from_millis(750));
-    let mut stream_last_completed = 0_u64;
-    let mut stream_stall_started_at: Option<Instant> = None;
-    let mut stream_last_recovery_sent_at: Option<Instant> = None;
+    let mut viewer_recovery_tick = tokio::time::interval(Duration::from_millis(200));
+    const STREAM_FREEZE_THRESHOLD: Duration = Duration::from_millis(200);
+    const STREAM_KEYFRAME_COOLDOWN: Duration = Duration::from_millis(500);
+    const STREAM_RECOVERY_COOLDOWN: Duration = Duration::from_millis(1750);
     let mut consecutive_audio_stalls = 0_u32;
     let mut last_stall_recovery_notice = Instant::now() - Duration::from_secs(30);
     loop {
@@ -3392,37 +3434,67 @@ async fn connect_and_run_session(
                     streams.keys().copied().collect::<Vec<_>>()
                 };
                 if active_stream_tags.is_empty() {
-                    stream_last_completed = stream_state.counters.completed_frames.load(Ordering::Relaxed);
-                    stream_stall_started_at = None;
                     continue;
                 }
 
-                let completed_total = stream_state.counters.completed_frames.load(Ordering::Relaxed);
-                if completed_total > stream_last_completed {
-                    stream_last_completed = completed_total;
-                    stream_stall_started_at = None;
-                    continue;
+                let now = Instant::now();
+                let mut pending_keyframe_requests = Vec::new();
+                let mut pending_recovery_requests = Vec::new();
+                {
+                    let mut freeze_states = stream_state.freeze_states.lock().await;
+                    for stream_tag in active_stream_tags {
+                        let freeze_state = freeze_states
+                            .entry(stream_tag)
+                            .or_insert_with(|| StreamFreezeState::new(now));
+
+                        if now.duration_since(freeze_state.last_frame_received_at) < STREAM_FREEZE_THRESHOLD {
+                            freeze_state.consecutive_freeze_intervals = 0;
+                            continue;
+                        }
+
+                        freeze_state.consecutive_freeze_intervals =
+                            freeze_state.consecutive_freeze_intervals.saturating_add(1);
+
+                        let keyframe_ready = freeze_state
+                            .last_keyframe_request_at
+                            .map(|ts| now.duration_since(ts) >= STREAM_KEYFRAME_COOLDOWN)
+                            .unwrap_or(true);
+                        if keyframe_ready {
+                            freeze_state.last_keyframe_request_at = Some(now);
+                            freeze_state.unanswered_keyframe_requests = freeze_state
+                                .unanswered_keyframe_requests
+                                .saturating_add(1);
+                            pending_keyframe_requests.push(stream_tag);
+                        }
+
+                        let recovery_ready = freeze_state
+                            .last_recovery_request_at
+                            .map(|ts| now.duration_since(ts) >= STREAM_RECOVERY_COOLDOWN)
+                            .unwrap_or(true);
+                        let should_escalate = freeze_state.unanswered_keyframe_requests > 0
+                            && freeze_state.consecutive_freeze_intervals >= 2;
+                        if should_escalate && recovery_ready {
+                            freeze_state.last_recovery_request_at = Some(now);
+                            pending_recovery_requests.push(stream_tag);
+                        }
+                    }
                 }
 
-                let started = stream_stall_started_at.get_or_insert_with(Instant::now);
-                if started.elapsed() < Duration::from_secs(2) {
-                    continue;
-                }
-                let should_send = stream_last_recovery_sent_at
-                    .map(|t| t.elapsed() >= Duration::from_secs(1))
-                    .unwrap_or(true);
-                if !should_send {
-                    continue;
+                for stream_tag in pending_keyframe_requests {
+                    let _ = dispatcher
+                        .send_no_response(pb::client_to_server::Payload::RequestKeyframeRequest(
+                            pb::RequestKeyframeRequest { stream_tag },
+                        ))
+                        .await;
                 }
 
-                for stream_tag in active_stream_tags {
+                for stream_tag in pending_recovery_requests {
                     let _ = dispatcher
                         .send_no_response(pb::client_to_server::Payload::RequestRecovery(
                             pb::RequestRecovery { stream_tag },
                         ))
                         .await;
                 }
-                stream_last_recovery_sent_at = Some(Instant::now());
             }
             _ = audio_health_tick.tick() => {
                 let ping_rtt_ms = disp_health
