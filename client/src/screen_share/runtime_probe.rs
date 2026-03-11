@@ -99,7 +99,7 @@ pub fn probe_media_caps(source: &crate::ShareSource) -> MediaRuntimeCaps {
     }
 }
 
-fn preferred_capture_backends(source: &crate::ShareSource) -> Vec<CaptureBackendKind> {
+fn preferred_capture_backends(_source: &crate::ShareSource) -> Vec<CaptureBackendKind> {
     #[cfg(target_os = "windows")]
     {
         return vec![CaptureBackendKind::Dxgi, CaptureBackendKind::Scrap];
@@ -107,7 +107,7 @@ fn preferred_capture_backends(source: &crate::ShareSource) -> Vec<CaptureBackend
 
     #[cfg(target_os = "linux")]
     {
-        if matches!(source, crate::ShareSource::X11Window(_)) {
+        if matches!(_source, crate::ShareSource::X11Window(_)) {
             return vec![CaptureBackendKind::X11, CaptureBackendKind::Scrap];
         }
         return vec![
@@ -116,8 +116,10 @@ fn preferred_capture_backends(source: &crate::ShareSource) -> Vec<CaptureBackend
         ];
     }
 
-    #[allow(unreachable_code)]
-    vec![CaptureBackendKind::Scrap]
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    {
+        vec![CaptureBackendKind::Scrap]
+    }
 }
 
 fn preferred_encode_backends() -> HashMap<pb::VideoCodec, Vec<EncodeBackendKind>> {
@@ -174,8 +176,11 @@ fn preferred_encode_backends() -> HashMap<pb::VideoCodec, Vec<EncodeBackendKind>
         return map;
     }
 
-    map.insert(pb::VideoCodec::Vp9, vec![EncodeBackendKind::Libvpx]);
-    map
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    {
+        map.insert(pb::VideoCodec::Vp9, vec![EncodeBackendKind::Libvpx]);
+        map
+    }
 }
 
 fn preferred_decode_backends() -> HashMap<pb::VideoCodec, Vec<DecodeBackendKind>> {
@@ -222,8 +227,11 @@ fn preferred_decode_backends() -> HashMap<pb::VideoCodec, Vec<DecodeBackendKind>
         return map;
     }
 
-    map.insert(pb::VideoCodec::Vp9, vec![DecodeBackendKind::Libvpx]);
-    map
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    {
+        map.insert(pb::VideoCodec::Vp9, vec![DecodeBackendKind::Libvpx]);
+        map
+    }
 }
 
 fn preferred_audio_backends() -> Vec<SystemAudioBackendKind> {
@@ -262,7 +270,10 @@ fn default_audio_backends() -> Vec<SystemAudioBackendKind> {
         ];
     }
 
-    vec![SystemAudioBackendKind::Off]
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    {
+        vec![SystemAudioBackendKind::Off]
+    }
 }
 
 fn apply_encoder_override(

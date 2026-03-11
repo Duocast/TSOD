@@ -27,7 +27,7 @@ use bytes::Bytes;
 use config::Config;
 use crossbeam_channel::{bounded, Receiver, Sender};
 use identity::DeviceIdentity;
-use media_codec::{DecodeMetadata, VideoSessionConfig};
+use media_codec::DecodeMetadata;
 use net::dispatcher::{ControlDispatcher, PushEvent};
 use net::egress::EgressScheduler;
 use net::overwrite_queue::{pop_voice_realtime, OverwriteQueue, StampedBytes};
@@ -514,7 +514,7 @@ async fn video_recv_loop(
         if let Some(frame) = maybe_frame {
             let now = Instant::now();
             let mut policy = state.recovery_policy.lock().await;
-            policy.on_frame_received(frame.stream_tag, now);
+            policy.on_frame_received(frame.stream_tag, now.into());
             drop(policy);
             let size = frame.payload.len();
             let codec = {
@@ -2720,7 +2720,7 @@ async fn connect_and_run_session(
                         }
                         {
                             let mut policy = stream_state.recovery_policy.lock().await;
-                            policy.register_stream(event.stream_tag, Instant::now());
+                            policy.register_stream(event.stream_tag, Instant::now().into());
                         }
                         if let Some(sid) = event.stream_id.as_ref() {
                             let mut ids = stream_state.stream_ids.write().await;
@@ -3078,7 +3078,7 @@ async fn connect_and_run_session(
                 {
                     let mut policy = stream_state.recovery_policy.lock().await;
                     for stream_tag in active_stream_tags {
-                        let actions = policy.evaluate_stream(stream_tag, now);
+                        let actions = policy.evaluate_stream(stream_tag, now.into());
                         if actions.request_keyframe {
                             pending_keyframe_requests.push(stream_tag);
                         }

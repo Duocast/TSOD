@@ -1,1 +1,1 @@
-pub use crate::screen_share::config::SenderPolicy;
+pub type SenderPolicy = crate::screen_share::config::SenderPolicy;
