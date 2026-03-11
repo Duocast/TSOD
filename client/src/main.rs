@@ -37,6 +37,7 @@ use net::voice_datagram::{
     make_voice_datagram, VOICE_FORWARDED_HDR_LEN, VOICE_HDR_LEN, VOICE_VERSION,
 };
 use proto::voiceplatform::v1 as pb;
+use screen_share::policy::recovery::{RecoveryPolicyConfig, ViewerRecoveryPolicy};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{
@@ -337,6 +338,8 @@ pub(crate) struct VideoRuntimeCounters {
     voice_rx_drain_drops: AtomicU64,
 
     completed_frames: AtomicU64,
+    incomplete_frame_evictions_capacity: AtomicU64,
+    incomplete_frame_evictions_timeout: AtomicU64,
     dropped_no_subscription: AtomicU64,
     dropped_channel_full: AtomicU64,
     pub(crate) sender_frame_errors: AtomicU64,
@@ -351,29 +354,8 @@ struct SharedStreamState {
     stream_codecs: Arc<RwLock<HashMap<u64, pb::VideoCodec>>>,
     stream_ids: Arc<RwLock<HashMap<u64, String>>>,
     video_decoders: Arc<Mutex<HashMap<u64, net::video_decode::VideoDecoderCache>>>,
-    freeze_states: Arc<Mutex<HashMap<u64, StreamFreezeState>>>,
+    recovery_policy: Arc<Mutex<ViewerRecoveryPolicy>>,
     counters: Arc<VideoRuntimeCounters>,
-}
-
-#[derive(Debug, Clone)]
-struct StreamFreezeState {
-    last_frame_received_at: Instant,
-    last_keyframe_request_at: Option<Instant>,
-    last_recovery_request_at: Option<Instant>,
-    consecutive_freeze_intervals: u32,
-    unanswered_keyframe_requests: u32,
-}
-
-impl StreamFreezeState {
-    fn new(now: Instant) -> Self {
-        Self {
-            last_frame_received_at: now,
-            last_keyframe_request_at: None,
-            last_recovery_request_at: None,
-            consecutive_freeze_intervals: 0,
-            unanswered_keyframe_requests: 0,
-        }
-    }
 }
 
 impl SharedStreamState {
@@ -383,7 +365,9 @@ impl SharedStreamState {
             stream_codecs: Arc::new(RwLock::new(HashMap::new())),
             stream_ids: Arc::new(RwLock::new(HashMap::new())),
             video_decoders: Arc::new(Mutex::new(HashMap::new())),
-            freeze_states: Arc::new(Mutex::new(HashMap::new())),
+            recovery_policy: Arc::new(Mutex::new(ViewerRecoveryPolicy::new(
+                RecoveryPolicyConfig::default(),
+            ))),
             counters: Arc::new(VideoRuntimeCounters::default()),
         }
     }
@@ -509,17 +493,29 @@ async fn video_recv_loop(
         };
 
         let mut rx = receiver.lock().await;
-        if let Some(frame) = rx.receive(&datagram) {
-            {
-                let now = Instant::now();
-                let mut freeze_states = state.freeze_states.lock().await;
-                let freeze_state = freeze_states
-                    .entry(frame.stream_tag)
-                    .or_insert_with(|| StreamFreezeState::new(now));
-                freeze_state.last_frame_received_at = now;
-                freeze_state.consecutive_freeze_intervals = 0;
-                freeze_state.unanswered_keyframe_requests = 0;
+        let maybe_frame = rx.receive(&datagram);
+        for evicted in rx.take_incomplete_evictions() {
+            match evicted.reason {
+                net::video_transport::IncompleteFrameEvictionReason::Capacity => {
+                    state
+                        .counters
+                        .incomplete_frame_evictions_capacity
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                net::video_transport::IncompleteFrameEvictionReason::Timeout => {
+                    state
+                        .counters
+                        .incomplete_frame_evictions_timeout
+                        .fetch_add(1, Ordering::Relaxed);
+                }
             }
+        }
+
+        if let Some(frame) = maybe_frame {
+            let now = Instant::now();
+            let mut policy = state.recovery_policy.lock().await;
+            policy.on_frame_received(frame.stream_tag, now);
+            drop(policy);
             let size = frame.payload.len();
             let codec = {
                 state
@@ -554,7 +550,7 @@ async fn video_recv_loop(
                 match cache.decode(
                     &net::video_frame::EncodedAccessUnit {
                         codec,
-                        layer_id: 0,
+                        layer_id: frame.layer_id,
                         ts_ms: frame.ts_ms,
                         is_keyframe: frame.is_keyframe,
                         data: Bytes::copy_from_slice(&frame.payload),
@@ -2699,8 +2695,8 @@ async fn connect_and_run_session(
                             video_decoders.remove(&event.stream_tag);
                         }
                         {
-                            let mut freeze_states = stream_state.freeze_states.lock().await;
-                            freeze_states.remove(&event.stream_tag);
+                            let mut policy = stream_state.recovery_policy.lock().await;
+                            policy.unregister_stream(event.stream_tag);
                         }
                         let _ = tx_event.send(UiEvent::AppendLog(format!(
                             "[video] unsubscribed stream_tag={}",
@@ -2723,9 +2719,8 @@ async fn connect_and_run_session(
                             );
                         }
                         {
-                            let mut freeze_states = stream_state.freeze_states.lock().await;
-                            freeze_states
-                                .insert(event.stream_tag, StreamFreezeState::new(Instant::now()));
+                            let mut policy = stream_state.recovery_policy.lock().await;
+                            policy.register_stream(event.stream_tag, Instant::now());
                         }
                         if let Some(sid) = event.stream_id.as_ref() {
                             let mut ids = stream_state.stream_ids.write().await;
@@ -3007,9 +3002,6 @@ async fn connect_and_run_session(
     let mut audio_health_tick = tokio::time::interval(Duration::from_secs(1));
     let mut stream_ui_tick = tokio::time::interval(Duration::from_secs(1));
     let mut viewer_recovery_tick = tokio::time::interval(Duration::from_millis(200));
-    const STREAM_FREEZE_THRESHOLD: Duration = Duration::from_millis(200);
-    const STREAM_KEYFRAME_COOLDOWN: Duration = Duration::from_millis(500);
-    const STREAM_RECOVERY_COOLDOWN: Duration = Duration::from_millis(1750);
     let mut consecutive_audio_stalls = 0_u32;
     let mut last_stall_recovery_notice = Instant::now() - Duration::from_secs(30);
     loop {
@@ -3084,40 +3076,13 @@ async fn connect_and_run_session(
                 let mut pending_keyframe_requests = Vec::new();
                 let mut pending_recovery_requests = Vec::new();
                 {
-                    let mut freeze_states = stream_state.freeze_states.lock().await;
+                    let mut policy = stream_state.recovery_policy.lock().await;
                     for stream_tag in active_stream_tags {
-                        let freeze_state = freeze_states
-                            .entry(stream_tag)
-                            .or_insert_with(|| StreamFreezeState::new(now));
-
-                        if now.duration_since(freeze_state.last_frame_received_at) < STREAM_FREEZE_THRESHOLD {
-                            freeze_state.consecutive_freeze_intervals = 0;
-                            continue;
-                        }
-
-                        freeze_state.consecutive_freeze_intervals =
-                            freeze_state.consecutive_freeze_intervals.saturating_add(1);
-
-                        let keyframe_ready = freeze_state
-                            .last_keyframe_request_at
-                            .map(|ts| now.duration_since(ts) >= STREAM_KEYFRAME_COOLDOWN)
-                            .unwrap_or(true);
-                        if keyframe_ready {
-                            freeze_state.last_keyframe_request_at = Some(now);
-                            freeze_state.unanswered_keyframe_requests = freeze_state
-                                .unanswered_keyframe_requests
-                                .saturating_add(1);
+                        let actions = policy.evaluate_stream(stream_tag, now);
+                        if actions.request_keyframe {
                             pending_keyframe_requests.push(stream_tag);
                         }
-
-                        let recovery_ready = freeze_state
-                            .last_recovery_request_at
-                            .map(|ts| now.duration_since(ts) >= STREAM_RECOVERY_COOLDOWN)
-                            .unwrap_or(true);
-                        let should_escalate = freeze_state.unanswered_keyframe_requests > 0
-                            && freeze_state.consecutive_freeze_intervals >= 2;
-                        if should_escalate && recovery_ready {
-                            freeze_state.last_recovery_request_at = Some(now);
+                        if actions.request_recovery {
                             pending_recovery_requests.push(stream_tag);
                         }
                     }
@@ -3146,6 +3111,9 @@ async fn connect_and_run_session(
                             pb::RequestRecovery { stream_tag },
                         ))
                         .await;
+                    active_share_session
+                        .force_next_keyframe
+                        .store(true, Ordering::Relaxed);
                 }
             }
             _ = audio_health_tick.tick() => {

@@ -1,1 +1,3 @@
-//! Screen-share policy scaffolding.
+//! Screen-share policy modules.
+
+pub mod recovery;
