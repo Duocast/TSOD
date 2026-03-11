@@ -27,11 +27,13 @@ use config::Config;
 use crossbeam_channel::{bounded, Receiver, Sender};
 use identity::DeviceIdentity;
 use media_capture::CaptureBackend;
-use media_codec::VideoEncoder;
+use media_codec::{DecodeMetadata, VideoSessionConfig};
 use net::dispatcher::{ControlDispatcher, PushEvent};
 use net::egress::EgressScheduler;
 use net::overwrite_queue::{pop_voice_realtime, OverwriteQueue, StampedBytes};
 use net::video_datagram::VideoHeader;
+use net::video_encode::build_screen_encoder;
+use net::video_frame::{PixelFormat, VideoFrame, VideoPlane};
 use net::video_transport::{VideoReceiver, VideoSender, VideoStreamProfile};
 use net::voice_datagram::{
     make_voice_datagram, VOICE_FORWARDED_HDR_LEN, VOICE_HDR_LEN, VOICE_VERSION,
@@ -76,34 +78,6 @@ pub enum ShareSource {
     X11Window(u64),
 }
 
-#[derive(Debug, Clone, Copy)]
-pub enum PixelFormat {
-    Bgra,
-    Nv12,
-}
-
-#[derive(Debug, Clone)]
-pub enum FrameData {
-    Cpu(Bytes),
-}
-
-#[derive(Debug, Clone)]
-pub struct CapturedFrame {
-    pub width: u32,
-    pub height: u32,
-    pub stride: u32,
-    pub ts_ms: u32,
-    pub format: PixelFormat,
-    pub data: FrameData,
-}
-
-#[derive(Debug)]
-pub struct EncodedFrame {
-    pub ts_ms: u32,
-    pub is_keyframe: bool,
-    pub data: bytes::Bytes,
-}
-
 #[derive(Debug, Default)]
 struct ActiveShareSession {
     force_next_keyframe: AtomicBool,
@@ -116,91 +90,6 @@ impl ActiveShareSession {
     fn clear(&self) {
         self.force_next_keyframe.store(false, Ordering::Relaxed);
         self.active_layer_id.store(0, Ordering::Relaxed);
-    }
-}
-
-const RAW_VIDEO_MAGIC: [u8; 4] = *b"TSRV";
-
-#[derive(Clone, Copy)]
-enum Av1EncoderBackend {
-    Hardware,
-    SvtAv1,
-}
-
-struct Av1RealtimeEncoder {
-    frame_seq: u32,
-    backend: Av1EncoderBackend,
-}
-
-impl Av1RealtimeEncoder {
-    fn new() -> Self {
-        let backend = if std::env::var("VP_AV1_DISABLE_HW").ok().as_deref() == Some("1") {
-            Av1EncoderBackend::SvtAv1
-        } else {
-            Av1EncoderBackend::Hardware
-        };
-        Self {
-            frame_seq: 0,
-            backend,
-        }
-    }
-}
-
-impl VideoEncoder for Av1RealtimeEncoder {
-    fn encode(&mut self, frame: CapturedFrame) -> anyhow::Result<EncodedFrame> {
-        let FrameData::Cpu(src) = frame.data;
-        let width = frame.width as usize;
-        let height = frame.height as usize;
-        let stride = frame.stride as usize;
-        let mut bgra = vec![0_u8; width * height * 4];
-
-        match frame.format {
-            PixelFormat::Bgra => {
-                for y in 0..height {
-                    let src_row = &src[y * stride..(y * stride) + width * 4];
-                    let dst_row = &mut bgra[y * width * 4..(y + 1) * width * 4];
-                    dst_row.copy_from_slice(src_row);
-                }
-            }
-            PixelFormat::Nv12 => return Err(anyhow!("NV12 screen encoding is not implemented")),
-        }
-
-        let mut encoded = Vec::with_capacity(16 + bgra.len());
-        encoded.extend_from_slice(&RAW_VIDEO_MAGIC);
-        encoded.push(match self.backend {
-            Av1EncoderBackend::Hardware => 1,
-            Av1EncoderBackend::SvtAv1 => 2,
-        });
-        encoded.push(0); // flags: no B-frames, low-latency pipeline
-        encoded.extend_from_slice(&frame.width.to_le_bytes());
-        encoded.extend_from_slice(&frame.height.to_le_bytes());
-        encoded.extend_from_slice(&bgra);
-
-        let encoded = EncodedFrame {
-            ts_ms: frame.ts_ms,
-            is_keyframe: self.frame_seq % 60 == 0,
-            data: Bytes::from(encoded),
-        };
-        self.frame_seq = self.frame_seq.wrapping_add(1);
-        Ok(encoded)
-    }
-}
-
-struct Vp9RealtimeEncoder {
-    inner: Av1RealtimeEncoder,
-}
-
-impl Vp9RealtimeEncoder {
-    fn new() -> Self {
-        Self {
-            inner: Av1RealtimeEncoder::new(),
-        }
-    }
-}
-
-impl VideoEncoder for Vp9RealtimeEncoder {
-    fn encode(&mut self, frame: CapturedFrame) -> anyhow::Result<EncodedFrame> {
-        self.inner.encode(frame)
     }
 }
 
@@ -224,7 +113,7 @@ impl SyntheticCapture {
 
 #[cfg(feature = "dev-synthetic-stream")]
 impl CaptureBackend for SyntheticCapture {
-    fn next_frame(&mut self) -> anyhow::Result<CapturedFrame> {
+    fn next_frame(&mut self) -> anyhow::Result<VideoFrame> {
         let mut rgba = vec![0_u8; (self.width * self.height * 4) as usize];
         for y in 0..self.height as usize {
             for x in 0..self.width as usize {
@@ -236,13 +125,15 @@ impl CaptureBackend for SyntheticCapture {
             }
         }
         self.frame_idx = self.frame_idx.wrapping_add(1);
-        Ok(CapturedFrame {
+        Ok(VideoFrame {
             width: self.width,
             height: self.height,
-            stride: self.width * 4,
             ts_ms: unix_ms() as u32,
             format: PixelFormat::Bgra,
-            data: FrameData::Cpu(Bytes::from(rgba)),
+            planes: vec![VideoPlane {
+                stride: self.width * 4,
+                data: Bytes::from(rgba),
+            }],
         })
     }
 }
@@ -309,7 +200,7 @@ impl WindowsWindowCapture {
 
 #[cfg(target_os = "windows")]
 impl CaptureBackend for WindowsWindowCapture {
-    fn next_frame(&mut self) -> anyhow::Result<CapturedFrame> {
+    fn next_frame(&mut self) -> anyhow::Result<VideoFrame> {
         use windows::Win32::Graphics::Gdi::{
             BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits,
             GetWindowDC, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
@@ -411,13 +302,15 @@ impl CaptureBackend for WindowsWindowCapture {
             return Err(anyhow!("failed to read window pixels from DIB"));
         }
 
-        Ok(CapturedFrame {
+        Ok(VideoFrame {
             width,
             height,
-            stride: width * 4,
             ts_ms: unix_ms() as u32,
             format: PixelFormat::Bgra,
-            data: FrameData::Cpu(Bytes::from(pixels)),
+            planes: vec![VideoPlane {
+                stride: width * 4,
+                data: Bytes::from(pixels),
+            }],
         })
     }
 }
@@ -471,18 +364,20 @@ impl ScrapCapture {
 }
 
 impl CaptureBackend for ScrapCapture {
-    fn next_frame(&mut self) -> anyhow::Result<CapturedFrame> {
+    fn next_frame(&mut self) -> anyhow::Result<VideoFrame> {
         loop {
             match self.capturer.frame() {
                 Ok(frame) => {
                     let stride = (frame.len() / self.height as usize) as u32;
-                    return Ok(CapturedFrame {
+                    return Ok(VideoFrame {
                         width: self.width,
                         height: self.height,
-                        stride,
                         ts_ms: unix_ms() as u32,
                         format: PixelFormat::Bgra,
-                        data: FrameData::Cpu(Bytes::copy_from_slice(&frame)),
+                        planes: vec![VideoPlane {
+                            stride,
+                            data: Bytes::copy_from_slice(&frame),
+                        }],
                     });
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -537,14 +432,6 @@ fn build_screen_capture(source: &ShareSource) -> anyhow::Result<Box<dyn CaptureB
     }
 
     Ok(Box::new(ScrapCapture::from_source(source)?))
-}
-
-fn build_screen_encoder(codec: &str, _profile: &str) -> anyhow::Result<Box<dyn VideoEncoder>> {
-    match codec {
-        "AV1" if cfg!(feature = "video-av1") => Ok(Box::new(Av1RealtimeEncoder::new())),
-        "VP9" if cfg!(feature = "video-vp9") => Ok(Box::new(Vp9RealtimeEncoder::new())),
-        _ => Err(anyhow!("no screen encoder available for codec {codec}")),
-    }
 }
 
 #[derive(Clone)]
@@ -998,7 +885,7 @@ async fn video_recv_loop(
                 let cache = decoders
                     .entry(frame.stream_tag)
                     .or_insert_with(net::video_decode::VideoDecoderCache::new);
-                match cache.decode(codec, &frame.payload) {
+                match cache.decode(codec, &frame.payload, DecodeMetadata { ts_ms: frame.ts_ms }) {
                     Ok(decoded) => decoded,
                     Err(_err) => continue,
                 }
@@ -4445,7 +4332,7 @@ async fn connect_and_run_session(
                                                 return;
                                             }
 
-                                            let (capture_tx, mut capture_rx) = mpsc::channel::<CapturedFrame>(4);
+                                            let (capture_tx, mut capture_rx) = mpsc::channel::<VideoFrame>(4);
                                             let stop_flag = Arc::new(AtomicBool::new(false));
 
                                             let watcher_flag = stop_flag.clone();
@@ -4501,7 +4388,7 @@ async fn connect_and_run_session(
                                                                 return None;
                                                             }
                                                         };
-                                                        Some((stream_tag, sender, encoder, 0_u32))
+                                                        Some((stream_tag, sender, encoder, 0_u32, false))
                                                     })
                                                     .collect::<Vec<_>>();
 
@@ -4528,10 +4415,31 @@ async fn connect_and_run_session(
                                                         sample_window_start = std::time::Instant::now();
                                                     }
 
-                                                    for (stream_tag, sender, encoder, frame_idx) in
+                                                    for (stream_tag, sender, encoder, frame_idx, configured) in
                                                         &mut stream_encoders
                                                     {
-                                                        let mut encoded = match encoder.encode(frame.clone()) {
+                                                        if !*configured {
+                                                            if let Err(e) = encoder.configure_session(VideoSessionConfig {
+                                                                width: frame.width,
+                                                                height: frame.height,
+                                                                target_bitrate_bps: 2_000_000,
+                                                            }) {
+                                                                warn!(error=?e, stream_tag, "[video] failed to configure encoder session");
+                                                                continue;
+                                                            }
+                                                            *configured = true;
+                                                        }
+
+                                                        if active_share_session
+                                                            .force_next_keyframe
+                                                            .swap(false, Ordering::Relaxed)
+                                                        {
+                                                            if let Err(e) = encoder.request_keyframe() {
+                                                                warn!(error=?e, stream_tag, "[video] failed to request keyframe");
+                                                            }
+                                                        }
+
+                                                        let encoded = match encoder.encode(frame.clone()) {
                                                             Ok(encoded) => encoded,
                                                             Err(e) => {
                                                                 warn!(
@@ -4542,13 +4450,6 @@ async fn connect_and_run_session(
                                                                 continue;
                                                             }
                                                         };
-
-                                                        if active_share_session
-                                                            .force_next_keyframe
-                                                            .swap(false, Ordering::Relaxed)
-                                                        {
-                                                            encoded.is_keyframe = true;
-                                                        }
 
                                                         if let Err(e) = sender
                                                             .send_frame_async(
