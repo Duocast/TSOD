@@ -1,6 +1,7 @@
 use anyhow::Result;
 
 use crate::media_codec::{DecodeMetadata, DecodedVideoFrame, VideoDecoder, VideoSessionConfig};
+use crate::net::video_frame::EncodedAccessUnit;
 
 use super::av1::decode_realtime_payload;
 
@@ -11,7 +12,19 @@ impl VideoDecoder for Vp9LibvpxDecoder {
         Ok(())
     }
 
-    fn decode(&mut self, encoded: &[u8], metadata: DecodeMetadata) -> Result<DecodedVideoFrame> {
+    fn decode(
+        &mut self,
+        encoded: &EncodedAccessUnit,
+        metadata: DecodeMetadata,
+    ) -> Result<DecodedVideoFrame> {
         decode_realtime_payload(encoded, metadata)
+    }
+
+    fn reset(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    fn backend_name(&self) -> &'static str {
+        "libvpx"
     }
 }

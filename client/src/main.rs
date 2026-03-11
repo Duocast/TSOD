@@ -33,7 +33,7 @@ use net::egress::EgressScheduler;
 use net::overwrite_queue::{pop_voice_realtime, OverwriteQueue, StampedBytes};
 use net::video_datagram::VideoHeader;
 use net::video_encode::build_screen_encoder;
-use net::video_frame::{PixelFormat, VideoFrame, VideoPlane};
+use net::video_frame::{FramePlanes, PixelFormat, VideoFrame};
 use net::video_transport::{VideoReceiver, VideoSender, VideoStreamProfile};
 use net::voice_datagram::{
     make_voice_datagram, VOICE_FORWARDED_HDR_LEN, VOICE_HDR_LEN, VOICE_VERSION,
@@ -130,10 +130,10 @@ impl CaptureBackend for SyntheticCapture {
             height: self.height,
             ts_ms: unix_ms() as u32,
             format: PixelFormat::Bgra,
-            planes: vec![VideoPlane {
+            planes: FramePlanes::Bgra {
+                bytes: Bytes::from(rgba),
                 stride: self.width * 4,
-                data: Bytes::from(rgba),
-            }],
+            },
         })
     }
 }
@@ -307,10 +307,10 @@ impl CaptureBackend for WindowsWindowCapture {
             height,
             ts_ms: unix_ms() as u32,
             format: PixelFormat::Bgra,
-            planes: vec![VideoPlane {
+            planes: FramePlanes::Bgra {
+                bytes: Bytes::from(pixels),
                 stride: width * 4,
-                data: Bytes::from(pixels),
-            }],
+            },
         })
     }
 }
@@ -374,10 +374,10 @@ impl CaptureBackend for ScrapCapture {
                         height: self.height,
                         ts_ms: unix_ms() as u32,
                         format: PixelFormat::Bgra,
-                        planes: vec![VideoPlane {
+                        planes: FramePlanes::Bgra {
+                            bytes: Bytes::copy_from_slice(&frame),
                             stride,
-                            data: Bytes::copy_from_slice(&frame),
-                        }],
+                        },
                     });
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -885,7 +885,16 @@ async fn video_recv_loop(
                 let cache = decoders
                     .entry(frame.stream_tag)
                     .or_insert_with(net::video_decode::VideoDecoderCache::new);
-                match cache.decode(codec, &frame.payload, DecodeMetadata { ts_ms: frame.ts_ms }) {
+                match cache.decode(
+                    &net::video_frame::EncodedAccessUnit {
+                        codec,
+                        layer_id: 0,
+                        ts_ms: frame.ts_ms,
+                        is_keyframe: frame.is_keyframe,
+                        data: Bytes::copy_from_slice(&frame.payload),
+                    },
+                    DecodeMetadata { ts_ms: frame.ts_ms },
+                ) {
                     Ok(decoded) => decoded,
                     Err(_err) => continue,
                 }
@@ -4422,7 +4431,10 @@ async fn connect_and_run_session(
                                                             if let Err(e) = encoder.configure_session(VideoSessionConfig {
                                                                 width: frame.width,
                                                                 height: frame.height,
+                                                                fps: 30,
                                                                 target_bitrate_bps: 2_000_000,
+                                                                low_latency: true,
+                                                                allow_frame_drop: true,
                                                             }) {
                                                                 warn!(error=?e, stream_tag, "[video] failed to configure encoder session");
                                                                 continue;
