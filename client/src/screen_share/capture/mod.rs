@@ -26,6 +26,7 @@ pub fn build_capture_backend(
         return Ok(Box::new(SyntheticCapture::new()));
     }
 
+    let mut errors = Vec::new();
     for backend in &caps.capture_backends {
         let attempt: anyhow::Result<Box<dyn CaptureBackend>> = match backend {
             CaptureBackendKind::Dxgi => Ok(Box::new(dxgi::DxgiCapture::from_source(source)?)),
@@ -38,13 +39,15 @@ pub fn build_capture_backend(
             }
         };
 
-        if let Ok(capture) = attempt {
-            return Ok(capture);
+        match attempt {
+            Ok(capture) => return Ok(capture),
+            Err(error) => errors.push(format!("{backend:?}: {error:#}")),
         }
     }
 
     Err(anyhow!(
-        "no screen capture backend could be initialized for source={source:?}"
+        "no screen capture backend could be initialized for source={source:?}; attempts={} ",
+        errors.join(" | ")
     ))
 }
 

@@ -13,9 +13,15 @@ pub struct DirtyRegion {
     pub bottom: u32,
 }
 
+#[derive(Debug, Clone)]
+pub struct DamageMetadata {
+    pub frame_ts_ms: u32,
+    pub dirty_regions: Vec<DirtyRegion>,
+}
+
 pub struct DxgiCapture {
     inner: ScrapCapture,
-    last_dirty_regions: Vec<DirtyRegion>,
+    last_damage: Option<DamageMetadata>,
 }
 
 impl DxgiCapture {
@@ -30,30 +36,44 @@ impl DxgiCapture {
 
         #[cfg(target_os = "windows")]
         {
+            if !matches!(
+                source,
+                crate::ShareSource::WindowsDisplay(_) | crate::ShareSource::WindowsWindow(_)
+            ) {
+                return Err(anyhow!(
+                    "DXGI backend only supports Windows display/window share sources"
+                ));
+            }
+
+            // TODO(backend): Replace the migration fallback with explicit Desktop Duplication
+            // output duplication and texture copy path once the dedicated DXGI implementation
+            // lands. The trait contract and metadata plumbing are already in place.
             let inner = ScrapCapture::from_source(source)
-                .context("initialize DXGI desktop duplication capture")?;
+                .context("initialize DXGI desktop duplication capture path")?;
             Ok(Self {
                 inner,
-                last_dirty_regions: Vec::new(),
+                last_damage: None,
             })
         }
     }
 
     #[allow(dead_code)]
-    pub fn take_dirty_regions(&mut self) -> Vec<DirtyRegion> {
-        std::mem::take(&mut self.last_dirty_regions)
+    pub fn take_damage(&mut self) -> Option<DamageMetadata> {
+        self.last_damage.take()
     }
 }
 
 impl CaptureBackend for DxgiCapture {
     fn next_frame(&mut self) -> anyhow::Result<VideoFrame> {
         let frame = self.inner.next_frame()?;
-        self.last_dirty_regions.clear();
-        self.last_dirty_regions.push(DirtyRegion {
-            left: 0,
-            top: 0,
-            right: frame.width,
-            bottom: frame.height,
+        self.last_damage = Some(DamageMetadata {
+            frame_ts_ms: frame.ts_ms,
+            dirty_regions: vec![DirtyRegion {
+                left: 0,
+                top: 0,
+                right: frame.width,
+                bottom: frame.height,
+            }],
         });
         Ok(frame)
     }
@@ -63,6 +83,7 @@ impl CaptureBackend for DxgiCapture {
     }
 
     fn native_format(&self) -> PixelFormat {
-        self.inner.native_format()
+        // DXGI duplication surfaces are typically BGRA8 in the migration path.
+        PixelFormat::Bgra
     }
 }

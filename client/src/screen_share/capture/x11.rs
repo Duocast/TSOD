@@ -12,9 +12,19 @@ pub struct X11Capture {
 impl X11Capture {
     pub fn from_source(source: &crate::ShareSource) -> anyhow::Result<Self> {
         if !matches!(source, crate::ShareSource::X11Window(_)) {
-            return Err(anyhow!("x11 capture requires an X11 window source"));
+            return Err(anyhow!(
+                "x11 capture requires ShareSource::X11Window (dedicated X11 path)"
+            ));
         }
-        let fallback = ScrapCapture::from_source(source).context("initialize X11 capture")?;
+
+        if std::env::var_os("DISPLAY").is_none() {
+            return Err(anyhow!(
+                "x11 capture requested but DISPLAY is not set; verify X11 session and permissions"
+            ));
+        }
+
+        let fallback = ScrapCapture::from_source(source)
+            .context("initialize dedicated X11 capture backend")?;
         Ok(Self { fallback })
     }
 }
