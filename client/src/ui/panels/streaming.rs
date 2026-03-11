@@ -183,24 +183,6 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel) {
                     egui::StrokeKind::Outside,
                 );
 
-                let (cur_res, viewport_text) = if rendered {
-                    let scale = if render_w > 0 {
-                        video_rect.width() / render_w as f32
-                    } else {
-                        1.0
-                    };
-                    (
-                        format!("{}x{}@{}", render_w, render_h, 25),
-                        format!(
-                            "{}x{}*{scale:.2}",
-                            video_rect.width().round() as i32,
-                            video_rect.height().round() as i32
-                        ),
-                    )
-                } else {
-                    (dbg.current_resolution.clone(), dbg.viewport.clone())
-                };
-
                 ui.scope_builder(
                     egui::UiBuilder::new().max_rect(stats_rect.shrink(10.0)),
                     |ui| {
@@ -212,22 +194,45 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel) {
                         ui.separator();
                         ui.label(format!("Codecs: {} / {}", dbg.codec_video, dbg.codec_audio));
                         ui.label(format!(
-                            "Connection speed: {} Kbps",
-                            dbg.connection_speed_kbps
+                            "Selected codec/backend: {} / {}",
+                            dbg.selected_codec, dbg.selected_backend
+                        ));
+                        ui.label(format!("Active layer: {}", dbg.active_layer));
+                        ui.label(format!(
+                            "Advertised profile: {}",
+                            dbg.advertised_target_profile
                         ));
                         ui.label(format!(
-                            "Network activity: {}",
-                            human_bytes(dbg.network_activity_bytes)
-                        ));
-                        ui.label(format!("Buffer health: {:.2} s", dbg.buffer_health_seconds));
-                        ui.label(format!(
-                            "Current / optimal res: {} / {}",
-                            cur_res, dbg.optimal_resolution
+                            "Rendered resolution: {}",
+                            dbg.current_rendered_resolution
                         ));
                         ui.label(format!(
-                            "Viewport / Frames: {} / {} dropped of {}",
-                            viewport_text, dbg.dropped_frames, dbg.total_frames
+                            "Encode/decode FPS: {:.1} / {:.1}",
+                            dbg.encoded_fps, dbg.decoded_fps
                         ));
+                        ui.label(format!(
+                            "Capture/render FPS: {:.1} / {:.1}",
+                            dbg.capture_fps, dbg.rendered_fps
+                        ));
+                        ui.label(format!(
+                            "Queue depth (cap/enc/pkt): {}/{}/{}",
+                            dbg.queue_depth_capture,
+                            dbg.queue_depth_encode,
+                            dbg.queue_depth_packetize
+                        ));
+                        ui.label(format!(
+                            "Tx/Rx bitrate: {} / {} bps",
+                            dbg.tx_bitrate_bps, dbg.rx_bitrate_bps
+                        ));
+                        ui.label(format!(
+                            "Encode/decode p95: {:.2} / {:.2} ms",
+                            dbg.encode_p95_ms, dbg.decode_p95_ms
+                        ));
+                        ui.label(format!(
+                            "Freeze/recovery: {} / {:.2} ms p95",
+                            dbg.freeze_count, dbg.freeze_ms_p95
+                        ));
+                        ui.label(format!("Backend label: {}", dbg.backend_label));
                         ui.separator();
                         ui.label(format!(
                             "Video rx/tx dgrams: {} / {}",

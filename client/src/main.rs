@@ -337,6 +337,20 @@ pub(crate) struct VideoRuntimeCounters {
     voice_rx_stale_drops: AtomicU64,
     voice_rx_drain_drops: AtomicU64,
 
+    capture_frames: AtomicU64,
+    capture_queue_overflows: AtomicU64,
+    encode_frames: AtomicU64,
+    encode_errors: AtomicU64,
+    decode_frames: AtomicU64,
+    decode_errors: AtomicU64,
+    queue_depth_capture: AtomicU64,
+    queue_depth_encode: AtomicU64,
+    queue_depth_packetize: AtomicU64,
+    last_render_width: AtomicU32,
+    last_render_height: AtomicU32,
+    freeze_count: AtomicU64,
+    freeze_ms_p95: AtomicU64,
+
     completed_frames: AtomicU64,
     incomplete_frame_evictions_capacity: AtomicU64,
     incomplete_frame_evictions_timeout: AtomicU64,
@@ -557,8 +571,22 @@ async fn video_recv_loop(
                     },
                     DecodeMetadata { ts_ms: frame.ts_ms },
                 ) {
-                    Ok(decoded) => decoded,
-                    Err(_err) => continue,
+                    Ok(decoded) => {
+                        state.counters.decode_frames.fetch_add(1, Ordering::Relaxed);
+                        state
+                            .counters
+                            .last_render_width
+                            .store(decoded.width as u32, Ordering::Relaxed);
+                        state
+                            .counters
+                            .last_render_height
+                            .store(decoded.height as u32, Ordering::Relaxed);
+                        decoded
+                    }
+                    Err(_err) => {
+                        state.counters.decode_errors.fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    }
                 }
             };
 
@@ -2997,6 +3025,13 @@ async fn connect_and_run_session(
     let mut active_share_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut active_local_stream_id: Option<pb::StreamId> = None;
     let mut share_state = screen_share::fsm::ShareState::Idle;
+    let mut selected_share_codec = "unknown".to_string();
+    let mut advertised_target_profile = "unknown".to_string();
+    let capture_queue_len_gauge = Arc::new(AtomicU64::new(0));
+    let capture_queue_overflow_total = Arc::new(AtomicU64::new(0));
+    let encode_queue_len_gauge = Arc::new(AtomicU64::new(0));
+    let packetize_queue_len_gauge = Arc::new(AtomicU64::new(0));
+    let backend_label = Arc::new(std::sync::Mutex::new(String::from("unknown")));
 
     tokio::pin!(ctl_keepalive);
     let mut audio_health_tick = tokio::time::interval(Duration::from_secs(1));
@@ -3012,7 +3047,15 @@ async fn connect_and_run_session(
                     streams.keys().copied().collect::<Vec<_>>()
                 };
                 let video_tx_bytes_per_sec = egress_stats.tx_bytes.swap(0, Ordering::Relaxed);
+                let video_rx_datagrams_per_sec = stream_state.counters.video_datagrams.swap(0, Ordering::Relaxed);
+                let video_tx_datagrams_per_sec = egress_stats.tx_video.swap(0, Ordering::Relaxed);
                 let completed_frames_per_sec = stream_state.counters.completed_frames.swap(0, Ordering::Relaxed);
+                let decode_frames_per_sec = stream_state.counters.decode_frames.swap(0, Ordering::Relaxed);
+                let capture_frames_per_sec = stream_state.counters.capture_frames.swap(0, Ordering::Relaxed);
+                let encode_frames_per_sec = stream_state.counters.encode_frames.swap(0, Ordering::Relaxed);
+                let encode_errors = stream_state.counters.encode_errors.load(Ordering::Relaxed);
+                let decode_errors = stream_state.counters.decode_errors.load(Ordering::Relaxed);
+                let capture_overflows = capture_queue_overflow_total.load(Ordering::Relaxed);
                 let dropped_frames = stream_state.counters.dropped_no_subscription.load(Ordering::Relaxed)
                     + stream_state.counters.dropped_channel_full.load(Ordering::Relaxed)
                     + stream_state.counters.sender_frame_errors.load(Ordering::Relaxed);
@@ -3032,10 +3075,35 @@ async fn connect_and_run_session(
                         names.join("/")
                     }
                 };
+                let rendered_w = stream_state.counters.last_render_width.load(Ordering::Relaxed);
+                let rendered_h = stream_state.counters.last_render_height.load(Ordering::Relaxed);
+                let active_layer = active_share_session.active_layer_id.load(Ordering::Relaxed);
+                let tx_bitrate_bps = video_tx_bytes_per_sec.saturating_mul(8);
+                let rx_bitrate_bps = video_rx_datagrams_per_sec.saturating_mul(1100).saturating_mul(8);
+                let backend_label = backend_label.lock().map(|v| v.clone()).unwrap_or_else(|_| "unknown".to_string());
                 let snapshot = ui::model::StreamDebugView {
                     active_stream_tags,
-                    video_datagrams_per_sec: stream_state.counters.video_datagrams.swap(0, Ordering::Relaxed),
-                    video_tx_datagrams_per_sec: egress_stats.tx_video.swap(0, Ordering::Relaxed),
+                    selected_codec: selected_share_codec.clone(),
+                    selected_backend: backend_label.clone(),
+                    advertised_target_profile: advertised_target_profile.clone(),
+                    active_layer,
+                    capture_fps: capture_frames_per_sec as f32,
+                    encoded_fps: encode_frames_per_sec as f32,
+                    decoded_fps: decode_frames_per_sec as f32,
+                    rendered_fps: completed_frames_per_sec as f32,
+                    encode_p95_ms: 0.0,
+                    decode_p95_ms: 0.0,
+                    tx_bitrate_bps,
+                    rx_bitrate_bps,
+                    freeze_count: capture_overflows,
+                    freeze_ms_p95: 0.0,
+                    backend_label,
+                    queue_depth_capture: capture_queue_len_gauge.load(Ordering::Relaxed),
+                    queue_depth_encode: encode_queue_len_gauge.load(Ordering::Relaxed),
+                    queue_depth_packetize: packetize_queue_len_gauge.load(Ordering::Relaxed),
+                    current_rendered_resolution: format!("{}x{}", rendered_w, rendered_h),
+                    video_datagrams_per_sec: video_rx_datagrams_per_sec,
+                    video_tx_datagrams_per_sec,
                     video_tx_bytes_per_sec,
                     video_tx_blocked_per_sec: egress_stats.blocked_events.swap(0, Ordering::Relaxed),
                     video_tx_drop_queue_full: egress_stats.drop_queue_full_video.load(Ordering::Relaxed),
@@ -3051,13 +3119,13 @@ async fn connect_and_run_session(
                     last_frame_seq: stream_state.counters.last_frame_seq.load(Ordering::Relaxed),
                     last_frame_ts_ms: stream_state.counters.last_frame_ts_ms.load(Ordering::Relaxed),
                     codec_video: negotiated_video_codecs,
-                    codec_audio: "opus (251)".to_string(),
-                    connection_speed_kbps: (video_tx_bytes_per_sec.saturating_mul(8)) / 1000,
+                    codec_audio: format!("opus (251) / enc_err={} dec_err={}", encode_errors, decode_errors),
+                    connection_speed_kbps: tx_bitrate_bps / 1000,
                     network_activity_bytes: video_tx_bytes_per_sec,
-                    buffer_health_seconds: if completed_frames_per_sec > 0 { 1.0 } else { 0.0 },
-                    current_resolution: "0x0@0".to_string(),
-                    optimal_resolution: "0x0@0".to_string(),
-                    viewport: "0x0*1.00".to_string(),
+                    buffer_health_seconds: if decode_frames_per_sec > 0 { 1.0 } else { 0.0 },
+                    current_resolution: format!("{}x{}@{}", rendered_w, rendered_h, decode_frames_per_sec),
+                    optimal_resolution: advertised_target_profile.clone(),
+                    viewport: format!("layer:{}", active_layer),
                     dropped_frames,
                     total_frames,
                 };
@@ -3818,6 +3886,7 @@ async fn connect_and_run_session(
                             } else {
                                 available_codecs.first().copied().unwrap_or("VP9").to_string()
                             };
+                            selected_share_codec = selected_codec.clone();
                             let preferred_codec = match selected_codec.as_str() {
                                 "AV1" => pb::video_caps::Codec::Av1,
                                 "VP8" => pb::video_caps::Codec::Vp8,
@@ -3841,6 +3910,11 @@ async fn connect_and_run_session(
                                     max_fps: 60,
                                     max_bitrate_bps: 8_000_000,
                                 }, VideoStreamProfile::P1080p60)
+                            };
+                            advertised_target_profile = if request_1440p60 {
+                                "1440p60".to_string()
+                            } else {
+                                "1080p60".to_string()
                             };
                             if saved_settings.screen_share_profile == "1440p60" && !request_1440p60 {
                                 let _ = tx_event.send(UiEvent::AppendLog(
@@ -3950,9 +4024,6 @@ async fn connect_and_run_session(
                                                 codec: *codec,
                                             })
                                             .collect::<Vec<_>>();
-                                        let capture_queue_len_gauge = Arc::new(AtomicU64::new(0));
-                                        let capture_queue_overflow_total = Arc::new(AtomicU64::new(0));
-
                                         active_share_task = Some(tokio::spawn(screen_share::session::start_local_share(
                                             screen_share::session::StartLocalShareParams {
                                                 source: source.clone(),
@@ -3967,8 +4038,11 @@ async fn connect_and_run_session(
                                                 runtime_caps,
                                                 sender_policy: crate::screen_share::config::SenderPolicy::from_settings_or_env(None),
                                                 stop_rx: share_stop_rx,
-                                                capture_queue_len_gauge,
-                                                capture_queue_overflow_total,
+                                                capture_queue_len_gauge: capture_queue_len_gauge.clone(),
+                                                capture_queue_overflow_total: capture_queue_overflow_total.clone(),
+                                                encode_queue_len_gauge: encode_queue_len_gauge.clone(),
+                                                packetize_queue_len_gauge: packetize_queue_len_gauge.clone(),
+                                                backend_label: backend_label.clone(),
                                             },
                                         )));
                                     } else {
