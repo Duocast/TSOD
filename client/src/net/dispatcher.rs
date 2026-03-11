@@ -24,7 +24,7 @@ const MAX_CTRL_MSG: usize = 256 * 1024;
 /// Stream-type discriminator bytes written as the first byte on each bidi stream.
 pub const STREAM_TYPE_MEDIA: u8 = 0x01;
 pub const STREAM_TYPE_PROFILE_ASSET: u8 = 0x02;
- 
+
 /// Server-push events emitted by the dispatcher.
 /// Keep this fairly low-level; app layer can transform into UI state.
 #[derive(Clone, Debug)]
@@ -79,6 +79,10 @@ pub enum PushEvent {
     },
     UnsubscribeStream {
         event: pb::UnsubscribeStream,
+        event_seq: u64,
+    },
+    RequestRecovery {
+        event: pb::RequestRecovery,
         event_seq: u64,
     },
     UserProfile {
@@ -742,7 +746,6 @@ impl ControlDispatcher {
         image_bytes: Vec<u8>,
         mime_type: &str,
     ) -> Result<String> {
-
         // Step 1: request upload session approval on the control stream.
         let begin_req = pb::BeginProfileAssetUploadRequest {
             purpose: purpose.to_string(),
@@ -762,7 +765,11 @@ impl ControlDispatcher {
 
         let session_id = match resp.payload {
             Some(pb::server_to_client::Payload::BeginProfileAssetUploadResponse(r)) => r.session_id,
-            _ => return Err(anyhow!("unexpected response to BeginProfileAssetUploadRequest")),
+            _ => {
+                return Err(anyhow!(
+                    "unexpected response to BeginProfileAssetUploadRequest"
+                ))
+            }
         };
 
         // Step 2: open a dedicated bidi stream for the asset data.
@@ -770,18 +777,19 @@ impl ControlDispatcher {
             .open_bi()
             .await
             .context("open profile asset upload stream")?;
- 
+
         // Write stream-type discriminator so the server routes correctly.
         send.write_all(&[STREAM_TYPE_PROFILE_ASSET])
             .await
             .context("write stream type")?;
- 
+
         let data_req = pb::UploadProfileAssetDataRequest {
             session_id,
             data: image_bytes,
         };
         write_delimited(&mut send, &data_req).await?;
-        send.finish().context("finish profile asset upload stream")?;
+        send.finish()
+            .context("finish profile asset upload stream")?;
 
         // Read back the CompleteProfileAssetUploadResponse.
         let complete_resp: pb::CompleteProfileAssetUploadResponse =
@@ -796,7 +804,10 @@ impl ControlDispatcher {
     }
 
     /// Fetch the calling user's own profile.
-    pub async fn fetch_self_profile(&self, user_id: &str) -> Result<crate::ui::model::UserProfileData> {
+    pub async fn fetch_self_profile(
+        &self,
+        user_id: &str,
+    ) -> Result<crate::ui::model::UserProfileData> {
         let req = pb::GetUserProfileRequest {
             user_id: Some(pb::UserId {
                 value: user_id.to_string(),
@@ -814,16 +825,19 @@ impl ControlDispatcher {
         }
 
         let profile = match resp.payload {
-            Some(pb::server_to_client::Payload::GetUserProfileResponse(r)) => {
-                r.profile.ok_or_else(|| anyhow!("empty profile in response"))?
-            }
+            Some(pb::server_to_client::Payload::GetUserProfileResponse(r)) => r
+                .profile
+                .ok_or_else(|| anyhow!("empty profile in response"))?,
             _ => return Err(anyhow!("unexpected response to GetUserProfileRequest")),
         };
 
         Ok(pb_profile_to_ui(&profile))
     }
 
-    pub async fn fetch_user_profile(&self, user_id: &str) -> Result<crate::ui::model::UserProfileData> {
+    pub async fn fetch_user_profile(
+        &self,
+        user_id: &str,
+    ) -> Result<crate::ui::model::UserProfileData> {
         let req = pb::GetUserProfileRequest {
             user_id: Some(pb::UserId {
                 value: user_id.to_string(),
@@ -841,9 +855,9 @@ impl ControlDispatcher {
         }
 
         let profile = match resp.payload {
-            Some(pb::server_to_client::Payload::GetUserProfileResponse(r)) => {
-                r.profile.ok_or_else(|| anyhow!("empty profile in response"))?
-            }
+            Some(pb::server_to_client::Payload::GetUserProfileResponse(r)) => r
+                .profile
+                .ok_or_else(|| anyhow!("empty profile in response"))?,
             _ => return Err(anyhow!("unexpected response to GetUserProfileRequest")),
         };
 
@@ -1073,7 +1087,11 @@ pub fn pb_profile_to_ui(p: &pb::UserProfile) -> crate::ui::model::UserProfileDat
     });
 
     UserProfileData {
-        user_id: p.user_id.as_ref().map(|u| u.value.clone()).unwrap_or_default(),
+        user_id: p
+            .user_id
+            .as_ref()
+            .map(|u| u.value.clone())
+            .unwrap_or_default(),
         display_name: p.display_name.clone(),
         description: p.description.clone(),
         status,
@@ -1153,12 +1171,14 @@ fn classify_push(msg: pb::ServerToClient) -> PushEvent {
                 event_seq: msg.event_seq,
             }
         }
-        Some(pb::server_to_client::Payload::UserProfileEvent(event)) => {
-            PushEvent::UserProfile {
-                event,
-                event_seq: msg.event_seq,
-            }
-        }
+        Some(pb::server_to_client::Payload::RequestRecovery(event)) => PushEvent::RequestRecovery {
+            event,
+            event_seq: msg.event_seq,
+        },
+        Some(pb::server_to_client::Payload::UserProfileEvent(event)) => PushEvent::UserProfile {
+            event,
+            event_seq: msg.event_seq,
+        },
         _ => PushEvent::Unknown(msg),
     }
 }

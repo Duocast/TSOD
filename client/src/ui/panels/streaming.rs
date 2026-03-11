@@ -1,5 +1,3 @@
-use crate::net::video_decode;
-use crate::proto::voiceplatform::v1 as pb;
 use crate::ui::model::UiModel;
 use crate::ui::theme;
 use eframe::egui;
@@ -64,26 +62,21 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel) {
             let mut rendered = false;
             let mut render_w = 0usize;
             let mut render_h = 0usize;
-            if let Some(frame) = model.latest_stream_frame.as_ref() {
+            if let Some(frame) = model.latest_stream_decoded_frame.as_ref() {
                 let frame_key = Some((frame.stream_tag, frame.frame_seq));
                 if model.latest_stream_frame_key != frame_key {
-                    if let Ok(codec) = pb::VideoCodec::try_from(frame.codec) {
-                        if let Ok(decoded) = video_decode::decode_video_frame(codec, &frame.payload)
-                        {
-                            let image = egui::ColorImage::from_rgba_unmultiplied(
-                                [decoded.width, decoded.height],
-                                &decoded.rgba,
-                            );
-                            model.latest_stream_frame_texture = Some(ui.ctx().load_texture(
-                                "streaming.latest",
-                                image,
-                                egui::TextureOptions::LINEAR,
-                            ));
-                            render_w = decoded.width;
-                            render_h = decoded.height;
-                            model.latest_stream_frame_key = frame_key;
-                        }
-                    }
+                    let image = egui::ColorImage::from_rgba_unmultiplied(
+                        [frame.width, frame.height],
+                        &frame.rgba,
+                    );
+                    model.latest_stream_frame_texture = Some(ui.ctx().load_texture(
+                        "streaming.latest",
+                        image,
+                        egui::TextureOptions::LINEAR,
+                    ));
+                    render_w = frame.width;
+                    render_h = frame.height;
+                    model.latest_stream_frame_key = frame_key;
                 }
 
                 if render_w == 0 || render_h == 0 {
