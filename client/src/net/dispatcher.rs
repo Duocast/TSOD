@@ -5,7 +5,7 @@ use std::{
         atomic::{AtomicU32, Ordering},
         Arc, OnceLock,
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 use tokio::{
     sync::{mpsc, oneshot, watch, Mutex, RwLock},
@@ -20,6 +20,8 @@ use crate::{
         UiLogTx,
     },
     proto::voiceplatform::v1 as pb,
+    screen_share::runtime_probe::{probe_media_caps, EncodeBackendKind, MediaRuntimeCaps},
+    ShareSource,
 };
 
 const MAX_CTRL_MSG: usize = 256 * 1024;
@@ -30,9 +32,8 @@ static RUNTIME_HEADROOM_FPS_X100: AtomicU32 = AtomicU32::new(0);
 
 #[derive(Clone, Debug)]
 struct MeasuredMediaCaps {
+    runtime_caps: MediaRuntimeCaps,
     caps: pb::ClientMediaCapabilities,
-    startup_encode_fps: f32,
-    supports_1440p60: bool,
 }
 
 /// Stream-type discriminator bytes written as the first byte on each bidi stream.
@@ -1207,12 +1208,15 @@ fn now_ts() -> pb::Timestamp {
 }
 
 pub fn available_screen_share_codecs() -> Vec<&'static str> {
-    available_video_codecs()
+    let caps = measured_media_caps();
+    let policy_codecs = [pb::VideoCodec::Vp9, pb::VideoCodec::Av1];
+    policy_codecs
         .into_iter()
-        .filter_map(|codec| match codec {
-            pb::VideoCodec::Av1 => Some("AV1"),
-            pb::VideoCodec::Vp9 => Some("VP9"),
-            _ => None,
+        .filter(|codec| caps.runtime_caps.encode_backends.contains_key(codec))
+        .map(|codec| match codec {
+            pb::VideoCodec::Vp9 => "VP9",
+            pb::VideoCodec::Av1 => "AV1",
+            _ => unreachable!("policy codecs only include VP9/AV1"),
         })
         .collect()
 }
@@ -1226,15 +1230,15 @@ pub fn available_screen_share_profiles() -> Vec<&'static str> {
 }
 
 fn available_video_codecs() -> Vec<pb::VideoCodec> {
+    let caps = measured_media_caps();
     let mut codecs = Vec::with_capacity(2);
-    if cfg!(feature = "video-av1-software") {
-        codecs.push(pb::VideoCodec::Av1);
+    for codec in [pb::VideoCodec::Vp9, pb::VideoCodec::Av1] {
+        let encodable = caps.runtime_caps.encode_backends.contains_key(&codec);
+        let decodable = caps.runtime_caps.decode_backends.contains_key(&codec);
+        if encodable && decodable {
+            codecs.push(codec);
+        }
     }
-    if cfg!(feature = "video-vp9") {
-        codecs.push(pb::VideoCodec::Vp9);
-    }
-    let decodable = crate::net::video_decode::available_decodable_codecs();
-    codecs.retain(|codec| decodable.contains(codec));
     codecs
 }
 
@@ -1244,7 +1248,7 @@ fn default_media_capabilities() -> pb::ClientMediaCapabilities {
 
 pub fn can_offer_1440p60() -> bool {
     let measured = measured_media_caps();
-    measured.supports_1440p60 && runtime_headroom_fps() >= 55.0
+    measured.runtime_caps.supports_1440p60 && runtime_headroom_fps() >= 55.0
 }
 
 pub fn report_runtime_encode_fps(fps: f32) {
@@ -1255,7 +1259,7 @@ pub fn report_runtime_encode_fps(fps: f32) {
 fn runtime_headroom_fps() -> f32 {
     let sampled = RUNTIME_HEADROOM_FPS_X100.load(Ordering::Relaxed);
     if sampled == 0 {
-        measured_media_caps().startup_encode_fps
+        0.0
     } else {
         sampled as f32 / FPS_SCALE
     }
@@ -1266,14 +1270,28 @@ fn measured_media_caps() -> MeasuredMediaCaps {
 }
 
 fn measure_media_caps() -> MeasuredMediaCaps {
-    let codecs = available_video_codecs();
+    let runtime_caps = probe_media_caps(&default_probe_share_source());
+    let codecs = [pb::VideoCodec::Vp9, pb::VideoCodec::Av1]
+        .into_iter()
+        .filter(|codec| {
+            runtime_caps.encode_backends.contains_key(codec)
+                && runtime_caps.decode_backends.contains_key(codec)
+        })
+        .collect::<Vec<_>>();
     let encode: Vec<i32> = codecs.iter().map(|codec| *codec as i32).collect();
     let decode = encode.clone();
-    let startup_encode_fps = benchmark_realtime_encode_fps(2560, 1440, 10);
-    let hw_av1 = codecs.contains(&pb::VideoCodec::Av1)
-        && std::env::var("VP_AV1_DISABLE_HW").ok().as_deref() != Some("1")
-        && startup_encode_fps >= 45.0;
-    let supports_1440p60 = startup_encode_fps >= 60.0;
+    let hw_av1 = runtime_caps
+        .encode_backends
+        .get(&pb::VideoCodec::Av1)
+        .map(|backends| {
+            backends.iter().any(|backend| {
+                matches!(
+                    backend,
+                    EncodeBackendKind::MfHwAv1 | EncodeBackendKind::VaapiAv1
+                )
+            })
+        })
+        .unwrap_or(false);
 
     let caps = pb::ClientMediaCapabilities {
         decode,
@@ -1286,45 +1304,56 @@ fn measure_media_caps() -> MeasuredMediaCaps {
         hw_decode_vp8: false,
     };
 
-    report_runtime_encode_fps(startup_encode_fps);
     info!(
-        startup_encode_fps,
-        supports_1440p60, hw_av1, "measured media capabilities"
+        supports_1440p60 = runtime_caps.supports_1440p60,
+        hw_av1, "runtime media capabilities"
     );
 
-    MeasuredMediaCaps {
-        caps,
-        startup_encode_fps,
-        supports_1440p60,
+    MeasuredMediaCaps { runtime_caps, caps }
+}
+
+fn default_probe_share_source() -> ShareSource {
+    #[cfg(target_os = "windows")]
+    {
+        return ShareSource::WindowsDisplay("0".to_string());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        return ShareSource::LinuxPortal(String::new());
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    {
+        ShareSource::LinuxPortal(String::new())
     }
 }
 
-fn benchmark_realtime_encode_fps(width: usize, height: usize, iterations: usize) -> f32 {
-    let stride = width * 4;
-    let src = vec![128_u8; stride * height];
-    let start = Instant::now();
-
-    for _ in 0..iterations {
-        let mut bgra = vec![0_u8; width * height * 4];
-        for y in 0..height {
-            let src_row = &src[y * stride..(y + 1) * stride];
-            let dst_row = &mut bgra[y * stride..(y + 1) * stride];
-            dst_row.copy_from_slice(src_row);
-        }
-        let mut encoded = Vec::with_capacity(16 + bgra.len());
-        encoded.extend_from_slice(b"TSRV");
-        encoded.push(1);
-        encoded.push(0);
-        encoded.extend_from_slice(&(width as u32).to_le_bytes());
-        encoded.extend_from_slice(&(height as u32).to_le_bytes());
-        encoded.extend_from_slice(&bgra);
-    }
-
-    let elapsed = start.elapsed().as_secs_f32();
-    if elapsed <= f32::EPSILON {
-        0.0
+pub fn build_screenshare_caps(caps: &MediaRuntimeCaps) -> pb::ScreenShareCaps {
+    let has_vp9 = caps.encode_backends.contains_key(&pb::VideoCodec::Vp9);
+    let has_av1 = caps.encode_backends.contains_key(&pb::VideoCodec::Av1);
+    let codec = if has_vp9 {
+        pb::video_caps::Codec::Vp9 as i32
+    } else if has_av1 {
+        pb::video_caps::Codec::Av1 as i32
     } else {
-        iterations as f32 / elapsed
+        match caps.preferred_codec {
+            pb::VideoCodec::Vp9 => pb::video_caps::Codec::Vp9 as i32,
+            _ => pb::video_caps::Codec::Av1 as i32,
+        }
+    };
+    let supports_1440p60 = caps.supports_1440p60;
+
+    pb::ScreenShareCaps {
+        codec,
+        max_width: if supports_1440p60 { 2560 } else { 1920 },
+        max_height: if supports_1440p60 { 1440 } else { 1080 },
+        max_fps: 60,
+        max_bitrate_bps: if supports_1440p60 {
+            16_000_000
+        } else {
+            8_000_000
+        },
+        max_simulcast_layers: caps.max_simulcast_layers as i32,
+        supports_system_audio: caps.supports_system_audio,
     }
 }
 
@@ -1337,8 +1366,9 @@ fn platform_has_capture_backend() -> bool {
 }
 
 fn default_caps(alpn: &str) -> pb::ClientCaps {
-    let media_caps = default_media_capabilities();
-    let supports_1440p60 = measured_media_caps().supports_1440p60;
+    let measured = measured_media_caps();
+    let media_caps = measured.caps;
+    let supports_1440p60 = measured.runtime_caps.supports_1440p60;
     let screen_video_codecs: Vec<i32> = media_caps
         .encode
         .iter()
@@ -1348,7 +1378,10 @@ fn default_caps(alpn: &str) -> pb::ClientCaps {
             _ => None,
         })
         .collect();
-    let preferred_screenshare_codec = screen_video_codecs.first().copied();
+    let supports_screen_share = cfg!(feature = "screen-share")
+        && platform_has_capture_backend()
+        && !media_caps.encode.is_empty()
+        && !media_caps.decode.is_empty();
 
     pb::ClientCaps {
         build: Some(pb::BuildInfo {
@@ -1363,10 +1396,7 @@ fn default_caps(alpn: &str) -> pb::ClientCaps {
             supports_streaming: cfg!(feature = "screen-share") || cfg!(feature = "video-call"),
             supports_drag_drop_upload: true,
             supports_relay_mode: false,
-            supports_screen_share: cfg!(feature = "screen-share")
-                && platform_has_capture_backend()
-                && !media_caps.encode.is_empty()
-                && !media_caps.decode.is_empty(),
+            supports_screen_share,
             supports_video_call: cfg!(feature = "video-call"),
             supports_e2ee: false,
             supports_spatial_audio: false,
@@ -1394,19 +1424,7 @@ fn default_caps(alpn: &str) -> pb::ClientCaps {
         caps_hash: Some(pb::CapabilityHash {
             sha256: alpn.as_bytes().to_vec(),
         }),
-        screen_share: preferred_screenshare_codec.map(|codec| pb::ScreenShareCaps {
-            codec,
-            max_width: if supports_1440p60 { 2560 } else { 1920 },
-            max_height: if supports_1440p60 { 1440 } else { 1080 },
-            max_fps: 60,
-            max_bitrate_bps: if supports_1440p60 {
-                16_000_000
-            } else {
-                8_000_000
-            },
-            max_simulcast_layers: 1,
-            supports_system_audio: false,
-        }),
+        screen_share: supports_screen_share.then(|| build_screenshare_caps(&measured.runtime_caps)),
         camera_video: None,
     }
 }
