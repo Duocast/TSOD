@@ -12,6 +12,30 @@ pub trait VideoDecoder: Send {
     fn decode(&mut self, encoded: &[u8]) -> Result<DecodedVideoFrame>;
 }
 
+pub struct VideoDecoderCache {
+    decoders: std::collections::HashMap<pb::VideoCodec, Box<dyn VideoDecoder>>,
+}
+
+impl VideoDecoderCache {
+    pub fn new() -> Self {
+        Self {
+            decoders: std::collections::HashMap::new(),
+        }
+    }
+
+    pub fn decode(&mut self, codec: pb::VideoCodec, encoded: &[u8]) -> Result<DecodedVideoFrame> {
+        if let std::collections::hash_map::Entry::Vacant(slot) = self.decoders.entry(codec) {
+            let decoder = decoder_for_codec(codec)
+                .ok_or_else(|| anyhow!("no decoder available for codec {codec:?}"))?;
+            slot.insert(decoder);
+        }
+        self.decoders
+            .get_mut(&codec)
+            .expect("decoder inserted above")
+            .decode(encoded)
+    }
+}
+
 struct Av1AvifDecoder;
 
 impl VideoDecoder for Av1AvifDecoder {
@@ -36,9 +60,8 @@ pub fn decoder_for_codec(codec: pb::VideoCodec) -> Option<Box<dyn VideoDecoder>>
 }
 
 pub fn decode_video_frame(codec: pb::VideoCodec, encoded: &[u8]) -> Result<DecodedVideoFrame> {
-    let mut decoder = decoder_for_codec(codec)
-        .ok_or_else(|| anyhow!("no decoder available for codec {codec:?}"))?;
-    decoder.decode(encoded)
+    let mut cache = VideoDecoderCache::new();
+    cache.decode(codec, encoded)
 }
 
 pub fn available_decodable_codecs() -> Vec<pb::VideoCodec> {

@@ -275,7 +275,6 @@ pub enum UiEvent {
     },
     StreamDebugUpdate(StreamDebugView),
     StreamFrame(StreamFrameView),
-    StreamFrameDecoded(StreamFrameDecodedView),
 
     // Telemetry
     TelemetryUpdate(TelemetryData),
@@ -616,14 +615,6 @@ pub struct StreamFrameView {
     pub stream_tag: u64,
     pub frame_seq: u32,
     pub ts_ms: u32,
-    pub codec: i32,
-    pub payload: Vec<u8>,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct StreamFrameDecodedView {
-    pub stream_tag: u64,
-    pub frame_seq: u32,
     pub width: usize,
     pub height: usize,
     pub rgba: Vec<u8>,
@@ -1904,7 +1895,6 @@ pub struct UiModel {
     pub start_share_in_flight: bool,
     pub stream_debug: StreamDebugView,
     pub latest_stream_frames: HashMap<u64, StreamFrameView>,
-    pub latest_stream_decoded_frames: HashMap<u64, StreamFrameDecodedView>,
     pub latest_stream_frame_textures: HashMap<u64, egui::TextureHandle>,
     pub last_presented_stream_frame_key: HashMap<u64, u32>,
     pub show_stream_stats: bool,
@@ -2234,7 +2224,6 @@ impl Default for UiModel {
             start_share_in_flight: false,
             stream_debug: StreamDebugView::default(),
             latest_stream_frames: HashMap::new(),
-            latest_stream_decoded_frames: HashMap::new(),
             latest_stream_frame_textures: HashMap::new(),
             last_presented_stream_frame_key: HashMap::new(),
             show_stream_stats: false,
@@ -2455,17 +2444,6 @@ impl UiModel {
                     .unwrap_or(true);
                 if should_store {
                     self.latest_stream_frames.insert(frame.stream_tag, frame);
-                }
-            }
-            UiEvent::StreamFrameDecoded(frame) => {
-                let should_store = self
-                    .latest_stream_decoded_frames
-                    .get(&frame.stream_tag)
-                    .map(|current| frame.frame_seq > current.frame_seq)
-                    .unwrap_or(true);
-                if should_store {
-                    self.latest_stream_decoded_frames
-                        .insert(frame.stream_tag, frame);
                 }
             }
             UiEvent::SetAwayMessage(message) => {

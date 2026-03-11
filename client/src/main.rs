@@ -742,6 +742,7 @@ struct VideoRuntimeCounters {
 struct SharedStreamState {
     active_streams: Arc<RwLock<HashMap<u64, Arc<Mutex<VideoReceiver>>>>>,
     stream_codecs: Arc<RwLock<HashMap<u64, pb::VideoCodec>>>,
+    video_decoders: Arc<RwLock<HashMap<u64, net::video_decode::VideoDecoderCache>>>,
     counters: Arc<VideoRuntimeCounters>,
 }
 
@@ -750,6 +751,7 @@ impl SharedStreamState {
         Self {
             active_streams: Arc::new(RwLock::new(HashMap::new())),
             stream_codecs: Arc::new(RwLock::new(HashMap::new())),
+            video_decoders: Arc::new(RwLock::new(HashMap::new())),
             counters: Arc::new(VideoRuntimeCounters::default()),
         }
     }
@@ -835,7 +837,6 @@ async fn datagram_demux_loop(
 
 async fn video_recv_loop(
     mut video_rx: mpsc::Receiver<Bytes>,
-    decode_tx: mpsc::Sender<ui::model::StreamFrameView>,
     tx_event: Sender<UiEvent>,
     state: SharedStreamState,
 ) {
@@ -875,7 +876,7 @@ async fn video_recv_loop(
                     .await
                     .get(&frame.stream_tag)
                     .copied()
-                    .unwrap_or(pb::VideoCodec::Unspecified) as i32
+                    .unwrap_or(pb::VideoCodec::Unspecified)
             };
             state
                 .counters
@@ -893,39 +894,27 @@ async fn video_recv_loop(
                 .counters
                 .last_frame_ts_ms
                 .store(frame.ts_ms, Ordering::Relaxed);
+            let decoded = {
+                let mut decoders = state.video_decoders.write().await;
+                let cache = decoders
+                    .entry(frame.stream_tag)
+                    .or_insert_with(net::video_decode::VideoDecoderCache::new);
+                match cache.decode(codec, &frame.payload) {
+                    Ok(decoded) => decoded,
+                    Err(_err) => continue,
+                }
+            };
+
             let frame_view = ui::model::StreamFrameView {
                 stream_tag: frame.stream_tag,
                 frame_seq: frame.frame_seq,
                 ts_ms: frame.ts_ms,
-                codec,
-                payload: frame.payload.to_vec(),
-            };
-            let _ = tx_event.send(UiEvent::StreamFrame(frame_view.clone()));
-            let _ = decode_tx.try_send(frame_view);
-        }
-    }
-}
-
-async fn video_decode_loop(
-    mut decode_rx: mpsc::Receiver<ui::model::StreamFrameView>,
-    tx_event: Sender<UiEvent>,
-) {
-    while let Some(frame) = decode_rx.recv().await {
-        let Ok(codec) = pb::VideoCodec::try_from(frame.codec) else {
-            continue;
-        };
-        let Ok(decoded) = net::video_decode::decode_video_frame(codec, &frame.payload) else {
-            continue;
-        };
-        let _ = tx_event.send(UiEvent::StreamFrameDecoded(
-            ui::model::StreamFrameDecodedView {
-                stream_tag: frame.stream_tag,
-                frame_seq: frame.frame_seq,
                 width: decoded.width,
                 height: decoded.height,
                 rgba: decoded.rgba,
-            },
-        ));
+            };
+            let _ = tx_event.send(UiEvent::StreamFrame(frame_view));
+        }
     }
 }
 
@@ -3043,6 +3032,8 @@ async fn connect_and_run_session(
                         {
                             let mut stream_codecs = stream_state.stream_codecs.write().await;
                             stream_codecs.remove(&event.stream_tag);
+                            let mut video_decoders = stream_state.video_decoders.write().await;
+                            video_decoders.remove(&event.stream_tag);
                         }
                         let _ = tx_event.send(UiEvent::AppendLog(format!(
                             "[video] unsubscribed stream_tag={}",
@@ -3212,7 +3203,6 @@ async fn connect_and_run_session(
     let voice_stale_drops_total = Arc::new(AtomicU64::new(0));
     let voice_drain_drops_total = Arc::new(AtomicU64::new(0));
     let (video_rx_tx, video_rx_rx) = mpsc::channel::<Bytes>(512);
-    let (video_decode_tx, video_decode_rx) = mpsc::channel::<ui::model::StreamFrameView>(8);
 
     let _datagram_demux = tokio::spawn(datagram_demux_loop(
         conn.clone(),
@@ -3243,11 +3233,9 @@ async fn connect_and_run_session(
 
     let _video_recv = tokio::spawn(video_recv_loop(
         video_rx_rx,
-        video_decode_tx,
         tx_event.clone(),
         stream_state.clone(),
     ));
-    let _video_decode = tokio::spawn(video_decode_loop(video_decode_rx, tx_event.clone()));
 
     let disp_keepalive = dispatcher.clone();
     let disp_health = dispatcher.clone();
