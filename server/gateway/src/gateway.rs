@@ -1283,6 +1283,8 @@ impl Gateway {
                         && allows_1440p60(plan.primary, streamer_media_caps.as_ref(), &viewer_media_caps);
 
                     let primary_tag = random_stream_tag()?;
+                    let stream_id = format!("{:016x}", primary_tag);
+                    let stream_id_msg = pb::StreamId { value: stream_id.clone() };
                     self.video
                         .register_stream(
                             primary_tag,
@@ -1308,7 +1310,7 @@ impl Gateway {
                             sent_at: Some(now_ts()),
                             error: None,
                             event_seq: 0,
-                            payload: Some(pb::server_to_client::Payload::SubscribeStream(pb::SubscribeStream { stream_tag: primary_tag, codec: plan.primary as i32 })),
+                            payload: Some(pb::server_to_client::Payload::SubscribeStream(pb::SubscribeStream { stream_tag: primary_tag, codec: plan.primary as i32, stream_id: Some(stream_id_msg.clone()) })),
                         }).await;
                     }
 
@@ -1323,7 +1325,7 @@ impl Gateway {
                                 sent_at: Some(now_ts()),
                                 error: None,
                                 event_seq: 0,
-                                payload: Some(pb::server_to_client::Payload::SubscribeStream(pb::SubscribeStream { stream_tag: tag, codec: fallback_codec as i32 })),
+                                payload: Some(pb::server_to_client::Payload::SubscribeStream(pb::SubscribeStream { stream_tag: tag, codec: fallback_codec as i32, stream_id: Some(stream_id_msg.clone()) })),
                             }).await;
                         }
                         Some((tag, fallback_codec))
@@ -1341,8 +1343,6 @@ impl Gateway {
                         .iter()
                         .map(|id| (*id).clamp(0, u8::MAX as u32) as u8)
                         .collect::<Vec<_>>();
-
-                    let stream_id = format!("{:016x}", primary_tag);
                     let stream_teardown = stream_registry.register(
                         stream_id.clone(),
                         StreamSessionOwnership {

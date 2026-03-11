@@ -253,10 +253,21 @@ struct ScrapCapture {
     height: u32,
 }
 
+// SAFETY: ScrapCapture is only used from a single dedicated capture thread.
+// The raw pointers inside scrap::Capturer (DXGI COM objects) are not accessed
+// concurrently; the capture loop is the sole owner.
+unsafe impl Send for ScrapCapture {}
+
 #[cfg(target_os = "windows")]
 struct WindowsWindowCapture {
     hwnd: windows::Win32::Foundation::HWND,
 }
+
+// SAFETY: HWND is a stable window handle used from a single capture thread.
+// Win32 window handles are safe to send between threads; GDI operations on
+// the handle are performed only from the owning capture thread.
+#[cfg(target_os = "windows")]
+unsafe impl Send for WindowsWindowCapture {}
 
 #[cfg(target_os = "windows")]
 impl WindowsWindowCapture {
@@ -785,7 +796,8 @@ struct VideoRuntimeCounters {
 struct SharedStreamState {
     active_streams: Arc<RwLock<HashMap<u64, Arc<Mutex<VideoReceiver>>>>>,
     stream_codecs: Arc<RwLock<HashMap<u64, pb::VideoCodec>>>,
-    video_decoders: Arc<RwLock<HashMap<u64, net::video_decode::VideoDecoderCache>>>,
+    stream_ids: Arc<RwLock<HashMap<u64, String>>>,
+    video_decoders: Arc<Mutex<HashMap<u64, net::video_decode::VideoDecoderCache>>>,
     freeze_states: Arc<Mutex<HashMap<u64, StreamFreezeState>>>,
     counters: Arc<VideoRuntimeCounters>,
 }
@@ -816,7 +828,8 @@ impl SharedStreamState {
         Self {
             active_streams: Arc::new(RwLock::new(HashMap::new())),
             stream_codecs: Arc::new(RwLock::new(HashMap::new())),
-            video_decoders: Arc::new(RwLock::new(HashMap::new())),
+            stream_ids: Arc::new(RwLock::new(HashMap::new())),
+            video_decoders: Arc::new(Mutex::new(HashMap::new())),
             freeze_states: Arc::new(Mutex::new(HashMap::new())),
             counters: Arc::new(VideoRuntimeCounters::default()),
         }
@@ -847,7 +860,7 @@ fn is_video_datagram(datagram: &Bytes) -> bool {
         && datagram[1] == vp_voice::DATAGRAM_KIND_VIDEO
 }
 
-fn select_active_share_layer(requested_layer_id: i32, accepted_layer_ids: &[i32]) -> Option<i32> {
+fn select_active_share_layer(requested_layer_id: u32, accepted_layer_ids: &[u32]) -> Option<u32> {
     if accepted_layer_ids.contains(&requested_layer_id) {
         return Some(requested_layer_id);
     }
@@ -981,7 +994,7 @@ async fn video_recv_loop(
                 .last_frame_ts_ms
                 .store(frame.ts_ms, Ordering::Relaxed);
             let decoded = {
-                let mut decoders = state.video_decoders.write().await;
+                let mut decoders = state.video_decoders.lock().await;
                 let cache = decoders
                     .entry(frame.stream_tag)
                     .or_insert_with(net::video_decode::VideoDecoderCache::new);
@@ -3118,7 +3131,9 @@ async fn connect_and_run_session(
                         {
                             let mut stream_codecs = stream_state.stream_codecs.write().await;
                             stream_codecs.remove(&event.stream_tag);
-                            let mut video_decoders = stream_state.video_decoders.write().await;
+                            let mut stream_ids = stream_state.stream_ids.write().await;
+                            stream_ids.remove(&event.stream_tag);
+                            let mut video_decoders = stream_state.video_decoders.lock().await;
                             video_decoders.remove(&event.stream_tag);
                         }
                         {
@@ -3149,6 +3164,10 @@ async fn connect_and_run_session(
                             let mut freeze_states = stream_state.freeze_states.lock().await;
                             freeze_states
                                 .insert(event.stream_tag, StreamFreezeState::new(Instant::now()));
+                        }
+                        if let Some(sid) = event.stream_id.as_ref() {
+                            let mut ids = stream_state.stream_ids.write().await;
+                            ids.insert(event.stream_tag, sid.value.clone());
                         }
                         if let Ok(codec) = pb::VideoCodec::try_from(event.codec) {
                             let mut stream_codecs = stream_state.stream_codecs.write().await;
@@ -3549,11 +3568,20 @@ async fn connect_and_run_session(
                 }
 
                 for stream_tag in pending_keyframe_requests {
-                    let _ = dispatcher
-                        .send_no_response(pb::client_to_server::Payload::RequestKeyframeRequest(
-                            pb::RequestKeyframeRequest { stream_tag },
-                        ))
-                        .await;
+                    let stream_id_value = {
+                        let ids = stream_state.stream_ids.read().await;
+                        ids.get(&stream_tag).cloned()
+                    };
+                    if let Some(sid) = stream_id_value {
+                        let _ = dispatcher
+                            .send_no_response(pb::client_to_server::Payload::RequestKeyframeRequest(
+                                pb::RequestKeyframeRequest {
+                                    stream_id: Some(pb::StreamId { value: sid }),
+                                    layer_id: 0,
+                                },
+                            ))
+                            .await;
+                    }
                 }
 
                 for stream_tag in pending_recovery_requests {

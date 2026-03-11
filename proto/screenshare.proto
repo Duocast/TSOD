@@ -106,6 +106,7 @@ message RequestRecovery {
 message SubscribeStream {
   uint64 stream_tag = 1;
   VideoCodec codec = 2;
+  StreamId stream_id = 3;
 }
 
 message UnsubscribeStream {
