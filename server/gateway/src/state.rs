@@ -5,6 +5,7 @@ use std::{
 
 use dashmap::DashMap;
 use tokio::sync::mpsc;
+use tokio::time::{Duration, Instant};
 
 use crate::proto::voiceplatform::v1 as pb;
 
@@ -423,9 +424,10 @@ impl ViewerProvider for MembershipCache {
 
 #[cfg(test)]
 mod tests {
-    use super::{MembershipCache, PushHub};
+    use super::{MembershipCache, PushHub, StreamSessionOwnership, StreamSessionRegistry};
     use crate::proto::voiceplatform::v1 as pb;
     use tokio::sync::mpsc;
+    use tokio::time::Instant;
     use vp_control::ids::{ChannelId, UserId};
 
     #[tokio::test]
@@ -549,6 +551,207 @@ mod tests {
         sessions.remove_from_user_index(user, "s2");
         assert!(sessions.user_index.get(&user).is_none());
     }
+
+    #[test]
+    fn stream_registry_stop_share_removes_all_tags() {
+        let mut registry = StreamSessionRegistry::new();
+        let owner = UserId::new();
+        let channel = ChannelId::new();
+        registry.register(
+            "stream-a".to_string(),
+            StreamSessionOwnership {
+                primary_tag: 10,
+                fallback_tag: Some(11),
+                owner_user_id: owner,
+                channel_id: channel,
+                active_layer_ids: vec![1],
+            },
+        );
+
+        let teardown = registry.teardown("stream-a");
+        assert_eq!(teardown.removed_tags, vec![10, 11]);
+        assert!(registry.ownership_by_stream_tag(10).is_none());
+        assert!(registry.ownership_by_stream_tag(11).is_none());
+        assert_eq!(registry.active_sessions(), 0);
+        assert_eq!(registry.active_stream_tags(), 0);
+    }
+
+    #[test]
+    fn stream_registry_recovery_for_fallback_tag_reaches_owner() {
+        let mut registry = StreamSessionRegistry::new();
+        let owner = UserId::new();
+        let channel = ChannelId::new();
+        registry.register(
+            "stream-b".to_string(),
+            StreamSessionOwnership {
+                primary_tag: 100,
+                fallback_tag: Some(101),
+                owner_user_id: owner,
+                channel_id: channel,
+                active_layer_ids: vec![1],
+            },
+        );
+
+        let (_, ownership) = registry
+            .ownership_by_stream_tag(101)
+            .expect("fallback should map to ownership");
+        assert_eq!(ownership.owner_user_id, owner);
+        assert!(registry.should_forward_recovery(101, Instant::now()));
+    }
+
+    #[test]
+    fn stream_registry_repeated_start_stop_leaves_no_orphan_tag() {
+        let mut registry = StreamSessionRegistry::new();
+        let owner = UserId::new();
+        let channel = ChannelId::new();
+        for idx in 0..5 {
+            let stream_id = format!("stream-{idx}");
+            registry.register(
+                stream_id.clone(),
+                StreamSessionOwnership {
+                    primary_tag: 200 + idx,
+                    fallback_tag: Some(300 + idx),
+                    owner_user_id: owner,
+                    channel_id: channel,
+                    active_layer_ids: vec![1],
+                },
+            );
+            registry.teardown(&stream_id);
+        }
+
+        assert_eq!(registry.active_sessions(), 0);
+        assert_eq!(registry.active_stream_tags(), 0);
+        assert_eq!(registry.orphan_cleanup_count(), 0);
+    }
 }
 
 pub type Sessions = SessionMap;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StreamSessionOwnership {
+    pub primary_tag: u64,
+    pub fallback_tag: Option<u64>,
+    pub owner_user_id: UserId,
+    pub channel_id: ChannelId,
+    pub active_layer_ids: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StreamTeardown {
+    pub stream_id: String,
+    pub removed_tags: Vec<u64>,
+    pub removed_orphan_tags: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct StreamSessionRegistry {
+    sessions_by_stream_id: HashMap<String, StreamSessionOwnership>,
+    stream_id_by_tag: HashMap<u64, String>,
+    recovery_forwarded_at: HashMap<u64, Instant>,
+    recovery_forwards: u64,
+    keyframe_requests: u64,
+    orphan_cleanup_count: u64,
+}
+
+impl StreamSessionRegistry {
+    const RECOVERY_THROTTLE: Duration = Duration::from_millis(500);
+
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn register(
+        &mut self,
+        stream_id: String,
+        ownership: StreamSessionOwnership,
+    ) -> StreamTeardown {
+        let mut teardown = self.teardown(&stream_id);
+        teardown.stream_id = stream_id.clone();
+
+        self.stream_id_by_tag
+            .insert(ownership.primary_tag, stream_id.clone());
+        if let Some(tag) = ownership.fallback_tag {
+            self.stream_id_by_tag.insert(tag, stream_id.clone());
+        }
+        self.sessions_by_stream_id.insert(stream_id, ownership);
+        teardown
+    }
+
+    pub fn teardown(&mut self, stream_id: &str) -> StreamTeardown {
+        let mut removed_tags = Vec::new();
+        if let Some(existing) = self.sessions_by_stream_id.remove(stream_id) {
+            removed_tags.push(existing.primary_tag);
+            if let Some(tag) = existing.fallback_tag {
+                removed_tags.push(tag);
+            }
+        }
+
+        let mut removed_orphan_tags = 0usize;
+        for tag in &removed_tags {
+            if self.stream_id_by_tag.remove(tag).is_none() {
+                removed_orphan_tags += 1;
+            }
+            self.recovery_forwarded_at.remove(tag);
+        }
+        self.orphan_cleanup_count += removed_orphan_tags as u64;
+
+        StreamTeardown {
+            stream_id: stream_id.to_string(),
+            removed_tags,
+            removed_orphan_tags,
+        }
+    }
+
+    pub fn ownership_by_stream_tag(
+        &self,
+        stream_tag: u64,
+    ) -> Option<(&str, &StreamSessionOwnership)> {
+        let stream_id = self.stream_id_by_tag.get(&stream_tag)?;
+        self.sessions_by_stream_id
+            .get(stream_id)
+            .map(|ownership| (stream_id.as_str(), ownership))
+    }
+
+    pub fn primary_tag_for_stream_id(&self, stream_id: &str) -> Option<u64> {
+        self.sessions_by_stream_id
+            .get(stream_id)
+            .map(|s| s.primary_tag)
+    }
+
+    pub fn note_keyframe_request(&mut self) {
+        self.keyframe_requests = self.keyframe_requests.saturating_add(1);
+    }
+
+    pub fn should_forward_recovery(&mut self, stream_tag: u64, now: Instant) -> bool {
+        let should_forward = self
+            .recovery_forwarded_at
+            .get(&stream_tag)
+            .map(|at| now.duration_since(*at) >= Self::RECOVERY_THROTTLE)
+            .unwrap_or(true);
+        if should_forward {
+            self.recovery_forwarded_at.insert(stream_tag, now);
+            self.recovery_forwards = self.recovery_forwards.saturating_add(1);
+        }
+        should_forward
+    }
+
+    pub fn active_sessions(&self) -> usize {
+        self.sessions_by_stream_id.len()
+    }
+
+    pub fn active_stream_tags(&self) -> usize {
+        self.stream_id_by_tag.len()
+    }
+
+    pub fn recovery_forwards(&self) -> u64 {
+        self.recovery_forwards
+    }
+
+    pub fn keyframe_requests(&self) -> u64 {
+        self.keyframe_requests
+    }
+
+    pub fn orphan_cleanup_count(&self) -> u64 {
+        self.orphan_cleanup_count
+    }
+}

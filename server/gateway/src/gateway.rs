@@ -20,7 +20,10 @@ use crate::{
     media::MediaService,
     overwrite_queue::{pop_voice_realtime, OverwriteQueue, StampedBytes},
     proto::voiceplatform::v1 as pb,
-    state::{MembershipCache, PushHub, Sessions, VoiceTelemetryCache, VoiceTelemetrySample},
+    state::{
+        MembershipCache, PushHub, Sessions, StreamSessionOwnership, StreamSessionRegistry,
+        VoiceTelemetryCache, VoiceTelemetrySample,
+    },
 };
 
 use vp_control::ids::{ChannelId, ServerId, UserId};
@@ -193,9 +196,7 @@ impl Gateway {
         );
 
         let mut current_channel: Option<ChannelId> = None;
-        let mut recovery_forwarded_at: HashMap<u64, Instant> = HashMap::new();
-        let mut stream_session_tags: HashMap<String, Vec<u64>> = HashMap::new();
-        let mut stream_layer_by_tag: HashMap<u64, u8> = HashMap::new();
+        let mut stream_registry = StreamSessionRegistry::new();
         let video_forwarder = self.video.clone();
         defer! {
             self.push.unregister(user_id, &session_id);
@@ -1336,20 +1337,29 @@ impl Gateway {
                         .filter(|layer| allow_1440p60 || (layer.width <= 1920 && layer.height <= 1080))
                         .map(|l| l.layer_id)
                         .collect::<Vec<_>>();
-                    let selected_layer_id = accepted_layer_ids
-                        .first()
-                        .copied()
-                        .unwrap_or(0) as u8;
+                    let active_layer_ids = accepted_layer_ids
+                        .iter()
+                        .map(|id| (*id).clamp(0, u8::MAX as u32) as u8)
+                        .collect::<Vec<_>>();
 
                     let stream_id = format!("{:016x}", primary_tag);
-                    let mut stream_tags = vec![primary_tag];
-                    if let Some((tag, _)) = fallback_tag {
-                        stream_tags.push(tag);
-                    }
-                    for stream_tag in &stream_tags {
-                        stream_layer_by_tag.insert(*stream_tag, selected_layer_id);
-                    }
-                    stream_session_tags.insert(stream_id.clone(), stream_tags);
+                    let stream_teardown = stream_registry.register(
+                        stream_id.clone(),
+                        StreamSessionOwnership {
+                            primary_tag,
+                            fallback_tag: fallback_tag.as_ref().map(|v| v.0),
+                            owner_user_id: user_id,
+                            channel_id: ch,
+                            active_layer_ids,
+                        },
+                    );
+                    self.teardown_stream_tags(&stream_teardown.removed_tags).await;
+                    info!(
+                        active_screen_share_sessions = stream_registry.active_sessions(),
+                        active_stream_tags = stream_registry.active_stream_tags(),
+                        orphan_cleanup_count = stream_registry.orphan_cleanup_count(),
+                        "stream session registered"
+                    );
                     let resp = pb::ServerToClient {
                         request_id: req_id,
                         session_id: Some(pb::SessionId { value: session_id.clone() }),
@@ -1374,28 +1384,14 @@ impl Gateway {
                 }
                 Some(pb::client_to_server::Payload::StopScreenShareRequest(r)) => {
                     if let Some(sid) = r.stream_id.as_ref() {
-                        let stream_tags = stream_session_tags
-                            .remove(&sid.value)
-                            .or_else(|| {
-                                u64::from_str_radix(&sid.value, 16)
-                                    .ok()
-                                    .map(|stream_tag| vec![stream_tag])
-                            })
-                            .unwrap_or_default();
-                        for stream_tag in stream_tags {
-                            stream_layer_by_tag.remove(&stream_tag);
-                            for viewer in self.video.subscribers_for_stream(stream_tag).await {
-                                self.push.send_to(viewer, pb::ServerToClient {
-                                    request_id: None,
-                                    session_id: None,
-                                    sent_at: Some(now_ts()),
-                                    error: None,
-                                    event_seq: 0,
-                                    payload: Some(pb::server_to_client::Payload::UnsubscribeStream(pb::UnsubscribeStream { stream_tag })),
-                                }).await;
-                            }
-                            self.video.unregister_stream(stream_tag).await;
-                        }
+                        let teardown = stream_registry.teardown(&sid.value);
+                        self.teardown_stream_tags(&teardown.removed_tags).await;
+                        info!(
+                            active_screen_share_sessions = stream_registry.active_sessions(),
+                            active_stream_tags = stream_registry.active_stream_tags(),
+                            orphan_cleanup_count = stream_registry.orphan_cleanup_count(),
+                            "stream session stopped"
+                        );
                     }
                     let resp = pb::ServerToClient {
                         request_id: req_id,
@@ -1432,33 +1428,31 @@ impl Gateway {
                     }
                 }
                 Some(pb::client_to_server::Payload::RequestKeyframeRequest(r)) => {
+                    stream_registry.note_keyframe_request();
                     let sid = r
                         .stream_id
                         .as_ref()
                         .ok_or(ControlError::InvalidArgument("stream_id missing"))?;
-                    let stream_tag = u64::from_str_radix(&sid.value, 16)
-                        .map_err(|_| ControlError::InvalidArgument("invalid stream_id"))?;
+                    let stream_tag = stream_registry
+                        .primary_tag_for_stream_id(&sid.value)
+                        .ok_or(ControlError::InvalidArgument("unknown stream_id"))?;
                     let now = Instant::now();
-                    let should_forward = recovery_forwarded_at
-                        .get(&stream_tag)
-                        .map(|t| now.duration_since(*t) >= Duration::from_millis(500))
-                        .unwrap_or(true);
+                    let should_forward = stream_registry.should_forward_recovery(stream_tag, now);
                     if should_forward {
-                        recovery_forwarded_at.insert(stream_tag, now);
                         self.video.note_recovery_request();
-                        let sender_uid = self
-                            .video
-                            .sender_for_stream(stream_tag)
-                            .await
+                        let (resolved_stream_id, ownership) = stream_registry
+                            .ownership_by_stream_tag(stream_tag)
                             .ok_or(ControlError::InvalidArgument("unknown stream_tag"))?;
-                        let layer_id = stream_layer_by_tag.get(&stream_tag).copied().unwrap_or(0);
+                        let layer_id = ownership.active_layer_ids.first().copied().unwrap_or(0);
                         info!(
-                            stream_id = %sid.value,
+                            stream_id = %resolved_stream_id,
                             stream_tag,
                             layer_id,
+                            recovery_forwards = stream_registry.recovery_forwards(),
+                            keyframe_requests = stream_registry.keyframe_requests(),
                             "forwarding recovery intent to sender"
                         );
-                        self.push.send_to(sender_uid, pb::ServerToClient {
+                        self.push.send_to(ownership.owner_user_id, pb::ServerToClient {
                             request_id: None,
                             session_id: None,
                             sent_at: Some(now_ts()),
@@ -1481,27 +1475,24 @@ impl Gateway {
                     }
                 }
                 Some(pb::client_to_server::Payload::RequestRecovery(r)) => {
-                    let sender_uid = self
-                        .video
-                        .sender_for_stream(r.stream_tag)
-                        .await
+                    let (resolved_stream_id, ownership) = stream_registry
+                        .ownership_by_stream_tag(r.stream_tag)
                         .ok_or(ControlError::InvalidArgument("unknown stream_tag"))?;
+                    let resolved_stream_id = resolved_stream_id.to_string();
+                    let owner_user_id = ownership.owner_user_id;
+                    let layer_id = ownership.active_layer_ids.first().copied().unwrap_or(0);
                     let now = Instant::now();
-                    let should_forward = recovery_forwarded_at
-                        .get(&r.stream_tag)
-                        .map(|t| now.duration_since(*t) >= Duration::from_millis(500))
-                        .unwrap_or(true);
+                    let should_forward = stream_registry.should_forward_recovery(r.stream_tag, now);
                     if should_forward {
-                        recovery_forwarded_at.insert(r.stream_tag, now);
                         self.video.note_recovery_request();
-                        let layer_id = stream_layer_by_tag.get(&r.stream_tag).copied().unwrap_or(0);
                         info!(
-                            stream_id = "n/a",
+                            stream_id = %resolved_stream_id,
                             stream_tag = r.stream_tag,
                             layer_id,
+                            recovery_forwards = stream_registry.recovery_forwards(),
                             "forwarding explicit recovery intent to sender"
                         );
-                        self.push.send_to(sender_uid, pb::ServerToClient {
+                        self.push.send_to(owner_user_id, pb::ServerToClient {
                             request_id: None,
                             session_id: None,
                             sent_at: Some(now_ts()),
@@ -1934,6 +1925,31 @@ impl Gateway {
 }
 
 impl Gateway {
+    async fn teardown_stream_tags(&self, stream_tags: &[u64]) {
+        for stream_tag in stream_tags {
+            for viewer in self.video.subscribers_for_stream(*stream_tag).await {
+                self.push
+                    .send_to(
+                        viewer,
+                        pb::ServerToClient {
+                            request_id: None,
+                            session_id: None,
+                            sent_at: Some(now_ts()),
+                            error: None,
+                            event_seq: 0,
+                            payload: Some(pb::server_to_client::Payload::UnsubscribeStream(
+                                pb::UnsubscribeStream {
+                                    stream_tag: *stream_tag,
+                                },
+                            )),
+                        },
+                    )
+                    .await;
+            }
+            self.video.unregister_stream(*stream_tag).await;
+        }
+    }
+
     async fn build_initial_snapshot(
         &self,
         server_id: ServerId,
@@ -2369,7 +2385,10 @@ mod tests {
         normalize_preferred_display_name,
     };
     use crate::proto::voiceplatform::v1 as pb;
+    use crate::state::{StreamSessionOwnership, StreamSessionRegistry};
     use std::collections::HashMap;
+    use tokio::time::Instant;
+    use vp_control::ids::{ChannelId, UserId};
     use vp_control::ControlError;
 
     #[test]
@@ -2531,5 +2550,47 @@ mod tests {
     fn voice_ingress_cap_guardrail() {
         // Do not increase without justification; latency risk.
         assert!(super::VOICE_INGRESS_CAP <= 64);
+    }
+
+    #[test]
+    fn stream_registry_teardown_removes_primary_and_fallback_tags() {
+        let mut registry = StreamSessionRegistry::new();
+        registry.register(
+            "s1".to_string(),
+            StreamSessionOwnership {
+                primary_tag: 900,
+                fallback_tag: Some(901),
+                owner_user_id: UserId::new(),
+                channel_id: ChannelId::new(),
+                active_layer_ids: vec![1],
+            },
+        );
+
+        let teardown = registry.teardown("s1");
+        assert_eq!(teardown.removed_tags, vec![900, 901]);
+        assert!(registry.ownership_by_stream_tag(900).is_none());
+        assert!(registry.ownership_by_stream_tag(901).is_none());
+    }
+
+    #[test]
+    fn stream_registry_routes_recovery_for_fallback_tag_to_owner() {
+        let mut registry = StreamSessionRegistry::new();
+        let owner = UserId::new();
+        registry.register(
+            "s2".to_string(),
+            StreamSessionOwnership {
+                primary_tag: 910,
+                fallback_tag: Some(911),
+                owner_user_id: owner,
+                channel_id: ChannelId::new(),
+                active_layer_ids: vec![2],
+            },
+        );
+
+        let (_, ownership) = registry
+            .ownership_by_stream_tag(911)
+            .expect("fallback tag must resolve");
+        assert_eq!(ownership.owner_user_id, owner);
+        assert!(registry.should_forward_recovery(911, Instant::now()));
     }
 }
