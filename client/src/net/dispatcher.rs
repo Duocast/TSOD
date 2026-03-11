@@ -1227,7 +1227,7 @@ pub fn available_screen_share_profiles() -> Vec<&'static str> {
 
 fn available_video_codecs() -> Vec<pb::VideoCodec> {
     let mut codecs = Vec::with_capacity(2);
-    if cfg!(feature = "video-av1") {
+    if cfg!(feature = "video-av1-software") {
         codecs.push(pb::VideoCodec::Av1);
     }
     if cfg!(feature = "video-vp9") {

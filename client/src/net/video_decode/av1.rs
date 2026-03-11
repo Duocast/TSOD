@@ -2,6 +2,7 @@ use anyhow::{bail, Result};
 
 use crate::media_codec::{DecodeMetadata, DecodedVideoFrame, VideoDecoder, VideoSessionConfig};
 use crate::net::video_encode::RAW_VIDEO_MAGIC;
+use crate::net::video_frame::EncodedAccessUnit;
 
 #[derive(Clone, Copy)]
 enum Av1DecoderBackend {
@@ -26,7 +27,10 @@ impl Av1RealtimeDecoder {
             config: VideoSessionConfig {
                 width: 0,
                 height: 0,
+                fps: 30,
                 target_bitrate_bps: 0,
+                low_latency: true,
+                allow_frame_drop: true,
             },
         }
     }
@@ -38,29 +42,45 @@ impl VideoDecoder for Av1RealtimeDecoder {
         Ok(())
     }
 
-    fn decode(&mut self, encoded: &[u8], metadata: DecodeMetadata) -> Result<DecodedVideoFrame> {
+    fn decode(
+        &mut self,
+        encoded: &EncodedAccessUnit,
+        metadata: DecodeMetadata,
+    ) -> Result<DecodedVideoFrame> {
         let _backend_hint = self.backend as u8;
         decode_realtime_payload(encoded, metadata)
+    }
+
+    fn reset(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    fn backend_name(&self) -> &'static str {
+        match self.backend {
+            Av1DecoderBackend::Hardware => "windows-mf-d3d11",
+            Av1DecoderBackend::Dav1d => "dav1d",
+        }
     }
 }
 
 pub(crate) fn decode_realtime_payload(
-    encoded: &[u8],
+    encoded: &EncodedAccessUnit,
     metadata: DecodeMetadata,
 ) -> Result<DecodedVideoFrame> {
-    if encoded.len() < 14 {
+    let data = encoded.data.as_ref();
+    if data.len() < 14 {
         bail!("short realtime video payload");
     }
-    if encoded[..4] != RAW_VIDEO_MAGIC {
+    if data[..4] != RAW_VIDEO_MAGIC {
         bail!("unexpected video payload format (not realtime stream payload)");
     }
-    let width = u32::from_le_bytes(encoded[6..10].try_into().expect("slice length")) as usize;
-    let height = u32::from_le_bytes(encoded[10..14].try_into().expect("slice length")) as usize;
+    let width = u32::from_le_bytes(data[6..10].try_into().expect("slice length")) as usize;
+    let height = u32::from_le_bytes(data[10..14].try_into().expect("slice length")) as usize;
     let pixel_len = width
         .checked_mul(height)
         .and_then(|p| p.checked_mul(4))
         .ok_or_else(|| anyhow::anyhow!("decoded frame dimensions overflow"))?;
-    let payload = &encoded[14..];
+    let payload = &data[14..];
     if payload.len() != pixel_len {
         bail!("decoded frame payload size mismatch");
     }

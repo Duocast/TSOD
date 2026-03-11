@@ -2,7 +2,7 @@ use anyhow::Result;
 
 use crate::media_codec::{VideoEncoder, VideoSessionConfig};
 use crate::net::video_encode::av1::Av1RealtimeEncoder;
-use crate::net::video_frame::{EncodedFrame, VideoFrame};
+use crate::net::video_frame::{EncodedAccessUnit, VideoFrame};
 
 pub struct Vp9RealtimeEncoder {
     inner: Av1RealtimeEncoder,
@@ -29,7 +29,13 @@ impl VideoEncoder for Vp9RealtimeEncoder {
         self.inner.update_bitrate(bitrate_bps)
     }
 
-    fn encode(&mut self, frame: VideoFrame) -> Result<EncodedFrame> {
-        self.inner.encode(frame)
+    fn encode(&mut self, frame: VideoFrame) -> Result<EncodedAccessUnit> {
+        let mut encoded = self.inner.encode(frame)?;
+        encoded.codec = crate::proto::voiceplatform::v1::VideoCodec::Vp9;
+        Ok(encoded)
+    }
+
+    fn backend_name(&self) -> &'static str {
+        "libvpx"
     }
 }

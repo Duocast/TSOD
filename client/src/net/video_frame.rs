@@ -1,15 +1,25 @@
 use bytes::Bytes;
 
-#[derive(Debug, Clone, Copy)]
+use crate::proto::voiceplatform::v1 as pb;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PixelFormat {
     Bgra,
     Nv12,
 }
 
 #[derive(Debug, Clone)]
-pub struct VideoPlane {
-    pub stride: u32,
-    pub data: Bytes,
+pub enum FramePlanes {
+    Bgra {
+        bytes: Bytes,
+        stride: u32,
+    },
+    Nv12 {
+        y: Bytes,
+        uv: Bytes,
+        y_stride: u32,
+        uv_stride: u32,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -18,11 +28,13 @@ pub struct VideoFrame {
     pub height: u32,
     pub ts_ms: u32,
     pub format: PixelFormat,
-    pub planes: Vec<VideoPlane>,
+    pub planes: FramePlanes,
 }
 
-#[derive(Debug)]
-pub struct EncodedFrame {
+#[derive(Debug, Clone)]
+pub struct EncodedAccessUnit {
+    pub codec: pb::VideoCodec,
+    pub layer_id: u8,
     pub ts_ms: u32,
     pub is_keyframe: bool,
     pub data: Bytes,
