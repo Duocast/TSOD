@@ -65,18 +65,18 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel) {
             let active_stream_tag = dbg
                 .active_stream_tags
                 .iter()
-                .find(|tag| model.latest_stream_decoded_frames.contains_key(tag))
+                .find(|tag| model.latest_stream_frames.contains_key(tag))
                 .copied()
                 .or_else(|| {
                     model
-                        .latest_stream_decoded_frames
+                        .latest_stream_frames
                         .iter()
                         .max_by_key(|(_, frame)| frame.frame_seq)
                         .map(|(tag, _)| *tag)
                 });
 
             if let Some(stream_tag) = active_stream_tag {
-                if let Some(frame) = model.latest_stream_decoded_frames.get(&stream_tag) {
+                if let Some(frame) = model.latest_stream_frames.get(&stream_tag) {
                     let should_present = model
                         .last_presented_stream_frame_key
                         .get(&stream_tag)
