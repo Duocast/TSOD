@@ -23,6 +23,7 @@ mod settings_io;
 mod ui;
 
 use anyhow::{anyhow, Context, Result};
+use bytes::Bytes;
 use config::Config;
 use crossbeam_channel::{bounded, Receiver, Sender};
 use identity::DeviceIdentity;
