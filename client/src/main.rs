@@ -18,6 +18,7 @@ mod media_codec;
 mod media_pipeline;
 mod net;
 mod proto;
+mod screen_share;
 mod settings_io;
 mod ui;
 
