@@ -49,6 +49,9 @@ pub struct StartLocalShareParams {
     pub stop_rx: watch::Receiver<bool>,
     pub capture_queue_len_gauge: Arc<AtomicU64>,
     pub capture_queue_overflow_total: Arc<AtomicU64>,
+    pub encode_queue_len_gauge: Arc<AtomicU64>,
+    pub packetize_queue_len_gauge: Arc<AtomicU64>,
+    pub backend_label: Arc<std::sync::Mutex<String>>,
 }
 
 pub async fn start_local_share(params: StartLocalShareParams) {
@@ -78,6 +81,7 @@ pub async fn start_local_share(params: StartLocalShareParams) {
     let capture_q = capture_queue.clone();
     let capture_len = params.capture_queue_len_gauge.clone();
     let capture_ovf = params.capture_queue_overflow_total.clone();
+    let counters = params.counters.clone();
     let capture_task = tokio::task::spawn_blocking(move || {
         let mut cap = match crate::screen_share::capture::build_capture_backend(
             &capture_source,
@@ -94,10 +98,17 @@ pub async fn start_local_share(params: StartLocalShareParams) {
             match cap.next_frame() {
                 Ok(frame) => {
                     capture_q.push(frame);
+                    counters.capture_frames.fetch_add(1, Ordering::Relaxed);
                     capture_len.store(capture_q.len() as u64, Ordering::Relaxed);
+                    counters
+                        .queue_depth_capture
+                        .store(capture_q.len() as u64, Ordering::Relaxed);
                     let ovf = capture_q.overflow_evictions_swap();
                     if ovf > 0 {
                         capture_ovf.fetch_add(ovf, Ordering::Relaxed);
+                        counters
+                            .capture_queue_overflows
+                            .fetch_add(ovf, Ordering::Relaxed);
                     }
                 }
                 Err(e) => {
@@ -130,6 +141,9 @@ pub async fn start_local_share(params: StartLocalShareParams) {
                 continue;
             }
         };
+        if let Ok(mut label) = params.backend_label.lock() {
+            *label = encoder.backend_name().to_string();
+        }
 
         let encode_queue = Arc::new(OverwriteQueue::<VideoFrame>::new(ENCODE_QUEUE_DEPTH));
         let packet_queue = Arc::new(OverwriteQueue::<EncodedFrame>::new(
@@ -139,12 +153,16 @@ pub async fn start_local_share(params: StartLocalShareParams) {
         let stream_capture_q = capture_queue.clone();
         let stream_encode_q = encode_queue.clone();
         let stop_for_fanout = stop_flag.clone();
+        let counters = params.counters.clone();
         let fanout_task = tokio::spawn(async move {
             while !stop_for_fanout.load(Ordering::Relaxed) {
                 let Some(frame) = stream_capture_q.pop_latest_or_wait().await else {
                     break;
                 };
                 stream_encode_q.push(frame);
+                counters
+                    .queue_depth_encode
+                    .store(stream_encode_q.len() as u64, Ordering::Relaxed);
             }
             stream_encode_q.close();
         });
@@ -153,9 +171,13 @@ pub async fn start_local_share(params: StartLocalShareParams) {
         let stream_packet_q = packet_queue.clone();
         let force_keyframe = params.force_next_keyframe.clone();
         let stream_tag = stream.stream_tag;
+        let encode_depth = params.encode_queue_len_gauge.clone();
+        let packet_depth = params.packetize_queue_len_gauge.clone();
+        let counters = params.counters.clone();
         let encode_task = tokio::spawn(async move {
             let mut configured = false;
             while let Some(frame) = stream_encode_q.pop_latest_or_wait().await {
+                encode_depth.store(stream_encode_q.len() as u64, Ordering::Relaxed);
                 if !configured {
                     if let Err(e) = encoder.configure_session(VideoSessionConfig {
                         width: frame.width,
@@ -176,12 +198,22 @@ pub async fn start_local_share(params: StartLocalShareParams) {
                 }
 
                 match encoder.encode(frame) {
-                    Ok(encoded) => stream_packet_q.push(EncodedFrame {
-                        ts_ms: encoded.ts_ms,
-                        is_keyframe: encoded.is_keyframe,
-                        data: encoded.data,
-                    }),
-                    Err(e) => warn!(error=?e, stream_tag, "[video] encode failed"),
+                    Ok(encoded) => {
+                        stream_packet_q.push(EncodedFrame {
+                            ts_ms: encoded.ts_ms,
+                            is_keyframe: encoded.is_keyframe,
+                            data: encoded.data,
+                        });
+                        counters.encode_frames.fetch_add(1, Ordering::Relaxed);
+                        packet_depth.store(stream_packet_q.len() as u64, Ordering::Relaxed);
+                        counters
+                            .queue_depth_packetize
+                            .store(stream_packet_q.len() as u64, Ordering::Relaxed);
+                    }
+                    Err(e) => {
+                        counters.encode_errors.fetch_add(1, Ordering::Relaxed);
+                        warn!(error=?e, stream_tag, "[video] encode failed")
+                    }
                 }
             }
             stream_packet_q.close();
@@ -193,6 +225,9 @@ pub async fn start_local_share(params: StartLocalShareParams) {
         let send_task = tokio::spawn(async move {
             let mut frame_idx = 0_u32;
             while let Some(encoded) = stream_packet_q.pop_latest_or_wait().await {
+                counters
+                    .queue_depth_packetize
+                    .store(stream_packet_q.len() as u64, Ordering::Relaxed);
                 if let Err(e) = sender
                     .send_frame_async(encoded.ts_ms, encoded.is_keyframe, &encoded.data, |dg| {
                         match egress.enqueue_video_fragment(
