@@ -456,7 +456,9 @@ struct FrameSlot {
     /// Uses `Option<Bytes>` but the Vec is pre-allocated and reused.
     fragments: Vec<Option<Bytes>>,
     is_keyframe: bool,
+    is_recovery: bool,
     ts_ms: u32,
+    last_updated_at: Instant,
 }
 
 impl FrameSlot {
@@ -468,7 +470,14 @@ impl FrameSlot {
         (word, bit)
     }
 
-    fn new(key: ReassemblyKey, frag_total: u16, is_keyframe: bool, ts_ms: u32) -> Self {
+    fn new(
+        key: ReassemblyKey,
+        frag_total: u16,
+        is_keyframe: bool,
+        is_recovery: bool,
+        ts_ms: u32,
+        now: Instant,
+    ) -> Self {
         let mut fragments = Vec::with_capacity(frag_total as usize);
         fragments.resize(frag_total as usize, None);
         Self {
@@ -478,7 +487,9 @@ impl FrameSlot {
             received_count: 0,
             fragments,
             is_keyframe,
+            is_recovery,
             ts_ms,
+            last_updated_at: now,
         }
     }
 
@@ -503,7 +514,15 @@ impl FrameSlot {
     }
 
     /// Reset for reuse (avoids reallocation).
-    fn reset(&mut self, key: ReassemblyKey, frag_total: u16, is_keyframe: bool, ts_ms: u32) {
+    fn reset(
+        &mut self,
+        key: ReassemblyKey,
+        frag_total: u16,
+        is_keyframe: bool,
+        is_recovery: bool,
+        ts_ms: u32,
+        now: Instant,
+    ) {
         self.key = key;
         self.frag_total = frag_total;
         let needed_words = (frag_total as usize).div_ceil(64);
@@ -511,10 +530,34 @@ impl FrameSlot {
         self.received_mask.resize(needed_words, 0);
         self.received_count = 0;
         self.is_keyframe = is_keyframe;
+        self.is_recovery = is_recovery;
         self.ts_ms = ts_ms;
+        self.last_updated_at = now;
         self.fragments.clear();
         self.fragments.resize(frag_total as usize, None);
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IncompleteFrameEvictionReason {
+    Capacity,
+    Timeout,
+}
+
+#[derive(Debug, Clone)]
+pub struct IncompleteFrameEviction {
+    pub stream_tag: u64,
+    pub layer_id: u8,
+    pub frame_seq: u32,
+    pub received_fragments: u16,
+    pub expected_fragments: u16,
+    pub reason: IncompleteFrameEvictionReason,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct VideoReceiverStats {
+    pub incomplete_evictions_capacity: u64,
+    pub incomplete_evictions_timeout: u64,
 }
 
 /// A complete reassembled frame ready for decoding.
@@ -524,6 +567,7 @@ pub struct ReassembledFrame {
     pub frame_seq: u32,
     pub ts_ms: u32,
     pub is_keyframe: bool,
+    pub is_recovery: bool,
     /// Concatenated payload for direct decode/render paths.
     pub payload: Bytes,
     /// Fragment payloads in order. Caller concatenates for decoding.
@@ -550,19 +594,78 @@ pub struct VideoReceiver {
     free_slots: Vec<FrameSlot>,
     max_slots: usize,
     max_frags_per_frame: u16,
+    incomplete_frame_timeout: Duration,
+    stats: VideoReceiverStats,
+    recent_incomplete_evictions: VecDeque<IncompleteFrameEviction>,
     #[cfg(test)]
     slot_allocations: usize,
 }
 
 impl VideoReceiver {
     pub fn new(max_in_flight_frames: usize, max_frags_per_frame: u16) -> Self {
+        Self::with_incomplete_timeout(
+            max_in_flight_frames,
+            max_frags_per_frame,
+            Duration::from_millis(750),
+        )
+    }
+
+    pub fn with_incomplete_timeout(
+        max_in_flight_frames: usize,
+        max_frags_per_frame: u16,
+        incomplete_frame_timeout: Duration,
+    ) -> Self {
         Self {
             slots: VecDeque::with_capacity(max_in_flight_frames),
             free_slots: Vec::with_capacity(max_in_flight_frames),
             max_slots: max_in_flight_frames,
             max_frags_per_frame,
+            incomplete_frame_timeout,
+            stats: VideoReceiverStats::default(),
+            recent_incomplete_evictions: VecDeque::with_capacity(max_in_flight_frames * 2),
             #[cfg(test)]
             slot_allocations: 0,
+        }
+    }
+
+    fn push_incomplete_eviction(
+        &mut self,
+        slot: &FrameSlot,
+        reason: IncompleteFrameEvictionReason,
+    ) {
+        let event = IncompleteFrameEviction {
+            stream_tag: slot.key.stream_tag,
+            layer_id: slot.key.layer_id,
+            frame_seq: slot.key.frame_seq,
+            received_fragments: slot.received_count,
+            expected_fragments: slot.frag_total,
+            reason,
+        };
+        if self.recent_incomplete_evictions.len() >= self.max_slots.saturating_mul(4).max(8) {
+            self.recent_incomplete_evictions.pop_front();
+        }
+        self.recent_incomplete_evictions.push_back(event);
+    }
+
+    fn evict_timed_out_incomplete_frames(&mut self, now: Instant) {
+        while let Some(oldest) = self.slots.front() {
+            if now.duration_since(oldest.last_updated_at) < self.incomplete_frame_timeout {
+                break;
+            }
+            if let Some(mut evicted) = self.slots.pop_front() {
+                self.stats.incomplete_evictions_timeout =
+                    self.stats.incomplete_evictions_timeout.saturating_add(1);
+                self.push_incomplete_eviction(&evicted, IncompleteFrameEvictionReason::Timeout);
+                evicted.reset(
+                    evicted.key,
+                    evicted.frag_total,
+                    evicted.is_keyframe,
+                    evicted.is_recovery,
+                    evicted.ts_ms,
+                    now,
+                );
+                self.free_slots.push(evicted);
+            }
         }
     }
 
@@ -570,6 +673,8 @@ impl VideoReceiver {
     ///
     /// Returns `Some(ReassembledFrame)` if this fragment completed a frame.
     pub fn receive(&mut self, datagram: &Bytes) -> Option<ReassembledFrame> {
+        let now = Instant::now();
+        self.evict_timed_out_incomplete_frames(now);
         let hdr = VideoHeader::parse(datagram)?;
         if hdr.frag_total > self.max_frags_per_frame {
             return None;
@@ -588,6 +693,7 @@ impl VideoReceiver {
         match slot_idx {
             Some(idx) => {
                 let complete = self.slots[idx].insert(hdr.frag_idx, payload);
+                self.slots[idx].last_updated_at = now;
                 if complete {
                     let mut slot = self.slots.remove(idx).unwrap();
                     let fragments: Vec<Bytes> =
@@ -599,10 +705,18 @@ impl VideoReceiver {
                         frame_seq: key.frame_seq,
                         ts_ms: slot.ts_ms,
                         is_keyframe: slot.is_keyframe,
+                        is_recovery: slot.is_recovery,
                         payload,
                         fragments,
                     };
-                    slot.reset(key, hdr.frag_total, hdr.is_keyframe(), hdr.ts_ms);
+                    slot.reset(
+                        key,
+                        hdr.frag_total,
+                        hdr.is_keyframe(),
+                        hdr.is_recovery(),
+                        hdr.ts_ms,
+                        now,
+                    );
                     self.free_slots.push(slot);
                     return Some(frame);
                 }
@@ -612,26 +726,49 @@ impl VideoReceiver {
                 // New frame. Evict oldest if full.
                 if self.slots.len() >= self.max_slots {
                     if let Some(mut evicted) = self.slots.pop_front() {
+                        self.stats.incomplete_evictions_capacity =
+                            self.stats.incomplete_evictions_capacity.saturating_add(1);
+                        self.push_incomplete_eviction(
+                            &evicted,
+                            IncompleteFrameEvictionReason::Capacity,
+                        );
                         evicted.reset(
                             evicted.key,
                             evicted.frag_total,
                             evicted.is_keyframe,
+                            evicted.is_recovery,
                             evicted.ts_ms,
+                            now,
                         );
                         self.free_slots.push(evicted);
                     }
                 }
                 let mut slot = if let Some(mut reused) = self.free_slots.pop() {
-                    reused.reset(key, hdr.frag_total, hdr.is_keyframe(), hdr.ts_ms);
+                    reused.reset(
+                        key,
+                        hdr.frag_total,
+                        hdr.is_keyframe(),
+                        hdr.is_recovery(),
+                        hdr.ts_ms,
+                        now,
+                    );
                     reused
                 } else {
                     #[cfg(test)]
                     {
                         self.slot_allocations += 1;
                     }
-                    FrameSlot::new(key, hdr.frag_total, hdr.is_keyframe(), hdr.ts_ms)
+                    FrameSlot::new(
+                        key,
+                        hdr.frag_total,
+                        hdr.is_keyframe(),
+                        hdr.is_recovery(),
+                        hdr.ts_ms,
+                        now,
+                    )
                 };
                 let complete = slot.insert(hdr.frag_idx, payload);
+                slot.last_updated_at = now;
                 if complete {
                     let fragments: Vec<Bytes> =
                         slot.take_fragments().into_iter().flatten().collect();
@@ -642,10 +779,18 @@ impl VideoReceiver {
                         frame_seq: key.frame_seq,
                         ts_ms: slot.ts_ms,
                         is_keyframe: slot.is_keyframe,
+                        is_recovery: slot.is_recovery,
                         payload,
                         fragments,
                     };
-                    slot.reset(key, hdr.frag_total, hdr.is_keyframe(), hdr.ts_ms);
+                    slot.reset(
+                        key,
+                        hdr.frag_total,
+                        hdr.is_keyframe(),
+                        hdr.is_recovery(),
+                        hdr.ts_ms,
+                        now,
+                    );
                     self.free_slots.push(slot);
                     return Some(frame);
                 }
@@ -658,6 +803,14 @@ impl VideoReceiver {
     /// Number of in-flight frames currently being reassembled.
     pub fn in_flight(&self) -> usize {
         self.slots.len()
+    }
+
+    pub fn stats(&self) -> VideoReceiverStats {
+        self.stats
+    }
+
+    pub fn take_incomplete_evictions(&mut self) -> Vec<IncompleteFrameEviction> {
+        self.recent_incomplete_evictions.drain(..).collect()
     }
 
     #[cfg(test)]
@@ -803,6 +956,62 @@ mod tests {
     }
 
     // ── VideoReceiver tests ───────────────────────────────────────────
+
+    #[test]
+    fn receiver_exposes_recovery_flag_and_layer() {
+        let mut rx = VideoReceiver::new(4, vp_voice::MAX_FRAGS_PER_FRAME);
+        let dg = video_datagram::make_video_datagram(
+            &VideoHeader {
+                stream_tag: 9,
+                layer_id: 2,
+                flags: vp_voice::VIDEO_FLAG_RECOVERY
+                    | vp_voice::VIDEO_FLAG_KEYFRAME
+                    | vp_voice::VIDEO_FLAG_END_OF_FRAME,
+                frame_seq: 1,
+                frag_idx: 0,
+                frag_total: 1,
+                ts_ms: 123,
+            },
+            b"recovery",
+        );
+        let frame = rx.receive(&dg).expect("frame");
+        assert_eq!(frame.layer_id, 2);
+        assert!(frame.is_recovery);
+    }
+
+    #[test]
+    fn receiver_tracks_capacity_evictions() {
+        let mut rx = VideoReceiver::new(1, vp_voice::MAX_FRAGS_PER_FRAME);
+        let dg0 = make_frag(1, 0, 0, 3, 0, b"a");
+        let dg1 = make_frag(1, 1, 0, 3, 0, b"b");
+        rx.receive(&dg0);
+        rx.receive(&dg1);
+        let stats = rx.stats();
+        assert_eq!(stats.incomplete_evictions_capacity, 1);
+        let evictions = rx.take_incomplete_evictions();
+        assert_eq!(evictions.len(), 1);
+        assert_eq!(evictions[0].reason, IncompleteFrameEvictionReason::Capacity);
+    }
+
+    #[test]
+    fn receiver_tracks_timeout_evictions() {
+        let mut rx = VideoReceiver::with_incomplete_timeout(
+            2,
+            vp_voice::MAX_FRAGS_PER_FRAME,
+            Duration::from_millis(1),
+        );
+        let dg0 = make_frag(1, 0, 0, 2, 0, b"a");
+        rx.receive(&dg0);
+        std::thread::sleep(Duration::from_millis(3));
+        let dg1 = make_frag(1, 1, 0, 1, vp_voice::VIDEO_FLAG_END_OF_FRAME, b"b");
+        let _ = rx.receive(&dg1);
+        let stats = rx.stats();
+        assert!(stats.incomplete_evictions_timeout >= 1);
+        let evictions = rx.take_incomplete_evictions();
+        assert!(evictions
+            .iter()
+            .any(|e| e.reason == IncompleteFrameEvictionReason::Timeout));
+    }
 
     #[test]
     fn receiver_reassembles_single_fragment_frame() {
