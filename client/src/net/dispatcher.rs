@@ -5,7 +5,7 @@ use std::{
         atomic::{AtomicU32, Ordering},
         Arc, OnceLock,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::{
     sync::{mpsc, oneshot, watch, Mutex, RwLock},
@@ -1352,7 +1352,7 @@ pub fn build_screenshare_caps(caps: &MediaRuntimeCaps) -> pb::ScreenShareCaps {
         } else {
             8_000_000
         },
-        max_simulcast_layers: caps.max_simulcast_layers as i32,
+        max_simulcast_layers: caps.max_simulcast_layers,
         supports_system_audio: caps.supports_system_audio,
     }
 }
