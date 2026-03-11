@@ -40,6 +40,7 @@ pub enum SystemAudioBackendKind {
     Off,
 }
 
+#[derive(Clone, Debug)]
 pub struct MediaRuntimeCaps {
     pub capture_backends: Vec<CaptureBackendKind>,
     pub encode_backends: HashMap<pb::VideoCodec, Vec<EncodeBackendKind>>,

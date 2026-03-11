@@ -3,8 +3,13 @@ use tokio::time::{timeout, Duration};
 
 use crate::{
     identity::DeviceIdentity,
-    net::frame::{read_delimited, write_delimited},
+    net::{
+        dispatcher::build_screenshare_caps,
+        frame::{read_delimited, write_delimited},
+    },
     proto::voiceplatform::v1 as pb,
+    screen_share::runtime_probe::probe_media_caps,
+    ShareSource,
 };
 
 const MAX_CTRL_MSG: usize = 256 * 1024;
@@ -133,6 +138,22 @@ fn now_ts() -> pb::Timestamp {
 }
 
 fn default_caps(alpn: &str) -> pb::ClientCaps {
+    let runtime_caps = probe_media_caps(&default_probe_share_source());
+    let supports_1440p60 = runtime_caps.supports_1440p60;
+    let screen_video_codecs = [pb::VideoCodec::Vp9, pb::VideoCodec::Av1]
+        .into_iter()
+        .filter(|codec| {
+            runtime_caps.encode_backends.contains_key(codec)
+                && runtime_caps.decode_backends.contains_key(codec)
+        })
+        .map(|codec| match codec {
+            pb::VideoCodec::Vp9 => pb::video_caps::Codec::Vp9 as i32,
+            pb::VideoCodec::Av1 => pb::video_caps::Codec::Av1 as i32,
+            _ => unreachable!("policy codecs only include VP9/AV1"),
+        })
+        .collect::<Vec<_>>();
+    let supports_screen_share = cfg!(feature = "screen-share") && !screen_video_codecs.is_empty();
+
     pb::ClientCaps {
         build: Some(pb::BuildInfo {
             client_name: "vp-client".into(),
@@ -146,7 +167,7 @@ fn default_caps(alpn: &str) -> pb::ClientCaps {
             supports_streaming: cfg!(feature = "screen-share") || cfg!(feature = "video-call"),
             supports_drag_drop_upload: true,
             supports_relay_mode: false,
-            supports_screen_share: cfg!(feature = "screen-share"),
+            supports_screen_share,
             supports_video_call: cfg!(feature = "video-call"),
             supports_e2ee: false,
             supports_spatial_audio: false,
@@ -164,29 +185,37 @@ fn default_caps(alpn: &str) -> pb::ClientCaps {
             max_simultaneous_decodes: 8,
         }),
         screen_video: Some(pb::VideoCaps {
-            codecs: vec![
-                pb::video_caps::Codec::Av1 as i32,
-                pb::video_caps::Codec::Vp9 as i32,
-            ],
-            max_width: 1920,
-            max_height: 1080,
+            codecs: screen_video_codecs,
+            max_width: if supports_1440p60 { 2560 } else { 1920 },
+            max_height: if supports_1440p60 { 1440 } else { 1080 },
             max_fps: 60,
             max_bitrate_bps: 8_000_000,
-            hw_encode_available: false,
+            hw_encode_available: runtime_caps
+                .encode_backends
+                .get(&pb::VideoCodec::Av1)
+                .map(|backends| !backends.is_empty())
+                .unwrap_or(false),
         }),
         caps_hash: Some(pb::CapabilityHash {
             sha256: sha256_bytes(alpn.as_bytes()),
         }),
-        screen_share: Some(pb::ScreenShareCaps {
-            codec: pb::video_caps::Codec::Av1 as i32,
-            max_width: 1920,
-            max_height: 1080,
-            max_fps: 60,
-            max_bitrate_bps: 8_000_000,
-            max_simulcast_layers: 1,
-            supports_system_audio: false,
-        }),
+        screen_share: supports_screen_share.then(|| build_screenshare_caps(&runtime_caps)),
         camera_video: None,
+    }
+}
+
+fn default_probe_share_source() -> ShareSource {
+    #[cfg(target_os = "windows")]
+    {
+        return ShareSource::WindowsDisplay("0".to_string());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        return ShareSource::LinuxPortal(String::new());
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    {
+        ShareSource::LinuxPortal(String::new())
     }
 }
 
