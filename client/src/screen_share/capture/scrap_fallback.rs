@@ -89,7 +89,7 @@ impl CaptureBackend for ScrapCapture {
     }
 
     fn backend_name(&self) -> &'static str {
-        "scrap"
+        "scrap-fallback"
     }
 
     fn native_format(&self) -> PixelFormat {
