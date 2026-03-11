@@ -1,7 +1,7 @@
 use anyhow::Result;
 
-use crate::CapturedFrame;
+use crate::net::video_frame::VideoFrame;
 
 pub trait CaptureBackend: Send {
-    fn next_frame(&mut self) -> Result<CapturedFrame>;
+    fn next_frame(&mut self) -> Result<VideoFrame>;
 }
