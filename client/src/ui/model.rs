@@ -275,6 +275,7 @@ pub enum UiEvent {
     },
     StreamDebugUpdate(StreamDebugView),
     StreamFrame(StreamFrameView),
+    StreamFrameDecoded(StreamFrameDecodedView),
 
     // Telemetry
     TelemetryUpdate(TelemetryData),
@@ -617,6 +618,15 @@ pub struct StreamFrameView {
     pub ts_ms: u32,
     pub codec: i32,
     pub payload: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct StreamFrameDecodedView {
+    pub stream_tag: u64,
+    pub frame_seq: u32,
+    pub width: usize,
+    pub height: usize,
+    pub rgba: Vec<u8>,
 }
 
 // ── Persisted application settings ────────────────────────────────────
@@ -1894,6 +1904,7 @@ pub struct UiModel {
     pub start_share_in_flight: bool,
     pub stream_debug: StreamDebugView,
     pub latest_stream_frame: Option<StreamFrameView>,
+    pub latest_stream_decoded_frame: Option<StreamFrameDecodedView>,
     pub latest_stream_frame_texture: Option<egui::TextureHandle>,
     pub latest_stream_frame_key: Option<(u64, u32)>,
     pub show_stream_stats: bool,
@@ -2223,6 +2234,7 @@ impl Default for UiModel {
             start_share_in_flight: false,
             stream_debug: StreamDebugView::default(),
             latest_stream_frame: None,
+            latest_stream_decoded_frame: None,
             latest_stream_frame_texture: None,
             latest_stream_frame_key: None,
             show_stream_stats: false,
@@ -2437,6 +2449,9 @@ impl UiModel {
             }
             UiEvent::StreamFrame(frame) => {
                 self.latest_stream_frame = Some(frame);
+            }
+            UiEvent::StreamFrameDecoded(frame) => {
+                self.latest_stream_decoded_frame = Some(frame);
                 self.latest_stream_frame_key = None;
             }
             UiEvent::SetAwayMessage(message) => {

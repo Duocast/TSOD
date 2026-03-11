@@ -744,6 +744,7 @@ struct SharedStreamState {
     stream_codecs: Arc<RwLock<HashMap<u64, pb::VideoCodec>>>,
     counters: Arc<VideoRuntimeCounters>,
     latest_frame: Arc<std::sync::RwLock<Option<ui::model::StreamFrameView>>>,
+    latest_decoded_frame: Arc<std::sync::RwLock<Option<ui::model::StreamFrameDecodedView>>>,
 }
 
 impl SharedStreamState {
@@ -753,6 +754,7 @@ impl SharedStreamState {
             stream_codecs: Arc::new(RwLock::new(HashMap::new())),
             counters: Arc::new(VideoRuntimeCounters::default()),
             latest_frame: Arc::new(std::sync::RwLock::new(None)),
+            latest_decoded_frame: Arc::new(std::sync::RwLock::new(None)),
         }
     }
 }
@@ -835,7 +837,11 @@ async fn datagram_demux_loop(
     }
 }
 
-async fn video_recv_loop(mut video_rx: mpsc::Receiver<Bytes>, state: SharedStreamState) {
+async fn video_recv_loop(
+    mut video_rx: mpsc::Receiver<Bytes>,
+    decode_tx: mpsc::Sender<ui::model::StreamFrameView>,
+    state: SharedStreamState,
+) {
     while let Some(datagram) = video_rx.recv().await {
         state
             .counters
@@ -891,14 +897,39 @@ async fn video_recv_loop(mut video_rx: mpsc::Receiver<Bytes>, state: SharedStrea
                 .last_frame_ts_ms
                 .store(frame.ts_ms, Ordering::Relaxed);
             if let Ok(mut latest) = state.latest_frame.write() {
-                *latest = Some(ui::model::StreamFrameView {
+                let frame_view = ui::model::StreamFrameView {
                     stream_tag: frame.stream_tag,
                     frame_seq: frame.frame_seq,
                     ts_ms: frame.ts_ms,
                     codec,
                     payload: frame.payload.to_vec(),
-                });
+                };
+                *latest = Some(frame_view.clone());
+                let _ = decode_tx.try_send(frame_view);
             }
+        }
+    }
+}
+
+async fn video_decode_loop(
+    mut decode_rx: mpsc::Receiver<ui::model::StreamFrameView>,
+    latest_decoded: Arc<std::sync::RwLock<Option<ui::model::StreamFrameDecodedView>>>,
+) {
+    while let Some(frame) = decode_rx.recv().await {
+        let Ok(codec) = pb::VideoCodec::try_from(frame.codec) else {
+            continue;
+        };
+        let Ok(decoded) = net::video_decode::decode_video_frame(codec, &frame.payload) else {
+            continue;
+        };
+        if let Ok(mut latest) = latest_decoded.write() {
+            *latest = Some(ui::model::StreamFrameDecodedView {
+                stream_tag: frame.stream_tag,
+                frame_seq: frame.frame_seq,
+                width: decoded.width,
+                height: decoded.height,
+                rgba: decoded.rgba,
+            });
         }
     }
 }
@@ -2438,6 +2469,8 @@ async fn connect_and_run_session(
         }
     }
 
+    let force_keyframe_requests = Arc::new(tokio::sync::Mutex::new(HashSet::<u64>::new()));
+
     // Server push consumer
     let mut push_rx = dispatcher.take_push_receiver().await;
     {
@@ -2449,6 +2482,7 @@ async fn connect_and_run_session(
         let server_deafened = server_deafened.clone();
         let stream_state = stream_state.clone();
         let dispatcher = dispatcher.clone();
+        let force_keyframe_requests = force_keyframe_requests.clone();
         tokio::spawn(async move {
             let mut prefetched_chat_profile_user_ids = HashSet::new();
             while let Some(ev) = push_rx.recv().await {
@@ -3044,6 +3078,20 @@ async fn connect_and_run_session(
                             event.stream_tag, event.codec
                         )));
                     }
+                    PushEvent::RequestRecovery { event, event_seq } => {
+                        maybe_note_event_gap(&tx_event, event_seq);
+                        if !should_apply_event_seq(&tx_event, &mut last_event_seq, event_seq) {
+                            continue;
+                        }
+                        let _ = tx_event.send(UiEvent::AppendLog(format!(
+                            "[video] sender recovery requested stream_tag={}",
+                            event.stream_tag
+                        )));
+                        {
+                            let mut guard = force_keyframe_requests.lock().await;
+                            guard.insert(event.stream_tag);
+                        }
+                    }
                     PushEvent::UserProfile { event, event_seq } => {
                         maybe_note_event_gap(&tx_event, event_seq);
                         if !should_apply_event_seq(&tx_event, &mut last_event_seq, event_seq) {
@@ -3169,6 +3217,7 @@ async fn connect_and_run_session(
     let voice_stale_drops_total = Arc::new(AtomicU64::new(0));
     let voice_drain_drops_total = Arc::new(AtomicU64::new(0));
     let (video_rx_tx, video_rx_rx) = mpsc::channel::<Bytes>(512);
+    let (video_decode_tx, video_decode_rx) = mpsc::channel::<ui::model::StreamFrameView>(8);
 
     let _datagram_demux = tokio::spawn(datagram_demux_loop(
         conn.clone(),
@@ -3197,7 +3246,15 @@ async fn connect_and_run_session(
         voice_die_tx.clone(),
     ));
 
-    let _video_recv = tokio::spawn(video_recv_loop(video_rx_rx, stream_state.clone()));
+    let _video_recv = tokio::spawn(video_recv_loop(
+        video_rx_rx,
+        video_decode_tx,
+        stream_state.clone(),
+    ));
+    let _video_decode = tokio::spawn(video_decode_loop(
+        video_decode_rx,
+        stream_state.latest_decoded_frame.clone(),
+    ));
 
     let disp_keepalive = dispatcher.clone();
     let disp_health = dispatcher.clone();
@@ -3283,6 +3340,10 @@ async fn connect_and_run_session(
     tokio::pin!(ctl_keepalive);
     let mut audio_health_tick = tokio::time::interval(Duration::from_secs(1));
     let mut stream_ui_tick = tokio::time::interval(Duration::from_secs(1));
+    let mut viewer_recovery_tick = tokio::time::interval(Duration::from_millis(750));
+    let mut stream_last_completed = 0_u64;
+    let mut stream_stall_started_at: Option<Instant> = None;
+    let mut stream_last_recovery_sent_at: Option<Instant> = None;
     let mut consecutive_audio_stalls = 0_u32;
     let mut last_stall_recovery_notice = Instant::now() - Duration::from_secs(30);
     loop {
@@ -3291,6 +3352,11 @@ async fn connect_and_run_session(
                 if let Ok(frame) = stream_state.latest_frame.read() {
                     if let Some(frame) = frame.clone() {
                         let _ = tx_event.send(UiEvent::StreamFrame(frame));
+                    }
+                }
+                if let Ok(frame) = stream_state.latest_decoded_frame.read() {
+                    if let Some(frame) = frame.clone() {
+                        let _ = tx_event.send(UiEvent::StreamFrameDecoded(frame));
                     }
                 }
                 let active_stream_tags = {
@@ -3348,6 +3414,44 @@ async fn connect_and_run_session(
                     total_frames,
                 };
                 let _ = tx_event.send(UiEvent::StreamDebugUpdate(snapshot));
+            }
+            _ = viewer_recovery_tick.tick() => {
+                let active_stream_tags = {
+                    let streams = stream_state.active_streams.read().await;
+                    streams.keys().copied().collect::<Vec<_>>()
+                };
+                if active_stream_tags.is_empty() {
+                    stream_last_completed = stream_state.counters.completed_frames.load(Ordering::Relaxed);
+                    stream_stall_started_at = None;
+                    continue;
+                }
+
+                let completed_total = stream_state.counters.completed_frames.load(Ordering::Relaxed);
+                if completed_total > stream_last_completed {
+                    stream_last_completed = completed_total;
+                    stream_stall_started_at = None;
+                    continue;
+                }
+
+                let started = stream_stall_started_at.get_or_insert_with(Instant::now);
+                if started.elapsed() < Duration::from_secs(2) {
+                    continue;
+                }
+                let should_send = stream_last_recovery_sent_at
+                    .map(|t| t.elapsed() >= Duration::from_secs(1))
+                    .unwrap_or(true);
+                if !should_send {
+                    continue;
+                }
+
+                for stream_tag in active_stream_tags {
+                    let _ = dispatcher
+                        .send_no_response(pb::client_to_server::Payload::RequestRecovery(
+                            pb::RequestRecovery { stream_tag },
+                        ))
+                        .await;
+                }
+                stream_last_recovery_sent_at = Some(Instant::now());
             }
             _ = audio_health_tick.tick() => {
                 let ping_rtt_ms = disp_health
@@ -4100,6 +4204,22 @@ async fn connect_and_run_session(
                                             ));
                                         }
 
+                                        let requested_layer_id = profile_layer.layer_id;
+                                        let mut negotiated_profile = sender_profile;
+                                        if !r.accepted_layer_ids.contains(&requested_layer_id) {
+                                            if r.accepted_layer_ids.contains(&1) {
+                                                negotiated_profile = VideoStreamProfile::P1080p60;
+                                            } else {
+                                                share_state = ShareState::Idle;
+                                                let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                                    "[video] start share rejected: requested layer {} was not accepted ({:?})",
+                                                    requested_layer_id,
+                                                    r.accepted_layer_ids
+                                                )));
+                                                continue;
+                                            }
+                                        }
+
                                         active_local_stream_id = r.stream_id.clone();
                                         {
                                             let mut streams = stream_state.active_streams.write().await;
@@ -4132,13 +4252,14 @@ async fn connect_and_run_session(
                                         let egress_send = egress.clone();
                                         let video_counters = stream_state.counters.clone();
                                         let selected_profile = saved_settings.screen_share_profile.clone();
+                                        let force_keyframe_requests = force_keyframe_requests.clone();
                                         tokio::spawn(async move {
                                             let stream_senders = negotiated_streams
                                                 .into_iter()
                                                 .filter_map(|(stream_tag, codec)| {
                                                     let codec_name = video_codec_encoder_name(codec)?;
                                                     let mut sender =
-                                                        VideoSender::new(stream_tag, 0, sender_profile, mtu);
+                                                        VideoSender::new(stream_tag, 0, negotiated_profile, mtu);
                                                     sender.set_pacing_enabled(false);
                                                     Some((stream_tag, codec_name.to_string(), sender))
                                                 })
@@ -4226,7 +4347,7 @@ async fn connect_and_run_session(
                                                     for (stream_tag, sender, encoder, frame_idx) in
                                                         &mut stream_encoders
                                                     {
-                                                        let encoded = match encoder.encode(frame.clone()) {
+                                                        let mut encoded = match encoder.encode(frame.clone()) {
                                                             Ok(encoded) => encoded,
                                                             Err(e) => {
                                                                 warn!(
@@ -4237,6 +4358,14 @@ async fn connect_and_run_session(
                                                                 continue;
                                                             }
                                                         };
+
+                                                        let force_keyframe = {
+                                                            let mut guard = force_keyframe_requests.lock().await;
+                                                            guard.remove(stream_tag)
+                                                        };
+                                                        if force_keyframe {
+                                                            encoded.is_keyframe = true;
+                                                        }
 
                                                         if let Err(e) = sender
                                                             .send_frame_async(

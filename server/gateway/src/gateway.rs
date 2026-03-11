@@ -32,7 +32,7 @@ use vp_media::voice_forwarder::VoiceForwarder;
 
 const CONTROL_STREAM_MAX_MSG: usize = 256 * 1024; // 256KB
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
- 
+
 /// Stream-type discriminator bytes written as the first byte on each bidi stream.
 const STREAM_TYPE_MEDIA: u8 = 0x01;
 const STREAM_TYPE_PROFILE_ASSET: u8 = 0x02;
@@ -165,11 +165,11 @@ impl Gateway {
         );
 
         // Ensure default profile exists and update display name from preferred_display_name.
-        if let Err(e) = self.control.create_default_profile(
-            user_id,
-            server_id,
-            &identity.display_name,
-        ).await {
+        if let Err(e) = self
+            .control
+            .create_default_profile(user_id, server_id, &identity.display_name)
+            .await
+        {
             warn!("failed to ensure default profile: {:#}", e);
         }
 
@@ -194,6 +194,7 @@ impl Gateway {
 
         let mut current_channel: Option<ChannelId> = None;
         let mut recovery_forwarded_at: HashMap<u64, Instant> = HashMap::new();
+        let mut stream_session_tags: HashMap<String, Vec<u64>> = HashMap::new();
         let video_forwarder = self.video.clone();
         defer! {
             self.push.unregister(user_id, &session_id);
@@ -393,9 +394,10 @@ impl Gateway {
                             }
                         }
                         STREAM_TYPE_PROFILE_ASSET => {
-                            if let Err(e) = handle_profile_asset_stream(
-                                send_s, recv_s, user_id, &control_svc,
-                            ).await {
+                            if let Err(e) =
+                                handle_profile_asset_stream(send_s, recv_s, user_id, &control_svc)
+                                    .await
+                            {
                                 warn!("profile asset stream failed: {:#}", e);
                             }
                         }
@@ -1328,6 +1330,11 @@ impl Gateway {
                     };
 
                     let stream_id = format!("{:016x}", primary_tag);
+                    let mut stream_tags = vec![primary_tag];
+                    if let Some((tag, _)) = fallback_tag {
+                        stream_tags.push(tag);
+                    }
+                    stream_session_tags.insert(stream_id.clone(), stream_tags);
                     let resp = pb::ServerToClient {
                         request_id: req_id,
                         session_id: Some(pb::SessionId { value: session_id.clone() }),
@@ -1357,7 +1364,15 @@ impl Gateway {
                 }
                 Some(pb::client_to_server::Payload::StopScreenShareRequest(r)) => {
                     if let Some(sid) = r.stream_id.as_ref() {
-                        if let Ok(stream_tag) = u64::from_str_radix(&sid.value, 16) {
+                        let stream_tags = stream_session_tags
+                            .remove(&sid.value)
+                            .or_else(|| {
+                                u64::from_str_radix(&sid.value, 16)
+                                    .ok()
+                                    .map(|stream_tag| vec![stream_tag])
+                            })
+                            .unwrap_or_default();
+                        for stream_tag in stream_tags {
                             for viewer in self.video.subscribers_for_stream(stream_tag).await {
                                 self.push.send_to(viewer, pb::ServerToClient {
                                     request_id: None,
@@ -1399,6 +1414,43 @@ impl Gateway {
                         error: None,
                         event_seq: 0,
                         payload: Some(pb::server_to_client::Payload::CapabilitiesUpdateAck(pb::CapabilitiesUpdateAck {})),
+                    };
+                    if let Err(e) = write_delimited(&mut send, &resp).await {
+                        warn!("control write failed: {:#}", e);
+                        break;
+                    }
+                }
+                Some(pb::client_to_server::Payload::RequestKeyframeRequest(r)) => {
+                    if let Some(sid) = r.stream_id.as_ref() {
+                        if let Ok(stream_tag) = u64::from_str_radix(&sid.value, 16) {
+                            let now = Instant::now();
+                            let should_forward = recovery_forwarded_at
+                                .get(&stream_tag)
+                                .map(|t| now.duration_since(*t) >= Duration::from_millis(500))
+                                .unwrap_or(true);
+                            if should_forward {
+                                recovery_forwarded_at.insert(stream_tag, now);
+                                self.video.note_recovery_request();
+                                if let Some(sender_uid) = self.video.sender_for_stream(stream_tag).await {
+                                    self.push.send_to(sender_uid, pb::ServerToClient {
+                                        request_id: None,
+                                        session_id: None,
+                                        sent_at: Some(now_ts()),
+                                        error: None,
+                                        event_seq: 0,
+                                        payload: Some(pb::server_to_client::Payload::RequestRecovery(pb::RequestRecovery { stream_tag })),
+                                    }).await;
+                                }
+                            }
+                        }
+                    }
+                    let resp = pb::ServerToClient {
+                        request_id: req_id,
+                        session_id: Some(pb::SessionId { value: session_id.clone() }),
+                        sent_at: Some(now_ts()),
+                        error: None,
+                        event_seq: 0,
+                        payload: Some(pb::server_to_client::Payload::RequestKeyframeResponse(pb::RequestKeyframeResponse {})),
                     };
                     if let Err(e) = write_delimited(&mut send, &resp).await {
                         warn!("control write failed: {:#}", e);
@@ -1808,7 +1860,9 @@ impl Gateway {
             at: Some(now_ts()),
             kind: Some(pb::user_profile_event::Kind::UserProfileUpdated(
                 pb::UserProfileUpdated {
-                    user_id: Some(pb::UserId { value: updated_user_id.0.to_string() }),
+                    user_id: Some(pb::UserId {
+                        value: updated_user_id.0.to_string(),
+                    }),
                     profile: Some(profile),
                 },
             )),
@@ -2191,25 +2245,33 @@ fn profile_row_to_pb(row: vp_control::model::UserProfileRow) -> pb::UserProfile 
         })
         .unwrap_or_default();
     pb::UserProfile {
-        user_id: Some(pb::UserId { value: row.user_id.0.to_string() }),
+        user_id: Some(pb::UserId {
+            value: row.user_id.0.to_string(),
+        }),
         display_name: row.display_name,
         avatar_asset_url: row.avatar_asset_url.clone(),
         avatar_asset_id: if row.avatar_asset_url.is_empty() {
             None
         } else {
-            Some(pb::AssetId { value: row.avatar_asset_url })
+            Some(pb::AssetId {
+                value: row.avatar_asset_url,
+            })
         },
         description: row.description,
         status: pb::OnlineStatus::Online as i32,
         custom_status_text: row.custom_status_text,
         badges: vec![],
-        created_at: Some(pb::Timestamp { unix_millis: row.created_at.timestamp_millis() }),
+        created_at: Some(pb::Timestamp {
+            unix_millis: row.created_at.timestamp_millis(),
+        }),
         last_seen_at: None,
         banner_asset_url: row.banner_asset_url.clone(),
         banner_asset_id: if row.banner_asset_url.is_empty() {
             None
         } else {
-            Some(pb::AssetId { value: row.banner_asset_url })
+            Some(pb::AssetId {
+                value: row.banner_asset_url,
+            })
         },
         accent_color: row.accent_color.max(0) as u32,
         links,
