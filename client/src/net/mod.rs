@@ -9,6 +9,7 @@ pub mod video_decode;
 pub mod video_encode;
 pub mod video_frame;
 pub mod video_metrics;
+pub mod video_policy;
 pub mod video_transport;
 pub mod voice_datagram;
 
