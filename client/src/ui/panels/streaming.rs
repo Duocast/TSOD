@@ -62,44 +62,73 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel) {
             let mut rendered = false;
             let mut render_w = 0usize;
             let mut render_h = 0usize;
-            if let Some(frame) = model.latest_stream_decoded_frame.as_ref() {
-                let frame_key = Some((frame.stream_tag, frame.frame_seq));
-                if model.latest_stream_frame_key != frame_key {
-                    let image = egui::ColorImage::from_rgba_unmultiplied(
-                        [frame.width, frame.height],
-                        &frame.rgba,
-                    );
-                    model.latest_stream_frame_texture = Some(ui.ctx().load_texture(
-                        "streaming.latest",
-                        image,
-                        egui::TextureOptions::LINEAR,
-                    ));
-                    render_w = frame.width;
-                    render_h = frame.height;
-                    model.latest_stream_frame_key = frame_key;
-                }
+            let active_stream_tag = dbg
+                .active_stream_tags
+                .iter()
+                .find(|tag| model.latest_stream_decoded_frames.contains_key(tag))
+                .copied()
+                .or_else(|| {
+                    model
+                        .latest_stream_decoded_frames
+                        .iter()
+                        .max_by_key(|(_, frame)| frame.frame_seq)
+                        .map(|(tag, _)| *tag)
+                });
 
-                if render_w == 0 || render_h == 0 {
-                    if let Some(texture) = &model.latest_stream_frame_texture {
-                        render_w = texture.size()[0];
-                        render_h = texture.size()[1];
+            if let Some(stream_tag) = active_stream_tag {
+                if let Some(frame) = model.latest_stream_decoded_frames.get(&stream_tag) {
+                    let should_present = model
+                        .last_presented_stream_frame_key
+                        .get(&stream_tag)
+                        .map(|last_presented| frame.frame_seq > *last_presented)
+                        .unwrap_or(true);
+                    if should_present {
+                        let image = egui::ColorImage::from_rgba_unmultiplied(
+                            [frame.width, frame.height],
+                            &frame.rgba,
+                        );
+                        model.latest_stream_frame_textures.insert(
+                            stream_tag,
+                            ui.ctx().load_texture(
+                                format!("streaming.latest.{stream_tag}"),
+                                image,
+                                egui::TextureOptions::LINEAR,
+                            ),
+                        );
+                        model
+                            .last_presented_stream_frame_key
+                            .insert(stream_tag, frame.frame_seq);
+                        render_w = frame.width;
+                        render_h = frame.height;
                     }
-                }
 
-                if render_w > 0 && render_h > 0 {
-                    let aspect = render_w as f32 / render_h as f32;
-                    let mut draw_size = video_rect.size();
-                    if draw_size.x / draw_size.y > aspect {
-                        draw_size.x = draw_size.y * aspect;
-                    } else {
-                        draw_size.y = draw_size.x / aspect;
+                    if render_w == 0 || render_h == 0 {
+                        if let Some(texture) = model.latest_stream_frame_textures.get(&stream_tag) {
+                            render_w = texture.size()[0];
+                            render_h = texture.size()[1];
+                        }
                     }
-                    let draw_rect = egui::Rect::from_center_size(video_rect.center(), draw_size);
-                    if let Some(texture) = &model.latest_stream_frame_texture {
-                        egui::Image::new((texture.id(), draw_size)).paint_at(ui, draw_rect);
-                        rendered = true;
+
+                    if render_w > 0 && render_h > 0 {
+                        let aspect = render_w as f32 / render_h as f32;
+                        let mut draw_size = video_rect.size();
+                        if draw_size.x / draw_size.y > aspect {
+                            draw_size.x = draw_size.y * aspect;
+                        } else {
+                            draw_size.y = draw_size.x / aspect;
+                        }
+                        let draw_rect =
+                            egui::Rect::from_center_size(video_rect.center(), draw_size);
+                        if let Some(texture) = model.latest_stream_frame_textures.get(&stream_tag) {
+                            egui::Image::new((texture.id(), draw_size)).paint_at(ui, draw_rect);
+                            rendered = true;
+                        }
                     }
                 }
+            }
+
+            if !dbg.active_stream_tags.is_empty() {
+                ui.ctx().request_repaint();
             }
 
             if !rendered {
