@@ -23,18 +23,16 @@ mod settings_io;
 mod ui;
 
 use anyhow::{anyhow, Context, Result};
-use bytes::Bytes;
 use config::Config;
 use crossbeam_channel::{bounded, Receiver, Sender};
 use identity::DeviceIdentity;
-use media_capture::CaptureBackend;
 use media_codec::{DecodeMetadata, VideoSessionConfig};
 use net::dispatcher::{ControlDispatcher, PushEvent};
 use net::egress::EgressScheduler;
 use net::overwrite_queue::{pop_voice_realtime, OverwriteQueue, StampedBytes};
 use net::video_datagram::VideoHeader;
 use net::video_encode::build_screen_encoder;
-use net::video_frame::{FramePlanes, PixelFormat, VideoFrame};
+use net::video_frame::VideoFrame;
 use net::video_transport::{VideoReceiver, VideoSender, VideoStreamProfile};
 use net::voice_datagram::{
     make_voice_datagram, VOICE_FORWARDED_HDR_LEN, VOICE_HDR_LEN, VOICE_VERSION,
@@ -94,302 +92,6 @@ impl ActiveShareSession {
     }
 }
 
-#[cfg(feature = "dev-synthetic-stream")]
-struct SyntheticCapture {
-    width: u32,
-    height: u32,
-    frame_idx: u32,
-}
-
-#[cfg(feature = "dev-synthetic-stream")]
-impl SyntheticCapture {
-    fn new() -> Self {
-        Self {
-            width: 1280,
-            height: 720,
-            frame_idx: 0,
-        }
-    }
-}
-
-#[cfg(feature = "dev-synthetic-stream")]
-impl CaptureBackend for SyntheticCapture {
-    fn next_frame(&mut self) -> anyhow::Result<VideoFrame> {
-        let mut rgba = vec![0_u8; (self.width * self.height * 4) as usize];
-        for y in 0..self.height as usize {
-            for x in 0..self.width as usize {
-                let idx = (y * self.width as usize + x) * 4;
-                rgba[idx] = ((x as u32 + self.frame_idx) & 0xff) as u8;
-                rgba[idx + 1] = ((y as u32 + self.frame_idx * 2) & 0xff) as u8;
-                rgba[idx + 2] = (self.frame_idx & 0xff) as u8;
-                rgba[idx + 3] = 255;
-            }
-        }
-        self.frame_idx = self.frame_idx.wrapping_add(1);
-        Ok(VideoFrame {
-            width: self.width,
-            height: self.height,
-            ts_ms: unix_ms() as u32,
-            format: PixelFormat::Bgra,
-            planes: FramePlanes::Bgra {
-                bytes: Bytes::from(rgba),
-                stride: self.width * 4,
-            },
-        })
-    }
-}
-
-struct ScrapCapture {
-    capturer: scrap::Capturer,
-    width: u32,
-    height: u32,
-}
-
-// SAFETY: ScrapCapture is only used from a single dedicated capture thread.
-// The raw pointers inside scrap::Capturer (DXGI COM objects) are not accessed
-// concurrently; the capture loop is the sole owner.
-unsafe impl Send for ScrapCapture {}
-
-#[cfg(target_os = "windows")]
-struct WindowsWindowCapture {
-    hwnd: windows::Win32::Foundation::HWND,
-}
-
-// SAFETY: HWND is a stable window handle used from a single capture thread.
-// Win32 window handles are safe to send between threads; GDI operations on
-// the handle are performed only from the owning capture thread.
-#[cfg(target_os = "windows")]
-unsafe impl Send for WindowsWindowCapture {}
-
-#[cfg(target_os = "windows")]
-impl WindowsWindowCapture {
-    fn from_source(source: &ShareSource) -> anyhow::Result<Self> {
-        use windows::Win32::Foundation::HWND;
-
-        let ShareSource::WindowsWindow(id) = source else {
-            return Err(anyhow!("invalid capture source for Windows window backend"));
-        };
-
-        let hwnd_raw = id
-            .strip_prefix("window-hwnd-")
-            .and_then(|value| value.parse::<isize>().ok())
-            .ok_or_else(|| anyhow!("invalid window id: {id}"))?;
-        let hwnd = HWND(hwnd_raw as *mut std::ffi::c_void);
-        if hwnd.0.is_null() {
-            return Err(anyhow!("invalid window handle: {id}"));
-        }
-
-        Ok(Self { hwnd })
-    }
-
-    fn window_dimensions(&self) -> anyhow::Result<(u32, u32)> {
-        use windows::Win32::Foundation::RECT;
-        use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
-
-        let mut rect = RECT::default();
-        if unsafe { GetWindowRect(self.hwnd, &mut rect) }.is_err() {
-            return Err(anyhow!(
-                "failed to query window bounds for hwnd={:?}",
-                self.hwnd.0
-            ));
-        }
-        let width = (rect.right - rect.left).max(1) as u32;
-        let height = (rect.bottom - rect.top).max(1) as u32;
-        Ok((width, height))
-    }
-}
-
-#[cfg(target_os = "windows")]
-impl CaptureBackend for WindowsWindowCapture {
-    fn next_frame(&mut self) -> anyhow::Result<VideoFrame> {
-        use windows::Win32::Graphics::Gdi::{
-            BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits,
-            GetWindowDC, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
-            DIB_RGB_COLORS, HGDIOBJ, SRCCOPY,
-        };
-        use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS};
-        use windows::Win32::UI::WindowsAndMessaging::{IsWindow, PW_RENDERFULLCONTENT};
-
-        if !unsafe { IsWindow(Some(self.hwnd)) }.as_bool() {
-            return Err(anyhow!("window is no longer valid: hwnd={:?}", self.hwnd.0));
-        }
-
-        let (width, height) = self.window_dimensions()?;
-        let window_dc = unsafe { GetWindowDC(Some(self.hwnd)) };
-        if window_dc.0.is_null() {
-            return Err(anyhow!("failed to get window device context"));
-        }
-
-        let mem_dc = unsafe { CreateCompatibleDC(Some(window_dc)) };
-        if mem_dc.0.is_null() {
-            unsafe {
-                ReleaseDC(Some(self.hwnd), window_dc);
-            }
-            return Err(anyhow!("failed to create memory device context"));
-        }
-
-        let bitmap = unsafe { CreateCompatibleBitmap(window_dc, width as i32, height as i32) };
-        if bitmap.0.is_null() {
-            unsafe {
-                DeleteDC(mem_dc);
-                ReleaseDC(Some(self.hwnd), window_dc);
-            }
-            return Err(anyhow!("failed to create compatible bitmap"));
-        }
-
-        let previous = unsafe { SelectObject(mem_dc, HGDIOBJ(bitmap.0)) };
-        if previous.0.is_null() {
-            unsafe {
-                DeleteObject(HGDIOBJ(bitmap.0));
-                DeleteDC(mem_dc);
-                ReleaseDC(Some(self.hwnd), window_dc);
-            }
-            return Err(anyhow!("failed to select bitmap into device context"));
-        }
-
-        let printed =
-            unsafe { PrintWindow(self.hwnd, mem_dc, PRINT_WINDOW_FLAGS(PW_RENDERFULLCONTENT)) }
-                .as_bool();
-        if !printed {
-            let _ = unsafe {
-                BitBlt(
-                    mem_dc,
-                    0,
-                    0,
-                    width as i32,
-                    height as i32,
-                    Some(window_dc),
-                    0,
-                    0,
-                    SRCCOPY,
-                )
-            };
-        }
-
-        let mut pixels = vec![0_u8; (width * height * 4) as usize];
-        let mut bitmap_info = BITMAPINFO {
-            bmiHeader: BITMAPINFOHEADER {
-                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth: width as i32,
-                biHeight: -(height as i32),
-                biPlanes: 1,
-                biBitCount: 32,
-                biCompression: BI_RGB.0,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        let rows = unsafe {
-            GetDIBits(
-                mem_dc,
-                bitmap,
-                0,
-                height,
-                Some(pixels.as_mut_ptr() as *mut _),
-                &mut bitmap_info,
-                DIB_RGB_COLORS,
-            )
-        };
-
-        unsafe {
-            SelectObject(mem_dc, previous);
-            DeleteObject(HGDIOBJ(bitmap.0));
-            DeleteDC(mem_dc);
-            ReleaseDC(Some(self.hwnd), window_dc);
-        }
-
-        if rows == 0 {
-            return Err(anyhow!("failed to read window pixels from DIB"));
-        }
-
-        Ok(VideoFrame {
-            width,
-            height,
-            ts_ms: unix_ms() as u32,
-            format: PixelFormat::Bgra,
-            planes: FramePlanes::Bgra {
-                bytes: Bytes::from(pixels),
-                stride: width * 4,
-            },
-        })
-    }
-}
-
-impl ScrapCapture {
-    fn from_source(source: &ShareSource) -> anyhow::Result<Self> {
-        let displays = scrap::Display::all().context("enumerate displays")?;
-        let display = match source {
-            ShareSource::WindowsDisplay(id) => {
-                let n = id
-                    .strip_prefix("screen-")
-                    .and_then(|v| v.parse::<usize>().ok())
-                    .unwrap_or(1)
-                    .max(1);
-                displays
-                    .into_iter()
-                    .nth(n - 1)
-                    .ok_or_else(|| anyhow!("display source not found: {id}"))?
-            }
-            ShareSource::WindowsWindow(id) => {
-                let _ = id;
-                scrap::Display::primary().context("resolve primary display")?
-            }
-            ShareSource::LinuxPortal(id) => {
-                let n = id
-                    .strip_prefix("screen-")
-                    .and_then(|v| v.parse::<usize>().ok())
-                    .unwrap_or(1)
-                    .max(1);
-                displays
-                    .into_iter()
-                    .nth(n - 1)
-                    .or_else(|| scrap::Display::primary().ok())
-                    .ok_or_else(|| anyhow!("display source not found: {id}"))?
-            }
-            ShareSource::X11Window(id) => {
-                let _ = id;
-                scrap::Display::primary().context("resolve primary display")?
-            }
-        };
-
-        let width = display.width() as u32;
-        let height = display.height() as u32;
-        let capturer = scrap::Capturer::new(display).context("create screen capturer")?;
-        Ok(Self {
-            capturer,
-            width,
-            height,
-        })
-    }
-}
-
-impl CaptureBackend for ScrapCapture {
-    fn next_frame(&mut self) -> anyhow::Result<VideoFrame> {
-        loop {
-            match self.capturer.frame() {
-                Ok(frame) => {
-                    let stride = (frame.len() / self.height as usize) as u32;
-                    return Ok(VideoFrame {
-                        width: self.width,
-                        height: self.height,
-                        ts_ms: unix_ms() as u32,
-                        format: PixelFormat::Bgra,
-                        planes: FramePlanes::Bgra {
-                            bytes: Bytes::copy_from_slice(&frame),
-                            stride,
-                        },
-                    });
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(Duration::from_millis(5));
-                }
-                Err(e) => return Err(e).context("read captured screen frame"),
-            }
-        }
-    }
-}
-
 fn map_share_selection(selection: ShareSourceSelection) -> ShareSource {
     match selection {
         ShareSourceSelection::WindowsDisplay(id) => ShareSource::WindowsDisplay(id),
@@ -401,38 +103,6 @@ fn map_share_selection(selection: ShareSourceSelection) -> ShareSource {
 
 fn platform_supports_system_audio() -> bool {
     false
-}
-
-fn build_screen_capture(source: &ShareSource) -> anyhow::Result<Box<dyn CaptureBackend>> {
-    #[cfg(feature = "dev-synthetic-stream")]
-    if std::env::var("VP_USE_SYNTHETIC_SCREEN_CAPTURE")
-        .ok()
-        .as_deref()
-        == Some("1")
-    {
-        return Ok(Box::new(SyntheticCapture::new()));
-    }
-
-    #[cfg(target_os = "windows")]
-    if matches!(source, ShareSource::WindowsWindow(_)) {
-        return Ok(Box::new(WindowsWindowCapture::from_source(source)?));
-    }
-
-    #[cfg(target_os = "linux")]
-    if matches!(source, ShareSource::LinuxPortal(_)) {
-        if std::env::var("WAYLAND_DISPLAY").is_ok()
-            || std::env::var("XDG_SESSION_TYPE")
-                .map(|v| v.eq_ignore_ascii_case("wayland"))
-                .unwrap_or(false)
-        {
-            warn!(
-                "[video] Wayland screen share selected; attempting PipeWire/portal-compatible capture path"
-            );
-        }
-        return Ok(Box::new(ScrapCapture::from_source(source)?));
-    }
-
-    Ok(Box::new(ScrapCapture::from_source(source)?))
 }
 
 #[derive(Clone)]
@@ -4357,9 +4027,16 @@ async fn connect_and_run_session(
                                             });
 
                                             let capture_source = source.clone();
+                                            let runtime_caps =
+                                                screen_share::runtime_probe::probe_media_caps(
+                                                    &capture_source,
+                                                );
                                             let capture_stop = stop_flag.clone();
                                             let capture_task = tokio::task::spawn_blocking(move || {
-                                                let mut cap = match build_screen_capture(&capture_source) {
+                                                let mut cap = match screen_share::capture::build_capture_backend(
+                                                    &capture_source,
+                                                    &runtime_caps,
+                                                ) {
                                                     Ok(cap) => cap,
                                                     Err(e) => {
                                                         warn!(error=?e, "[video] failed to build screen capture backend");
