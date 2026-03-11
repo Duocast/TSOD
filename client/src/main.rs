@@ -3984,13 +3984,12 @@ async fn connect_and_run_session(
 
                                         let egress_send = egress.clone();
                                         let video_counters = stream_state.counters.clone();
-                                        let selected_profile = saved_settings.screen_share_profile.clone();
                                         let active_share_session = active_share_session.clone();
                                         tokio::spawn(async move {
                                             let stream_senders = negotiated_streams
                                                 .into_iter()
                                                 .filter_map(|(stream_tag, codec)| {
-                                                    let codec_name = video_codec_encoder_name(codec)?;
+                                                    video_codec_encoder_name(codec)?;
                                                     let mut sender =
                                                         VideoSender::new(
                                                             stream_tag,
@@ -4001,7 +4000,7 @@ async fn connect_and_run_session(
                                                             mtu,
                                                         );
                                                     sender.set_pacing_enabled(false);
-                                                    Some((stream_tag, codec_name.to_string(), sender))
+                                                    Some((stream_tag, codec, sender))
                                                 })
                                                 .collect::<Vec<_>>();
 
@@ -4027,15 +4026,17 @@ async fn connect_and_run_session(
                                             });
 
                                             let capture_source = source.clone();
-                                            let runtime_caps =
+                                            let runtime_caps = std::sync::Arc::new(
                                                 screen_share::runtime_probe::probe_media_caps(
                                                     &capture_source,
-                                                );
+                                                ),
+                                            );
                                             let capture_stop = stop_flag.clone();
+                                            let capture_caps = runtime_caps.clone();
                                             let capture_task = tokio::task::spawn_blocking(move || {
                                                 let mut cap = match screen_share::capture::build_capture_backend(
                                                     &capture_source,
-                                                    &runtime_caps,
+                                                    capture_caps.as_ref(),
                                                 ) {
                                                     Ok(cap) => cap,
                                                     Err(e) => {
@@ -4059,17 +4060,18 @@ async fn connect_and_run_session(
                                             let send_task = tokio::spawn(async move {
                                                 let mut stream_encoders = stream_senders
                                                     .into_iter()
-                                                    .filter_map(|(stream_tag, codec_name, sender)| {
+                                                    .filter_map(|(stream_tag, codec, sender)| {
                                                         let encoder = match build_screen_encoder(
-                                                            &codec_name,
-                                                            &selected_profile,
+                                                            codec,
+                                                            crate::screen_share::config::SenderPolicy::from_settings_or_env(None),
+                                                            runtime_caps.as_ref(),
                                                         ) {
                                                             Ok(enc) => enc,
                                                             Err(e) => {
                                                                 warn!(
                                                                     error=?e,
                                                                     stream_tag,
-                                                                    codec=%codec_name,
+                                                                    codec=%video_codec_name(codec),
                                                                     "[video] failed to build screen encoder"
                                                                 );
                                                                 return None;

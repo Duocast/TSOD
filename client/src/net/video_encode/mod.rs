@@ -1,73 +1,60 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
+use tracing::info;
 
-use crate::media_codec::{VideoEncoder, VideoSessionConfig};
-use crate::net::video_frame::{EncodedAccessUnit, FramePlanes, PixelFormat, VideoFrame};
+use crate::media_codec::VideoEncoder;
 use crate::proto::voiceplatform::v1 as pb;
+use crate::screen_share::config::{env_video_encoder_override, SenderPolicy};
+use crate::screen_share::runtime_probe::{EncodeBackendKind, MediaRuntimeCaps};
 
 pub mod av1;
+#[cfg(target_os = "linux")]
+pub mod hw_linux;
+#[cfg(target_os = "windows")]
+pub mod hw_windows;
 pub mod vp9;
 
-pub const RAW_VIDEO_MAGIC: [u8; 4] = *b"TSRV";
-
-pub fn build_screen_encoder(codec: &str, _profile: &str) -> Result<Box<dyn VideoEncoder>> {
-    match codec {
-        "AV1" if cfg!(feature = "video-av1-software") => {
-            Ok(Box::new(av1::Av1RealtimeEncoder::new()))
-        }
-        "VP9" if cfg!(feature = "video-vp9") => Ok(Box::new(vp9::Vp9RealtimeEncoder::new())),
-        other => Err(anyhow!(
-            "unsupported screen codec '{}'; enable matching feature",
-            other
-        )),
-    }
-}
-
-pub(crate) fn encode_raw_payload(
-    frame: VideoFrame,
+pub fn build_screen_encoder(
     codec: pb::VideoCodec,
-    backend_tag: u8,
-    force_keyframe: bool,
-    frame_seq: u32,
-) -> Result<EncodedAccessUnit> {
-    let width = frame.width as usize;
-    let height = frame.height as usize;
-    let mut bgra = vec![0_u8; width * height * 4];
-
-    match (&frame.format, frame.planes) {
-        (PixelFormat::Bgra, FramePlanes::Bgra { bytes, stride }) => {
-            let src = bytes;
-            let stride = stride as usize;
-            for y in 0..height {
-                let src_row = &src[y * stride..(y * stride) + width * 4];
-                let dst_row = &mut bgra[y * width * 4..(y + 1) * width * 4];
-                dst_row.copy_from_slice(src_row);
-            }
-        }
-        (PixelFormat::Nv12, FramePlanes::Nv12 { .. }) => {
-            return Err(anyhow!("NV12 screen encoding is not implemented"));
-        }
-        _ => {
-            return Err(anyhow!("pixel format and frame planes mismatch"));
+    policy: SenderPolicy,
+    caps: &MediaRuntimeCaps,
+) -> Result<Box<dyn VideoEncoder>> {
+    if matches!(policy, SenderPolicy::AutoLowLatency) && codec == pb::VideoCodec::Av1 {
+        let sw_enabled = cfg!(feature = "video-av1-software");
+        let has_hw_av1 = caps
+            .encode_backends
+            .get(&pb::VideoCodec::Av1)
+            .map(|backends| {
+                backends
+                    .iter()
+                    .any(|b| matches!(b, EncodeBackendKind::MfHwAv1 | EncodeBackendKind::VaapiAv1))
+            })
+            .unwrap_or(false);
+        if !has_hw_av1 && !sw_enabled {
+            bail!(
+                "AV1 software encoder is disabled for interactive mode; enable `video-av1-software` or provide hardware AV1"
+            );
         }
     }
 
-    let mut encoded = Vec::with_capacity(16 + bgra.len());
-    encoded.extend_from_slice(&RAW_VIDEO_MAGIC);
-    encoded.push(backend_tag);
-    encoded.push(0);
-    encoded.extend_from_slice(&frame.width.to_le_bytes());
-    encoded.extend_from_slice(&frame.height.to_le_bytes());
-    encoded.extend_from_slice(&bgra);
+    let requested = env_video_encoder_override().unwrap_or_else(|| "auto".to_string());
+    let backends = caps
+        .encode_backends
+        .get(&codec)
+        .ok_or_else(|| anyhow!("no runtime backends available for codec {codec:?}"))?;
 
-    Ok(EncodedAccessUnit {
-        codec,
-        layer_id: 0,
-        ts_ms: frame.ts_ms,
-        is_keyframe: force_keyframe || frame_seq % 60 == 0,
-        data: bytes::Bytes::from(encoded),
-    })
-}
+    let encoder = match codec {
+        pb::VideoCodec::Vp9 => vp9::build_vp9_encoder(backends)?,
+        pb::VideoCodec::Av1 => av1::build_av1_encoder(backends, policy)?,
+        _ => bail!("unsupported screen encoder codec {codec:?}"),
+    };
 
-pub(crate) fn apply_config(config: &mut VideoSessionConfig, update: VideoSessionConfig) {
-    *config = update;
+    info!(
+        codec = ?codec,
+        policy = policy.as_str(),
+        env_override = %requested,
+        backend = encoder.backend_name(),
+        "[video] selected screen encoder backend"
+    );
+
+    Ok(encoder)
 }
