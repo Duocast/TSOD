@@ -2,15 +2,7 @@ use anyhow::{anyhow, Context, Result};
 
 use crate::proto::voiceplatform::v1 as pb;
 
-pub struct DecodedVideoFrame {
-    pub width: usize,
-    pub height: usize,
-    pub rgba: Vec<u8>,
-}
-
-pub trait VideoDecoder: Send {
-    fn decode(&mut self, encoded: &[u8]) -> Result<DecodedVideoFrame>;
-}
+use crate::media_codec::{DecodedVideoFrame, VideoDecoder};
 
 pub struct VideoDecoderCache {
     decoders: std::collections::HashMap<pb::VideoCodec, Box<dyn VideoDecoder>>,

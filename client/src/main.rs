@@ -12,6 +12,10 @@ mod app;
 mod audio;
 mod config;
 mod identity;
+mod media_audio_loopback;
+mod media_capture;
+mod media_codec;
+mod media_pipeline;
 mod net;
 mod proto;
 mod settings_io;
@@ -22,6 +26,8 @@ use bytes::Bytes;
 use config::Config;
 use crossbeam_channel::{bounded, Receiver, Sender};
 use identity::DeviceIdentity;
+use media_capture::CaptureBackend;
+use media_codec::VideoEncoder;
 use net::dispatcher::{ControlDispatcher, PushEvent};
 use net::egress::EgressScheduler;
 use net::overwrite_queue::{pop_voice_realtime, OverwriteQueue, StampedBytes};
@@ -91,19 +97,11 @@ pub struct CapturedFrame {
     pub data: FrameData,
 }
 
-pub trait ScreenCapture {
-    fn next_frame(&mut self) -> anyhow::Result<CapturedFrame>;
-}
-
 #[derive(Debug)]
 pub struct EncodedFrame {
     pub ts_ms: u32,
     pub is_keyframe: bool,
     pub data: bytes::Bytes,
-}
-
-trait ScreenEncoder: Send {
-    fn encode(&mut self, frame: CapturedFrame) -> anyhow::Result<EncodedFrame>;
 }
 
 #[derive(Debug, Default)]
@@ -131,7 +129,7 @@ impl Av1AvifEncoder {
     }
 }
 
-impl ScreenEncoder for Av1AvifEncoder {
+impl VideoEncoder for Av1AvifEncoder {
     fn encode(&mut self, frame: CapturedFrame) -> anyhow::Result<EncodedFrame> {
         use image::codecs::avif::AvifEncoder;
         use image::{ColorType, ImageEncoder};
@@ -194,7 +192,7 @@ impl SyntheticCapture {
 }
 
 #[cfg(feature = "dev-synthetic-stream")]
-impl ScreenCapture for SyntheticCapture {
+impl CaptureBackend for SyntheticCapture {
     fn next_frame(&mut self) -> anyhow::Result<CapturedFrame> {
         let mut rgba = vec![0_u8; (self.width * self.height * 4) as usize];
         for y in 0..self.height as usize {
@@ -268,7 +266,7 @@ impl WindowsWindowCapture {
 }
 
 #[cfg(target_os = "windows")]
-impl ScreenCapture for WindowsWindowCapture {
+impl CaptureBackend for WindowsWindowCapture {
     fn next_frame(&mut self) -> anyhow::Result<CapturedFrame> {
         use windows::Win32::Graphics::Gdi::{
             BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits,
@@ -430,7 +428,7 @@ impl ScrapCapture {
     }
 }
 
-impl ScreenCapture for ScrapCapture {
+impl CaptureBackend for ScrapCapture {
     fn next_frame(&mut self) -> anyhow::Result<CapturedFrame> {
         loop {
             match self.capturer.frame() {
@@ -467,7 +465,7 @@ fn platform_supports_system_audio() -> bool {
     false
 }
 
-fn build_screen_capture(source: &ShareSource) -> anyhow::Result<Box<dyn ScreenCapture>> {
+fn build_screen_capture(source: &ShareSource) -> anyhow::Result<Box<dyn CaptureBackend>> {
     #[cfg(feature = "dev-synthetic-stream")]
     if std::env::var("VP_USE_SYNTHETIC_SCREEN_CAPTURE")
         .ok()
@@ -499,7 +497,7 @@ fn build_screen_capture(source: &ShareSource) -> anyhow::Result<Box<dyn ScreenCa
     Ok(Box::new(ScrapCapture::from_source(source)?))
 }
 
-fn build_screen_encoder(codec: &str, _profile: &str) -> anyhow::Result<Box<dyn ScreenEncoder>> {
+fn build_screen_encoder(codec: &str, _profile: &str) -> anyhow::Result<Box<dyn VideoEncoder>> {
     match codec {
         "AV1" if cfg!(feature = "video-av1") => Ok(Box::new(Av1AvifEncoder::new())),
         // TODO(video-vp9): replace AVIF-frame fallback with a realtime VP9 encoder.
