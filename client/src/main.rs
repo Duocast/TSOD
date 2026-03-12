@@ -5034,24 +5034,17 @@ async fn connect_and_run_session(
                                         continue;
                                     };
 
-                                    match dispatcher.join_channel(&dm_channel_id).await {
-                                        Ok(_) => {
-                                            active_channel = Some(dm_channel_id.clone());
-                                            *active_channel_for_reports.write().await =
-                                                active_channel.clone();
-                                            let _ = tx_event.send(UiEvent::SetChannelName(
-                                                dm_channel_id.clone(),
-                                            ));
-                                            let _ = tx_event.send(UiEvent::AppendLog(format!(
-                                                "[dm] opened direct message {dm_channel_id}"
-                                            )));
-                                        }
-                                        Err(e) => {
-                                            let _ = tx_event.send(UiEvent::AppendLog(format!(
-                                                "[dm] open failed: could not switch to dm channel: {e:#}"
-                                            )));
-                                        }
-                                    }
+                                    // DMs are chat-only and do not require joining a voice
+                                    // channel. Switching to the DM id is enough to open it in
+                                    // the chat panel.
+                                    active_channel = Some(dm_channel_id.clone());
+                                    *active_channel_for_reports.write().await =
+                                        active_channel.clone();
+                                    let _ = tx_event
+                                        .send(UiEvent::SetChannelName(dm_channel_id.clone()));
+                                    let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                        "[dm] opened direct message {dm_channel_id}"
+                                    )));
                                 }
                                 Ok(Err(e)) | Err(e) => {
                                     let _ = tx_event.send(UiEvent::AppendLog(format!("[dm] open failed: {e:#}")));
