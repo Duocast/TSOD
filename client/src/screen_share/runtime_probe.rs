@@ -15,18 +15,22 @@ pub enum CaptureBackendKind {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum EncodeBackendKind {
-    HardwareVp9,
-    HardwareAv1,
+    MfHwVp9,
     Libvpx,
+    MfHwAv1,
     SvtAv1,
+    VaapiVp9,
+    VaapiAv1,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum DecodeBackendKind {
-    HardwareVp9,
-    HardwareAv1,
+    MfHwVp9,
     Libvpx,
+    MfHwAv1,
     Dav1d,
+    VaapiVp9,
+    VaapiAv1,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -86,8 +90,6 @@ pub fn probe_media_caps(source: &crate::ShareSource) -> MediaRuntimeCaps {
         .iter()
         .any(|backend| !matches!(backend, SystemAudioBackendKind::Off));
 
-    let supports_1440p60 = benchmark_supports_1440p60(&encode_backends, preferred_codec);
-
     MediaRuntimeCaps {
         capture_backends,
         encode_backends,
@@ -96,30 +98,8 @@ pub fn probe_media_caps(source: &crate::ShareSource) -> MediaRuntimeCaps {
         supports_system_audio,
         max_simulcast_layers: 1,
         preferred_codec,
-        supports_1440p60,
+        supports_1440p60: false,
     }
-}
-
-fn benchmark_supports_1440p60(
-    encode_backends: &HashMap<pb::VideoCodec, Vec<EncodeBackendKind>>,
-    preferred_codec: pb::VideoCodec,
-) -> bool {
-    // Startup benchmark hook. Replace env value with measured throughput harness once
-    // native codec backends are fully integrated.
-    if std::env::var("TSOD_FORCE_1440P60").ok().as_deref() == Some("1") {
-        return true;
-    }
-    encode_backends
-        .get(&preferred_codec)
-        .map(|backends| {
-            backends.iter().any(|b| {
-                matches!(
-                    b,
-                    EncodeBackendKind::HardwareAv1 | EncodeBackendKind::HardwareVp9
-                )
-            })
-        })
-        .unwrap_or(false)
 }
 
 fn preferred_capture_backends(_source: &crate::ShareSource) -> Vec<CaptureBackendKind> {
@@ -149,52 +129,115 @@ fn preferred_encode_backends() -> HashMap<pb::VideoCodec, Vec<EncodeBackendKind>
     let mut map = HashMap::new();
     let hw_disabled = env_disable_hw();
 
-    map.insert(
-        pb::VideoCodec::Vp9,
-        if hw_disabled {
-            vec![EncodeBackendKind::Libvpx]
-        } else {
-            vec![EncodeBackendKind::HardwareVp9, EncodeBackendKind::Libvpx]
-        },
-    );
+    #[cfg(target_os = "windows")]
+    {
+        map.insert(
+            pb::VideoCodec::Vp9,
+            if hw_disabled {
+                vec![EncodeBackendKind::Libvpx]
+            } else {
+                vec![EncodeBackendKind::MfHwVp9, EncodeBackendKind::Libvpx]
+            },
+        );
 
-    let mut av1 = Vec::new();
-    if !hw_disabled {
-        av1.push(EncodeBackendKind::HardwareAv1);
+        let mut av1 = Vec::new();
+        if !hw_disabled {
+            av1.push(EncodeBackendKind::MfHwAv1);
+        }
+        if cfg!(feature = "video-av1-software") {
+            av1.push(EncodeBackendKind::SvtAv1);
+        }
+        if !av1.is_empty() {
+            map.insert(pb::VideoCodec::Av1, av1);
+        }
+
+        return map;
     }
-    if cfg!(feature = "video-av1-software") {
-        av1.push(EncodeBackendKind::SvtAv1);
+
+    #[cfg(target_os = "linux")]
+    {
+        map.insert(
+            pb::VideoCodec::Vp9,
+            if hw_disabled {
+                vec![EncodeBackendKind::Libvpx]
+            } else {
+                vec![EncodeBackendKind::VaapiVp9, EncodeBackendKind::Libvpx]
+            },
+        );
+
+        let mut av1 = Vec::new();
+        if !hw_disabled {
+            av1.push(EncodeBackendKind::VaapiAv1);
+        }
+        if cfg!(feature = "video-av1-software") {
+            av1.push(EncodeBackendKind::SvtAv1);
+        }
+        if !av1.is_empty() {
+            map.insert(pb::VideoCodec::Av1, av1);
+        }
+
+        return map;
     }
-    if !av1.is_empty() {
-        map.insert(pb::VideoCodec::Av1, av1);
+
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    {
+        map.insert(pb::VideoCodec::Vp9, vec![EncodeBackendKind::Libvpx]);
+        map
     }
-    map
 }
 
 fn preferred_decode_backends() -> HashMap<pb::VideoCodec, Vec<DecodeBackendKind>> {
     let mut map = HashMap::new();
     let hw_disabled = env_disable_hw();
 
-    map.insert(
-        pb::VideoCodec::Vp9,
-        if hw_disabled {
-            vec![DecodeBackendKind::Libvpx]
-        } else {
-            vec![DecodeBackendKind::HardwareVp9, DecodeBackendKind::Libvpx]
-        },
-    );
+    #[cfg(target_os = "windows")]
+    {
+        map.insert(
+            pb::VideoCodec::Vp9,
+            if hw_disabled {
+                vec![DecodeBackendKind::Libvpx]
+            } else {
+                vec![DecodeBackendKind::MfHwVp9, DecodeBackendKind::Libvpx]
+            },
+        );
 
-    let mut av1 = Vec::new();
-    if !hw_disabled {
-        av1.push(DecodeBackendKind::HardwareAv1);
+        let mut av1 = Vec::new();
+        if !hw_disabled {
+            av1.push(DecodeBackendKind::MfHwAv1);
+        }
+        av1.push(DecodeBackendKind::Dav1d);
+        map.insert(pb::VideoCodec::Av1, av1);
+        return map;
     }
-    av1.push(DecodeBackendKind::Dav1d);
-    map.insert(pb::VideoCodec::Av1, av1);
-    map
+
+    #[cfg(target_os = "linux")]
+    {
+        map.insert(
+            pb::VideoCodec::Vp9,
+            if hw_disabled {
+                vec![DecodeBackendKind::Libvpx]
+            } else {
+                vec![DecodeBackendKind::VaapiVp9, DecodeBackendKind::Libvpx]
+            },
+        );
+
+        let mut av1 = Vec::new();
+        if !hw_disabled {
+            av1.push(DecodeBackendKind::VaapiAv1);
+        }
+        av1.push(DecodeBackendKind::Dav1d);
+        map.insert(pb::VideoCodec::Av1, av1);
+        return map;
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    {
+        map.insert(pb::VideoCodec::Vp9, vec![DecodeBackendKind::Libvpx]);
+        map
+    }
 }
 
 fn preferred_audio_backends() -> Vec<SystemAudioBackendKind> {
-    /* unchanged */
     if let Some(override_value) = env_system_audio_override() {
         return match override_value.as_str() {
             "off" => vec![SystemAudioBackendKind::Off],
@@ -209,8 +252,10 @@ fn preferred_audio_backends() -> Vec<SystemAudioBackendKind> {
             _ => default_audio_backends(),
         };
     }
+
     default_audio_backends()
 }
+
 fn default_audio_backends() -> Vec<SystemAudioBackendKind> {
     #[cfg(target_os = "windows")]
     {
@@ -219,6 +264,7 @@ fn default_audio_backends() -> Vec<SystemAudioBackendKind> {
             SystemAudioBackendKind::Off,
         ];
     }
+
     #[cfg(target_os = "linux")]
     {
         return vec![
@@ -226,6 +272,7 @@ fn default_audio_backends() -> Vec<SystemAudioBackendKind> {
             SystemAudioBackendKind::Off,
         ];
     }
+
     #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
         vec![SystemAudioBackendKind::Off]
@@ -240,14 +287,20 @@ fn apply_encoder_override(
         "vp9-libvpx" => {
             backends.insert(pb::VideoCodec::Vp9, vec![EncodeBackendKind::Libvpx]);
         }
-        "vp9-mf" | "vp9-vaapi" => {
-            backends.insert(pb::VideoCodec::Vp9, vec![EncodeBackendKind::HardwareVp9]);
+        "vp9-mf" => {
+            backends.insert(pb::VideoCodec::Vp9, vec![EncodeBackendKind::MfHwVp9]);
+        }
+        "vp9-vaapi" => {
+            backends.insert(pb::VideoCodec::Vp9, vec![EncodeBackendKind::VaapiVp9]);
         }
         "av1-svt" => {
             backends.insert(pb::VideoCodec::Av1, vec![EncodeBackendKind::SvtAv1]);
         }
-        "av1-mf" | "av1-vaapi" => {
-            backends.insert(pb::VideoCodec::Av1, vec![EncodeBackendKind::HardwareAv1]);
+        "av1-mf" => {
+            backends.insert(pb::VideoCodec::Av1, vec![EncodeBackendKind::MfHwAv1]);
+        }
+        "av1-vaapi" => {
+            backends.insert(pb::VideoCodec::Av1, vec![EncodeBackendKind::VaapiAv1]);
         }
         _ => {}
     }
@@ -261,14 +314,20 @@ fn apply_decoder_override(
         "vp9-libvpx" => {
             backends.insert(pb::VideoCodec::Vp9, vec![DecodeBackendKind::Libvpx]);
         }
-        "vp9-mf" | "vp9-vaapi" => {
-            backends.insert(pb::VideoCodec::Vp9, vec![DecodeBackendKind::HardwareVp9]);
+        "vp9-mf" => {
+            backends.insert(pb::VideoCodec::Vp9, vec![DecodeBackendKind::MfHwVp9]);
+        }
+        "vp9-vaapi" => {
+            backends.insert(pb::VideoCodec::Vp9, vec![DecodeBackendKind::VaapiVp9]);
         }
         "av1-dav1d" => {
             backends.insert(pb::VideoCodec::Av1, vec![DecodeBackendKind::Dav1d]);
         }
-        "av1-mf" | "av1-vaapi" => {
-            backends.insert(pb::VideoCodec::Av1, vec![DecodeBackendKind::HardwareAv1]);
+        "av1-mf" => {
+            backends.insert(pb::VideoCodec::Av1, vec![DecodeBackendKind::MfHwAv1]);
+        }
+        "av1-vaapi" => {
+            backends.insert(pb::VideoCodec::Av1, vec![DecodeBackendKind::VaapiAv1]);
         }
         _ => {}
     }
