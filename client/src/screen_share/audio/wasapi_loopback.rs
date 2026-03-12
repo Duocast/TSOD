@@ -4,7 +4,7 @@ use std::sync::{
     Arc, Mutex,
 };
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use wasapi::{Direction, StreamMode};
 
 use crate::media_audio_loopback::AudioLoopbackBackend;
@@ -29,7 +29,9 @@ impl WasapiLoopback {
     }
 
     fn run_capture(queue: Arc<Mutex<VecDeque<i16>>>, stop: Arc<AtomicBool>) -> Result<()> {
-        wasapi::initialize_mta().context("initialize COM MTA")?;
+        wasapi::initialize_mta()
+            .ok()
+            .map_err(|e| anyhow!("initialize COM MTA: {e}"))?;
         let enumerator = wasapi::DeviceEnumerator::new().context("create device enumerator")?;
         let device = enumerator
             .get_default_device(&Direction::Render)
@@ -41,8 +43,8 @@ impl WasapiLoopback {
             32,
             32,
             &wasapi::SampleType::Float,
-            SAMPLE_RATE,
-            CHANNELS as u16,
+            SAMPLE_RATE as usize,
+            CHANNELS,
             None,
         );
         let mode = StreamMode::EventsShared {
