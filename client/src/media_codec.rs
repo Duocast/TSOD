@@ -21,8 +21,7 @@ pub trait VideoEncoder: Send {
     fn configure_session(&mut self, config: VideoSessionConfig) -> Result<()>;
     fn request_keyframe(&mut self) -> Result<()>;
     fn update_bitrate(&mut self, bitrate_bps: u32) -> Result<()>;
-    fn encode(&mut self, frame: VideoFrame) -> Result<Option<EncodedAccessUnit>>;
-    fn flush(&mut self) -> Result<Vec<EncodedAccessUnit>>;
+    fn encode(&mut self, frame: VideoFrame) -> Result<EncodedAccessUnit>;
     fn backend_name(&self) -> &'static str;
 }
 
@@ -39,7 +38,7 @@ pub trait VideoDecoder: Send {
         &mut self,
         encoded: &EncodedAccessUnit,
         metadata: DecodeMetadata,
-    ) -> Result<Option<DecodedVideoFrame>>;
+    ) -> Result<DecodedVideoFrame>;
     fn reset(&mut self) -> Result<()>;
     fn backend_name(&self) -> &'static str;
 }
