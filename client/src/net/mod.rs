@@ -4,6 +4,7 @@ pub mod egress;
 pub mod frame;
 pub mod overwrite_queue;
 pub mod quic;
+pub mod video_convert;
 pub mod video_datagram;
 pub mod video_decode;
 pub mod video_encode;

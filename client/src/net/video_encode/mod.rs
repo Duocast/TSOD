@@ -26,7 +26,7 @@ pub fn build_screen_encoder(
             .map(|backends| {
                 backends
                     .iter()
-                    .any(|b| matches!(b, EncodeBackendKind::MfHwAv1 | EncodeBackendKind::VaapiAv1))
+                    .any(|b| matches!(b, EncodeBackendKind::HardwareAv1))
             })
             .unwrap_or(false);
         if !has_hw_av1 && !sw_enabled {

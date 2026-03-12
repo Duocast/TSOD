@@ -6,6 +6,7 @@ use crate::proto::voiceplatform::v1 as pb;
 pub enum PixelFormat {
     Bgra,
     Nv12,
+    I420,
 }
 
 #[derive(Debug, Clone)]
@@ -19,6 +20,14 @@ pub enum FramePlanes {
         uv: Bytes,
         y_stride: u32,
         uv_stride: u32,
+    },
+    I420 {
+        y: Bytes,
+        u: Bytes,
+        v: Bytes,
+        y_stride: u32,
+        u_stride: u32,
+        v_stride: u32,
     },
 }
 
@@ -36,6 +45,10 @@ pub struct EncodedAccessUnit {
     pub codec: pb::VideoCodec,
     pub layer_id: u8,
     pub ts_ms: u32,
+    /// True when this access unit is decoder-refreshing and can be used as the
+    /// first frame after decoder reset/loss recovery.
     pub is_keyframe: bool,
+    /// One complete decodable access unit / display frame in codec bitstream
+    /// form. Codec config OBUs/headers are carried in-band on keyframes.
     pub data: Bytes,
 }

@@ -564,7 +564,7 @@ async fn video_recv_loop(
                     },
                     DecodeMetadata { ts_ms: frame.ts_ms },
                 ) {
-                    Ok(decoded) => {
+                    Ok(Some(decoded)) => {
                         state.counters.decode_frames.fetch_add(1, Ordering::Relaxed);
                         state
                             .counters
@@ -576,6 +576,7 @@ async fn video_recv_loop(
                             .store(decoded.height as u32, Ordering::Relaxed);
                         decoded
                     }
+                    Ok(None) => continue,
                     Err(_err) => {
                         state.counters.decode_errors.fetch_add(1, Ordering::Relaxed);
                         continue;
