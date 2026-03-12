@@ -245,7 +245,7 @@ fn render_profile(
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(&mut child_ui, |ui| {
-            render_content_area(ui, model, tx_intent, profile, accent);
+            render_content_area(ui, model, tx_intent, profile);
         });
 }
 
@@ -254,7 +254,6 @@ fn render_content_area(
     model: &mut UiModel,
     tx_intent: &Sender<UiIntent>,
     profile: &UserProfileData,
-    accent: egui::Color32,
 ) {
     draw_divider(ui);
     ui.add_space(8.0);
@@ -363,7 +362,13 @@ fn render_content_area(
                 } else {
                     &link.platform
                 };
-                draw_tag_chip(ui, emoji, label, accent).on_hover_text(&link.url);
+
+                let link_label = format!("{emoji} {label}");
+                ui.add(
+                    egui::Hyperlink::from_label_and_url(link_label, &link.url)
+                        .open_in_new_tab(true),
+                )
+                .on_hover_text(&link.url);
             }
         });
         ui.add_space(6.0);
