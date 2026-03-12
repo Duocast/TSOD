@@ -301,6 +301,7 @@ pub enum UiEvent {
     UserProfileCacheInvalidated {
         user_id: String,
     },
+    UserProfileUpdated(UserProfileData),
     SelfProfileLoaded(UserProfileData),
     AvatarUploadComplete {
         asset_id: String,
@@ -1403,6 +1404,7 @@ pub struct MemberEntry {
     pub streaming: bool,
     pub speaking: bool,
     pub avatar_url: Option<String>,
+    pub accent_color: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -2392,6 +2394,10 @@ impl UiModel {
         })
     }
 
+    pub fn get_cached_profile_stale(&self, user_id: &str) -> Option<&UserProfileData> {
+        self.profile_cache.get(user_id).map(|cached| &cached.data)
+    }
+
     pub fn insert_profile_cache(&mut self, user_id: String, data: UserProfileData) {
         if self.profile_cache.len() >= PROFILE_CACHE_MAX_ENTRIES {
             if let Some(oldest_key) = self
@@ -2902,6 +2908,21 @@ impl UiModel {
             UiEvent::UserProfileCacheInvalidated { user_id } => {
                 self.profile_cache.remove(&user_id);
             }
+            UiEvent::UserProfileUpdated(profile) => {
+                let user_id = profile.user_id.clone();
+                let accent_color = (profile.accent_color != 0).then_some(profile.accent_color);
+                for members in self.members.values_mut() {
+                    if let Some(member) = members.iter_mut().find(|m| m.user_id == user_id) {
+                        member.accent_color = accent_color;
+                        member.avatar_url = profile.avatar_url.clone();
+                    }
+                }
+                self.insert_profile_cache(profile.user_id.clone(), profile.clone());
+                if user_id == self.user_id {
+                    self.self_profile = Some(profile);
+                }
+                self.refresh_message_author_metadata();
+            }
             UiEvent::UserProfileFetchFailed { user_id } => {
                 // Clear the loading state so the user isn't stuck on an
                 // infinite spinner.  If stub data was already populated from
@@ -3240,7 +3261,7 @@ impl UiModel {
             }
 
             if let Some(avatar_url) = self
-                .get_cached_profile(author_id)
+                .get_cached_profile_stale(author_id)
                 .and_then(|profile| profile.avatar_url.as_ref())
                 .map(|avatar| avatar.trim())
                 .filter(|avatar| !avatar.is_empty())
@@ -3261,6 +3282,17 @@ impl UiModel {
         fallback_author_name_color: Option<u32>,
     ) -> Option<u32> {
         if !author_id.trim().is_empty() {
+            if let Some(color) = self
+                .members
+                .values()
+                .flat_map(|members| members.iter())
+                .find(|member| member.user_id == author_id)
+                .and_then(|member| member.accent_color)
+                .filter(|color| *color != 0)
+            {
+                return Some(color);
+            }
+
             if !self.user_id.is_empty() && self.user_id == author_id {
                 if let Some(profile) = self.self_profile.as_ref() {
                     if profile.accent_color != 0 {
@@ -3270,7 +3302,7 @@ impl UiModel {
             }
 
             if let Some(color) = self
-                .get_cached_profile(author_id)
+                .get_cached_profile_stale(author_id)
                 .map(|profile| profile.accent_color)
                 .filter(|color| *color != 0)
             {
@@ -3523,6 +3555,7 @@ mod tests {
                 streaming: false,
                 speaking: false,
                 avatar_url: None,
+                accent_color: None,
             }],
         );
 
@@ -3590,6 +3623,7 @@ mod tests {
                 streaming: false,
                 speaking: false,
                 avatar_url: None,
+                accent_color: None,
             },
         });
         model.apply_event(UiEvent::MemberJoined {
@@ -3605,6 +3639,7 @@ mod tests {
                 streaming: false,
                 speaking: false,
                 avatar_url: None,
+                accent_color: None,
             },
         });
 
@@ -3629,6 +3664,7 @@ mod tests {
                 streaming: false,
                 speaking: false,
                 avatar_url: None,
+                accent_color: None,
             },
         });
 
@@ -3654,6 +3690,7 @@ mod tests {
                 streaming: false,
                 speaking: false,
                 avatar_url: None,
+                accent_color: None,
             },
         });
 
@@ -3681,6 +3718,7 @@ mod tests {
                 streaming: false,
                 speaking: false,
                 avatar_url: None,
+                accent_color: None,
             },
         });
         model.apply_event(UiEvent::MemberJoined {
@@ -3696,6 +3734,7 @@ mod tests {
                 streaming: false,
                 speaking: false,
                 avatar_url: None,
+                accent_color: None,
             },
         });
 
