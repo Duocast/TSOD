@@ -85,7 +85,7 @@ prost-build = "0.14.3"
 chrono = "0.4.44"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-reqwest = { version = "0.12.24", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.13.1", default-features = false, features = ["json", "rustls-tls"] }
 wasapi = "0.22"
 windows = { version = "0.62.2", features = [
   "Win32_Foundation",
