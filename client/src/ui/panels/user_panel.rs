@@ -5,6 +5,22 @@ use crate::ui::theme;
 use crossbeam_channel::Sender;
 use eframe::egui;
 
+fn user_display_name_color(model: &UiModel) -> egui::Color32 {
+    model
+        .self_profile
+        .as_ref()
+        .map(|profile| profile.accent_color)
+        .filter(|color| *color != 0)
+        .map(|color| {
+            egui::Color32::from_rgb(
+                ((color >> 16) & 0xFF) as u8,
+                ((color >> 8) & 0xFF) as u8,
+                (color & 0xFF) as u8,
+            )
+        })
+        .unwrap_or(egui::Color32::WHITE)
+}
+
 /// Renders the user panel as a self-contained vertical section.
 /// Designed to sit at the bottom of the left sidebar panel.
 pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>) {
@@ -139,6 +155,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                         .as_ref()
                         .and_then(|p| p.current_activity.as_ref())
                         .map(|a| format!("Playing {}", a.game_name));
+                    let display_name_color = user_display_name_color(model);
 
                     let mut block = egui::text::LayoutJob::default();
                     block.append(
@@ -146,7 +163,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                         0.0,
                         egui::TextFormat {
                             font_id: egui::FontId::proportional(20.0),
-                            color: egui::Color32::WHITE,
+                            color: display_name_color,
                             ..Default::default()
                         },
                     );
