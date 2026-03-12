@@ -3,7 +3,8 @@ use std::sync::{
     Arc,
 };
 
-use tokio::sync::{mpsc::Sender, watch};
+use crossbeam_channel::Sender;
+use tokio::sync::watch;
 use tracing::warn;
 
 use crate::audio::opus::{OpusEncoder, OpusEncoderProfile};
@@ -96,7 +97,6 @@ pub async fn start_local_share(params: StartLocalShareParams) {
                             let mut encoder = match OpusEncoder::new(
                                 48_000,
                                 1,
-                                64_000,
                                 OpusEncoderProfile::Music,
                             ) {
                                 Ok(enc) => enc,
@@ -106,6 +106,9 @@ pub async fn start_local_share(params: StartLocalShareParams) {
                                     return;
                                 }
                             };
+                            if let Err(e) = encoder.set_bitrate(64_000) {
+                                warn!(error=?e, "[audio-share] failed to set opus bitrate");
+                            }
                             let mut pcm = vec![0i16; 960];
                             let mut out = vec![0u8; 4000];
                             let ssrc: u32 = rand::random();
