@@ -529,6 +529,14 @@ fn page_application(ui: &mut egui::Ui, model: &mut UiModel) -> bool {
         dirty = true;
     }
 
+    ui.add_space(4.0);
+    ui.horizontal(|ui: &mut egui::Ui| {
+        ui.label("Compact chat avatars:");
+        if ui.toggle_value(&mut s.chat_show_avatars, "").changed() {
+            dirty = true;
+        }
+    });
+
     section(ui, "Debug");
 
     egui::CollapsingHeader::new("Debug Log")

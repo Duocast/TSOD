@@ -775,8 +775,10 @@ fn show_message(
 ) {
     let row_response = ui
         .horizontal(|ui| {
-            show_message_avatar(ui, msg);
-            ui.add_space(8.0);
+            if model.settings.chat_show_avatars {
+                show_message_avatar(ui, msg);
+                ui.add_space(8.0);
+            }
 
             ui.vertical(|ui| {
                 ui.horizontal(|ui| {

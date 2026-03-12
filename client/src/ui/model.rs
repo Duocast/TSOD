@@ -747,6 +747,7 @@ pub struct AppSettings {
     pub language: String,
     pub theme: String,
     pub ui_scale: f32,
+    pub chat_show_avatars: bool,
 
     // ─── Screen Share (modern) ───
     pub screen_share_fps: u32,
@@ -844,6 +845,7 @@ impl Default for AppSettings {
             language: "English".into(),
             theme: "Dark".into(),
             ui_scale: 1.0,
+            chat_show_avatars: true,
 
             // Screen Share
             screen_share_fps: 30,
