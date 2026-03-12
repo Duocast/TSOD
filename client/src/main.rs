@@ -3878,18 +3878,48 @@ async fn connect_and_run_session(
                                 ));
                                 continue;
                             }
-                            let selected_codec = if available_codecs
-                                .iter()
-                                .any(|codec| *codec == saved_settings.screen_share_codec)
-                            {
-                                saved_settings.screen_share_codec.clone()
-                            } else {
-                                available_codecs.first().copied().unwrap_or("VP9").to_string()
+                            let sender_policy = crate::screen_share::config::SenderPolicy::from_settings_or_env(
+                                Some(
+                                    crate::screen_share::config::SenderPolicy::from_setting_value(
+                                        &saved_settings.screen_share_sender_policy,
+                                    ),
+                                ),
+                            );
+                            let preferred_codec = sender_policy
+                                .preferred_codec_order()
+                                .into_iter()
+                                .find_map(|codec| {
+                                    let codec_name = match codec {
+                                        pb::VideoCodec::Av1 => "AV1",
+                                        pb::VideoCodec::Vp8 => "VP8",
+                                        pb::VideoCodec::Vp9 => "VP9",
+                                        _ => return None,
+                                    };
+                                    available_codecs
+                                        .iter()
+                                        .any(|candidate| *candidate == codec_name)
+                                        .then_some((codec_name.to_string(), codec))
+                                })
+                                .or_else(|| {
+                                    available_codecs.first().map(|codec| {
+                                        let codec_enum = match *codec {
+                                            "AV1" => pb::VideoCodec::Av1,
+                                            "VP8" => pb::VideoCodec::Vp8,
+                                            _ => pb::VideoCodec::Vp9,
+                                        };
+                                        ((*codec).to_string(), codec_enum)
+                                    })
+                                });
+                            let Some((selected_codec, preferred_codec)) = preferred_codec else {
+                                let _ = tx_event.send(UiEvent::AppendLog(
+                                    "[video] start share aborted: no supported codecs available".into(),
+                                ));
+                                continue;
                             };
-                            selected_share_codec = selected_codec.clone();
-                            let preferred_codec = match selected_codec.as_str() {
-                                "AV1" => pb::video_caps::Codec::Av1,
-                                "VP8" => pb::video_caps::Codec::Vp8,
+                            selected_share_codec = selected_codec;
+                            let preferred_codec = match preferred_codec {
+                                pb::VideoCodec::Av1 => pb::video_caps::Codec::Av1,
+                                pb::VideoCodec::Vp8 => pb::video_caps::Codec::Vp8,
                                 _ => pb::video_caps::Codec::Vp9,
                             };
                             let request_1440p60 = saved_settings.screen_share_profile == "1440p60"
@@ -3947,6 +3977,25 @@ async fn connect_and_run_session(
                                                 pb::VideoCodec::try_from(fallback_codec)
                                                     .unwrap_or(pb::VideoCodec::Unspecified),
                                             ));
+                                        }
+                                        let negotiated_primary_codec = pb::VideoCodec::try_from(r.primary_codec)
+                                            .unwrap_or(pb::VideoCodec::Unspecified);
+                                        let negotiated_primary_codec_name =
+                                            video_codec_name(negotiated_primary_codec);
+                                        if negotiated_primary_codec_name != selected_share_codec
+                                            || r.fallback_stream_tag.is_some()
+                                        {
+                                            let fallback_note = if r.fallback_stream_tag.is_some() {
+                                                ", fallback stream enabled"
+                                            } else {
+                                                ""
+                                            };
+                                            let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                                "[video] sender policy fallback: requested={} negotiated={}{}",
+                                                selected_share_codec,
+                                                negotiated_primary_codec_name,
+                                                fallback_note
+                                            )));
                                         }
 
                                         let requested_layer_id = profile_layer.layer_id;
@@ -4034,7 +4083,7 @@ async fn connect_and_run_session(
                                                 counters: stream_state.counters.clone(),
                                                 egress: egress.clone(),
                                                 runtime_caps,
-                                                sender_policy: crate::screen_share::config::SenderPolicy::from_settings_or_env(None),
+                                                sender_policy,
                                                 stop_rx: share_stop_rx,
                                                 capture_queue_len_gauge: capture_queue_len_gauge.clone(),
                                                 capture_queue_overflow_total: capture_queue_overflow_total.clone(),

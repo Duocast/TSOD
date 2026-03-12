@@ -731,6 +731,8 @@ pub struct AppSettings {
     // ─── Screen Share (modern) ───
     pub screen_share_fps: u32,
     pub screen_share_max_bitrate_kbps: u32,
+    #[serde(default = "default_screen_share_sender_policy")]
+    pub screen_share_sender_policy: String,
     pub screen_share_codec: String,
     pub screen_share_profile: String,
     pub screen_share_capture_audio: bool,
@@ -826,6 +828,7 @@ impl Default for AppSettings {
             // Screen Share
             screen_share_fps: 30,
             screen_share_max_bitrate_kbps: 3000,
+            screen_share_sender_policy: default_screen_share_sender_policy(),
             screen_share_codec: crate::net::dispatcher::available_screen_share_codecs()
                 .first()
                 .copied()
@@ -847,6 +850,10 @@ impl Default for AppSettings {
             auto_download_files: false,
         }
     }
+}
+
+fn default_screen_share_sender_policy() -> String {
+    "auto_low_latency".to_string()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
