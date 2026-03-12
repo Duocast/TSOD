@@ -1,4 +1,6 @@
-use anyhow::{anyhow, Context};
+use anyhow::anyhow;
+#[cfg(target_os = "windows")]
+use anyhow::Context;
 
 use crate::media_capture::CaptureBackend;
 use crate::net::video_frame::{PixelFormat, VideoFrame};
