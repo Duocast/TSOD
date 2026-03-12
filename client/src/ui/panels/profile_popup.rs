@@ -545,6 +545,10 @@ fn render_content_area(
                 )
                 .clicked()
             {
+                model.profile_popup_user_id = None;
+                model.profile_popup_data = None;
+                model.profile_popup_loading = false;
+                model.profile_popup_anchor = None;
                 let _ = tx_intent.send(UiIntent::CreateDmChannel {
                     participant_user_ids: vec![profile.user_id.clone()],
                 });
