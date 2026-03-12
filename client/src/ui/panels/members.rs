@@ -6,7 +6,16 @@ use crate::ui::theme;
 use crossbeam_channel::Sender;
 use eframe::egui;
 
-fn member_name_color(model: &UiModel, user_id: &str) -> egui::Color32 {
+fn member_name_color(model: &UiModel, member: &crate::ui::model::MemberEntry) -> egui::Color32 {
+    let user_id = member.user_id.as_str();
+    if let Some(color) = member.accent_color.filter(|color| *color != 0) {
+        return egui::Color32::from_rgb(
+            ((color >> 16) & 0xFF) as u8,
+            ((color >> 8) & 0xFF) as u8,
+            (color & 0xFF) as u8,
+        );
+    }
+
     if !user_id.trim().is_empty() {
         if user_id == model.user_id {
             if let Some(color) = model
@@ -24,7 +33,7 @@ fn member_name_color(model: &UiModel, user_id: &str) -> egui::Color32 {
         }
 
         if let Some(color) = model
-            .get_cached_profile(user_id)
+            .get_cached_profile_stale(user_id)
             .map(|profile| profile.accent_color)
             .filter(|color| *color != 0)
         {
@@ -147,7 +156,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                 })
                 .or_else(|| {
                     model
-                        .get_cached_profile(&member.user_id)
+                        .get_cached_profile_stale(&member.user_id)
                         .and_then(|profile| profile.avatar_url.as_deref())
                         .filter(|url| !url.is_empty())
                         .map(str::to_owned)
@@ -218,7 +227,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                 egui::Align2::LEFT_TOP,
                 &member.display_name,
                 egui::TextStyle::Body.resolve(ui.style()),
-                member_name_color(model, &member.user_id),
+                member_name_color(model, &member),
             );
 
             let mut status_parts: Vec<String> = Vec::new();

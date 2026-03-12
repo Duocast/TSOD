@@ -1691,6 +1691,7 @@ fn apply_authoritative_snapshot(
                 speaking: false,
                 avatar_url: (!m.avatar_asset_url.trim().is_empty())
                     .then(|| m.avatar_asset_url.clone()),
+                accent_color: (m.accent_color != 0).then_some(m.accent_color),
             })
             .collect::<Vec<_>>();
         let _ = tx_event.send(UiEvent::UpdateChannelMembers {
@@ -2292,8 +2293,7 @@ async fn connect_and_run_session(
                                     ));
                                     if !author_id.is_empty()
                                         && author_id != local_user_id
-                                        && prefetched_profile_user_ids
-                                            .insert(author_id.clone())
+                                        && prefetched_profile_user_ids.insert(author_id.clone())
                                     {
                                         let tx_event = tx_event.clone();
                                         let dispatcher = dispatcher.clone();
@@ -2483,13 +2483,14 @@ async fn connect_and_run_session(
                                                 streaming: member.streaming,
                                                 speaking: false,
                                                 avatar_url,
+                                                accent_color: (member.accent_color != 0)
+                                                    .then_some(member.accent_color),
                                             },
                                         });
 
                                         if !user_id.is_empty()
                                             && user_id != local_user_id
-                                            && prefetched_profile_user_ids
-                                                .insert(user_id.clone())
+                                            && prefetched_profile_user_ids.insert(user_id.clone())
                                         {
                                             let tx_event = tx_event.clone();
                                             let dispatcher = dispatcher.clone();
@@ -2868,9 +2869,105 @@ async fn connect_and_run_session(
                         match event.kind {
                             Some(pb::user_profile_event::Kind::UserProfileUpdated(updated)) => {
                                 let uid = updated.user_id.map(|u| u.value).unwrap_or_default();
-                                let _ = tx_event.send(UiEvent::UserProfileCacheInvalidated {
-                                    user_id: uid.clone(),
-                                });
+                                if let Some(profile) = updated.profile {
+                                    let avatar_url = if profile.avatar_asset_url.is_empty() {
+                                        None
+                                    } else {
+                                        match resolve_profile_asset_uri(
+                                            &conn,
+                                            &profile.avatar_asset_url,
+                                        )
+                                        .await
+                                        {
+                                            Ok(url) => url,
+                                            Err(e) => {
+                                                let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                                    "[profile] resolve avatar failed for {uid}: {e:#}"
+                                                )));
+                                                Some(profile.avatar_asset_url.clone())
+                                            }
+                                        }
+                                    };
+                                    let banner_url = if profile.banner_asset_url.is_empty() {
+                                        None
+                                    } else {
+                                        match resolve_profile_asset_uri(
+                                            &conn,
+                                            &profile.banner_asset_url,
+                                        )
+                                        .await
+                                        {
+                                            Ok(url) => url,
+                                            Err(e) => {
+                                                let _ = tx_event.send(UiEvent::AppendLog(format!(
+                                                    "[profile] resolve banner failed for {uid}: {e:#}"
+                                                )));
+                                                Some(profile.banner_asset_url.clone())
+                                            }
+                                        }
+                                    };
+                                    let user_profile = ui::model::UserProfileData {
+                                        user_id: profile
+                                            .user_id
+                                            .map(|u| u.value)
+                                            .unwrap_or_default(),
+                                        display_name: profile.display_name,
+                                        description: profile.description,
+                                        status: ui_status_from_pb(profile.status),
+                                        custom_status_text: profile.custom_status_text,
+                                        custom_status_emoji: profile.custom_status_emoji,
+                                        accent_color: profile.accent_color,
+                                        avatar_url,
+                                        banner_url,
+                                        badges: profile
+                                            .badges
+                                            .into_iter()
+                                            .map(|badge| ui::model::BadgeData {
+                                                id: badge.id,
+                                                label: badge.label,
+                                                icon_url: badge.icon_url,
+                                                tooltip: badge.tooltip,
+                                            })
+                                            .collect(),
+                                        links: profile
+                                            .links
+                                            .into_iter()
+                                            .map(|link| ui::model::ProfileLinkData {
+                                                platform: link.platform,
+                                                url: link.url,
+                                                display_text: link.display_text,
+                                                verified: link.verified,
+                                            })
+                                            .collect(),
+                                        created_at: profile
+                                            .created_at
+                                            .map(|ts| ts.unix_millis)
+                                            .unwrap_or_default(),
+                                        last_seen_at: profile
+                                            .last_seen_at
+                                            .map(|ts| ts.unix_millis)
+                                            .unwrap_or_default(),
+                                        current_activity: profile.current_activity.map(
+                                            |activity| ui::model::GameActivityData {
+                                                game_name: activity.game_name,
+                                                details: activity.details,
+                                                state: activity.state,
+                                                started_at: activity
+                                                    .started_at
+                                                    .map(|ts| ts.unix_millis)
+                                                    .unwrap_or_default(),
+                                                large_image_url: activity.large_image_url,
+                                            },
+                                        ),
+                                        roles: Vec::new(),
+                                    };
+                                    let _ =
+                                        tx_event.send(UiEvent::UserProfileUpdated(user_profile));
+                                } else {
+                                    let _ = tx_event.send(UiEvent::UserProfileCacheInvalidated {
+                                        user_id: uid.clone(),
+                                    });
+                                }
                                 let _ = tx_event.send(UiEvent::AppendLog(format!(
                                     "[profile] profile updated for {uid}"
                                 )));
@@ -3678,6 +3775,7 @@ async fn connect_and_run_session(
                                             streaming: m.streaming,
                                             speaking: false,
                                             avatar_url,
+                                            accent_color: (m.accent_color != 0).then_some(m.accent_color),
                                         });
                                     }
                                     let _ = tx_event.send(UiEvent::UpdateChannelMembers {
