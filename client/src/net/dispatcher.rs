@@ -1352,7 +1352,7 @@ pub fn build_screenshare_caps(caps: &MediaRuntimeCaps) -> pb::ScreenShareCaps {
         } else {
             8_000_000
         },
-        max_simulcast_layers: caps.max_simulcast_layers,
+        max_simulcast_layers: u32::from(caps.max_simulcast_layers),
         supports_system_audio: caps.supports_system_audio,
     }
 }
