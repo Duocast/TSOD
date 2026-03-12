@@ -9,18 +9,22 @@ pub enum SenderPolicy {
 impl SenderPolicy {
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::AutoLowLatency => "auto",
-            Self::AutoPremiumAv1 => "av1",
+            Self::AutoLowLatency => "auto_low_latency",
+            Self::AutoPremiumAv1 => "auto_premium_av1",
+        }
+    }
+
+    pub fn from_setting_value(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "auto_premium_av1" | "av1" => Self::AutoPremiumAv1,
+            "auto_low_latency" | "auto" | "vp9" => Self::AutoLowLatency,
+            _ => Self::AutoLowLatency,
         }
     }
 
     pub fn from_settings_or_env(settings_policy: Option<Self>) -> Self {
         if let Ok(value) = std::env::var("TSOD_VIDEO_CODEC_POLICY") {
-            match value.trim().to_ascii_lowercase().as_str() {
-                "av1" => return Self::AutoPremiumAv1,
-                "auto" | "vp9" => return Self::AutoLowLatency,
-                _ => {}
-            }
+            return Self::from_setting_value(&value);
         }
 
         settings_policy.unwrap_or(Self::AutoLowLatency)
