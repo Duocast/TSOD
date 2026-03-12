@@ -7,11 +7,11 @@ edition = "2021"
 default = ["dsp", "aec"]
 dsp = []
 aec = ["dsp", "dep:sonora-aec3"]
-screen-share = ["video-vp9", "video-av1-decode"]
+screen-share = ["video-vp9", "video-av1-software", "video-av1-decode"]
 video-call = ["video-vp9", "video-av1-decode"]
-video-vp9 = []
-video-av1-decode = []
-video-av1-software = []
+video-vp9 = ["dep:vpx-encode"]
+video-av1-decode = ["dep:dav1d"]
+video-av1-software = ["dep:svt-av1-sys"]
 screen-share-hw-windows = []
 screen-share-hw-linux = []
 capture-dxgi = []
@@ -70,6 +70,9 @@ dirs = "6"
 rfd = "0.17.2"
 url = "2.5.7"
 scrap = "0.5.0"
+vpx-encode = { version = "0.6", optional = true }
+svt-av1-sys = { version = "0.1", optional = true }
+dav1d = { version = "0.10", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 pipewire = { version = "0.9.2", features = ["v0_3_44"] }
