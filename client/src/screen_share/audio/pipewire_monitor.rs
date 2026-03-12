@@ -43,26 +43,21 @@ impl AudioLoopbackBackend for PipeWireMonitor {
     }
 
     fn start(&mut self) -> Result<()> {
-        let host = cpal::available_hosts()
-            .into_iter()
-            .find(|id| *id == cpal::HostId::PipeWire)
-            .map(cpal::host_from_id)
-            .transpose()?
-            .unwrap_or_else(cpal::default_host);
+        let host = cpal::default_host();
         let device = Self::select_monitor_device(&host)?;
         let supported = device
             .supported_input_configs()
             .context("query monitor input configs")?
             .find(|cfg| {
                 cfg.sample_format() == cpal::SampleFormat::F32
-                    && cfg.min_sample_rate().0 <= SAMPLE_RATE
-                    && cfg.max_sample_rate().0 >= SAMPLE_RATE
+                    && cfg.min_sample_rate() <= SAMPLE_RATE
+                    && cfg.max_sample_rate() >= SAMPLE_RATE
                     && cfg.channels() >= 1
             })
             .ok_or_else(|| anyhow!("no 48kHz float monitor format supported"))?;
         let config = cpal::StreamConfig {
             channels: CHANNELS,
-            sample_rate: cpal::SampleRate(SAMPLE_RATE),
+            sample_rate: SAMPLE_RATE,
             buffer_size: cpal::BufferSize::Default,
         };
         let queue = self.queue.clone();
