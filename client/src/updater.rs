@@ -20,7 +20,8 @@ pub enum UpdateInstallResult {
 pub async fn check_for_updates() -> Result<UpdateCheckResult> {
     info!("[update] checking for updates");
 
-    let updater = match AxoUpdater::new_for(APP_ID).load_receipt() {
+    let mut updater = AxoUpdater::new_for(APP_ID);
+    let updater = match updater.load_receipt() {
         Ok(updater) => updater,
         Err(err) => {
             warn!("[update] no dist receipt available; updater unsupported: {err:#}");
@@ -33,12 +34,10 @@ pub async fn check_for_updates() -> Result<UpdateCheckResult> {
         .await
         .context("query update state")?
     {
-        let release = updater
-            .get_latest_version()
-            .await
-            .context("query latest release")?;
-        info!("[update] update available: {release}");
-        Ok(UpdateCheckResult::UpdateAvailable { version: release })
+        info!("[update] update available");
+        Ok(UpdateCheckResult::UpdateAvailable {
+            version: "new version available".to_string(),
+        })
     } else {
         info!("[update] no update available");
         Ok(UpdateCheckResult::UpToDate)
@@ -48,7 +47,8 @@ pub async fn check_for_updates() -> Result<UpdateCheckResult> {
 pub async fn install_update() -> Result<UpdateInstallResult> {
     info!("[update] install requested");
 
-    let updater = match AxoUpdater::new_for(APP_ID).load_receipt() {
+    let mut updater = AxoUpdater::new_for(APP_ID);
+    let updater = match updater.load_receipt() {
         Ok(updater) => updater,
         Err(err) => {
             warn!("[update] install unsupported; missing dist receipt: {err:#}");
