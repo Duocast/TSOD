@@ -3921,8 +3921,6 @@ async fn connect_and_run_session(
                                     "[video] 1440p60 unavailable (startup benchmark/runtime headroom); using 1080p60".into(),
                                 ));
                             }
-                            let request_id = uuid::Uuid::new_v4();
-                            share_state = screen_share::fsm::ShareState::Starting { request_id };
                             let req = pb::StartScreenShareRequest {
                                 channel_id: active_channel.as_ref().map(|id| pb::ChannelId { value: id.clone() }),
                                 codec: preferred_codec as i32,
@@ -4064,7 +4062,6 @@ async fn connect_and_run_session(
                             }
                         }
                         UiIntent::StopScreenShare => {
-                            share_state = screen_share::fsm::ShareState::Stopping { reason: screen_share::fsm::StopReason::UserRequested };
                             active_share_session.clear();
                             {
                                 let mut stream_tags = active_share_session.stream_tags.lock().await;
