@@ -2473,7 +2473,7 @@ async fn connect_and_run_session(
                                         let _ = tx_event.send(UiEvent::MemberJoined {
                                             channel_id: channel_id.value,
                                             member: ui::model::MemberEntry {
-                                                user_id,
+                                                user_id: user_id.clone(),
                                                 display_name: member.display_name,
                                                 away_message: String::new(),
                                                 muted: member.muted,
