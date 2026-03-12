@@ -4381,6 +4381,25 @@ async fn connect_and_run_session(
                                 .await
                             {
                                 Ok(()) => {
+                                    if let Ok(mut profile) =
+                                        dispatcher.fetch_self_profile(&local_user_id).await
+                                    {
+                                        if let Some(raw) = profile.avatar_url.as_deref() {
+                                            if let Ok(resolved) =
+                                                resolve_profile_asset_uri(&conn, raw).await
+                                            {
+                                                profile.avatar_url = resolved;
+                                            }
+                                        }
+                                        if let Some(raw) = profile.banner_url.as_deref() {
+                                            if let Ok(resolved) =
+                                                resolve_profile_asset_uri(&conn, raw).await
+                                            {
+                                                profile.banner_url = resolved;
+                                            }
+                                        }
+                                        let _ = tx_event.send(UiEvent::SelfProfileLoaded(profile));
+                                    }
                                     let _ = tx_event.send(UiEvent::ProfileUpdateComplete);
                                     let _ = tx_event.send(UiEvent::AppendLog(
                                         "[profile] profile saved".to_string(),

@@ -2917,7 +2917,9 @@ impl UiModel {
                         self.avatar_url = Some(url.clone());
                     }
                 }
+                self.insert_profile_cache(profile.user_id.clone(), profile.clone());
                 self.self_profile = Some(profile);
+                self.refresh_message_author_metadata();
             }
             UiEvent::AvatarUploadComplete {
                 asset_id,
