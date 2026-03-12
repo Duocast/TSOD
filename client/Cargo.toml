@@ -63,6 +63,7 @@ cosmic-text = "0.18"
 # Utilities
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
+semver = "1.0.27"
 chrono = { version = "0.4.44", features = ["serde"] }
 parking_lot = "0.12.5"
 crossbeam-channel = "0.5.15"
@@ -84,6 +85,7 @@ prost-build = "0.14.3"
 chrono = "0.4.44"
 
 [target.'cfg(target_os = "windows")'.dependencies]
+reqwest = { version = "0.12.24", default-features = false, features = ["json", "rustls-tls"] }
 wasapi = "0.22"
 windows = { version = "0.62.2", features = [
   "Win32_Foundation",
