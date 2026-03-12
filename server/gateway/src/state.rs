@@ -647,6 +647,7 @@ pub struct StreamTeardown {
 pub struct StreamSessionRegistry {
     sessions_by_stream_id: HashMap<String, StreamSessionOwnership>,
     stream_id_by_tag: HashMap<u64, String>,
+    viewer_preferred_layers: HashMap<(String, UserId), u8>,
     recovery_forwarded_at: HashMap<u64, Instant>,
     recovery_forwards: u64,
     keyframe_requests: u64,
@@ -694,6 +695,8 @@ impl StreamSessionRegistry {
             self.recovery_forwarded_at.remove(tag);
         }
         self.orphan_cleanup_count += removed_orphan_tags as u64;
+        self.viewer_preferred_layers
+            .retain(|(sid, _), _| sid != stream_id);
 
         StreamTeardown {
             stream_id: stream_id.to_string(),
@@ -712,6 +715,20 @@ impl StreamSessionRegistry {
             .map(|ownership| (stream_id.as_str(), ownership))
     }
 
+    pub fn ownership_by_stream_id(&self, stream_id: &str) -> Option<&StreamSessionOwnership> {
+        self.sessions_by_stream_id.get(stream_id)
+    }
+
+    pub fn set_viewer_preferred_layer(&mut self, stream_id: &str, viewer: UserId, layer_id: u8) {
+        self.viewer_preferred_layers
+            .insert((stream_id.to_string(), viewer), layer_id);
+    }
+
+    pub fn viewer_preferred_layer(&self, stream_id: &str, viewer: UserId) -> Option<u8> {
+        self.viewer_preferred_layers
+            .get(&(stream_id.to_string(), viewer))
+            .copied()
+    }
     pub fn primary_tag_for_stream_id(&self, stream_id: &str) -> Option<u64> {
         self.sessions_by_stream_id
             .get(stream_id)
