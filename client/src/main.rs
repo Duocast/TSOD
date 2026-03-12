@@ -3932,6 +3932,12 @@ async fn connect_and_run_session(
                             let probed_caps = screen_share::runtime_probe::probe_media_caps(&source);
                             let include_audio = saved_settings.screen_share_capture_audio
                                 && probed_caps.supports_system_audio;
+                            if saved_settings.screen_share_capture_audio && !probed_caps.supports_system_audio {
+                                let _ = tx_event.send(UiEvent::SetScreenShareSystemAudioStatus {
+                                    available: false,
+                                    detail: "System audio unavailable on this platform/runtime. Sharing video-only.".into(),
+                                });
+                            }
                             let available_codecs = net::dispatcher::available_screen_share_codecs();
                             if available_codecs.is_empty() {
                                 let _ = tx_event.send(UiEvent::AppendLog(
@@ -4151,6 +4157,8 @@ async fn connect_and_run_session(
                                                 encode_queue_len_gauge: encode_queue_len_gauge.clone(),
                                                 packetize_queue_len_gauge: packetize_queue_len_gauge.clone(),
                                                 backend_label: backend_label.clone(),
+                                                active_voice_channel_route: active_voice_channel_route.clone(),
+                                                tx_event: tx_event.clone(),
                                             },
                                         )));
                                     } else {

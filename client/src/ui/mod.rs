@@ -758,6 +758,16 @@ impl eframe::App for VpApp {
                             ui.toggle_value(&mut self.model.share_include_audio, "Include sound");
                         });
                     });
+                    let audio_color = if self.model.screen_share_system_audio_available {
+                        theme::COLOR_ONLINE
+                    } else {
+                        theme::COLOR_DANGER
+                    };
+                    ui.label(
+                        egui::RichText::new(self.model.screen_share_system_audio_detail.clone())
+                            .small()
+                            .color(audio_color),
+                    );
 
                     ui.add_space(12.0);
                     ui.label(egui::RichText::new("Presenter mode").strong().size(16.0));

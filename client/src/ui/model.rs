@@ -275,6 +275,10 @@ pub enum UiEvent {
     },
     StreamDebugUpdate(StreamDebugView),
     StreamFrame(StreamFrameView),
+    SetScreenShareSystemAudioStatus {
+        available: bool,
+        detail: String,
+    },
 
     // Telemetry
     TelemetryUpdate(TelemetryData),
@@ -1919,6 +1923,8 @@ pub struct UiModel {
     pub selected_share_source: Option<ShareSourceSelection>,
     pub sharing_active: bool,
     pub start_share_in_flight: bool,
+    pub screen_share_system_audio_available: bool,
+    pub screen_share_system_audio_detail: String,
     pub stream_debug: StreamDebugView,
     pub latest_stream_frames: HashMap<u64, StreamFrameView>,
     pub latest_stream_frame_textures: HashMap<u64, egui::TextureHandle>,
@@ -2248,6 +2254,8 @@ impl Default for UiModel {
             selected_share_source: None,
             sharing_active: false,
             start_share_in_flight: false,
+            screen_share_system_audio_available: true,
+            screen_share_system_audio_detail: "System audio: ready".into(),
             stream_debug: StreamDebugView::default(),
             latest_stream_frames: HashMap::new(),
             latest_stream_frame_textures: HashMap::new(),
@@ -2471,6 +2479,10 @@ impl UiModel {
                 if should_store {
                     self.latest_stream_frames.insert(frame.stream_tag, frame);
                 }
+            }
+            UiEvent::SetScreenShareSystemAudioStatus { available, detail } => {
+                self.screen_share_system_audio_available = available;
+                self.screen_share_system_audio_detail = detail;
             }
             UiEvent::SetAwayMessage(message) => {
                 self.away_message = message.clone();

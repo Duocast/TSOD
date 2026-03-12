@@ -1,20 +1,23 @@
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering},
+    atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering},
     Arc,
 };
 
-use tokio::sync::watch;
+use tokio::sync::{mpsc::Sender, watch};
 use tracing::warn;
 
+use crate::audio::opus::{OpusEncoder, OpusEncoderProfile};
 use crate::media_codec::VideoSessionConfig;
 use crate::net::egress::EgressScheduler;
 use crate::net::overwrite_queue::OverwriteQueue;
 use crate::net::video_encode::build_screen_encoder;
 use crate::net::video_frame::VideoFrame;
 use crate::net::video_transport::{VideoSender, VideoStreamProfile};
+use crate::net::voice_datagram::make_voice_datagram;
 use crate::proto::voiceplatform::v1 as pb;
 use crate::screen_share::config::SenderPolicy;
 use crate::screen_share::runtime_probe::MediaRuntimeCaps;
+use crate::ui::model::UiEvent;
 
 use crate::{video_codec_name, ShareSource, VideoRuntimeCounters};
 
@@ -52,13 +55,11 @@ pub struct StartLocalShareParams {
     pub encode_queue_len_gauge: Arc<AtomicU64>,
     pub packetize_queue_len_gauge: Arc<AtomicU64>,
     pub backend_label: Arc<std::sync::Mutex<String>>,
+    pub active_voice_channel_route: Arc<AtomicU32>,
+    pub tx_event: Sender<UiEvent>,
 }
 
 pub async fn start_local_share(params: StartLocalShareParams) {
-    if params.include_audio {
-        warn!("[audio] include_audio requested but system audio capture is currently disabled");
-    }
-
     let stop_flag = Arc::new(AtomicBool::new(false));
     let capture_queue = Arc::new(OverwriteQueue::<VideoFrame>::new(CAPTURE_QUEUE_DEPTH));
 
@@ -74,6 +75,108 @@ pub async fn start_local_share(params: StartLocalShareParams) {
             }
         }
     });
+
+    let mut audio_worker: Option<tokio::task::JoinHandle<()>> = None;
+    if params.include_audio {
+        match crate::screen_share::audio::build_system_audio_backend(params.runtime_caps.as_ref()) {
+            Ok(Some(mut backend)) => {
+                let backend_name = backend.backend_name().to_string();
+                match backend.start() {
+                    Ok(()) => {
+                        let _ = params
+                            .tx_event
+                            .send(UiEvent::SetScreenShareSystemAudioStatus {
+                                available: true,
+                                detail: format!("System audio: enabled ({backend_name})"),
+                            });
+                        let stop = stop_flag.clone();
+                        let egress = params.egress.clone();
+                        let active_route = params.active_voice_channel_route.clone();
+                        audio_worker = Some(tokio::spawn(async move {
+                            let mut encoder = match OpusEncoder::new(
+                                48_000,
+                                1,
+                                64_000,
+                                OpusEncoderProfile::Music,
+                            ) {
+                                Ok(enc) => enc,
+                                Err(e) => {
+                                    warn!(error=?e, "[audio-share] failed to initialize opus encoder");
+                                    backend.stop();
+                                    return;
+                                }
+                            };
+                            let mut pcm = vec![0i16; 960];
+                            let mut out = vec![0u8; 4000];
+                            let ssrc: u32 = rand::random();
+                            let mut seq = 0u32;
+                            let mut ts_ms = 0u32;
+                            while !stop.load(Ordering::Relaxed) {
+                                if !backend.read_frame(&mut pcm) {
+                                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                                    continue;
+                                }
+                                let Ok(n) = encoder.encode(&pcm, &mut out) else {
+                                    continue;
+                                };
+                                let route = active_route.load(Ordering::Relaxed);
+                                if route == 0 {
+                                    continue;
+                                }
+                                let d =
+                                    make_voice_datagram(route, ssrc, seq, ts_ms, true, &out[..n]);
+                                if let Err(reason) = egress.enqueue_voice(d) {
+                                    warn!(
+                                        ?reason,
+                                        "[audio-share] failed to enqueue system audio datagram"
+                                    );
+                                }
+                                seq = seq.wrapping_add(1);
+                                ts_ms = ts_ms.wrapping_add(20);
+                            }
+                            backend.stop();
+                        }));
+                    }
+                    Err(e) => {
+                        warn!(error=?e, "[audio-share] failed to start system audio backend; continuing video-only");
+                        let _ = params
+                            .tx_event
+                            .send(UiEvent::SetScreenShareSystemAudioStatus {
+                                available: false,
+                                detail: format!("System audio failed: {e:#}. Sharing video-only."),
+                            });
+                    }
+                }
+            }
+            Ok(None) => {
+                let _ = params
+                    .tx_event
+                    .send(UiEvent::SetScreenShareSystemAudioStatus {
+                        available: false,
+                        detail: "System audio unavailable on this runtime. Sharing video-only."
+                            .into(),
+                    });
+            }
+            Err(e) => {
+                warn!(error=?e, "[audio-share] system audio init failed; continuing video-only");
+                let _ = params
+                    .tx_event
+                    .send(UiEvent::SetScreenShareSystemAudioStatus {
+                        available: false,
+                        detail: format!(
+                            "System audio failed to initialize: {e:#}. Sharing video-only."
+                        ),
+                    });
+            }
+        }
+    } else {
+        let _ = params
+            .tx_event
+            .send(UiEvent::SetScreenShareSystemAudioStatus {
+                available: true,
+                detail: "System audio: disabled".into(),
+            });
+    }
 
     let capture_stop = stop_flag.clone();
     let capture_source = params.source.clone();
@@ -269,6 +372,9 @@ pub async fn start_local_share(params: StartLocalShareParams) {
     }
 
     for worker in stream_workers {
+        let _ = worker.await;
+    }
+    if let Some(worker) = audio_worker {
         let _ = worker.await;
     }
     let _ = stop_watch_task.await;
