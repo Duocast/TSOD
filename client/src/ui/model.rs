@@ -3071,7 +3071,7 @@ impl UiModel {
                 self.update_in_progress = false;
                 self.update_available_version = None;
                 self.update_status_text =
-                    "Automatic updates are unavailable for this install type".to_string();
+                    "Automatic updates are unavailable for this install. Use a cargo-dist packaged install to enable in-app updates.".to_string();
             }
             UiEvent::UpdateInstalling => {
                 self.update_in_progress = true;
