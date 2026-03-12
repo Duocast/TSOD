@@ -86,7 +86,9 @@ pub fn probe_media_caps(source: &crate::ShareSource) -> MediaRuntimeCaps {
         .find(|codec| encode_backends.contains_key(codec))
         .unwrap_or(pb::VideoCodec::Vp9);
 
-    let supports_system_audio = false;
+    let supports_system_audio = audio_backends
+        .iter()
+        .any(|backend| !matches!(backend, SystemAudioBackendKind::Off));
 
     MediaRuntimeCaps {
         capture_backends,
