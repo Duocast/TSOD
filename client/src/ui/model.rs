@@ -342,6 +342,17 @@ pub enum UiEvent {
     SetDefaultChannelId(Option<String>),
     SetPipeWirePulseFallbackSuggested(bool),
 
+    // Updater
+    UpdateCheckStarted,
+    UpdateAvailable {
+        version: String,
+    },
+    UpdateNotAvailable,
+    UpdateUnsupportedInstall,
+    UpdateInstalling,
+    UpdateInstalled,
+    UpdateError(String),
+
     // Settings loaded from disk
     SettingsLoaded(Box<AppSettings>),
     PermissionsMembersLoaded {
@@ -542,6 +553,10 @@ pub enum UiIntent {
         selection: ShareSourceSelection,
     },
     StopScreenShare,
+
+    // Updater
+    CheckForUpdates,
+    InstallUpdate,
 
     // Settings: Apply all (sent after settings are saved)
     ApplySettings(Box<AppSettings>),
@@ -1851,6 +1866,10 @@ pub struct UiModel {
     pub show_settings: bool,
     pub show_about: bool,
     pub about_tab: usize,
+    pub update_status_text: String,
+    pub update_in_progress: bool,
+    pub update_available_version: Option<String>,
+    pub update_check_started_this_session: bool,
     pub show_telemetry: bool,
     pub show_connections: bool,
     pub member_connection_info_windows: Vec<MemberConnectionInfoWindow>,
@@ -2192,6 +2211,10 @@ impl Default for UiModel {
             show_settings: false,
             show_about: false,
             about_tab: 0,
+            update_status_text: "Not checked yet".to_string(),
+            update_in_progress: false,
+            update_available_version: None,
+            update_check_started_this_session: false,
             show_telemetry: false,
             show_connections: false,
             member_connection_info_windows: Vec::new(),
@@ -3029,6 +3052,40 @@ impl UiModel {
             }
             UiEvent::SetPipeWirePulseFallbackSuggested(suggested) => {
                 self.pipewire_pulse_fallback_suggested = suggested;
+            }
+            UiEvent::UpdateCheckStarted => {
+                self.update_in_progress = true;
+                self.update_status_text = "Checking for updates…".to_string();
+            }
+            UiEvent::UpdateAvailable { version } => {
+                self.update_in_progress = false;
+                self.update_available_version = Some(version.clone());
+                self.update_status_text = format!("Update available: {version}");
+            }
+            UiEvent::UpdateNotAvailable => {
+                self.update_in_progress = false;
+                self.update_available_version = None;
+                self.update_status_text = "You are up to date".to_string();
+            }
+            UiEvent::UpdateUnsupportedInstall => {
+                self.update_in_progress = false;
+                self.update_available_version = None;
+                self.update_status_text =
+                    "Automatic updates are unavailable for this install type".to_string();
+            }
+            UiEvent::UpdateInstalling => {
+                self.update_in_progress = true;
+                self.update_status_text = "Installing update…".to_string();
+            }
+            UiEvent::UpdateInstalled => {
+                self.update_in_progress = false;
+                self.update_available_version = None;
+                self.update_status_text =
+                    "Update installed. Please restart the app to use the new version.".to_string();
+            }
+            UiEvent::UpdateError(err) => {
+                self.update_in_progress = false;
+                self.update_status_text = format!("Update check/install failed: {err}");
             }
             UiEvent::SettingsLoaded(s) => {
                 self.settings = *s.clone();

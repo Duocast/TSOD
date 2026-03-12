@@ -25,7 +25,7 @@ pub use model::{ConnectionStage, UiEvent, UiIntent, UiModel};
 use crossbeam_channel::{Receiver, Sender};
 use eframe::egui;
 
-use crate::BUILD_VERSION;
+use crate::{APP_VERSION, BUILD_VERSION};
 
 const TSOD_LOGO: egui::ImageSource<'static> = egui::include_image!("../../assets/tsod-logo.png");
 const THIRD_PARTY_LICENSES: &str = include_str!("../../assets/third_party_licenses.tsv");
@@ -276,7 +276,11 @@ impl eframe::App for VpApp {
         egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.label(egui::RichText::new("TSOD").strong().size(16.0));
-                ui.label(egui::RichText::new(BUILD_VERSION).size(12.0).monospace());
+                ui.label(
+                    egui::RichText::new(format!("v{APP_VERSION}"))
+                        .size(12.0)
+                        .monospace(),
+                );
                 ui.add_sized([6.0, 18.0], egui::Separator::default().vertical());
 
                 let conn_text = if self.model.connected {
@@ -463,10 +467,31 @@ impl eframe::App for VpApp {
                                 );
                                 ui.add_space(8.0);
                                 ui.heading("TSOD");
-                                ui.label(egui::RichText::new(format!("Version {BUILD_VERSION}")).monospace());
+                                ui.label(egui::RichText::new(format!("App Version: {APP_VERSION}")).monospace());
+                                ui.label(egui::RichText::new(format!("Build Timestamp: {BUILD_VERSION}")).monospace());
                             });
                             ui.add_space(10.0);
                             ui.label("TSOD is a low-latency, TeamSpeak- and Discord-inspired voice collaboration client built for reliable channels, rich chat, permissions-aware moderation, and high quality audio/video communication across modern desktop environments.");
+                            ui.add_space(10.0);
+                            ui.label(egui::RichText::new("Automatic updates").strong());
+                            ui.label(self.model.update_status_text.clone());
+                            ui.horizontal(|ui| {
+                                let check_clicked = ui
+                                    .add_enabled(!self.model.update_in_progress, egui::Button::new("Check for updates"))
+                                    .clicked();
+                                if check_clicked {
+                                    self.model.update_check_started_this_session = true;
+                                    let _ = self.tx_intent.send(UiIntent::CheckForUpdates);
+                                }
+
+                                let can_install = self.model.update_available_version.is_some() && !self.model.update_in_progress;
+                                if ui
+                                    .add_enabled(can_install, egui::Button::new("Install update"))
+                                    .clicked()
+                                {
+                                    let _ = self.tx_intent.send(UiIntent::InstallUpdate);
+                                }
+                            });
                         }
                         _ => {
                             ui.label(

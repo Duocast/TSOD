@@ -35,6 +35,7 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 uuid = { version = "1.21", features = ["v4"] }
 vp-route-hash = { path = "../shared/route-hash" }
 vp-voice = { path = "../shared/voice" }
+axoupdater = "0.10.0"
 
 # QUIC / TLS
 quinn = "0.11.9"

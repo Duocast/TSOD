@@ -9,7 +9,7 @@ use crate::{
     },
     proto::voiceplatform::v1 as pb,
     screen_share::runtime_probe::probe_media_caps,
-    ShareSource,
+    ShareSource, APP_VERSION,
 };
 
 const MAX_CTRL_MSG: usize = 256 * 1024;
@@ -157,7 +157,7 @@ fn default_caps(alpn: &str) -> pb::ClientCaps {
     pb::ClientCaps {
         build: Some(pb::BuildInfo {
             client_name: "vp-client".into(),
-            client_version: "0.1.0".into(),
+            client_version: APP_VERSION.into(),
             platform: std::env::consts::OS.into(),
             git_sha: "".into(),
         }),
