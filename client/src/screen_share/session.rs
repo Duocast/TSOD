@@ -11,14 +11,12 @@ use crate::audio::opus::{OpusEncoder, OpusEncoderProfile};
 use crate::media_codec::VideoSessionConfig;
 use crate::net::egress::EgressScheduler;
 use crate::net::overwrite_queue::OverwriteQueue;
-use crate::net::video_convert::convert_frame;
 use crate::net::video_encode::build_screen_encoder;
-use crate::net::video_frame::{PixelFormat, VideoFrame};
+use crate::net::video_frame::VideoFrame;
 use crate::net::video_transport::{VideoSender, VideoStreamProfile};
 use crate::net::voice_datagram::make_voice_datagram;
 use crate::proto::voiceplatform::v1 as pb;
 use crate::screen_share::config::SenderPolicy;
-use crate::screen_share::policy::bitrate::BitrateController;
 use crate::screen_share::runtime_probe::MediaRuntimeCaps;
 use crate::ui::model::UiEvent;
 
@@ -60,12 +58,6 @@ pub struct StartLocalShareParams {
     pub backend_label: Arc<std::sync::Mutex<String>>,
     pub active_voice_channel_route: Arc<AtomicU32>,
     pub tx_event: Sender<UiEvent>,
-}
-
-fn profile_fps(profile: VideoStreamProfile) -> u32 {
-    match profile {
-        VideoStreamProfile::P1080p60 | VideoStreamProfile::P1440p60 => 60,
-    }
 }
 
 pub async fn start_local_share(params: StartLocalShareParams) {
@@ -288,39 +280,16 @@ pub async fn start_local_share(params: StartLocalShareParams) {
         let encode_depth = params.encode_queue_len_gauge.clone();
         let packet_depth = params.packetize_queue_len_gauge.clone();
         let counters = params.counters.clone();
-        let negotiated_profile = params.negotiated_profile;
-        let active_layer_id = params.active_layer_id.clone();
-        let bitrate_controller =
-            BitrateController::new(negotiated_profile, active_layer_id.load(Ordering::Relaxed));
-        let target_pixel_format = if encoder.backend_name().contains("libvpx")
-            || encoder.backend_name().contains("svt")
-        {
-            PixelFormat::I420
-        } else {
-            PixelFormat::Nv12
-        };
         let encode_task = tokio::spawn(async move {
             let mut configured = false;
-            let mut produced = 0u32;
-            let mut last_fps_emit = std::time::Instant::now();
-            while let Some(mut frame) = stream_encode_q.pop_latest_or_wait().await {
+            while let Some(frame) = stream_encode_q.pop_latest_or_wait().await {
                 encode_depth.store(stream_encode_q.len() as u64, Ordering::Relaxed);
-                if frame.format != target_pixel_format {
-                    match convert_frame(frame, target_pixel_format) {
-                        Ok(converted) => frame = converted,
-                        Err(e) => {
-                            counters.encode_errors.fetch_add(1, Ordering::Relaxed);
-                            warn!(error=?e, stream_tag, "[video] conversion failed");
-                            continue;
-                        }
-                    }
-                }
                 if !configured {
                     if let Err(e) = encoder.configure_session(VideoSessionConfig {
                         width: frame.width,
                         height: frame.height,
-                        fps: profile_fps(negotiated_profile),
-                        target_bitrate_bps: bitrate_controller.current_target_bps(),
+                        fps: 30,
+                        target_bitrate_bps: 2_000_000,
                         low_latency: true,
                         allow_frame_drop: true,
                     }) {
@@ -330,19 +299,12 @@ pub async fn start_local_share(params: StartLocalShareParams) {
                     configured = true;
                 }
 
-                let layer_id = active_layer_id.load(Ordering::Relaxed);
-                bitrate_controller.set_layer(layer_id);
-                let target_bps = bitrate_controller
-                    .apply_network_feedback(bitrate_controller.current_target_bps());
-                let _ = encoder.update_bitrate(target_bps);
-
                 if force_keyframe.swap(false, Ordering::Relaxed) {
                     let _ = encoder.request_keyframe();
                 }
 
                 match encoder.encode(frame) {
-                    Ok(Some(encoded)) => {
-                        produced = produced.saturating_add(1);
+                    Ok(encoded) => {
                         stream_packet_q.push(EncodedFrame {
                             ts_ms: encoded.ts_ms,
                             is_keyframe: encoded.is_keyframe,
@@ -354,27 +316,10 @@ pub async fn start_local_share(params: StartLocalShareParams) {
                             .queue_depth_packetize
                             .store(stream_packet_q.len() as u64, Ordering::Relaxed);
                     }
-                    Ok(None) => {}
                     Err(e) => {
                         counters.encode_errors.fetch_add(1, Ordering::Relaxed);
                         warn!(error=?e, stream_tag, "[video] encode failed")
                     }
-                }
-
-                let elapsed = last_fps_emit.elapsed().as_secs_f32();
-                if elapsed >= 1.0 {
-                    crate::net::dispatcher::report_runtime_encode_fps(produced as f32 / elapsed);
-                    produced = 0;
-                    last_fps_emit = std::time::Instant::now();
-                }
-            }
-            if let Ok(flushed) = encoder.flush() {
-                for encoded in flushed {
-                    stream_packet_q.push(EncodedFrame {
-                        ts_ms: encoded.ts_ms,
-                        is_keyframe: encoded.is_keyframe,
-                        data: encoded.data,
-                    });
                 }
             }
             stream_packet_q.close();
