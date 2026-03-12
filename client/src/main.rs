@@ -3211,7 +3211,7 @@ async fn connect_and_run_session(
                     loss_rate,
                     decode_error_rate,
                 };
-                let decision = layer_selection_policy.evaluate(Instant::now(), signals);
+                let decision = layer_selection_policy.evaluate(Instant::now().into(), signals);
 
                 let stream_id_value = {
                     let ids = stream_state.stream_ids.read().await;
