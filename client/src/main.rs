@@ -2194,7 +2194,7 @@ async fn connect_and_run_session(
         let dispatcher = dispatcher.clone();
         let active_share_session = active_share_session.clone();
         tokio::spawn(async move {
-            let mut prefetched_chat_profile_user_ids = HashSet::new();
+            let mut prefetched_profile_user_ids = HashSet::new();
             while let Some(ev) = push_rx.recv().await {
                 match ev {
                     PushEvent::Chat {
@@ -2292,7 +2292,7 @@ async fn connect_and_run_session(
                                     ));
                                     if !author_id.is_empty()
                                         && author_id != local_user_id
-                                        && prefetched_chat_profile_user_ids
+                                        && prefetched_profile_user_ids
                                             .insert(author_id.clone())
                                     {
                                         let tx_event = tx_event.clone();
@@ -2485,6 +2485,33 @@ async fn connect_and_run_session(
                                                 avatar_url,
                                             },
                                         });
+
+                                        if !user_id.is_empty()
+                                            && user_id != local_user_id
+                                            && prefetched_profile_user_ids
+                                                .insert(user_id.clone())
+                                        {
+                                            let tx_event = tx_event.clone();
+                                            let dispatcher = dispatcher.clone();
+                                            let conn = conn.clone();
+                                            tokio::spawn(async move {
+                                                if let Ok(mut profile) =
+                                                    dispatcher.fetch_user_profile(&user_id).await
+                                                {
+                                                    if let Some(raw) = profile.avatar_url.as_deref()
+                                                    {
+                                                        if let Ok(resolved) =
+                                                            resolve_profile_asset_uri(&conn, raw)
+                                                                .await
+                                                        {
+                                                            profile.avatar_url = resolved;
+                                                        }
+                                                    }
+                                                    let _ = tx_event
+                                                        .send(UiEvent::UserProfileLoaded(profile));
+                                                }
+                                            });
+                                        }
                                     }
                                 }
                                 pb::presence_event::Kind::MemberLeft(ml) => {
