@@ -6,6 +6,39 @@ use crate::ui::theme;
 use crossbeam_channel::Sender;
 use eframe::egui;
 
+fn member_name_color(model: &UiModel, user_id: &str) -> egui::Color32 {
+    if !user_id.trim().is_empty() {
+        if user_id == model.user_id {
+            if let Some(color) = model
+                .self_profile
+                .as_ref()
+                .map(|profile| profile.accent_color)
+                .filter(|color| *color != 0)
+            {
+                return egui::Color32::from_rgb(
+                    ((color >> 16) & 0xFF) as u8,
+                    ((color >> 8) & 0xFF) as u8,
+                    (color & 0xFF) as u8,
+                );
+            }
+        }
+
+        if let Some(color) = model
+            .get_cached_profile(user_id)
+            .map(|profile| profile.accent_color)
+            .filter(|color| *color != 0)
+        {
+            return egui::Color32::from_rgb(
+                ((color >> 16) & 0xFF) as u8,
+                ((color >> 8) & 0xFF) as u8,
+                (color & 0xFF) as u8,
+            );
+        }
+    }
+
+    theme::text_color()
+}
+
 pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>) {
     ui.heading("Members");
 
@@ -185,7 +218,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                 egui::Align2::LEFT_TOP,
                 &member.display_name,
                 egui::TextStyle::Body.resolve(ui.style()),
-                theme::text_color(),
+                member_name_color(model, &member.user_id),
             );
 
             let mut status_parts: Vec<String> = Vec::new();
