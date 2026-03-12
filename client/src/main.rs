@@ -2194,7 +2194,7 @@ async fn connect_and_run_session(
         let dispatcher = dispatcher.clone();
         let active_share_session = active_share_session.clone();
         tokio::spawn(async move {
-            let mut prefetched_chat_profile_user_ids = HashSet::new();
+            let mut prefetched_profile_user_ids = HashSet::new();
             while let Some(ev) = push_rx.recv().await {
                 match ev {
                     PushEvent::Chat {
@@ -2292,7 +2292,7 @@ async fn connect_and_run_session(
                                     ));
                                     if !author_id.is_empty()
                                         && author_id != local_user_id
-                                        && prefetched_chat_profile_user_ids
+                                        && prefetched_profile_user_ids
                                             .insert(author_id.clone())
                                     {
                                         let tx_event = tx_event.clone();
@@ -2473,7 +2473,7 @@ async fn connect_and_run_session(
                                         let _ = tx_event.send(UiEvent::MemberJoined {
                                             channel_id: channel_id.value,
                                             member: ui::model::MemberEntry {
-                                                user_id,
+                                                user_id: user_id.clone(),
                                                 display_name: member.display_name,
                                                 away_message: String::new(),
                                                 muted: member.muted,
@@ -2485,6 +2485,33 @@ async fn connect_and_run_session(
                                                 avatar_url,
                                             },
                                         });
+
+                                        if !user_id.is_empty()
+                                            && user_id != local_user_id
+                                            && prefetched_profile_user_ids
+                                                .insert(user_id.clone())
+                                        {
+                                            let tx_event = tx_event.clone();
+                                            let dispatcher = dispatcher.clone();
+                                            let conn = conn.clone();
+                                            tokio::spawn(async move {
+                                                if let Ok(mut profile) =
+                                                    dispatcher.fetch_user_profile(&user_id).await
+                                                {
+                                                    if let Some(raw) = profile.avatar_url.as_deref()
+                                                    {
+                                                        if let Ok(resolved) =
+                                                            resolve_profile_asset_uri(&conn, raw)
+                                                                .await
+                                                        {
+                                                            profile.avatar_url = resolved;
+                                                        }
+                                                    }
+                                                    let _ = tx_event
+                                                        .send(UiEvent::UserProfileLoaded(profile));
+                                                }
+                                            });
+                                        }
                                     }
                                 }
                                 pb::presence_event::Kind::MemberLeft(ml) => {
@@ -5034,39 +5061,9 @@ async fn connect_and_run_session(
                                         continue;
                                     };
 
-                                    // Ensure the DM is represented in the local channel list so
-                                    // selecting it always opens in the chat panel.
-                                    let dm_name = payload
-                                        .channel
-                                        .as_ref()
-                                        .map(|channel| channel.name.trim())
-                                        .filter(|name| !name.is_empty())
-                                        .unwrap_or("Direct Message")
-                                        .to_string();
-                                    let _ = tx_event.send(UiEvent::ChannelCreated(
-                                        ui::model::ChannelEntry {
-                                            id: dm_channel_id.clone(),
-                                            name: dm_name,
-                                            channel_type: ui::model::ChannelType::Text,
-                                            parent_id: None,
-                                            position: i32::MAX,
-                                            member_count: 0,
-                                            user_limit: 0,
-                                            description: String::new(),
-                                            bitrate_bps: 0,
-                                            opus_profile: pb::OpusProfile::OpusVoice as i32,
-                                        },
-                                    ));
-
-                                    // Some backends may accept joining a DM channel while others
-                                    // treat DMs as chat-only. Attempt join, but always switch the
-                                    // selected chat so the DM window opens reliably.
-                                    if let Err(e) = dispatcher.join_channel(&dm_channel_id).await {
-                                        let _ = tx_event.send(UiEvent::AppendLog(format!(
-                                            "[dm] join skipped/fallback for {dm_channel_id}: {e:#}"
-                                        )));
-                                    }
-
+                                    // DMs are chat-only and do not require joining a voice
+                                    // channel. Switching to the DM id is enough to open it in
+                                    // the chat panel.
                                     active_channel = Some(dm_channel_id.clone());
                                     *active_channel_for_reports.write().await =
                                         active_channel.clone();
