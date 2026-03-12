@@ -10,6 +10,8 @@ mod orphan_cleaner;
 mod outbox_dispatch;
 mod overwrite_queue;
 mod prune;
+mod screenshare;
+mod screenshare_policy;
 mod state;
 mod tls;
 

@@ -20,6 +20,8 @@ use crate::{
     media::MediaService,
     overwrite_queue::{pop_voice_realtime, OverwriteQueue, StampedBytes},
     proto::voiceplatform::v1 as pb,
+    screenshare::{select_and_persist_layer, validate_viewer_access},
+    screenshare_policy::ScreenSharePolicy,
     state::{
         MembershipCache, PushHub, Sessions, StreamSessionOwnership, StreamSessionRegistry,
         VoiceTelemetryCache, VoiceTelemetrySample,
@@ -197,6 +199,7 @@ impl Gateway {
 
         let mut current_channel: Option<ChannelId> = None;
         let mut stream_registry = StreamSessionRegistry::new();
+        let mut screenshare_policy = ScreenSharePolicy::default();
         let video_forwarder = self.video.clone();
         defer! {
             self.push.unregister(user_id, &session_id);
@@ -1421,6 +1424,44 @@ impl Gateway {
                         error: None,
                         event_seq: 0,
                         payload: Some(pb::server_to_client::Payload::CapabilitiesUpdateAck(pb::CapabilitiesUpdateAck {})),
+                    };
+                    if let Err(e) = write_delimited(&mut send, &resp).await {
+                        warn!("control write failed: {:#}", e);
+                        break;
+                    }
+                }
+                Some(pb::client_to_server::Payload::SelectScreenShareLayerRequest(r)) => {
+                    let sid = r
+                        .stream_id
+                        .as_ref()
+                        .ok_or(ControlError::InvalidArgument("stream_id missing"))?;
+                    let ownership = stream_registry
+                        .ownership_by_stream_id(&sid.value)
+                        .ok_or(ControlError::InvalidArgument("unknown stream_id"))?;
+                    let channel_members = self.membership.members_of(ownership.channel_id);
+                    validate_viewer_access(&stream_registry, &sid.value, user_id, channel_members.as_ref())?;
+                    let (active_layer_id, primary_tag) = select_and_persist_layer(
+                        &mut stream_registry,
+                        &mut screenshare_policy,
+                        &sid.value,
+                        user_id,
+                        r.preferred_layer_id,
+                    )?;
+                    self.video
+                        .set_viewer_preferred_layer(primary_tag, user_id, active_layer_id)
+                        .await;
+
+                    let resp = pb::ServerToClient {
+                        request_id: req_id,
+                        session_id: Some(pb::SessionId { value: session_id.clone() }),
+                        sent_at: Some(now_ts()),
+                        error: None,
+                        event_seq: 0,
+                        payload: Some(pb::server_to_client::Payload::SelectScreenShareLayerResponse(
+                            pb::SelectScreenShareLayerResponse {
+                                active_layer_id: active_layer_id as u32,
+                            },
+                        )),
                     };
                     if let Err(e) = write_delimited(&mut send, &resp).await {
                         warn!("control write failed: {:#}", e);

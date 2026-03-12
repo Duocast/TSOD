@@ -22,14 +22,17 @@ use std::{
 
 use bytes::Bytes;
 use tokio::sync::mpsc::error::TrySendError;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
 use vp_control::ids::{ChannelId, UserId};
 
-use crate::voice_forwarder::{DatagramTx, SessionRegistry};
+use crate::{
+    layer_filter::LayerFilter,
+    voice_forwarder::{DatagramTx, SessionRegistry},
+};
 
 // ── Video datagram header parsing (server-side) ───────────────────────
 
@@ -367,6 +370,7 @@ pub struct StreamForwarder {
 
     /// Per-viewer send loops: (user_id, session_id) → enqueue handle + lifecycle state.
     viewer_loops: RwLock<HashMap<(UserId, String), ViewerLoopEntry>>,
+    layer_filter: Mutex<LayerFilter>,
     forwarded_fragments: AtomicU64,
     dropped_queue_full: AtomicU64,
     dropped_malformed: AtomicU64,
@@ -416,6 +420,7 @@ impl StreamForwarder {
             streams: RwLock::new(HashMap::new()),
             subscriptions: RwLock::new(HashMap::new()),
             viewer_loops: RwLock::new(HashMap::new()),
+            layer_filter: Mutex::new(LayerFilter::default()),
             forwarded_fragments: AtomicU64::new(0),
             dropped_queue_full: AtomicU64::new(0),
             dropped_malformed: AtomicU64::new(0),
@@ -481,6 +486,13 @@ impl StreamForwarder {
             .unwrap_or_default()
     }
 
+    pub async fn set_viewer_preferred_layer(&self, stream_tag: u64, viewer: UserId, layer_id: u8) {
+        self.layer_filter
+            .lock()
+            .await
+            .set_preferred_layer(stream_tag, viewer, layer_id);
+    }
+
     pub fn note_recovery_request(&self) {
         self.metrics.inc_recovery_requests();
     }
@@ -490,6 +502,7 @@ impl StreamForwarder {
         debug!(stream_tag, "stream unregistered");
         self.streams.write().await.remove(&stream_tag);
         self.subscriptions.write().await.remove(&stream_tag);
+        self.layer_filter.lock().await.remove_stream(stream_tag);
     }
 
     /// Remove viewer queues for a disconnecting session.
@@ -597,6 +610,16 @@ impl StreamForwarder {
         let mut forwarded = 0usize;
 
         for viewer_id in viewer_ids {
+            let should_forward = self.layer_filter.lock().await.should_forward(
+                hdr.stream_tag,
+                viewer_id,
+                hdr.layer_id,
+                hdr.is_priority(),
+            );
+            if !should_forward {
+                continue;
+            }
+
             let sessions = self.sessions.get_sessions(viewer_id).await;
             if sessions.is_empty() {
                 self.dropped_sessions_empty_for_viewer

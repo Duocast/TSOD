@@ -37,6 +37,9 @@ use net::voice_datagram::{
     make_voice_datagram, VOICE_FORWARDED_HDR_LEN, VOICE_HDR_LEN, VOICE_VERSION,
 };
 use proto::voiceplatform::v1 as pb;
+use screen_share::policy::layer_selection::{
+    select_active_share_layer, ViewerLayerSelectionPolicy, ViewerLayerSignals,
+};
 use screen_share::policy::recovery::{RecoveryPolicyConfig, ViewerRecoveryPolicy};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -409,16 +412,6 @@ fn is_video_datagram(datagram: &Bytes) -> bool {
     datagram.len() >= 2
         && datagram[0] == vp_voice::VIDEO_VERSION
         && datagram[1] == vp_voice::DATAGRAM_KIND_VIDEO
-}
-
-fn select_active_share_layer(requested_layer_id: u32, accepted_layer_ids: &[u32]) -> Option<u32> {
-    if accepted_layer_ids.contains(&requested_layer_id) {
-        return Some(requested_layer_id);
-    }
-    if accepted_layer_ids.contains(&1) {
-        return Some(1);
-    }
-    None
 }
 
 async fn datagram_demux_loop(
@@ -3037,6 +3030,9 @@ async fn connect_and_run_session(
     let mut audio_health_tick = tokio::time::interval(Duration::from_secs(1));
     let mut stream_ui_tick = tokio::time::interval(Duration::from_secs(1));
     let mut viewer_recovery_tick = tokio::time::interval(Duration::from_millis(200));
+    let mut layer_selection_tick = tokio::time::interval(Duration::from_millis(250));
+    let mut layer_selection_policy = ViewerLayerSelectionPolicy::new(1);
+    let mut last_decode_sample = (0_u64, 0_u64);
     let mut consecutive_audio_stalls = 0_u32;
     let mut last_stall_recovery_notice = Instant::now() - Duration::from_secs(30);
     loop {
@@ -3183,6 +3179,71 @@ async fn connect_and_run_session(
                         .force_next_keyframe
                         .store(true, Ordering::Relaxed);
                 }
+            }
+            _ = layer_selection_tick.tick() => {
+                let active_stream_tags = {
+                    let streams = stream_state.active_streams.read().await;
+                    streams.keys().copied().collect::<Vec<_>>()
+                };
+                if active_stream_tags.is_empty() {
+                    continue;
+                }
+
+                let rendered_w = stream_state.counters.last_render_width.load(Ordering::Relaxed);
+                let rendered_h = stream_state.counters.last_render_height.load(Ordering::Relaxed);
+                let decode_frames = stream_state.counters.decode_frames.load(Ordering::Relaxed);
+                let decode_errors = stream_state.counters.decode_errors.load(Ordering::Relaxed);
+                let frames_delta = decode_frames.saturating_sub(last_decode_sample.0);
+                let errors_delta = decode_errors.saturating_sub(last_decode_sample.1);
+                last_decode_sample = (decode_frames, decode_errors);
+                let decode_error_rate = if frames_delta + errors_delta == 0 {
+                    0.0
+                } else {
+                    errors_delta as f32 / (frames_delta + errors_delta) as f32
+                };
+
+                let loss_rate = (network_telemetry.loss_ppm.load(Ordering::Relaxed) as f32 / 1_000_000.0)
+                    .clamp(0.0, 1.0);
+
+                let signals = ViewerLayerSignals {
+                    viewport_width: rendered_w.max(1),
+                    viewport_height: rendered_h.max(1),
+                    loss_rate,
+                    decode_error_rate,
+                };
+                let decision = layer_selection_policy.evaluate(Instant::now(), signals);
+
+                let stream_id_value = {
+                    let ids = stream_state.stream_ids.read().await;
+                    active_stream_tags
+                        .iter()
+                        .find_map(|tag| ids.get(tag).cloned())
+                };
+                if let Some(sid) = stream_id_value {
+                    let _ = dispatcher
+                        .send_no_response(pb::client_to_server::Payload::SelectScreenShareLayerRequest(
+                            pb::SelectScreenShareLayerRequest {
+                                stream_id: Some(pb::StreamId { value: sid.clone() }),
+                                preferred_layer_id: decision.preferred_layer_id,
+                            },
+                        ))
+                        .await;
+
+                    if decision.request_keyframe {
+                        let _ = dispatcher
+                            .send_no_response(pb::client_to_server::Payload::RequestKeyframeRequest(
+                                pb::RequestKeyframeRequest {
+                                    stream_id: Some(pb::StreamId { value: sid }),
+                                    layer_id: decision.preferred_layer_id,
+                                },
+                            ))
+                            .await;
+                    }
+                }
+
+                active_share_session
+                    .active_layer_id
+                    .store(decision.preferred_layer_id as u8, Ordering::Relaxed);
             }
             _ = audio_health_tick.tick() => {
                 let ping_rtt_ms = disp_health
@@ -6659,11 +6720,10 @@ async fn upload_profile_image(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        apply_authoritative_snapshot, choose_initial_selected_channel, select_active_share_layer,
-    };
+    use super::{apply_authoritative_snapshot, choose_initial_selected_channel};
     use crate::{
         proto::voiceplatform::v1 as pb,
+        screen_share::policy::layer_selection::select_active_share_layer,
         ui::{model::ChannelType, UiEvent},
     };
     use crossbeam_channel::bounded;
