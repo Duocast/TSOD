@@ -5,8 +5,7 @@ use tracing::{info, warn};
 
 const APP_ID: &str = "vp-client";
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
-const GITHUB_REPO_SLUG: &str = "Duocast/TSOD";
-const GITHUB_LATEST_RELEASE_API: &str = "https://api.github.com/repos/Duocast/TSOD/releases/latest";
+const GITHUB_REPO: &str = "Duocast/TSOD";
 
 #[derive(Debug, Clone)]
 pub enum UpdateCheckResult {
@@ -145,15 +144,14 @@ async fn install_portable_windows_release() -> Result<UpdateInstallResult> {
 
 #[cfg(target_os = "windows")]
 async fn fetch_latest_portable_release() -> Result<PortableRelease> {
+    let url = format!("https://api.github.com/repos/{GITHUB_REPO}/releases/latest");
     let client = reqwest::Client::new();
     let response = client
-        .get(GITHUB_LATEST_RELEASE_API)
+        .get(&url)
         .header(reqwest::header::USER_AGENT, "tsod-client-updater")
         .send()
         .await
-        .context(format!(
-            "request latest GitHub release for {GITHUB_REPO_SLUG}"
-        ))?
+        .context("request latest GitHub release")?
         .error_for_status()
         .context("latest GitHub release returned error status")?;
 

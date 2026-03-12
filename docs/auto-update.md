@@ -28,7 +28,7 @@ Automatic install requires a `cargo-dist` install receipt on disk.
 
 When no `cargo-dist` receipt exists on Windows, the client:
 
-- checks `https://api.github.com/repos/Duocast/TSOD/releases/latest` (API form of `https://github.com/Duocast/TSOD/releases`),
+- checks `https://api.github.com/repos/Duocast/TSOD/releases/latest`,
 - picks a Windows `.exe` asset,
 - compares release tag version against `CARGO_PKG_VERSION`,
 - downloads the newer EXE beside the running executable,
