@@ -3,6 +3,8 @@ use std::{env, path::PathBuf};
 include!("../proto/proto_files.rs");
 
 fn main() {
+    // Display/debug build identity (timestamp), distinct from semver release version
+    // used by updater/network metadata via CARGO_PKG_VERSION.
     let build_version = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
     println!("cargo:rustc-env=VP_CLIENT_BUILD_VERSION={build_version}");
 

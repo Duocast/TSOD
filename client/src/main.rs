@@ -21,6 +21,7 @@ mod proto;
 mod screen_share;
 mod settings_io;
 mod ui;
+mod updater;
 
 use anyhow::{anyhow, Context, Result};
 use bytes::Bytes;
@@ -60,6 +61,7 @@ use ui::{UiEvent, UiIntent, VpApp};
 #[cfg(debug_assertions)]
 static DEBUG_SEEN_AUTH_USER_IDS: OnceLock<StdMutex<HashSet<String>>> = OnceLock::new();
 
+pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const BUILD_VERSION: &str = env!("VP_CLIENT_BUILD_VERSION");
 
 const VOICE_INGRESS_CAP: usize = 16; // Do not increase without justification; latency risk.
@@ -905,6 +907,43 @@ fn set_connection_stage(
     let _ = tx_event.send(UiEvent::AppendLog(format!("[conn] {detail}")));
 }
 
+fn spawn_update_check_task(tx_event: Sender<UiEvent>) {
+    tokio::spawn(async move {
+        let _ = tx_event.send(UiEvent::UpdateCheckStarted);
+        match updater::check_for_updates().await {
+            Ok(updater::UpdateCheckResult::UpToDate) => {
+                let _ = tx_event.send(UiEvent::UpdateNotAvailable);
+            }
+            Ok(updater::UpdateCheckResult::UpdateAvailable { version }) => {
+                let _ = tx_event.send(UiEvent::UpdateAvailable { version });
+            }
+            Ok(updater::UpdateCheckResult::UnsupportedInstallType) => {
+                let _ = tx_event.send(UiEvent::UpdateUnsupportedInstall);
+            }
+            Err(err) => {
+                let _ = tx_event.send(UiEvent::UpdateError(err.to_string()));
+            }
+        }
+    });
+}
+
+fn spawn_update_install_task(tx_event: Sender<UiEvent>) {
+    tokio::spawn(async move {
+        let _ = tx_event.send(UiEvent::UpdateInstalling);
+        match updater::install_update().await {
+            Ok(updater::UpdateInstallResult::Installed) => {
+                let _ = tx_event.send(UiEvent::UpdateInstalled);
+            }
+            Ok(updater::UpdateInstallResult::UnsupportedInstallType) => {
+                let _ = tx_event.send(UiEvent::UpdateUnsupportedInstall);
+            }
+            Err(err) => {
+                let _ = tx_event.send(UiEvent::UpdateError(err.to_string()));
+            }
+        }
+    });
+}
+
 async fn app_task(
     mut cfg: Config,
     tx_event: Sender<UiEvent>,
@@ -968,6 +1007,9 @@ async fn app_task(
         });
     }
     let _ = tx_event.send(UiEvent::SettingsLoaded(Box::new(saved_settings.clone())));
+    if saved_settings.check_for_updates {
+        spawn_update_check_task(tx_event.clone());
+    }
 
     #[cfg(target_os = "linux")]
     {
@@ -1492,6 +1534,12 @@ async fn app_task(
                                     format!("[presence] away message set: {message}")
                                 };
                                 let _ = tx_event.send(UiEvent::AppendLog(text));
+                            }
+                            UiIntent::CheckForUpdates => {
+                                spawn_update_check_task(tx_event.clone());
+                            }
+                            UiIntent::InstallUpdate => {
+                                spawn_update_install_task(tx_event.clone());
                             }
                             _ => {}
                         }
@@ -5195,6 +5243,12 @@ async fn connect_and_run_session(
                                     )));
                                 }
                             }
+                        }
+                        UiIntent::CheckForUpdates => {
+                            spawn_update_check_task(tx_event.clone());
+                        }
+                        UiIntent::InstallUpdate => {
+                            spawn_update_install_task(tx_event.clone());
                         }
                         _ => {
                             // Remaining intents (moderation, file upload, etc.)
