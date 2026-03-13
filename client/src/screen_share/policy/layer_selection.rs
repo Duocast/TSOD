@@ -21,10 +21,12 @@ pub fn select_active_share_layer(
     if accepted_layer_ids.contains(&requested_layer_id) {
         return Some(requested_layer_id);
     }
-    if accepted_layer_ids.contains(&1) {
-        return Some(1);
-    }
-    None
+    accepted_layer_ids
+        .iter()
+        .copied()
+        .filter(|layer| *layer <= requested_layer_id)
+        .max()
+        .or_else(|| accepted_layer_ids.iter().copied().min())
 }
 
 pub struct ViewerLayerSelectionPolicy {

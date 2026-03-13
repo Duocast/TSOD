@@ -86,7 +86,7 @@ pub enum ShareSource {
 
 #[derive(Debug, Default)]
 struct ActiveShareSession {
-    force_next_keyframe: Arc<AtomicBool>,
+    force_keyframe_generation: Arc<AtomicU64>,
     active_layer_id: Arc<AtomicU8>,
     stream_id: tokio::sync::Mutex<Option<String>>,
     stream_tags: tokio::sync::Mutex<HashSet<u64>>,
@@ -94,7 +94,7 @@ struct ActiveShareSession {
 
 impl ActiveShareSession {
     fn clear(&self) {
-        self.force_next_keyframe.store(false, Ordering::Relaxed);
+        self.force_keyframe_generation.store(0, Ordering::Relaxed);
         self.active_layer_id.store(0, Ordering::Relaxed);
     }
 }
@@ -2886,8 +2886,8 @@ async fn connect_and_run_session(
                         };
                         if should_force_recovery {
                             active_share_session
-                                .force_next_keyframe
-                                .store(true, Ordering::Relaxed);
+                                .force_keyframe_generation
+                                .fetch_add(1, Ordering::Relaxed);
                             let stream_id = {
                                 let stream_id = active_share_session.stream_id.lock().await;
                                 stream_id.clone().unwrap_or_else(|| "unknown".to_string())
@@ -3389,8 +3389,8 @@ async fn connect_and_run_session(
                         ))
                         .await;
                     active_share_session
-                        .force_next_keyframe
-                        .store(true, Ordering::Relaxed);
+                        .force_keyframe_generation
+                        .fetch_add(1, Ordering::Relaxed);
                 }
             }
             _ = layer_selection_tick.tick() => {
@@ -4209,42 +4209,56 @@ async fn connect_and_run_session(
                                 .screen_share_max_bitrate_kbps
                                 .saturating_mul(1_000)
                                 .max(600_000);
-                            let request_1440p60 = saved_settings.screen_share_profile == "1440p60"
-                                && net::dispatcher::can_offer_1440p60();
-                            let (profile_layer, sender_profile) = if request_1440p60 {
-                                (pb::SimulcastLayer {
-                                    layer_id: 2,
-                                    width: 2560,
-                                    height: 1440,
-                                    max_fps: requested_fps,
-                                    max_bitrate_bps: requested_bitrate_bps.min(16_000_000),
-                                }, VideoStreamProfile::P1440p60)
-                            } else {
-                                (pb::SimulcastLayer {
+                            let allow_1440p60 = net::dispatcher::can_offer_1440p60();
+                            let max_layers = probed_caps.max_simulcast_layers.max(1) as usize;
+                            let mut offered_layers = vec![
+                                pb::SimulcastLayer {
+                                    layer_id: 0,
+                                    width: 1280,
+                                    height: 720,
+                                    max_fps: requested_fps.min(30),
+                                    max_bitrate_bps: requested_bitrate_bps.min(3_000_000),
+                                },
+                                pb::SimulcastLayer {
                                     layer_id: 1,
                                     width: 1920,
                                     height: 1080,
                                     max_fps: requested_fps,
                                     max_bitrate_bps: requested_bitrate_bps.min(8_000_000),
-                                }, VideoStreamProfile::P1080p60)
+                                },
+                            ];
+                            if allow_1440p60 {
+                                offered_layers.push(pb::SimulcastLayer {
+                                    layer_id: 2,
+                                    width: 2560,
+                                    height: 1440,
+                                    max_fps: requested_fps,
+                                    max_bitrate_bps: requested_bitrate_bps.min(16_000_000),
+                                });
+                            }
+                            if offered_layers.len() > max_layers {
+                                offered_layers.truncate(max_layers);
+                            }
+                            let sender_profile = if offered_layers.iter().any(|l| l.layer_id == 2) {
+                                VideoStreamProfile::P1440p60
+                            } else {
+                                VideoStreamProfile::P1080p60
                             };
-                            advertised_target_profile = if request_1440p60 {
+                            advertised_target_profile = if offered_layers.iter().any(|l| l.layer_id == 2) {
                                 "1440p60".to_string()
                             } else {
                                 "1080p60".to_string()
                             };
-                            if saved_settings.screen_share_profile == "1440p60" && !request_1440p60 {
+                            if saved_settings.screen_share_profile == "1440p60" && !allow_1440p60 {
                                 let _ = tx_event.send(UiEvent::AppendLog(
                                     "[video] 1440p60 unavailable (startup benchmark/runtime headroom); using 1080p60".into(),
                                 ));
                             }
-                            let target_width = profile_layer.width;
-                            let target_height = profile_layer.height;
-                            let target_bitrate_bps = profile_layer.max_bitrate_bps;
+                            let requested_layer_id = offered_layers.last().map(|l| l.layer_id).unwrap_or(0);
                             let req = pb::StartScreenShareRequest {
                                 channel_id: active_channel.as_ref().map(|id| pb::ChannelId { value: id.clone() }),
                                 codec: preferred_codec as i32,
-                                layers: vec![profile_layer],
+                                layers: offered_layers.clone(),
                                 include_audio,
                             };
                             match dispatcher
@@ -4288,7 +4302,6 @@ async fn connect_and_run_session(
                                             )));
                                         }
 
-                                        let requested_layer_id = profile_layer.layer_id;
                                         let mut negotiated_profile = sender_profile;
                                         let Some(active_layer_id) = select_active_share_layer(
                                             requested_layer_id,
@@ -4302,7 +4315,7 @@ async fn connect_and_run_session(
                                             )));
                                             continue;
                                         };
-                                        if active_layer_id == 1 && requested_layer_id != 1 {
+                                        if active_layer_id <= 1 && requested_layer_id > 1 {
                                             negotiated_profile = VideoStreamProfile::P1080p60;
                                         }
 
@@ -4310,8 +4323,8 @@ async fn connect_and_run_session(
                                             .active_layer_id
                                             .store(active_layer_id as u8, Ordering::Relaxed);
                                         active_share_session
-                                            .force_next_keyframe
-                                            .store(false, Ordering::Relaxed);
+                                            .force_keyframe_generation
+                                            .store(0, Ordering::Relaxed);
                                         {
                                             let mut stream_tags = active_share_session.stream_tags.lock().await;
                                             stream_tags.clear();
@@ -4369,7 +4382,7 @@ async fn connect_and_run_session(
                                                 negotiated_profile,
                                                 mtu,
                                                 active_layer_id: active_share_session.active_layer_id.clone(),
-                                                force_next_keyframe: active_share_session.force_next_keyframe.clone(),
+                                                force_keyframe_generation: active_share_session.force_keyframe_generation.clone(),
                                                 counters: stream_state.counters.clone(),
                                                 egress: egress.clone(),
                                                 runtime_caps,
@@ -4382,10 +4395,8 @@ async fn connect_and_run_session(
                                                 backend_label: backend_label.clone(),
                                                 active_voice_channel_route: active_voice_channel_route.clone(),
                                                 tx_event: tx_event.clone(),
-                                                target_fps: requested_fps,
-                                                target_bitrate_bps,
-                                                target_width,
-                                                target_height,
+                                                offered_layers: offered_layers.clone(),
+                                                accepted_layer_ids: r.accepted_layer_ids.clone(),
                                             },
                                         )));
                                     } else {
@@ -7166,7 +7177,7 @@ mod tests {
 
     #[test]
     fn rejected_1440_request_cannot_continue_as_active_layer() {
-        assert_eq!(select_active_share_layer(2, &[0]), None);
+        assert_eq!(select_active_share_layer(2, &[0]), Some(0));
         assert_eq!(select_active_share_layer(2, &[1]), Some(1));
         assert_eq!(select_active_share_layer(2, &[2]), Some(2));
     }

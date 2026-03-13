@@ -49,3 +49,22 @@ pub fn select_and_persist_layer(
     registry.set_viewer_preferred_layer(stream_id, viewer, active_layer);
     Ok((active_layer, ownership.primary_tag))
 }
+
+pub fn should_request_keyframe_on_layer_change(
+    previous_layer: Option<u8>,
+    active_layer: u8,
+) -> bool {
+    previous_layer != Some(active_layer)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_request_keyframe_on_layer_change;
+
+    #[test]
+    fn keyframe_requested_when_layer_changes() {
+        assert!(should_request_keyframe_on_layer_change(Some(0), 1));
+        assert!(should_request_keyframe_on_layer_change(None, 0));
+        assert!(!should_request_keyframe_on_layer_change(Some(2), 2));
+    }
+}

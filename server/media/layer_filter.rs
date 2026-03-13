@@ -33,3 +33,20 @@ impl LayerFilter {
         datagram_layer_id == preferred || is_priority
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::LayerFilter;
+    use vp_control::ids::UserId;
+
+    #[test]
+    fn selection_affects_forwarding() {
+        let viewer = UserId::new();
+        let mut filter = LayerFilter::default();
+        filter.set_preferred_layer(7, viewer, 2);
+
+        assert!(!filter.should_forward(7, viewer, 1, false));
+        assert!(filter.should_forward(7, viewer, 2, false));
+        assert!(filter.should_forward(7, viewer, 1, true));
+    }
+}
