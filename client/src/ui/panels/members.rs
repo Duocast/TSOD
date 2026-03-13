@@ -84,8 +84,9 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                 .copied()
                 .unwrap_or(0.0)
                 .clamp(0.0, 1.0);
-            let cached_profile = model.get_cached_profile_stale(&member.user_id);
+            let cached_profile = model.get_cached_profile_stale(&member.user_id).cloned();
             let activity_text = cached_profile
+                .as_ref()
                 .and_then(|profile| profile.current_activity.as_ref())
                 .map(|activity| format!("Playing {}", activity.game_name));
             let has_member_status = member.muted
@@ -116,11 +117,6 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
             }
 
             // Left-click opens profile popup; middle-click opens connection info.
-            if response.clicked() {
-                let click_pos = response.rect.right_top() + egui::vec2(8.0, 0.0);
-                model.open_profile_popup(member.user_id.clone(), click_pos, tx_intent);
-            }
-
             if response.middle_clicked() {
                 model.open_member_connection_info_window(
                     member.user_id.clone(),
@@ -157,6 +153,7 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
             }
             .or_else(|| {
                 cached_profile
+                    .as_ref()
                     .and_then(|profile| profile.avatar_url.as_deref())
                     .filter(|url| !url.is_empty())
                     .map(str::to_owned)
