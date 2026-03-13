@@ -1,3 +1,6 @@
+pub mod nvidia;
+
+use crate::net::video_encode::av1::caps::probe_av1_caps;
 use crate::proto::voiceplatform::v1 as pb;
 use crate::screen_share::config::{
     env_disable_hw, env_screen_capture_override, env_system_audio_override,
@@ -17,10 +20,9 @@ pub enum CaptureBackendKind {
 pub enum EncodeBackendKind {
     MfHwVp9,
     Libvpx,
-    MfHwAv1,
+    NvencAv1,
     SvtAv1,
     VaapiVp9,
-    VaapiAv1,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -140,13 +142,7 @@ fn preferred_encode_backends() -> HashMap<pb::VideoCodec, Vec<EncodeBackendKind>
             },
         );
 
-        let mut av1 = Vec::new();
-        if cfg!(feature = "video-av1-software") {
-            av1.push(EncodeBackendKind::SvtAv1);
-        }
-        if !hw_disabled {
-            av1.push(EncodeBackendKind::MfHwAv1);
-        }
+        let av1 = av1_encode_backends(hw_disabled);
         if !av1.is_empty() {
             map.insert(pb::VideoCodec::Av1, av1);
         }
@@ -165,13 +161,7 @@ fn preferred_encode_backends() -> HashMap<pb::VideoCodec, Vec<EncodeBackendKind>
             },
         );
 
-        let mut av1 = Vec::new();
-        if cfg!(feature = "video-av1-software") {
-            av1.push(EncodeBackendKind::SvtAv1);
-        }
-        if !hw_disabled {
-            av1.push(EncodeBackendKind::VaapiAv1);
-        }
+        let av1 = av1_encode_backends(hw_disabled);
         if !av1.is_empty() {
             map.insert(pb::VideoCodec::Av1, av1);
         }
@@ -184,6 +174,18 @@ fn preferred_encode_backends() -> HashMap<pb::VideoCodec, Vec<EncodeBackendKind>
         map.insert(pb::VideoCodec::Vp9, vec![EncodeBackendKind::Libvpx]);
         map
     }
+}
+
+fn av1_encode_backends(hw_disabled: bool) -> Vec<EncodeBackendKind> {
+    let av1_caps = probe_av1_caps();
+    let mut av1 = Vec::new();
+    if !hw_disabled && av1_caps.nvenc_available {
+        av1.push(EncodeBackendKind::NvencAv1);
+    }
+    if av1_caps.svt_available {
+        av1.push(EncodeBackendKind::SvtAv1);
+    }
+    av1
 }
 
 fn preferred_decode_backends() -> HashMap<pb::VideoCodec, Vec<DecodeBackendKind>> {
@@ -290,14 +292,11 @@ fn apply_encoder_override(
         "vp9-svt" => {
             backends.insert(pb::VideoCodec::Vp9, vec![EncodeBackendKind::MfHwVp9]);
         }
-        "av1-rav1e" | "av1-svt" => {
+        "av1-svt" => {
             backends.insert(pb::VideoCodec::Av1, vec![EncodeBackendKind::SvtAv1]);
         }
-        "av1-mf" => {
-            backends.insert(pb::VideoCodec::Av1, vec![EncodeBackendKind::MfHwAv1]);
-        }
-        "av1-vaapi" => {
-            backends.insert(pb::VideoCodec::Av1, vec![EncodeBackendKind::VaapiAv1]);
+        "av1-nvenc" => {
+            backends.insert(pb::VideoCodec::Av1, vec![EncodeBackendKind::NvencAv1]);
         }
         _ => {}
     }
@@ -324,5 +323,48 @@ fn apply_decoder_override(
             backends.insert(pb::VideoCodec::Av1, vec![DecodeBackendKind::VaapiAv1]);
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nvenc_not_shown_without_probe() {
+        std::env::remove_var("TSOD_TEST_NVIDIA_VENDOR_ID");
+        std::env::remove_var("TSOD_TEST_NVIDIA_DEVICE_ID");
+        let av1 = av1_encode_backends(false);
+        assert!(!av1.contains(&EncodeBackendKind::NvencAv1));
+    }
+
+    #[test]
+    fn explicit_nvenc_selection_no_fallback() {
+        let mut map = HashMap::new();
+        apply_encoder_override("av1-nvenc", &mut map);
+        assert_eq!(
+            map.get(&pb::VideoCodec::Av1),
+            Some(&vec![EncodeBackendKind::NvencAv1])
+        );
+    }
+
+    #[test]
+    fn explicit_svt_selection_software_only() {
+        let mut map = HashMap::new();
+        apply_encoder_override("av1-svt", &mut map);
+        assert_eq!(
+            map.get(&pb::VideoCodec::Av1),
+            Some(&vec![EncodeBackendKind::SvtAv1])
+        );
+    }
+
+    #[test]
+    fn auto_prefers_nvenc_over_svt() {
+        std::env::set_var("TSOD_TEST_NVIDIA_VENDOR_ID", "10de");
+        std::env::set_var("TSOD_TEST_NVIDIA_DEVICE_ID", "2684");
+        let av1 = av1_encode_backends(false);
+        if av1.contains(&EncodeBackendKind::SvtAv1) {
+            assert_eq!(av1.first(), Some(&EncodeBackendKind::NvencAv1));
+        }
     }
 }
