@@ -141,11 +141,11 @@ fn preferred_encode_backends() -> HashMap<pb::VideoCodec, Vec<EncodeBackendKind>
         );
 
         let mut av1 = Vec::new();
-        if !hw_disabled {
-            av1.push(EncodeBackendKind::MfHwAv1);
-        }
         if cfg!(feature = "video-av1-software") {
             av1.push(EncodeBackendKind::SvtAv1);
+        }
+        if !hw_disabled {
+            av1.push(EncodeBackendKind::MfHwAv1);
         }
         if !av1.is_empty() {
             map.insert(pb::VideoCodec::Av1, av1);
@@ -166,11 +166,11 @@ fn preferred_encode_backends() -> HashMap<pb::VideoCodec, Vec<EncodeBackendKind>
         );
 
         let mut av1 = Vec::new();
-        if !hw_disabled {
-            av1.push(EncodeBackendKind::VaapiAv1);
-        }
         if cfg!(feature = "video-av1-software") {
             av1.push(EncodeBackendKind::SvtAv1);
+        }
+        if !hw_disabled {
+            av1.push(EncodeBackendKind::VaapiAv1);
         }
         if !av1.is_empty() {
             map.insert(pb::VideoCodec::Av1, av1);
@@ -202,10 +202,10 @@ fn preferred_decode_backends() -> HashMap<pb::VideoCodec, Vec<DecodeBackendKind>
         );
 
         let mut av1 = Vec::new();
+        av1.push(DecodeBackendKind::Dav1d);
         if !hw_disabled {
             av1.push(DecodeBackendKind::MfHwAv1);
         }
-        av1.push(DecodeBackendKind::Dav1d);
         map.insert(pb::VideoCodec::Av1, av1);
         return map;
     }
@@ -222,10 +222,10 @@ fn preferred_decode_backends() -> HashMap<pb::VideoCodec, Vec<DecodeBackendKind>
         );
 
         let mut av1 = Vec::new();
+        av1.push(DecodeBackendKind::Dav1d);
         if !hw_disabled {
             av1.push(DecodeBackendKind::VaapiAv1);
         }
-        av1.push(DecodeBackendKind::Dav1d);
         map.insert(pb::VideoCodec::Av1, av1);
         return map;
     }
@@ -293,7 +293,7 @@ fn apply_encoder_override(
         "vp9-vaapi" => {
             backends.insert(pb::VideoCodec::Vp9, vec![EncodeBackendKind::VaapiVp9]);
         }
-        "av1-svt" => {
+        "av1-rav1e" | "av1-svt" => {
             backends.insert(pb::VideoCodec::Av1, vec![EncodeBackendKind::SvtAv1]);
         }
         "av1-mf" => {
