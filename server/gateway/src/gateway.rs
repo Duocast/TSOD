@@ -21,7 +21,9 @@ use crate::{
     media::MediaService,
     overwrite_queue::{pop_voice_realtime, OverwriteQueue, StampedBytes},
     proto::voiceplatform::v1 as pb,
-    screenshare::{select_and_persist_layer, validate_viewer_access},
+    screenshare::{
+        select_and_persist_layer, should_request_keyframe_on_layer_change, validate_viewer_access,
+    },
     screenshare_policy::ScreenSharePolicy,
     state::{
         MembershipCache, PushHub, Sessions, StreamSessionOwnership, StreamSessionRegistry,
@@ -1441,8 +1443,10 @@ impl Gateway {
                     let ownership = stream_registry
                         .ownership_by_stream_id(&sid.value)
                         .ok_or(ControlError::InvalidArgument("unknown stream_id"))?;
+                    let owner_user_id = ownership.owner_user_id;
                     let channel_members = self.membership.members_of(ownership.channel_id);
                     validate_viewer_access(&stream_registry, &sid.value, user_id, channel_members.as_ref())?;
+                    let previous_layer = stream_registry.viewer_preferred_layer(&sid.value, user_id);
                     let (active_layer_id, primary_tag) = select_and_persist_layer(
                         &mut stream_registry,
                         &mut screenshare_policy,
@@ -1453,6 +1457,16 @@ impl Gateway {
                     self.video
                         .set_viewer_preferred_layer(primary_tag, user_id, active_layer_id)
                         .await;
+                    if should_request_keyframe_on_layer_change(previous_layer, active_layer_id) {
+                        self.push.send_to(owner_user_id, pb::ServerToClient {
+                            request_id: None,
+                            session_id: None,
+                            sent_at: Some(now_ts()),
+                            error: None,
+                            event_seq: 0,
+                            payload: Some(pb::server_to_client::Payload::RequestRecovery(pb::RequestRecovery { stream_tag: primary_tag })),
+                        }).await;
+                    }
 
                     let resp = pb::ServerToClient {
                         request_id: req_id,

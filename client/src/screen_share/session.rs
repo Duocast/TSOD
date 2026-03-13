@@ -47,7 +47,7 @@ pub struct StartLocalShareParams {
     pub negotiated_profile: VideoStreamProfile,
     pub mtu: usize,
     pub active_layer_id: Arc<AtomicU8>,
-    pub force_next_keyframe: Arc<AtomicBool>,
+    pub force_keyframe_generation: Arc<AtomicU64>,
     pub counters: Arc<VideoRuntimeCounters>,
     pub egress: Arc<EgressScheduler>,
     pub runtime_caps: Arc<MediaRuntimeCaps>,
@@ -60,10 +60,18 @@ pub struct StartLocalShareParams {
     pub backend_label: Arc<std::sync::Mutex<String>>,
     pub active_voice_channel_route: Arc<AtomicU32>,
     pub tx_event: Sender<UiEvent>,
-    pub target_fps: u32,
-    pub target_bitrate_bps: u32,
-    pub target_width: u32,
-    pub target_height: u32,
+    pub offered_layers: Vec<pb::SimulcastLayer>,
+    pub accepted_layer_ids: Vec<u32>,
+}
+
+#[derive(Clone, Copy)]
+struct LayerEncodingTarget {
+    layer_id: u8,
+    width: u32,
+    height: u32,
+    fps: u32,
+    bitrate_bps: u32,
+    profile: VideoStreamProfile,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -236,10 +244,16 @@ fn build_session_config(
 }
 
 pub async fn start_local_share(params: StartLocalShareParams) {
-    let target_fps = params.target_fps.clamp(5, 60);
-    let target_bitrate_bps = params.target_bitrate_bps.max(600_000);
-    let target_width = params.target_width.max(320);
-    let target_height = params.target_height.max(180);
+    let layer_targets = build_layer_targets(
+        &params.offered_layers,
+        &params.accepted_layer_ids,
+        params.negotiated_profile,
+    );
+    if layer_targets.is_empty() {
+        warn!("[video] no accepted screen-share layers to encode");
+        return;
+    }
+    let capture_fps = layer_targets.iter().map(|l| l.fps).max().unwrap_or(30);
 
     let stop_flag = Arc::new(AtomicBool::new(false));
     let capture_queue = Arc::new(OverwriteQueue::<VideoFrame>::new(CAPTURE_QUEUE_DEPTH));
@@ -368,7 +382,6 @@ pub async fn start_local_share(params: StartLocalShareParams) {
     let capture_len = params.capture_queue_len_gauge.clone();
     let capture_ovf = params.capture_queue_overflow_total.clone();
     let counters = params.counters.clone();
-    let capture_fps = target_fps;
     let capture_task = tokio::task::spawn_blocking(move || {
         let mut pacer = FramePacer::new(capture_fps);
         let mut cap = match crate::screen_share::capture::build_capture_backend(
@@ -411,177 +424,187 @@ pub async fn start_local_share(params: StartLocalShareParams) {
 
     let mut stream_workers = Vec::new();
     for stream in params.streams {
-        let mut sender = VideoSender::new(
-            stream.stream_tag,
-            params.active_layer_id.load(Ordering::Relaxed),
-            params.negotiated_profile,
-            params.mtu,
-        );
-        sender.set_pacing_enabled(false);
+        for target in &layer_targets {
+            let mut sender = VideoSender::new(
+                stream.stream_tag,
+                target.layer_id,
+                target.profile,
+                params.mtu,
+            );
+            sender.set_pacing_enabled(false);
 
-        let mut encoder = match build_screen_encoder(
-            stream.codec,
-            params.sender_policy,
-            params.runtime_caps.as_ref(),
-        ) {
-            Ok(enc) => enc,
-            Err(e) => {
-                warn!(error=?e, stream_tag=stream.stream_tag, codec=%video_codec_name(stream.codec), "[video] failed to build screen encoder");
-                continue;
-            }
-        };
-        if let Ok(mut label) = params.backend_label.lock() {
-            *label = encoder.backend_name().to_string();
-        }
-
-        let encode_queue = Arc::new(OverwriteQueue::<VideoFrame>::new(ENCODE_QUEUE_DEPTH));
-        let packet_queue = Arc::new(OverwriteQueue::<EncodedFrame>::new(
-            PACKETIZATION_QUEUE_DEPTH,
-        ));
-
-        let stream_capture_q = capture_queue.clone();
-        let stream_encode_q = encode_queue.clone();
-        let stop_for_fanout = stop_flag.clone();
-        let counters = params.counters.clone();
-        let fanout_task = tokio::spawn(async move {
-            while !stop_for_fanout.load(Ordering::Relaxed) {
-                let Some(frame) = stream_capture_q.pop_latest_or_wait().await else {
-                    break;
-                };
-                stream_encode_q.push(frame);
-                counters
-                    .queue_depth_encode
-                    .store(stream_encode_q.len() as u64, Ordering::Relaxed);
-            }
-            stream_encode_q.close();
-        });
-
-        let stream_encode_q = encode_queue.clone();
-        let stream_packet_q = packet_queue.clone();
-        let force_keyframe = params.force_next_keyframe.clone();
-        let stream_tag = stream.stream_tag;
-        let encode_depth = params.encode_queue_len_gauge.clone();
-        let packet_depth = params.packetize_queue_len_gauge.clone();
-        let counters = params.counters.clone();
-        let egress_stats = params.egress.stats();
-        let encode_task = tokio::spawn(async move {
-            let mut configured = false;
-            let mut quality = AdaptiveQualityController::new(target_bitrate_bps, target_fps);
-            let mut last_report = std::time::Instant::now();
-            let mut encoded_frames = 0_u32;
-            let mut last_encoded_at = std::time::Instant::now();
-            while let Some(frame) = stream_encode_q.pop_latest_or_wait().await {
-                encode_depth.store(stream_encode_q.len() as u64, Ordering::Relaxed);
-                let frame = downscale_frame_to_fit(frame, target_width, target_height);
-                if !configured {
-                    if let Err(e) = encoder.configure_session(build_session_config(
-                        &frame,
-                        target_fps,
-                        target_bitrate_bps,
-                    )) {
-                        warn!(error=?e, stream_tag, "[video] failed to configure encoder session");
-                        continue;
-                    }
-                    configured = true;
-                }
-
-                let snapshot = PressureSnapshot {
-                    encode_queue_len: stream_encode_q.len(),
-                    packet_queue_len: stream_packet_q.len(),
-                    dropped_video_fragments: egress_stats
-                        .drop_queue_full_video
-                        .load(Ordering::Relaxed),
-                };
-                let (next_bitrate, next_fps) = quality.evaluate(snapshot);
-                let _ = encoder.update_bitrate(next_bitrate);
-
-                let min_interval = Duration::from_secs_f64(1.0 / next_fps.max(1) as f64);
-                if last_encoded_at.elapsed() < min_interval {
+            let mut encoder = match build_screen_encoder(
+                stream.codec,
+                params.sender_policy,
+                params.runtime_caps.as_ref(),
+            ) {
+                Ok(enc) => enc,
+                Err(e) => {
+                    warn!(error=?e, stream_tag=stream.stream_tag, codec=%video_codec_name(stream.codec), layer_id=target.layer_id, "[video] failed to build screen encoder");
                     continue;
                 }
-                last_encoded_at = std::time::Instant::now();
-
-                if force_keyframe.swap(false, Ordering::Relaxed) {
-                    let _ = encoder.request_keyframe();
-                }
-
-                match encoder.encode(frame) {
-                    Ok(encoded) => {
-                        encoded_frames = encoded_frames.saturating_add(1);
-                        let elapsed = last_report.elapsed();
-                        if elapsed >= Duration::from_secs(1) {
-                            let runtime_fps = encoded_frames as f32 / elapsed.as_secs_f32();
-                            crate::net::dispatcher::report_runtime_encode_fps(runtime_fps);
-                            last_report = std::time::Instant::now();
-                            encoded_frames = 0;
-                        }
-                        stream_packet_q.push(EncodedFrame {
-                            ts_ms: encoded.ts_ms,
-                            is_keyframe: encoded.is_keyframe,
-                            data: encoded.data,
-                        });
-                        counters.encode_frames.fetch_add(1, Ordering::Relaxed);
-                        packet_depth.store(stream_packet_q.len() as u64, Ordering::Relaxed);
-                        counters
-                            .queue_depth_packetize
-                            .store(stream_packet_q.len() as u64, Ordering::Relaxed);
-                    }
-                    Err(e) => {
-                        counters.encode_errors.fetch_add(1, Ordering::Relaxed);
-                        warn!(error=?e, stream_tag, "[video] encode failed")
-                    }
-                }
+            };
+            if let Ok(mut label) = params.backend_label.lock() {
+                *label = encoder.backend_name().to_string();
             }
-            stream_packet_q.close();
-        });
 
-        let stream_packet_q = packet_queue.clone();
-        let egress = params.egress.clone();
-        let counters = params.counters.clone();
-        let send_task = tokio::spawn(async move {
-            let mut frame_idx = 0_u32;
-            while let Some(encoded) = stream_packet_q.pop_latest_or_wait().await {
-                counters
-                    .queue_depth_packetize
-                    .store(stream_packet_q.len() as u64, Ordering::Relaxed);
-                if let Err(e) = sender
-                    .send_frame_async(encoded.ts_ms, encoded.is_keyframe, &encoded.data, |dg| {
-                        match egress.enqueue_video_fragment(
-                            stream_tag,
-                            frame_idx,
-                            encoded.is_keyframe,
-                            std::time::Instant::now(),
-                            dg,
-                        ) {
-                            Ok(report) => {
-                                counters.video_tx_datagrams.fetch_add(1, Ordering::Relaxed);
-                                if let Some(dropped) = report.dropped {
+            let encode_queue = Arc::new(OverwriteQueue::<VideoFrame>::new(ENCODE_QUEUE_DEPTH));
+            let packet_queue = Arc::new(OverwriteQueue::<EncodedFrame>::new(
+                PACKETIZATION_QUEUE_DEPTH,
+            ));
+
+            let stream_capture_q = capture_queue.clone();
+            let stream_encode_q = encode_queue.clone();
+            let stop_for_fanout = stop_flag.clone();
+            let counters = params.counters.clone();
+            let fanout_task = tokio::spawn(async move {
+                while !stop_for_fanout.load(Ordering::Relaxed) {
+                    let Some(frame) = stream_capture_q.pop_latest_or_wait().await else {
+                        break;
+                    };
+                    stream_encode_q.push(frame);
+                    counters
+                        .queue_depth_encode
+                        .store(stream_encode_q.len() as u64, Ordering::Relaxed);
+                }
+                stream_encode_q.close();
+            });
+
+            let stream_encode_q = encode_queue.clone();
+            let stream_packet_q = packet_queue.clone();
+            let keyframe_generation = params.force_keyframe_generation.clone();
+            let stream_tag = stream.stream_tag;
+            let encode_depth = params.encode_queue_len_gauge.clone();
+            let packet_depth = params.packetize_queue_len_gauge.clone();
+            let counters = params.counters.clone();
+            let egress_stats = params.egress.stats();
+            let layer_id = target.layer_id;
+            let encode_task = tokio::spawn(async move {
+                let mut configured = false;
+                let mut quality = AdaptiveQualityController::new(target.bitrate_bps, target.fps);
+                let mut last_report = std::time::Instant::now();
+                let mut encoded_frames = 0_u32;
+                let mut last_encoded_at = std::time::Instant::now();
+                let mut last_force_keyframe_generation =
+                    keyframe_generation.load(Ordering::Relaxed);
+                while let Some(frame) = stream_encode_q.pop_latest_or_wait().await {
+                    encode_depth.store(stream_encode_q.len() as u64, Ordering::Relaxed);
+                    let frame = downscale_frame_to_fit(frame, target.width, target.height);
+                    if !configured {
+                        if let Err(e) = encoder.configure_session(build_session_config(
+                            &frame,
+                            target.fps,
+                            target.bitrate_bps,
+                        )) {
+                            warn!(error=?e, stream_tag, layer_id, "[video] failed to configure encoder session");
+                            continue;
+                        }
+                        configured = true;
+                    }
+
+                    let snapshot = PressureSnapshot {
+                        encode_queue_len: stream_encode_q.len(),
+                        packet_queue_len: stream_packet_q.len(),
+                        dropped_video_fragments: egress_stats
+                            .drop_queue_full_video
+                            .load(Ordering::Relaxed),
+                    };
+                    let (next_bitrate, next_fps) = quality.evaluate(snapshot);
+                    let _ = encoder.update_bitrate(next_bitrate);
+
+                    let min_interval = Duration::from_secs_f64(1.0 / next_fps.max(1) as f64);
+                    if last_encoded_at.elapsed() < min_interval {
+                        continue;
+                    }
+                    last_encoded_at = std::time::Instant::now();
+
+                    let generation = keyframe_generation.load(Ordering::Relaxed);
+                    if generation != last_force_keyframe_generation {
+                        last_force_keyframe_generation = generation;
+                        let _ = encoder.request_keyframe();
+                    }
+
+                    match encoder.encode(frame) {
+                        Ok(encoded) => {
+                            encoded_frames = encoded_frames.saturating_add(1);
+                            let elapsed = last_report.elapsed();
+                            if elapsed >= Duration::from_secs(1) {
+                                let runtime_fps = encoded_frames as f32 / elapsed.as_secs_f32();
+                                crate::net::dispatcher::report_runtime_encode_fps(runtime_fps);
+                                last_report = std::time::Instant::now();
+                                encoded_frames = 0;
+                            }
+                            stream_packet_q.push(EncodedFrame {
+                                ts_ms: encoded.ts_ms,
+                                is_keyframe: encoded.is_keyframe,
+                                data: encoded.data,
+                            });
+                            counters.encode_frames.fetch_add(1, Ordering::Relaxed);
+                            packet_depth.store(stream_packet_q.len() as u64, Ordering::Relaxed);
+                            counters
+                                .queue_depth_packetize
+                                .store(stream_packet_q.len() as u64, Ordering::Relaxed);
+                        }
+                        Err(e) => {
+                            counters.encode_errors.fetch_add(1, Ordering::Relaxed);
+                            warn!(error=?e, stream_tag, layer_id, "[video] encode failed")
+                        }
+                    }
+                }
+                stream_packet_q.close();
+            });
+
+            let stream_packet_q = packet_queue.clone();
+            let egress = params.egress.clone();
+            let counters = params.counters.clone();
+            let send_task = tokio::spawn(async move {
+                let mut frame_idx = 0_u32;
+                while let Some(encoded) = stream_packet_q.pop_latest_or_wait().await {
+                    counters
+                        .queue_depth_packetize
+                        .store(stream_packet_q.len() as u64, Ordering::Relaxed);
+                    if let Err(e) = sender
+                        .send_frame_async(encoded.ts_ms, encoded.is_keyframe, &encoded.data, |dg| {
+                            match egress.enqueue_video_fragment(
+                                stream_tag,
+                                frame_idx,
+                                encoded.is_keyframe,
+                                std::time::Instant::now(),
+                                dg,
+                            ) {
+                                Ok(report) => {
+                                    counters.video_tx_datagrams.fetch_add(1, Ordering::Relaxed);
+                                    if let Some(dropped) = report.dropped {
+                                        counters
+                                            .video_tx_drop_queue_full
+                                            .fetch_add(dropped.count as u64, Ordering::Relaxed);
+                                    }
+                                }
+                                Err(reason) => {
                                     counters
-                                        .video_tx_drop_queue_full
-                                        .fetch_add(dropped.count as u64, Ordering::Relaxed);
+                                        .video_tx_drop_deadline
+                                        .fetch_add(1, Ordering::Relaxed);
+                                    warn!(
+                                        ?reason,
+                                        stream_tag, frame_idx, "[video] enqueue rejected"
+                                    );
                                 }
                             }
-                            Err(reason) => {
-                                counters
-                                    .video_tx_drop_deadline
-                                    .fetch_add(1, Ordering::Relaxed);
-                                warn!(?reason, stream_tag, frame_idx, "[video] enqueue rejected");
-                            }
-                        }
-                    })
-                    .await
-                {
-                    counters.sender_frame_errors.fetch_add(1, Ordering::Relaxed);
-                    warn!(error=?e, stream_tag, frame_size=encoded.data.len(), "[video] send_frame failed");
-                    break;
+                        })
+                        .await
+                    {
+                        counters.sender_frame_errors.fetch_add(1, Ordering::Relaxed);
+                        warn!(error=?e, stream_tag, layer_id, frame_size=encoded.data.len(), "[video] send_frame failed");
+                        break;
+                    }
+                    frame_idx = frame_idx.wrapping_add(1);
                 }
-                frame_idx = frame_idx.wrapping_add(1);
-            }
-        });
+            });
 
-        stream_workers.push(fanout_task);
-        stream_workers.push(encode_task);
-        stream_workers.push(send_task);
+            stream_workers.push(fanout_task);
+            stream_workers.push(encode_task);
+            stream_workers.push(send_task);
+        }
     }
 
     for worker in stream_workers {
@@ -592,6 +615,31 @@ pub async fn start_local_share(params: StartLocalShareParams) {
     }
     let _ = stop_watch_task.await;
     let _ = capture_task.await;
+}
+
+fn build_layer_targets(
+    offered_layers: &[pb::SimulcastLayer],
+    accepted_layer_ids: &[u32],
+    fallback_profile: VideoStreamProfile,
+) -> Vec<LayerEncodingTarget> {
+    let mut out = offered_layers
+        .iter()
+        .filter(|layer| accepted_layer_ids.contains(&layer.layer_id))
+        .map(|layer| LayerEncodingTarget {
+            layer_id: layer.layer_id.clamp(0, u8::MAX as u32) as u8,
+            width: layer.width.max(320),
+            height: layer.height.max(180),
+            fps: layer.max_fps.clamp(5, 60),
+            bitrate_bps: layer.max_bitrate_bps.max(600_000),
+            profile: if layer.width >= 2560 || layer.height >= 1440 {
+                VideoStreamProfile::P1440p60
+            } else {
+                fallback_profile
+            },
+        })
+        .collect::<Vec<_>>();
+    out.sort_by_key(|target| target.layer_id);
+    out
 }
 
 #[cfg(test)]
@@ -650,5 +698,36 @@ mod tests {
         });
         assert!(bitrate_b < bitrate_a);
         assert!(fps_b < fps_a);
+    }
+
+    #[test]
+    fn build_layer_targets_keeps_only_accepted_layers() {
+        let offered = vec![
+            pb::SimulcastLayer {
+                layer_id: 0,
+                width: 1280,
+                height: 720,
+                max_fps: 30,
+                max_bitrate_bps: 2_000_000,
+            },
+            pb::SimulcastLayer {
+                layer_id: 1,
+                width: 1920,
+                height: 1080,
+                max_fps: 60,
+                max_bitrate_bps: 6_000_000,
+            },
+            pb::SimulcastLayer {
+                layer_id: 2,
+                width: 2560,
+                height: 1440,
+                max_fps: 60,
+                max_bitrate_bps: 12_000_000,
+            },
+        ];
+        let targets = build_layer_targets(&offered, &[0, 2], VideoStreamProfile::P1080p60);
+        assert_eq!(targets.len(), 2);
+        assert_eq!(targets[0].layer_id, 0);
+        assert_eq!(targets[1].layer_id, 2);
     }
 }

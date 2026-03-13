@@ -93,6 +93,7 @@ pub fn probe_media_caps(source: &crate::ShareSource) -> MediaRuntimeCaps {
         .any(|backend| !matches!(backend, SystemAudioBackendKind::Off));
 
     let supports_1440p60 = estimate_encode_headroom_1440p60(&encode_backends);
+    let max_simulcast_layers = estimate_max_simulcast_layers(&encode_backends, supports_1440p60);
 
     MediaRuntimeCaps {
         capture_backends,
@@ -100,9 +101,32 @@ pub fn probe_media_caps(source: &crate::ShareSource) -> MediaRuntimeCaps {
         decode_backends,
         audio_backends,
         supports_system_audio,
-        max_simulcast_layers: 1,
+        max_simulcast_layers,
         preferred_codec,
         supports_1440p60,
+    }
+}
+
+fn estimate_max_simulcast_layers(
+    encode_backends: &HashMap<pb::VideoCodec, Vec<EncodeBackendKind>>,
+    supports_1440p60: bool,
+) -> u8 {
+    let cpu = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    let has_hw_encode = encode_backends.values().flatten().any(|backend| {
+        matches!(
+            backend,
+            EncodeBackendKind::MfHwVp9 | EncodeBackendKind::NvencAv1 | EncodeBackendKind::VaapiVp9
+        )
+    });
+
+    if supports_1440p60 && (has_hw_encode || cpu >= 12) {
+        3
+    } else if has_hw_encode || cpu >= 8 {
+        2
+    } else {
+        1
     }
 }
 
