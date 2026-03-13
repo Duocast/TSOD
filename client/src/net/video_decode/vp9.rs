@@ -189,3 +189,7 @@ mod tests {
         );
     }
 }
+
+pub(crate) fn can_initialize_backend(backend: DecodeBackendKind) -> bool {
+    build_vp9_decoder(&[backend]).is_ok()
+}

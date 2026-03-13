@@ -347,3 +347,7 @@ unsafe extern "C" {
     fn dav1d_data_unref(data: *mut Dav1dData);
     fn dav1d_picture_unref(pic: *mut Dav1dPicture);
 }
+
+pub(crate) fn can_initialize_backend(backend: DecodeBackendKind) -> bool {
+    matches!(backend, DecodeBackendKind::Dav1d) && build_av1_decoder(&[backend]).is_ok()
+}

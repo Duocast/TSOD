@@ -4153,7 +4153,15 @@ async fn connect_and_run_session(
                                     detail: "System audio unavailable on this platform/runtime. Sharing video-only.".into(),
                                 });
                             }
-                            let available_codecs = net::dispatcher::available_screen_share_codecs();
+                            let available_codecs = [pb::VideoCodec::Vp9, pb::VideoCodec::Av1]
+                                .into_iter()
+                                .filter(|codec| probed_caps.encode_backends.contains_key(codec))
+                                .map(|codec| match codec {
+                                    pb::VideoCodec::Av1 => "AV1",
+                                    pb::VideoCodec::Vp9 => "VP9",
+                                    _ => unreachable!("screen-share only supports AV1/VP9"),
+                                })
+                                .collect::<Vec<_>>();
                             if available_codecs.is_empty() {
                                 let _ = tx_event.send(UiEvent::AppendLog(
                                     "[video] start share aborted: no supported codecs available".into(),
@@ -4209,7 +4217,7 @@ async fn connect_and_run_session(
                                 .screen_share_max_bitrate_kbps
                                 .saturating_mul(1_000)
                                 .max(600_000);
-                            let allow_1440p60 = net::dispatcher::can_offer_1440p60();
+                            let allow_1440p60 = probed_caps.supports_1440p60 && net::dispatcher::can_offer_1440p60();
                             let max_layers = probed_caps.max_simulcast_layers.max(1) as usize;
                             let mut offered_layers = vec![
                                 pb::SimulcastLayer {

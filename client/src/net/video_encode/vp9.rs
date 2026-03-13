@@ -195,3 +195,7 @@ mod tests {
         assert_eq!(bitrate, 1_234_567);
     }
 }
+
+pub(crate) fn can_initialize_backend(backend: EncodeBackendKind) -> bool {
+    build_vp9_encoder(&[backend]).is_ok()
+}
