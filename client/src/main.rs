@@ -28,7 +28,7 @@ use activity::ActivityRuntimeSettings;
 use anyhow::{anyhow, Context, Result};
 use bytes::Bytes;
 use config::Config;
-use crossbeam_channel::{bounded, Receiver, Sender};
+use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
 use identity::DeviceIdentity;
 use media_codec::DecodeMetadata;
 use net::dispatcher::{ControlDispatcher, PushEvent};
@@ -762,6 +762,12 @@ fn apply_network_class_encoder_settings(
 fn persist_settings(tx_event: &Sender<UiEvent>, settings: &ui::model::AppSettings) {
     if let Err(e) = settings_io::save_settings(settings) {
         let _ = tx_event.send(UiEvent::AppendLog(format!("[settings] save failed: {e:#}")));
+    }
+}
+
+fn send_ui_realtime_event(tx_event: &Sender<UiEvent>, event: UiEvent) {
+    match tx_event.try_send(event) {
+        Ok(()) | Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {}
     }
 }
 
@@ -6026,15 +6032,21 @@ async fn voice_send_loop(
         if !can_send {
             if last_local_speaking {
                 last_local_speaking = false;
-                let _ = tx_event.send(UiEvent::VoiceActivity {
-                    user_id: local_user_id.clone(),
-                    speaking: false,
-                });
+                send_ui_realtime_event(
+                    &tx_event,
+                    UiEvent::VoiceActivity {
+                        user_id: local_user_id.clone(),
+                        speaking: false,
+                    },
+                );
             }
-            let _ = tx_event.send(UiEvent::VoiceMeter {
-                user_id: local_user_id.clone(),
-                level: 0.0,
-            });
+            send_ui_realtime_event(
+                &tx_event,
+                UiEvent::VoiceMeter {
+                    user_id: local_user_id.clone(),
+                    level: 0.0,
+                },
+            );
             continue;
         }
 
@@ -6076,10 +6088,13 @@ async fn voice_send_loop(
         }
 
         let processed_level = audio::pcm_peak_level(&pcm);
-        let _ = tx_event.send(UiEvent::VoiceMeter {
-            user_id: local_user_id.clone(),
-            level: processed_level,
-        });
+        send_ui_realtime_event(
+            &tx_event,
+            UiEvent::VoiceMeter {
+                user_id: local_user_id.clone(),
+                level: processed_level,
+            },
+        );
 
         let gated_on = match capture_mode_from_u8(capture_mode.load(Ordering::Relaxed)) {
             ui::model::CaptureMode::PushToTalk => ptt_active.load(Ordering::Relaxed),
@@ -6118,10 +6133,13 @@ async fn voice_send_loop(
         let speaking_now = gated_on;
         if speaking_now != last_local_speaking {
             last_local_speaking = speaking_now;
-            let _ = tx_event.send(UiEvent::VoiceActivity {
-                user_id: local_user_id.clone(),
-                speaking: speaking_now,
-            });
+            send_ui_realtime_event(
+                &tx_event,
+                UiEvent::VoiceActivity {
+                    user_id: local_user_id.clone(),
+                    speaking: speaking_now,
+                },
+            );
         }
 
         if !speaking_now {
@@ -6387,10 +6405,13 @@ async fn voice_recv_loop(
                         stream.last_emitted_speaking = speaking_now;
                         if let Some(user_id) = stream.user_id.as_ref() {
                             if user_id != &local_user_id {
-                                let _ = tx_event.send(UiEvent::VoiceActivity {
-                                    user_id: user_id.clone(),
-                                    speaking: speaking_now,
-                                });
+                                send_ui_realtime_event(
+                                    &tx_event,
+                                    UiEvent::VoiceActivity {
+                                        user_id: user_id.clone(),
+                                        speaking: speaking_now,
+                                    },
+                                );
                             }
                         }
                     }
@@ -6399,10 +6420,13 @@ async fn voice_recv_loop(
                     voice_counters.observe_peak_stream_level(stream.level);
                     if let Some(user_id) = stream.user_id.as_ref() {
                         if user_id != &local_user_id {
-                            let _ = tx_event.send(UiEvent::VoiceMeter {
-                                user_id: user_id.clone(),
-                                level: stream.level,
-                            });
+                            send_ui_realtime_event(
+                                &tx_event,
+                                UiEvent::VoiceMeter {
+                                    user_id: user_id.clone(),
+                                    level: stream.level,
+                                },
+                            );
                         }
                     }
                 }
@@ -6413,10 +6437,13 @@ async fn voice_recv_loop(
                         if stream.last_emitted_speaking {
                             if let Some(user_id) = stream.user_id.as_ref() {
                                 if user_id != &local_user_id {
-                                    let _ = tx_event.send(UiEvent::VoiceActivity {
-                                        user_id: user_id.clone(),
-                                        speaking: false,
-                                    });
+                                    send_ui_realtime_event(
+                                        &tx_event,
+                                        UiEvent::VoiceActivity {
+                                            user_id: user_id.clone(),
+                                            speaking: false,
+                                        },
+                                    );
                                 }
                             }
                         }
