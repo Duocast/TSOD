@@ -31,8 +31,9 @@ impl ScrapCapture {
                     .ok_or_else(|| anyhow!("display source not found: {id}"))?
             }
             crate::ShareSource::WindowsWindow(id) => {
-                let _ = id;
-                scrap::Display::primary().context("resolve primary display")?
+                return Err(anyhow!(
+                    "scrap fallback does not support per-window Windows capture: {id}"
+                ));
             }
             crate::ShareSource::LinuxPortal(id) => {
                 let n = id
@@ -47,8 +48,9 @@ impl ScrapCapture {
                     .ok_or_else(|| anyhow!("display source not found: {id}"))?
             }
             crate::ShareSource::X11Window(id) => {
-                let _ = id;
-                scrap::Display::primary().context("resolve primary display")?
+                return Err(anyhow!(
+                    "scrap fallback does not support exact X11 window capture: {id}"
+                ));
             }
         };
 
