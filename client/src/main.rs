@@ -8,6 +8,7 @@
 //! - crossbeam channels bridge the GUI ↔ backend boundary
 //! - DSP pipeline (RNNoise, AGC, VAD) processes audio before encoding
 
+mod activity;
 mod app;
 mod audio;
 mod config;
@@ -23,6 +24,7 @@ mod settings_io;
 mod ui;
 mod updater;
 
+use activity::ActivityRuntimeSettings;
 use anyhow::{anyhow, Context, Result};
 use bytes::Bytes;
 use config::Config;
@@ -1034,6 +1036,7 @@ async fn app_task(
     )));
 
     let audio_runtime = AudioRuntimeSettings::from_app_settings(&saved_settings);
+    let activity_runtime = ActivityRuntimeSettings::from_app_settings(&saved_settings);
     let dsp_enabled = Arc::new(AtomicBool::new(
         saved_settings.dsp_enabled && !cfg.no_noise_suppression,
     ));
@@ -1172,6 +1175,7 @@ async fn app_task(
             network_telemetry.clone(),
             send_queue_drop_count.clone(),
             audio_runtime.clone(),
+            activity_runtime.clone(),
             sample_rate,
             channels,
             frame_ms,
@@ -1211,6 +1215,7 @@ async fn app_task(
                                 saved_settings.input_gain = gain;
                                 input_gain.store(f32_to_u32(gain), Ordering::Relaxed);
                                 persist_settings(&tx_event, &saved_settings);
+                                activity_runtime.apply(&saved_settings);
                             }
                             UiIntent::SetEchoCancellation(enabled) => {
                                 saved_settings.echo_cancellation = enabled;
@@ -1219,6 +1224,7 @@ async fn app_task(
                                     d.set_echo_cancellation(enabled);
                                 }
                                 persist_settings(&tx_event, &saved_settings);
+                                activity_runtime.apply(&saved_settings);
                             }
                             UiIntent::SetVoiceProcessingMode(mode) => {
                                 saved_settings.voice_processing_mode = mode;
@@ -1265,12 +1271,14 @@ async fn app_task(
                                     }
                                 }
                                 persist_settings(&tx_event, &saved_settings);
+                                activity_runtime.apply(&saved_settings);
                             }
                             UiIntent::SetDspEnabled(enabled) => {
                                 saved_settings.dsp_enabled = enabled;
                                 dsp_enabled
                                     .store(enabled && !cfg.no_noise_suppression, Ordering::Relaxed);
                                 persist_settings(&tx_event, &saved_settings);
+                                activity_runtime.apply(&saved_settings);
                             }
                             UiIntent::SetDspMethod(method) => {
                                 saved_settings.dsp_method = method;
@@ -1291,6 +1299,7 @@ async fn app_task(
                                     )));
                                 }
                                 persist_settings(&tx_event, &saved_settings);
+                                activity_runtime.apply(&saved_settings);
                             }
                             UiIntent::SetNoiseSuppression(enabled) => {
                                 saved_settings.noise_suppression = enabled;
@@ -1299,6 +1308,7 @@ async fn app_task(
                                     d.set_noise_suppression(enabled);
                                 }
                                 persist_settings(&tx_event, &saved_settings);
+                                activity_runtime.apply(&saved_settings);
                             }
                             UiIntent::SetAgcEnabled(enabled) => {
                                 saved_settings.agc_enabled = enabled;
@@ -1307,6 +1317,7 @@ async fn app_task(
                                     d.set_agc(enabled);
                                 }
                                 persist_settings(&tx_event, &saved_settings);
+                                activity_runtime.apply(&saved_settings);
                             }
                             UiIntent::SetAgcPreset(preset) => {
                                 saved_settings.agc_preset = preset;
@@ -1316,6 +1327,7 @@ async fn app_task(
                                     d.set_agc_preset(preset);
                                 }
                                 persist_settings(&tx_event, &saved_settings);
+                                activity_runtime.apply(&saved_settings);
                             }
                             UiIntent::SetAgcTargetDb(target_db) => {
                                 saved_settings.agc_target_db = target_db;
@@ -1324,6 +1336,7 @@ async fn app_task(
                                     d.set_agc_target(target_db);
                                 }
                                 persist_settings(&tx_event, &saved_settings);
+                                activity_runtime.apply(&saved_settings);
                             }
                             UiIntent::SetTypingAttenuation(enabled) => {
                                 saved_settings.typing_attenuation = enabled;
@@ -1331,6 +1344,7 @@ async fn app_task(
                                     .typing_attenuation
                                     .store(enabled, Ordering::Relaxed);
                                 persist_settings(&tx_event, &saved_settings);
+                                activity_runtime.apply(&saved_settings);
                             }
                             UiIntent::SetFecMode(mode) => {
                                 saved_settings.fec_mode = mode;
@@ -1338,6 +1352,7 @@ async fn app_task(
                                 let mut enc = encoder.lock().await;
                                 let _ = apply_fec_encoder_settings(&mut enc, &audio_runtime);
                                 persist_settings(&tx_event, &saved_settings);
+                                activity_runtime.apply(&saved_settings);
                             }
                             UiIntent::SetFecStrength(strength) => {
                                 saved_settings.fec_strength = strength.min(100);
@@ -1347,6 +1362,7 @@ async fn app_task(
                                 let mut enc = encoder.lock().await;
                                 let _ = apply_fec_encoder_settings(&mut enc, &audio_runtime);
                                 persist_settings(&tx_event, &saved_settings);
+                                activity_runtime.apply(&saved_settings);
                             }
                             UiIntent::SetVadThreshold(threshold) => {
                                 saved_settings.vad_threshold = threshold;
@@ -1355,11 +1371,13 @@ async fn app_task(
                                     d.set_vad_threshold(threshold);
                                 }
                                 persist_settings(&tx_event, &saved_settings);
+                                activity_runtime.apply(&saved_settings);
                             }
                             UiIntent::SetOutputGain(gain) => {
                                 saved_settings.output_gain = gain;
                                 output_gain.store(f32_to_u32(gain), Ordering::Relaxed);
                                 persist_settings(&tx_event, &saved_settings);
+                                activity_runtime.apply(&saved_settings);
                             }
                             UiIntent::SetOutputAutoLevel(enabled) => {
                                 saved_settings.output_auto_level = enabled;
@@ -1367,6 +1385,7 @@ async fn app_task(
                                     .output_auto_level
                                     .store(enabled, Ordering::Relaxed);
                                 persist_settings(&tx_event, &saved_settings);
+                                activity_runtime.apply(&saved_settings);
                             }
                             UiIntent::SetMonoExpansion(enabled) => {
                                 saved_settings.mono_expansion = enabled;
@@ -1374,6 +1393,7 @@ async fn app_task(
                                     .mono_expansion
                                     .store(enabled, Ordering::Relaxed);
                                 persist_settings(&tx_event, &saved_settings);
+                                activity_runtime.apply(&saved_settings);
                             }
                             UiIntent::SetComfortNoise(enabled) => {
                                 saved_settings.comfort_noise = enabled;
@@ -1381,6 +1401,7 @@ async fn app_task(
                                     .comfort_noise
                                     .store(enabled, Ordering::Relaxed);
                                 persist_settings(&tx_event, &saved_settings);
+                                activity_runtime.apply(&saved_settings);
                             }
                             UiIntent::SetComfortNoiseLevel(level) => {
                                 saved_settings.comfort_noise_level = level.clamp(0.0, 0.1);
@@ -1389,6 +1410,7 @@ async fn app_task(
                                     Ordering::Relaxed,
                                 );
                                 persist_settings(&tx_event, &saved_settings);
+                                activity_runtime.apply(&saved_settings);
                             }
                             UiIntent::SetDuckingEnabled(enabled) => {
                                 saved_settings.ducking_enabled = enabled;
@@ -1396,6 +1418,7 @@ async fn app_task(
                                     .ducking_enabled
                                     .store(enabled, Ordering::Relaxed);
                                 persist_settings(&tx_event, &saved_settings);
+                                activity_runtime.apply(&saved_settings);
                             }
                             UiIntent::SetDuckingAttenuationDb(db) => {
                                 saved_settings.ducking_attenuation_db = db.clamp(-40, 0);
@@ -1404,6 +1427,7 @@ async fn app_task(
                                     Ordering::Relaxed,
                                 );
                                 persist_settings(&tx_event, &saved_settings);
+                                activity_runtime.apply(&saved_settings);
                             }
                             UiIntent::SetInputDevice(dev) => {
                                 {
@@ -1478,6 +1502,7 @@ async fn app_task(
                             UiIntent::SaveSettings(ref settings) => {
                                 saved_settings = (**settings).clone();
                                 persist_settings(&tx_event, &saved_settings);
+                                activity_runtime.apply(&saved_settings);
                             }
                             UiIntent::ConnectToServer {
                                 host,
@@ -2006,6 +2031,7 @@ async fn connect_and_run_session(
     network_telemetry: Arc<SharedNetworkTelemetry>,
     send_queue_drop_count: Arc<AtomicU32>,
     audio_runtime: AudioRuntimeSettings,
+    activity_runtime: ActivityRuntimeSettings,
     sample_rate: u32,
     channels: u16,
     frame_ms: u32,
@@ -2122,6 +2148,13 @@ async fn connect_and_run_session(
     } else {
         auth_info.user_id.clone()
     };
+
+    activity::spawn_activity_detector(
+        dispatcher.clone(),
+        activity_runtime.clone(),
+        shutdown_rx.clone(),
+    );
+    activity_runtime.trigger_scan();
 
     let stream_state = SharedStreamState::new();
 
@@ -3898,6 +3931,7 @@ async fn connect_and_run_session(
                                     }
                                 }
                                 persist_settings(&tx_event, &saved_settings);
+                                activity_runtime.apply(&saved_settings);
                             }
                             UiIntent::SetDspEnabled(enabled) => {
                             saved_settings.dsp_enabled = enabled;
@@ -4735,6 +4769,7 @@ async fn connect_and_run_session(
                                 *per_user = settings.per_user_audio.clone();
                             }
                             audio_runtime.apply(settings);
+                            activity_runtime.apply(settings);
                             info!(
                                 "[audio] apply settings dsp_enabled={} dsp_method={} ns={} agc={} agc_preset={} agc_target={:.1} aec={} typing_attn={} fec={:?} fec_strength={} auto_level={} mono_expansion={} comfort_noise={} comfort_noise_level={:.3} ducking={} duck_db={}",
                                 settings.dsp_enabled,
@@ -5903,6 +5938,7 @@ async fn voice_send_loop(
     input_gain: Arc<std::sync::atomic::AtomicU32>,
     loopback_active: Arc<AtomicBool>,
     audio_runtime: AudioRuntimeSettings,
+    activity_runtime: ActivityRuntimeSettings,
     voice_counters: Arc<VoiceTelemetryCounters>,
     network_telemetry: Arc<SharedNetworkTelemetry>,
     send_queue_drop_count: Arc<AtomicU32>,
@@ -6154,6 +6190,7 @@ async fn voice_recv_loop(
     output_gain: Arc<std::sync::atomic::AtomicU32>,
     per_user_audio: Arc<std::sync::RwLock<HashMap<String, PerUserAudioSettings>>>,
     audio_runtime: AudioRuntimeSettings,
+    activity_runtime: ActivityRuntimeSettings,
     tx_event: Sender<UiEvent>,
     voice_counters: Arc<VoiceTelemetryCounters>,
     voice_stale_drops_total: Arc<AtomicU64>,

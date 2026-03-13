@@ -84,14 +84,22 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                 .copied()
                 .unwrap_or(0.0)
                 .clamp(0.0, 1.0);
+            let cached_profile = model.get_cached_profile_stale(&member.user_id);
+            let activity_text = cached_profile
+                .and_then(|profile| profile.current_activity.as_ref())
+                .map(|activity| format!("Playing {}", activity.game_name));
             let has_member_status = member.muted
                 || member.self_muted
                 || member.deafened
                 || member.self_deafened
                 || member.streaming
                 || !member.away_message.trim().is_empty();
-            let row_height = if has_member_status {
+            let row_height = if has_member_status && activity_text.is_some() {
+                ui.spacing().interact_size.y.max(56.0)
+            } else if has_member_status {
                 ui.spacing().interact_size.y.max(40.0)
+            } else if activity_text.is_some() {
+                ui.spacing().interact_size.y.max(48.0)
             } else {
                 ui.spacing().interact_size.y.max(36.0)
             };
@@ -137,8 +145,6 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
 
             ui.painter()
                 .circle_filled(center, radius, theme::bg_light());
-
-            let cached_profile = model.get_cached_profile_stale(&member.user_id);
 
             let avatar_url = if member.user_id == model.user_id {
                 model
@@ -234,6 +240,15 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                 egui::TextStyle::Body.resolve(ui.style()),
                 member_name_color(model, &member),
             );
+            if let Some(activity_text) = &activity_text {
+                ui.painter().text(
+                    egui::pos2(text_x, top_y + 18.0),
+                    egui::Align2::LEFT_TOP,
+                    activity_text,
+                    egui::TextStyle::Small.resolve(ui.style()),
+                    theme::text_muted(),
+                );
+            }
 
             let mut status_parts: Vec<String> = Vec::new();
             if member.muted {

@@ -634,6 +634,7 @@ impl ControlDispatcher {
             custom_status_expires: None,
             accent_color: None,
             links: Vec::new(),
+            activity_update: None,
         };
         let resp = self
             .send_request(
@@ -694,6 +695,7 @@ impl ControlDispatcher {
             custom_status_expires: None,
             accent_color,
             links: pb_links,
+            activity_update: None,
         };
 
         let resp = self
@@ -705,6 +707,38 @@ impl ControlDispatcher {
 
         if let Some(err) = resp.error {
             return Err(anyhow!("update_user_profile error: {:?}", err));
+        }
+        Ok(())
+    }
+
+    pub async fn update_current_activity(&self, activity: Option<pb::GameActivity>) -> Result<()> {
+        let activity_update = if let Some(activity) = activity {
+            Some(pb::update_user_profile_request::ActivityUpdate::CurrentActivity(activity))
+        } else {
+            Some(pb::update_user_profile_request::ActivityUpdate::ClearCurrentActivity(true))
+        };
+
+        let req = pb::UpdateUserProfileRequest {
+            display_name: None,
+            description: None,
+            status: pb::OnlineStatus::StatusUnspecified as i32,
+            custom_status_text: None,
+            custom_status_emoji: None,
+            custom_status_expires: None,
+            accent_color: None,
+            links: Vec::new(),
+            activity_update,
+        };
+
+        let resp = self
+            .send_request(
+                pb::client_to_server::Payload::UpdateUserProfileRequest(req),
+                Duration::from_secs(3),
+            )
+            .await??;
+
+        if let Some(err) = resp.error {
+            return Err(anyhow!("update_current_activity error: {:?}", err));
         }
         Ok(())
     }
