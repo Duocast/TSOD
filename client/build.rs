@@ -3,22 +3,19 @@ use std::{env, path::PathBuf};
 include!("../proto/proto_files.rs");
 
 fn main() {
-    // Display/debug build identity (timestamp), distinct from semver release version
-    // used by updater/network metadata via CARGO_PKG_VERSION.
     let build_version = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
     println!("cargo:rustc-env=VP_CLIENT_BUILD_VERSION={build_version}");
 
     println!("cargo:rerun-if-env-changed=VCPKG_ROOT");
     println!("cargo:rerun-if-env-changed=DAV1D_ROOT");
+    println!("cargo:rerun-if-env-changed=PKG_CONFIG_PATH");
+    println!("cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR");
 
-    // Add dav1d native library search path for Windows/MSVC builds.
-    // We do NOT emit `cargo:rustc-link-lib=dav1d` here because your build already
-    // requests dav1d somewhere else; the error is that link.exe cannot FIND dav1d.lib.
-    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
-        && env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
-    {
-        let profile = env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+    let profile = env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
 
+    if target_os == "windows" && target_env == "msvc" {
         let dav1d_root = env::var("DAV1D_ROOT")
             .map(PathBuf::from)
             .or_else(|_| {
@@ -43,6 +40,18 @@ fn main() {
         }
 
         println!("cargo:rustc-link-search=native={}", lib_dir.display());
+    } else if target_os == "linux" {
+        let lib = pkg_config::Config::new()
+            .cargo_metadata(false)
+            .probe("dav1d")
+            .expect("Failed to find dav1d via pkg-config. Install libdav1d-dev/libdav1d-devel/dav1d.");
+
+        for path in lib.link_paths {
+            println!("cargo:rustc-link-search=native={}", path.display());
+        }
+
+        // Keep this only if nothing else already links dav1d.
+        println!("cargo:rustc-link-lib=dav1d");
     }
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
