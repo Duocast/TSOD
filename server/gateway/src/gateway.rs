@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Context, Result};
+use dashmap::DashMap;
 use ring::rand::SecureRandom;
 use scopeguard::defer;
 use std::{
@@ -60,6 +61,7 @@ pub struct Gateway {
     media: Arc<MediaService>,
     connection_limit: Arc<Semaphore>,
     reactions: Arc<RwLock<HashMap<(ChannelId, uuid::Uuid), HashMap<String, HashSet<UserId>>>>>,
+    current_activity: Arc<DashMap<UserId, pb::GameActivity>>,
 }
 
 impl Gateway {
@@ -90,6 +92,7 @@ impl Gateway {
             media,
             connection_limit: Arc::new(Semaphore::new(max_connections)),
             reactions: Arc::new(RwLock::new(HashMap::new())),
+            current_activity: Arc::new(DashMap::new()),
         }
     }
 
@@ -1590,6 +1593,7 @@ impl Gateway {
                             icon_url: b.icon_url,
                             tooltip: b.tooltip,
                         }).collect();
+                        self.overlay_current_activity(target_uid, p);
                     }
                     let resp = pb::ServerToClient {
                         request_id: req_id,
@@ -1632,15 +1636,35 @@ impl Gateway {
                             "display_text": l.display_text,
                         })).collect::<Vec<_>>()).unwrap_or(serde_json::Value::Array(vec![])))
                     };
-                    self.control.update_user_profile(
-                        &ctx,
-                        r.display_name.clone(),
-                        r.description.clone(),
-                        r.accent_color.map(|c| c as i32),
-                        links_json,
-                    ).await?;
+                    let has_durable_update = r.display_name.is_some()
+                        || r.description.is_some()
+                        || r.accent_color.is_some()
+                        || !r.links.is_empty();
+                    if has_durable_update {
+                        self.control.update_user_profile(
+                            &ctx,
+                            r.display_name.clone(),
+                            r.description.clone(),
+                            r.accent_color.map(|c| c as i32),
+                            links_json,
+                        ).await?;
+                    }
+
+                    match r.activity_update {
+                        Some(pb::update_user_profile_request::ActivityUpdate::CurrentActivity(activity)) => {
+                            self.current_activity.insert(user_id, activity);
+                        }
+                        Some(pb::update_user_profile_request::ActivityUpdate::ClearCurrentActivity(_)) => {
+                            self.current_activity.remove(&user_id);
+                        }
+                        None => {}
+                    }
+
                     let row = self.control.get_user_profile(&ctx, user_id).await?;
-                    let profile = row.map(profile_row_to_pb);
+                    let mut profile = row.map(profile_row_to_pb);
+                    if let Some(ref mut p) = profile {
+                        self.overlay_current_activity(user_id, p);
+                    }
                     // Broadcast UserProfileUpdated to all connected users.
                     if let Some(ref p) = profile {
                         self.broadcast_profile_updated(user_id, p.clone()).await;
@@ -1669,7 +1693,8 @@ impl Gateway {
                     self.control.set_avatar(&ctx, asset_url).await?;
                     // Broadcast profile update.
                     if let Ok(Some(row)) = self.control.get_user_profile(&ctx, user_id).await {
-                        let p = profile_row_to_pb(row);
+                        let mut p = profile_row_to_pb(row);
+                        self.overlay_current_activity(user_id, &mut p);
                         self.broadcast_profile_updated(user_id, p).await;
                     }
                     let resp = pb::ServerToClient {
@@ -1696,7 +1721,8 @@ impl Gateway {
                     self.control.set_banner(&ctx, asset_url).await?;
                     // Broadcast profile update.
                     if let Ok(Some(row)) = self.control.get_user_profile(&ctx, user_id).await {
-                        let p = profile_row_to_pb(row);
+                        let mut p = profile_row_to_pb(row);
+                        self.overlay_current_activity(user_id, &mut p);
                         self.broadcast_profile_updated(user_id, p).await;
                     }
                     let resp = pb::ServerToClient {
@@ -1804,6 +1830,15 @@ impl Gateway {
                         cur.retain(|u| *u != user_id);
                         let max = self.membership.max_talkers_of(ch).unwrap_or(4);
                         self.membership.set_channel_state(ch, max, cur);
+                    }
+                }
+                if !self.sessions.has_user_sessions(user_id) {
+                    if self.current_activity.remove(&user_id).is_some() {
+                        if let Ok(Some(row)) = self.control.get_user_profile(&ctx, user_id).await {
+                            let mut p = profile_row_to_pb(row);
+                            self.overlay_current_activity(user_id, &mut p);
+                            self.broadcast_profile_updated(user_id, p).await;
+                        }
                     }
                 }
             }
@@ -1920,7 +1955,16 @@ impl Gateway {
         Ok(identity)
     }
 
-    async fn broadcast_profile_updated(&self, updated_user_id: UserId, profile: pb::UserProfile) {
+    fn overlay_current_activity(&self, user_id: UserId, profile: &mut pb::UserProfile) {
+        profile.current_activity = self.current_activity.get(&user_id).map(|a| a.clone());
+    }
+
+    async fn broadcast_profile_updated(
+        &self,
+        updated_user_id: UserId,
+        mut profile: pb::UserProfile,
+    ) {
+        self.overlay_current_activity(updated_user_id, &mut profile);
         let event = pb::UserProfileEvent {
             at: Some(now_ts()),
             kind: Some(pb::user_profile_event::Kind::UserProfileUpdated(

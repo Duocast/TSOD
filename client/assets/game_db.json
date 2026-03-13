@@ -1,0 +1,6 @@
+[
+  { "name": "Rust", "executables": ["rustclient.exe", "rustclient", "RustClient"] },
+  { "name": "Counter-Strike 2", "executables": ["cs2.exe", "cs2"] },
+  { "name": "Dota 2", "executables": ["dota2.exe", "dota2"] },
+  { "name": "Minecraft", "executables": ["javaw.exe", "java"] }
+]

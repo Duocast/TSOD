@@ -144,6 +144,13 @@ impl SessionMap {
         }
     }
 
+    pub fn has_user_sessions(&self, user: UserId) -> bool {
+        self.user_index
+            .get(&user)
+            .map(|sessions| !sessions.is_empty())
+            .unwrap_or(false)
+    }
+
     pub fn pending_sessions(&self, max: usize) -> Vec<(UserId, String, Arc<SessionSendCtx>)> {
         self.inner
             .iter()

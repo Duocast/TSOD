@@ -748,6 +748,8 @@ pub struct AppSettings {
     pub auto_connect: bool,
     pub auto_reconnect: bool,
     pub reconnect_delay_sec: u32,
+    pub share_game_activity: bool,
+    pub share_game_details: bool,
 
     // ─── Application ───
     pub start_minimized: bool,
@@ -846,6 +848,8 @@ impl Default for AppSettings {
             auto_connect: false,
             auto_reconnect: true,
             reconnect_delay_sec: 5,
+            share_game_activity: true,
+            share_game_details: true,
 
             // Application
             start_minimized: false,

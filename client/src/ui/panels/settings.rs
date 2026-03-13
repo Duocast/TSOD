@@ -2021,6 +2021,27 @@ fn page_security(ui: &mut egui::Ui, s: &mut AppSettings) -> (bool, bool) {
         });
     }
 
+    section(ui, "Privacy");
+    if ui
+        .checkbox(&mut s.share_game_activity, "Share game activity")
+        .changed()
+    {
+        dirty = true;
+    }
+    if ui
+        .add_enabled(
+            s.share_game_activity,
+            egui::Checkbox::new(&mut s.share_game_details, "Share game details"),
+        )
+        .changed()
+    {
+        dirty = true;
+    }
+    hint(
+        ui,
+        "When disabled, your client publishes generic \"Playing a game\" activity only.",
+    );
+
     section(ui, "Encryption");
 
     hint(

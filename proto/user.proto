@@ -89,6 +89,11 @@ message UpdateUserProfileRequest {
   optional Timestamp custom_status_expires = 6;
   optional uint32 accent_color = 7;
   repeated ProfileLink links = 8;     // full replacement when present
+
+  oneof activity_update {
+    GameActivity current_activity = 9;
+    bool clear_current_activity = 10;
+  }
 }
 
 message UpdateUserProfileResponse {
