@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use anyhow::{anyhow, bail, Result};
 use rav1e::prelude::{
     ChromaSampling, ColorDescription, ColorPrimaries, Config, EncoderConfig, MatrixCoefficients,
@@ -162,10 +164,7 @@ impl SoftwareAv1Encoder {
             matrix_coefficients: MatrixCoefficients::BT709,
         });
 
-        let cfg = Config::new()
-            .with_encoder_config(enc)
-            .with_threads(1)
-            .with_parallel_gops(false);
+        let cfg = Config::new().with_encoder_config(enc).with_threads(1);
         let ctx = cfg
             .new_context()
             .map_err(|e| anyhow!("failed to initialize AV1 encoder context: {e}"))?;
@@ -176,13 +175,11 @@ impl SoftwareAv1Encoder {
         let mut yuv = self.ctx.new_frame();
         bgra_to_i420(frame, &mut yuv)?;
         self.ctx
-            .send_frame(Some(yuv))
+            .send_frame(Some(Arc::new(yuv)))
             .map_err(|e| anyhow!("failed to submit frame to AV1 encoder: {e}"))?;
 
         if force_keyframe {
-            self.ctx
-                .flush()
-                .map_err(|e| anyhow!("failed to flush encoder for keyframe request: {e}"))?;
+            self.ctx.flush();
         }
 
         loop {

@@ -85,6 +85,11 @@ struct Dav1dDecoder {
     ctx: *mut Dav1dContext,
 }
 
+// SAFETY: `Dav1dDecoder` owns the raw decoder handle and only exposes
+// `&mut self` methods for interaction, so the context cannot be used
+// concurrently from multiple threads.
+unsafe impl Send for Dav1dDecoder {}
+
 impl Dav1dDecoder {
     fn new() -> Result<Self> {
         let mut settings = MaybeUninit::<Dav1dSettings>::zeroed();
