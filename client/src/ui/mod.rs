@@ -258,6 +258,10 @@ impl eframe::App for VpApp {
         // Drain backend events
         self.drain_events();
 
+        // Proactively hydrate profile cache for visible members so avatar/name color
+        // data appears without requiring profile popup clicks.
+        self.model.prefetch_member_profiles(&self.tx_intent);
+
         // Request continuous repaint for real-time views (voice meters, telemetry, mic test)
         if self.model.connected || self.model.loopback_active {
             ctx.request_repaint_after(std::time::Duration::from_millis(16));
