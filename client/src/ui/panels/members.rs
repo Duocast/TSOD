@@ -138,6 +138,8 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
             ui.painter()
                 .circle_filled(center, radius, theme::bg_light());
 
+            let cached_profile = model.get_cached_profile_stale(&member.user_id);
+
             let avatar_url = if member.user_id == model.user_id {
                 model
                     .avatar_url
@@ -148,18 +150,21 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
                 None
             }
             .or_else(|| {
-                model
-                    .get_cached_profile_stale(&member.user_id)
+                cached_profile
                     .and_then(|profile| profile.avatar_url.as_deref())
                     .filter(|url| !url.is_empty())
                     .map(str::to_owned)
             })
             .or_else(|| {
-                member
-                    .avatar_url
-                    .as_deref()
-                    .filter(|url| !url.is_empty())
-                    .map(str::to_owned)
+                if cached_profile.is_some() {
+                    None
+                } else {
+                    member
+                        .avatar_url
+                        .as_deref()
+                        .filter(|url| !url.is_empty())
+                        .map(str::to_owned)
+                }
             });
 
             if let Some(avatar_url) = avatar_url {
