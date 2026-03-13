@@ -235,11 +235,14 @@ fn collect_running_process_names() -> Result<HashSet<String>> {
     let mut pids = vec![0u32; 4096];
     let mut bytes_returned = 0u32;
     unsafe {
-        K32EnumProcesses(
+        let ok = K32EnumProcesses(
             pids.as_mut_ptr(),
             (pids.len() * std::mem::size_of::<u32>()) as u32,
             &mut bytes_returned,
-        )?;
+        );
+        if !ok.as_bool() {
+            return Err(anyhow::anyhow!("K32EnumProcesses failed"));
+        }
     }
     let count = bytes_returned as usize / std::mem::size_of::<u32>();
     let mut names = HashSet::new();
@@ -258,7 +261,7 @@ fn collect_running_process_names() -> Result<HashSet<String>> {
         let ok = unsafe {
             QueryFullProcessImageNameW(
                 handle,
-                PROCESS_NAME_WIN32.0,
+                PROCESS_NAME_WIN32,
                 windows::core::PWSTR(buf.as_mut_ptr()),
                 &mut size,
             )
