@@ -1318,12 +1318,9 @@ fn measure_media_caps() -> MeasuredMediaCaps {
         .encode_backends
         .get(&pb::VideoCodec::Av1)
         .map(|backends| {
-            backends.iter().any(|backend| {
-                matches!(
-                    backend,
-                    EncodeBackendKind::MfHwAv1 | EncodeBackendKind::VaapiAv1
-                )
-            })
+            backends
+                .iter()
+                .any(|backend| matches!(backend, EncodeBackendKind::NvencAv1))
         })
         .unwrap_or(false);
 
