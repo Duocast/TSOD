@@ -1,6 +1,9 @@
 pub mod nvidia;
 
-use crate::net::video_encode::av1::caps::probe_av1_caps;
+use crate::net::{
+    video_decode::{av1 as av1_decode, vp9 as vp9_decode},
+    video_encode::{av1 as av1_encode, vp9 as vp9_encode},
+};
 use crate::proto::voiceplatform::v1 as pb;
 use crate::screen_share::config::{
     env_disable_hw, env_screen_capture_override, env_system_audio_override,
@@ -56,8 +59,8 @@ pub struct MediaRuntimeCaps {
 
 pub fn probe_media_caps(source: &crate::ShareSource) -> MediaRuntimeCaps {
     let mut capture_backends = preferred_capture_backends(source);
-    let mut encode_backends = preferred_encode_backends();
-    let mut decode_backends = preferred_decode_backends();
+    let mut encode_backends = verified_encode_backends(preferred_encode_backends());
+    let mut decode_backends = verified_decode_backends(preferred_decode_backends());
     let audio_backends = preferred_audio_backends();
 
     if let Some(override_capture) = env_screen_capture_override() {
@@ -80,6 +83,9 @@ pub fn probe_media_caps(source: &crate::ShareSource) -> MediaRuntimeCaps {
     if let Some(decoder_override) = env_video_decoder_override() {
         apply_decoder_override(&decoder_override, &mut decode_backends);
     }
+
+    encode_backends = verified_encode_backends(encode_backends);
+    decode_backends = verified_decode_backends(decode_backends);
 
     let sender_policy = SenderPolicy::from_settings_or_env(None);
     let preferred_codec = sender_policy
@@ -239,15 +245,69 @@ fn preferred_encode_backends() -> HashMap<pb::VideoCodec, Vec<EncodeBackendKind>
 }
 
 fn av1_encode_backends(hw_disabled: bool) -> Vec<EncodeBackendKind> {
-    let av1_caps = probe_av1_caps();
     let mut av1 = Vec::new();
-    if !hw_disabled && av1_caps.nvenc_available {
+    if !hw_disabled {
         av1.push(EncodeBackendKind::NvencAv1);
     }
-    if av1_caps.svt_available {
-        av1.push(EncodeBackendKind::SvtAv1);
-    }
+    av1.push(EncodeBackendKind::SvtAv1);
     av1
+}
+
+fn verified_encode_backends(
+    backends: HashMap<pb::VideoCodec, Vec<EncodeBackendKind>>,
+) -> HashMap<pb::VideoCodec, Vec<EncodeBackendKind>> {
+    backends
+        .into_iter()
+        .filter_map(|(codec, list)| {
+            let verified = list
+                .into_iter()
+                .filter(|backend| can_init_encode_backend(codec, *backend))
+                .collect::<Vec<_>>();
+            (!verified.is_empty()).then_some((codec, verified))
+        })
+        .collect()
+}
+
+fn can_init_encode_backend(codec: pb::VideoCodec, backend: EncodeBackendKind) -> bool {
+    match (codec, backend) {
+        (
+            pb::VideoCodec::Vp9,
+            EncodeBackendKind::MfHwVp9 | EncodeBackendKind::VaapiVp9 | EncodeBackendKind::Libvpx,
+        ) => vp9_encode::can_initialize_backend(backend),
+        (pb::VideoCodec::Av1, EncodeBackendKind::NvencAv1 | EncodeBackendKind::SvtAv1) => {
+            av1_encode::can_initialize_backend(backend)
+        }
+        _ => false,
+    }
+}
+
+fn verified_decode_backends(
+    backends: HashMap<pb::VideoCodec, Vec<DecodeBackendKind>>,
+) -> HashMap<pb::VideoCodec, Vec<DecodeBackendKind>> {
+    backends
+        .into_iter()
+        .filter_map(|(codec, list)| {
+            let verified = list
+                .into_iter()
+                .filter(|backend| can_init_decode_backend(codec, *backend))
+                .collect::<Vec<_>>();
+            (!verified.is_empty()).then_some((codec, verified))
+        })
+        .collect()
+}
+
+fn can_init_decode_backend(codec: pb::VideoCodec, backend: DecodeBackendKind) -> bool {
+    match (codec, backend) {
+        (
+            pb::VideoCodec::Vp9,
+            DecodeBackendKind::MfHwVp9 | DecodeBackendKind::VaapiVp9 | DecodeBackendKind::Libvpx,
+        ) => vp9_decode::can_initialize_backend(backend),
+        (pb::VideoCodec::Av1, DecodeBackendKind::Dav1d) => {
+            av1_decode::can_initialize_backend(backend)
+        }
+        (pb::VideoCodec::Av1, DecodeBackendKind::MfHwAv1 | DecodeBackendKind::VaapiAv1) => false,
+        _ => false,
+    }
 }
 
 fn preferred_decode_backends() -> HashMap<pb::VideoCodec, Vec<DecodeBackendKind>> {
@@ -393,11 +453,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn nvenc_not_shown_without_probe() {
-        std::env::remove_var("TSOD_TEST_NVIDIA_VENDOR_ID");
-        std::env::remove_var("TSOD_TEST_NVIDIA_DEVICE_ID");
-        let av1 = av1_encode_backends(false);
-        assert!(!av1.contains(&EncodeBackendKind::NvencAv1));
+    fn impossible_codec_not_advertised() {
+        let caps = verified_encode_backends(HashMap::from([(
+            pb::VideoCodec::Av1,
+            vec![EncodeBackendKind::NvencAv1],
+        )]));
+        assert!(caps.get(&pb::VideoCodec::Av1).is_none());
     }
 
     #[test]
@@ -421,12 +482,9 @@ mod tests {
     }
 
     #[test]
-    fn auto_prefers_nvenc_over_svt() {
-        std::env::set_var("TSOD_TEST_NVIDIA_VENDOR_ID", "10de");
-        std::env::set_var("TSOD_TEST_NVIDIA_DEVICE_ID", "2684");
-        let av1 = av1_encode_backends(false);
-        if av1.contains(&EncodeBackendKind::SvtAv1) {
-            assert_eq!(av1.first(), Some(&EncodeBackendKind::NvencAv1));
-        }
+    fn profile_1440_hidden_when_runtime_headroom_insufficient() {
+        let mut map = HashMap::new();
+        map.insert(pb::VideoCodec::Vp9, vec![EncodeBackendKind::Libvpx]);
+        assert!(!estimate_encode_headroom_1440p60(&map));
     }
 }

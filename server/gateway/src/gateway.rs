@@ -1290,6 +1290,9 @@ impl Gateway {
                     let allow_1440p60 = requested_1440p60
                         && allows_1440p60(plan.primary, streamer_media_caps.as_ref(), &viewer_media_caps);
 
+                    let accepted_layer_ids =
+                        accepted_layer_ids_for_request(&r.layers, allow_1440p60)?;
+
                     let primary_tag = random_stream_tag()?;
                     let stream_id = format!("{:016x}", primary_tag);
                     let stream_id_msg = pb::StreamId { value: stream_id.clone() };
@@ -1341,12 +1344,6 @@ impl Gateway {
                         None
                     };
 
-                    let accepted_layer_ids = r
-                        .layers
-                        .iter()
-                        .filter(|layer| allow_1440p60 || (layer.width <= 1920 && layer.height <= 1080))
-                        .map(|l| l.layer_id)
-                        .collect::<Vec<_>>();
                     let active_layer_ids = accepted_layer_ids
                         .iter()
                         .map(|id| (*id).clamp(0, u8::MAX as u32) as u8)
@@ -2221,6 +2218,21 @@ fn allows_1440p60(
         .all(|caps| codec_hw_decode(caps, codec))
 }
 
+fn accepted_layer_ids_for_request(
+    layers: &[pb::SimulcastLayer],
+    allow_1440p60: bool,
+) -> Result<Vec<u32>> {
+    let accepted = layers
+        .iter()
+        .filter(|layer| allow_1440p60 || (layer.width <= 1920 && layer.height <= 1080))
+        .map(|l| l.layer_id)
+        .collect::<Vec<_>>();
+    if accepted.is_empty() {
+        return Err(ControlError::FailedPrecondition("requested layers unsupported").into());
+    }
+    Ok(accepted)
+}
+
 fn negotiate_codecs(
     streamer: &[pb::VideoCodec],
     viewers: &HashMap<UserId, Vec<pb::VideoCodec>>,
@@ -2587,6 +2599,30 @@ mod tests {
         let plan = negotiate_codecs(&streamer, &viewers).expect("plan");
         assert_eq!(plan.primary, pb::VideoCodec::Vp8);
         assert_eq!(plan.fallback, None);
+    }
+
+    #[test]
+    fn empty_accepted_layer_ids_returns_error_without_stream_registration() {
+        let err = accepted_layer_ids_for_request(
+            &[pb::SimulcastLayer {
+                layer_id: 2,
+                width: 2560,
+                height: 1440,
+                max_fps: 60,
+                max_bitrate_bps: 16_000_000,
+            }],
+            false,
+        )
+        .expect_err("must reject unsupported layers");
+        let control = err
+            .downcast_ref::<ControlError>()
+            .expect("should return control error");
+        match control {
+            ControlError::FailedPrecondition(msg) => {
+                assert_eq!(*msg, "requested layers unsupported")
+            }
+            other => panic!("unexpected error variant: {other:?}"),
+        }
     }
 
     #[test]

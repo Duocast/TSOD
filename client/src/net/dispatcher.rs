@@ -1256,7 +1256,15 @@ pub fn available_screen_share_codecs() -> Vec<&'static str> {
 }
 
 pub fn available_screen_share_profiles() -> Vec<&'static str> {
-    if can_offer_1440p60() {
+    let measured = measured_media_caps();
+    screen_share_profiles_for(
+        measured.runtime_caps.supports_1440p60,
+        runtime_headroom_fps(),
+    )
+}
+
+fn screen_share_profiles_for(supports_1440p60: bool, headroom_fps: f32) -> Vec<&'static str> {
+    if supports_1440p60 && headroom_fps >= 55.0 {
         vec!["1080p60", "1440p60"]
     } else {
         vec!["1080p60"]
@@ -1319,7 +1327,7 @@ fn measure_media_caps() -> MeasuredMediaCaps {
         .collect::<Vec<_>>();
     let encode: Vec<i32> = codecs.iter().map(|codec| *codec as i32).collect();
     let decode = encode.clone();
-    let hw_av1 = runtime_caps
+    let hw_encode_av1 = runtime_caps
         .encode_backends
         .get(&pb::VideoCodec::Av1)
         .map(|backends| {
@@ -1328,21 +1336,59 @@ fn measure_media_caps() -> MeasuredMediaCaps {
                 .any(|backend| matches!(backend, EncodeBackendKind::NvencAv1))
         })
         .unwrap_or(false);
+    let hw_encode_vp9 = runtime_caps
+        .encode_backends
+        .get(&pb::VideoCodec::Vp9)
+        .map(|backends| {
+            backends.iter().any(|backend| {
+                matches!(
+                    backend,
+                    EncodeBackendKind::MfHwVp9 | EncodeBackendKind::VaapiVp9
+                )
+            })
+        })
+        .unwrap_or(false);
+    let hw_decode_av1 = runtime_caps
+        .decode_backends
+        .get(&pb::VideoCodec::Av1)
+        .map(|backends| {
+            backends.iter().any(|backend| {
+                matches!(
+                    backend,
+                    crate::screen_share::runtime_probe::DecodeBackendKind::MfHwAv1
+                        | crate::screen_share::runtime_probe::DecodeBackendKind::VaapiAv1
+                )
+            })
+        })
+        .unwrap_or(false);
+    let hw_decode_vp9 = runtime_caps
+        .decode_backends
+        .get(&pb::VideoCodec::Vp9)
+        .map(|backends| {
+            backends.iter().any(|backend| {
+                matches!(
+                    backend,
+                    crate::screen_share::runtime_probe::DecodeBackendKind::MfHwVp9
+                        | crate::screen_share::runtime_probe::DecodeBackendKind::VaapiVp9
+                )
+            })
+        })
+        .unwrap_or(false);
 
     let caps = pb::ClientMediaCapabilities {
         decode,
         encode,
-        hw_encode_av1: hw_av1,
-        hw_encode_vp9: false,
+        hw_encode_av1,
+        hw_encode_vp9,
         hw_encode_vp8: false,
-        hw_decode_av1: hw_av1,
-        hw_decode_vp9: false,
+        hw_decode_av1,
+        hw_decode_vp9,
         hw_decode_vp8: false,
     };
 
     info!(
         supports_1440p60 = runtime_caps.supports_1440p60,
-        hw_av1, "runtime media capabilities"
+        hw_encode_av1, hw_encode_vp9, hw_decode_av1, hw_decode_vp9, "runtime media capabilities"
     );
 
     MeasuredMediaCaps { runtime_caps, caps }
@@ -1455,12 +1501,22 @@ fn default_caps(alpn: &str) -> pb::ClientCaps {
             max_height: if supports_1440p60 { 1440 } else { 1080 },
             max_fps: 60,
             max_bitrate_bps: 8_000_000,
-            hw_encode_available: media_caps.hw_encode_av1,
+            hw_encode_available: media_caps.hw_encode_av1 || media_caps.hw_encode_vp9,
         }),
         caps_hash: Some(pb::CapabilityHash {
             sha256: alpn.as_bytes().to_vec(),
         }),
         screen_share: supports_screen_share.then(|| build_screenshare_caps(&measured.runtime_caps)),
         camera_video: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::screen_share_profiles_for;
+
+    #[test]
+    fn screen_share_profiles_hide_1440_without_headroom() {
+        assert_eq!(screen_share_profiles_for(true, 54.0), vec!["1080p60"]);
     }
 }

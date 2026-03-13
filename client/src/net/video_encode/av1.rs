@@ -49,3 +49,7 @@ fn build_backend(backend: EncodeBackendKind) -> Result<Box<dyn VideoEncoder>> {
         _ => bail!("unsupported AV1 backend {backend:?}"),
     }
 }
+
+pub(crate) fn can_initialize_backend(backend: EncodeBackendKind) -> bool {
+    build_backend(backend).is_ok()
+}
