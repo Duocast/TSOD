@@ -530,10 +530,12 @@ fn page_application(ui: &mut egui::Ui, model: &mut UiModel) -> bool {
     }
 
     ui.add_space(4.0);
+    let mut compact_chat_avatars = !s.chat_show_avatars;
     if ui
-        .checkbox(&mut s.chat_show_avatars, "Compact chat avatars")
+        .checkbox(&mut compact_chat_avatars, "Compact chat avatars")
         .changed()
     {
+        s.chat_show_avatars = !compact_chat_avatars;
         dirty = true;
     }
 
