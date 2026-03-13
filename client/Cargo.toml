@@ -36,6 +36,7 @@ uuid = { version = "1.21", features = ["v4"] }
 vp-route-hash = { path = "../shared/route-hash" }
 vp-voice = { path = "../shared/voice" }
 axoupdater = "0.10.0"
+pkg-config = "0.3"
 
 # QUIC / TLS
 quinn = "0.11.9"
