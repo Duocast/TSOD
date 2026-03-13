@@ -4204,6 +4204,11 @@ async fn connect_and_run_session(
                                 pb::VideoCodec::Vp8 => pb::video_caps::Codec::Vp8,
                                 _ => pb::video_caps::Codec::Vp9,
                             };
+                            let requested_fps = saved_settings.screen_share_fps.clamp(5, 60);
+                            let requested_bitrate_bps = saved_settings
+                                .screen_share_max_bitrate_kbps
+                                .saturating_mul(1_000)
+                                .max(600_000);
                             let request_1440p60 = saved_settings.screen_share_profile == "1440p60"
                                 && net::dispatcher::can_offer_1440p60();
                             let (profile_layer, sender_profile) = if request_1440p60 {
@@ -4211,16 +4216,16 @@ async fn connect_and_run_session(
                                     layer_id: 2,
                                     width: 2560,
                                     height: 1440,
-                                    max_fps: 60,
-                                    max_bitrate_bps: 16_000_000,
+                                    max_fps: requested_fps,
+                                    max_bitrate_bps: requested_bitrate_bps.min(16_000_000),
                                 }, VideoStreamProfile::P1440p60)
                             } else {
                                 (pb::SimulcastLayer {
                                     layer_id: 1,
                                     width: 1920,
                                     height: 1080,
-                                    max_fps: 60,
-                                    max_bitrate_bps: 8_000_000,
+                                    max_fps: requested_fps,
+                                    max_bitrate_bps: requested_bitrate_bps.min(8_000_000),
                                 }, VideoStreamProfile::P1080p60)
                             };
                             advertised_target_profile = if request_1440p60 {
@@ -4233,6 +4238,9 @@ async fn connect_and_run_session(
                                     "[video] 1440p60 unavailable (startup benchmark/runtime headroom); using 1080p60".into(),
                                 ));
                             }
+                            let target_width = profile_layer.width;
+                            let target_height = profile_layer.height;
+                            let target_bitrate_bps = profile_layer.max_bitrate_bps;
                             let req = pb::StartScreenShareRequest {
                                 channel_id: active_channel.as_ref().map(|id| pb::ChannelId { value: id.clone() }),
                                 codec: preferred_codec as i32,
@@ -4374,6 +4382,10 @@ async fn connect_and_run_session(
                                                 backend_label: backend_label.clone(),
                                                 active_voice_channel_route: active_voice_channel_route.clone(),
                                                 tx_event: tx_event.clone(),
+                                                target_fps: requested_fps,
+                                                target_bitrate_bps,
+                                                target_width,
+                                                target_height,
                                             },
                                         )));
                                     } else {
