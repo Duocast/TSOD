@@ -52,7 +52,11 @@ pub async fn check_for_updates() -> Result<UpdateCheckResult> {
             {
                 return check_portable_windows_release().await;
             }
-            #[cfg(not(target_os = "windows"))]
+            #[cfg(target_os = "linux")]
+            {
+                return check_portable_linux_release().await;
+            }
+            #[cfg(not(any(target_os = "windows", target_os = "linux")))]
             {
                 return Ok(UpdateCheckResult::UnsupportedInstallType);
             }
@@ -118,6 +122,26 @@ async fn check_portable_windows_release() -> Result<UpdateCheckResult> {
     }
 }
 
+#[cfg(target_os = "linux")]
+async fn check_portable_linux_release() -> Result<UpdateCheckResult> {
+    let release = fetch_latest_portable_release().await?;
+    if is_newer_release(&release.version, CURRENT_VERSION) {
+        info!(
+            "[update] portable Linux update available: current={}, latest={}",
+            CURRENT_VERSION, release.version
+        );
+        Ok(UpdateCheckResult::UpdateAvailable {
+            version: release.version,
+        })
+    } else {
+        info!(
+            "[update] portable Linux up to date: current={}, latest={}",
+            CURRENT_VERSION, release.version
+        );
+        Ok(UpdateCheckResult::UpToDate)
+    }
+}
+
 #[cfg(target_os = "windows")]
 async fn install_portable_windows_release() -> Result<UpdateInstallResult> {
     let release = fetch_latest_portable_release().await?;
@@ -142,7 +166,7 @@ async fn install_portable_windows_release() -> Result<UpdateInstallResult> {
     Ok(UpdateInstallResult::Installed)
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 async fn fetch_latest_portable_release() -> Result<PortableRelease> {
     let url = format!("https://api.github.com/repos/{GITHUB_REPO}/releases/latest");
     let client = reqwest::Client::new();
@@ -167,8 +191,8 @@ async fn fetch_latest_portable_release() -> Result<PortableRelease> {
         warn!("[update] latest GitHub release is marked prerelease");
     }
 
-    let asset = select_windows_asset(&release.assets)
-        .ok_or_else(|| anyhow!("no Windows .exe asset found in latest GitHub release"))?;
+    let asset = select_release_asset(&release.assets)
+        .ok_or_else(|| anyhow!("no matching release asset found in latest GitHub release"))?;
 
     Ok(PortableRelease {
         version: release.tag_name.trim_start_matches('v').to_string(),
@@ -177,11 +201,45 @@ async fn fetch_latest_portable_release() -> Result<PortableRelease> {
 }
 
 #[cfg(target_os = "windows")]
-fn select_windows_asset(assets: &[GithubAsset]) -> Option<&GithubAsset> {
+fn select_release_asset(assets: &[GithubAsset]) -> Option<&GithubAsset> {
     assets
         .iter()
         .find(|asset| asset.name.contains("windows") && asset.name.ends_with(".exe"))
         .or_else(|| assets.iter().find(|asset| asset.name.ends_with(".exe")))
+}
+
+#[cfg(target_os = "linux")]
+fn select_release_asset(assets: &[GithubAsset]) -> Option<&GithubAsset> {
+    let arch_matches = linux_arch_aliases();
+    assets
+        .iter()
+        .find(|asset| {
+            let name = asset.name.to_ascii_lowercase();
+            name.contains("linux")
+                && arch_matches.iter().any(|arch| name.contains(arch))
+                && (name.ends_with(".appimage") || name.ends_with(".deb") || name.ends_with(".rpm"))
+        })
+        .or_else(|| {
+            assets.iter().find(|asset| {
+                let name = asset.name.to_ascii_lowercase();
+                name.contains("linux")
+                    && (name.ends_with(".appimage")
+                        || name.ends_with(".deb")
+                        || name.ends_with(".rpm")
+                        || name.ends_with(".tar.gz"))
+            })
+        })
+}
+
+#[cfg(target_os = "linux")]
+fn linux_arch_aliases() -> &'static [&'static str] {
+    match std::env::consts::ARCH {
+        "x86_64" => &["x86_64", "amd64"],
+        "aarch64" => &["aarch64", "arm64"],
+        "arm" => &["armv7", "armhf", "arm"],
+        "x86" => &["x86", "i386", "i686"],
+        other => &[other],
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -232,7 +290,7 @@ fn launch_windows_swap_script(
     Ok(())
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 fn is_newer_release(latest: &str, current: &str) -> bool {
     match (
         semver::Version::parse(latest.trim()),
@@ -245,13 +303,31 @@ fn is_newer_release(latest: &str, current: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     use super::is_newer_release;
 
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     #[test]
     fn newer_semver_is_detected() {
         assert!(is_newer_release("0.2.0", "0.1.9"));
         assert!(!is_newer_release("0.2.0", "0.2.0"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_asset_selection_prefers_linux_package() {
+        let assets = vec![
+            super::GithubAsset {
+                name: "tsod-0.2.0-windows-x64.exe".to_string(),
+                browser_download_url: "https://example.com/windows.exe".to_string(),
+            },
+            super::GithubAsset {
+                name: "tsod-0.2.0-linux-x86_64.AppImage".to_string(),
+                browser_download_url: "https://example.com/linux.AppImage".to_string(),
+            },
+        ];
+
+        let selected = super::select_release_asset(&assets).expect("linux asset should be found");
+        assert_eq!(selected.name, "tsod-0.2.0-linux-x86_64.AppImage");
     }
 }
