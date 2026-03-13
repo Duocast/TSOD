@@ -1,6 +1,700 @@
 [
-  { "name": "Rust", "executables": ["rustclient.exe", "rustclient", "RustClient"] },
-  { "name": "Counter-Strike 2", "executables": ["cs2.exe", "cs2"] },
-  { "name": "Dota 2", "executables": ["dota2.exe", "dota2"] },
-  { "name": "Minecraft", "executables": ["javaw.exe", "java"] }
+  {
+    "name": "Rust",
+    "executables": [
+      "rustclient.exe",
+      "rustclient",
+      "RustClient"
+    ]
+  },
+  {
+    "name": "Counter-Strike 2",
+    "executables": [
+      "cs2.exe",
+      "cs2"
+    ]
+  },
+  {
+    "name": "Dota 2",
+    "executables": [
+      "dota2.exe",
+      "dota2"
+    ]
+  },
+  {
+    "name": "Minecraft",
+    "executables": [
+      "javaw.exe",
+      "java"
+    ]
+  },
+  {
+    "name": "Alan Wake 2",
+    "executables": [
+      "AlanWake2.exe",
+      "alanwake2.exe"
+    ]
+  },
+  {
+    "name": "Alan Wake Remastered",
+    "executables": [
+      "Alan Wake Remastered.exe",
+      "alan wake remastered.exe",
+      "AlanWake.exe",
+      "alanwake.exe"
+    ]
+  },
+  {
+    "name": "Among Us",
+    "executables": [
+      "Among Us.exe",
+      "AmongUs.exe",
+      "among us",
+      "amongus"
+    ]
+  },
+  {
+    "name": "Apex Legends",
+    "executables": [
+      "r5apex.exe",
+      "R5Apex.exe",
+      "Apex.exe",
+      "apex"
+    ]
+  },
+  {
+    "name": "ARC Raiders",
+    "executables": [
+      "ARC Raiders.exe",
+      "ARC_RAIDERS.exe",
+      "arcraiders.exe",
+      "arcraiders"
+    ]
+  },
+  {
+    "name": "ARK: Survival Evolved",
+    "executables": [
+      "ShooterGame.exe",
+      "shootergame.exe",
+      "ShooterGame"
+    ]
+  },
+  {
+    "name": "Assassin's Creed Odyssey",
+    "executables": [
+      "ACOdyssey.exe",
+      "acodyssey.exe",
+      "AssassinsCreedOdyssey.exe",
+      "assassinscreedodyssey.exe"
+    ]
+  },
+  {
+    "name": "Baldur's Gate 3",
+    "executables": [
+      "bg3.exe",
+      "bg3_dx11.exe",
+      "BG3.exe",
+      "bg3"
+    ]
+  },
+  {
+    "name": "Battlefield 2042",
+    "executables": [
+      "bf2042.exe",
+      "BF2042.exe",
+      "Battlefield2042.exe",
+      "battlefield2042.exe"
+    ]
+  },
+  {
+    "name": "Battlefield 6",
+    "executables": [
+      "bf6.exe",
+      "BF6.exe",
+      "Battlefield6.exe",
+      "battlefield6.exe"
+    ]
+  },
+  {
+    "name": "Black Myth: Wukong",
+    "executables": [
+      "b1.exe",
+      "BlackMythWukong.exe",
+      "blackmythwukong.exe"
+    ]
+  },
+  {
+    "name": "Borderlands 4",
+    "executables": [
+      "Borderlands4.exe",
+      "borderlands4.exe"
+    ]
+  },
+  {
+    "name": "BRAVELY DEFAULT FLYING FAIRY HD Remaster",
+    "executables": [
+      "BravelyDefaultFlyingFairyHDRemaster.exe",
+      "bravelydefaultflyingfairyhdremaster.exe"
+    ]
+  },
+  {
+    "name": "Call of Duty: Black Ops 6",
+    "executables": [
+      "cod.exe",
+      "COD.exe",
+      "bootstrapper.exe",
+      "Bootstrapper.exe"
+    ]
+  },
+  {
+    "name": "Call of Duty: Black Ops 7",
+    "executables": [
+      "cod.exe",
+      "COD.exe",
+      "bootstrapper.exe",
+      "Bootstrapper.exe"
+    ]
+  },
+  {
+    "name": "Call of Duty: Modern Warfare II",
+    "executables": [
+      "cod.exe",
+      "COD.exe",
+      "bootstrapper.exe",
+      "Bootstrapper.exe"
+    ]
+  },
+  {
+    "name": "Call of Duty: Modern Warfare III",
+    "executables": [
+      "cod.exe",
+      "COD.exe",
+      "bootstrapper.exe",
+      "Bootstrapper.exe"
+    ]
+  },
+  {
+    "name": "Civilization VI",
+    "executables": [
+      "CivilizationVI.exe",
+      "CivilizationVI_DX12.exe",
+      "civilizationvi.exe",
+      "civilizationvi"
+    ]
+  },
+  {
+    "name": "Counter-Strike: Global Offensive",
+    "executables": [
+      "csgo.exe",
+      "csgo"
+    ]
+  },
+  {
+    "name": "Cyberpunk 2077",
+    "executables": [
+      "Cyberpunk2077.exe",
+      "cyberpunk2077.exe",
+      "Cyberpunk2077"
+    ]
+  },
+  {
+    "name": "Dark Souls III",
+    "executables": [
+      "DarkSoulsIII.exe",
+      "darksoulsiii.exe",
+      "DarkSoulsIII"
+    ]
+  },
+  {
+    "name": "Dead by Daylight",
+    "executables": [
+      "DeadByDaylight-Win64-Shipping.exe",
+      "deadbydaylight-win64-shipping.exe",
+      "DeadByDaylight.exe",
+      "deadbydaylight.exe"
+    ]
+  },
+  {
+    "name": "Destiny 2",
+    "executables": [
+      "destiny2.exe",
+      "Destiny2.exe",
+      "destiny2launcher.exe"
+    ]
+  },
+  {
+    "name": "Diablo I",
+    "executables": [
+      "DIABLO.EXE",
+      "Diablo.exe",
+      "diablo.exe"
+    ]
+  },
+  {
+    "name": "Diablo II",
+    "executables": [
+      "Game.exe",
+      "game.exe",
+      "Diablo II.exe",
+      "DiabloII.exe",
+      "D2R.exe",
+      "d2r.exe"
+    ]
+  },
+  {
+    "name": "Diablo III",
+    "executables": [
+      "Diablo III64.exe",
+      "Diablo III.exe",
+      "DiabloIII64.exe",
+      "DiabloIII.exe",
+      "diabloiii64.exe",
+      "diabloiii.exe"
+    ]
+  },
+  {
+    "name": "Divinity: Original Sin 2",
+    "executables": [
+      "EoCApp.exe",
+      "eocapp.exe",
+      "DivinityOriginalSin2.exe",
+      "divinityoriginalsin2.exe"
+    ]
+  },
+  {
+    "name": "DOOM Eternal",
+    "executables": [
+      "DOOMEternalx64vk.exe",
+      "doometernalx64vk.exe",
+      "DOOMEternalx64.exe",
+      "doometernalx64.exe"
+    ]
+  },
+  {
+    "name": "Dying Light 2 Stay Human",
+    "executables": [
+      "DyingLightGame_x64_rwdi.exe",
+      "dyinglightgame_x64_rwdi.exe",
+      "DyingLight2.exe",
+      "dyinglight2.exe"
+    ]
+  },
+  {
+    "name": "Elden Ring",
+    "executables": [
+      "eldenring.exe",
+      "EldenRing.exe",
+      "start_protected_game.exe"
+    ]
+  },
+  {
+    "name": "Fall Guys",
+    "executables": [
+      "FallGuys_client_game.exe",
+      "fallguys_client_game.exe",
+      "FallGuys_client.exe",
+      "fallguys_client.exe"
+    ]
+  },
+  {
+    "name": "Fallout 4",
+    "executables": [
+      "Fallout4.exe",
+      "fallout4.exe",
+      "Fallout4Launcher.exe"
+    ]
+  },
+  {
+    "name": "Far Cry 5",
+    "executables": [
+      "FarCry5.exe",
+      "farcry5.exe",
+      "FC5.exe",
+      "fc5.exe"
+    ]
+  },
+  {
+    "name": "Fortnite",
+    "executables": [
+      "FortniteClient-Win64-Shipping.exe",
+      "fortniteclient-win64-shipping.exe",
+      "FortniteLauncher.exe",
+      "fortnitelauncher.exe"
+    ]
+  },
+  {
+    "name": "Genshin Impact",
+    "executables": [
+      "GenshinImpact.exe",
+      "genshinimpact.exe",
+      "YuanShen.exe",
+      "yuanshen.exe"
+    ]
+  },
+  {
+    "name": "Grand Theft Auto V",
+    "executables": [
+      "GTA5.exe",
+      "gta5.exe",
+      "GTAVLauncher.exe",
+      "PlayGTAV.exe"
+    ]
+  },
+  {
+    "name": "H1Z1",
+    "executables": [
+      "H1Z1.exe",
+      "h1z1.exe",
+      "Z1BattleRoyale.exe",
+      "z1battleroyale.exe"
+    ]
+  },
+  {
+    "name": "Hearthstone",
+    "executables": [
+      "Hearthstone.exe",
+      "hearthstone.exe"
+    ]
+  },
+  {
+    "name": "Helldivers 2",
+    "executables": [
+      "helldivers2.exe",
+      "Helldivers2.exe"
+    ]
+  },
+  {
+    "name": "Hogwarts Legacy",
+    "executables": [
+      "HogwartsLegacy.exe",
+      "hogwartslegacy.exe"
+    ]
+  },
+  {
+    "name": "John Carpenter's Toxic Commando",
+    "executables": [
+      "JohnCarpentersToxicCommando.exe",
+      "johncarpenterstoxiccommando.exe",
+      "ToxicCommando.exe",
+      "toxiccommando.exe"
+    ]
+  },
+  {
+    "name": "League of Legends",
+    "executables": [
+      "LeagueClient.exe",
+      "leagueclient.exe",
+      "League of Legends.exe",
+      "league of legends.exe",
+      "LeagueClientUx.exe",
+      "LeagueClientUxRenderer.exe",
+      "RiotClientServices.exe"
+    ]
+  },
+  {
+    "name": "Lost Ark",
+    "executables": [
+      "LOSTARK.exe",
+      "lostark.exe",
+      "lostarklauncher.exe"
+    ]
+  },
+  {
+    "name": "Marathon",
+    "executables": [
+      "Marathon.exe",
+      "marathon.exe"
+    ]
+  },
+  {
+    "name": "Marvel Rivals",
+    "executables": [
+      "MarvelRivals.exe",
+      "marvelrivals.exe",
+      "MarvelRivals_Launcher.exe",
+      "marvelrivals_launcher.exe",
+      "marvel.exe"
+    ]
+  },
+  {
+    "name": "Monster Hunter Rise",
+    "executables": [
+      "MonsterHunterRise.exe",
+      "monsterhunterrise.exe"
+    ]
+  },
+  {
+    "name": "Monster Hunter Stories 3: Twisted Reflection",
+    "executables": [
+      "MonsterHunterStories3.exe",
+      "monsterhunterstories3.exe"
+    ]
+  },
+  {
+    "name": "Monster Hunter Wilds",
+    "executables": [
+      "MonsterHunterWilds.exe",
+      "monsterhunterwilds.exe"
+    ]
+  },
+  {
+    "name": "Monster Hunter: World",
+    "executables": [
+      "MonsterHunterWorld.exe",
+      "monsterhunterworld.exe"
+    ]
+  },
+  {
+    "name": "NARAKA: BLADEPOINT",
+    "executables": [
+      "NarakaBladepoint.exe",
+      "narakabladepoint.exe",
+      "NARAKA.exe",
+      "naraka.exe"
+    ]
+  },
+  {
+    "name": "New World",
+    "executables": [
+      "NewWorld.exe",
+      "newworld.exe"
+    ]
+  },
+  {
+    "name": "No Man's Sky",
+    "executables": [
+      "NMS.exe",
+      "nms.exe",
+      "NoMansSky.exe",
+      "nomanssky.exe"
+    ]
+  },
+  {
+    "name": "Palworld",
+    "executables": [
+      "Palworld-Win64-Shipping.exe",
+      "palworld-win64-shipping.exe",
+      "Palworld.exe",
+      "palworld.exe"
+    ]
+  },
+  {
+    "name": "PLAYERUNKNOWN'S BATTLEGROUNDS",
+    "executables": [
+      "TslGame.exe",
+      "tslgame.exe",
+      "PUBG.exe",
+      "pubg.exe"
+    ]
+  },
+  {
+    "name": "PUBG: BATTLEGROUNDS",
+    "executables": [
+      "TslGame.exe",
+      "tslgame.exe",
+      "PUBG.exe",
+      "pubg.exe"
+    ]
+  },
+  {
+    "name": "R.E.P.O.",
+    "executables": [
+      "REPO.exe",
+      "repo.exe"
+    ]
+  },
+  {
+    "name": "Red Dead Redemption 2",
+    "executables": [
+      "RDR2.exe",
+      "rdr2.exe",
+      "PlayRDR2.exe"
+    ]
+  },
+  {
+    "name": "Resident Evil Requiem",
+    "executables": [
+      "ResidentEvilRequiem.exe",
+      "residentevilrequiem.exe",
+      "RE9.exe",
+      "re9.exe"
+    ]
+  },
+  {
+    "name": "Rocket League",
+    "executables": [
+      "RocketLeague.exe",
+      "rocketleague.exe",
+      "RocketLeague"
+    ]
+  },
+  {
+    "name": "Schedule I",
+    "executables": [
+      "Schedule1.exe",
+      "schedule1.exe"
+    ]
+  },
+  {
+    "name": "Sekiro: Shadows Die Twice",
+    "executables": [
+      "sekiro.exe",
+      "Sekiro.exe",
+      "sekiro"
+    ]
+  },
+  {
+    "name": "Slay the Spire 2",
+    "executables": [
+      "SlayTheSpire2.exe",
+      "slaythespire2.exe"
+    ]
+  },
+  {
+    "name": "Solasta II",
+    "executables": [
+      "Solasta2.exe",
+      "solasta2.exe",
+      "SolastaII.exe",
+      "solastaii.exe"
+    ]
+  },
+  {
+    "name": "Sons of the Forest",
+    "executables": [
+      "SonsOfTheForest.exe",
+      "sonsoftheforest.exe"
+    ]
+  },
+  {
+    "name": "Star Citizen",
+    "executables": [
+      "RSI Launcher.exe",
+      "rsi launcher.exe",
+      "StarCitizen.exe",
+      "starcitizen.exe",
+      "Star Citizen Launcher.exe"
+    ]
+  },
+  {
+    "name": "Starfield",
+    "executables": [
+      "Starfield.exe",
+      "starfield.exe"
+    ]
+  },
+  {
+    "name": "The Elder Scrolls Online",
+    "executables": [
+      "eso64.exe",
+      "ESO64.exe"
+    ]
+  },
+  {
+    "name": "The Witcher 3: Wild Hunt",
+    "executables": [
+      "witcher3.exe",
+      "Witcher3.exe",
+      "witcher3"
+    ]
+  },
+  {
+    "name": "Tom Clancy's Ghost Recon Wildlands",
+    "executables": [
+      "GRW.exe",
+      "grw.exe",
+      "GhostReconWildlands.exe",
+      "ghostreconwildlands.exe"
+    ]
+  },
+  {
+    "name": "Tom Clancy's Rainbow Six Siege",
+    "executables": [
+      "RainbowSix.exe",
+      "rainbowsix.exe",
+      "RainbowSix_Vulkan.exe",
+      "rainbowsix_vulkan.exe"
+    ]
+  },
+  {
+    "name": "Tom Clancy's The Division",
+    "executables": [
+      "TheDivision.exe",
+      "thedivision.exe"
+    ]
+  },
+  {
+    "name": "Total War: THREE KINGDOMS",
+    "executables": [
+      "ThreeKingdoms.exe",
+      "threekingdoms.exe"
+    ]
+  },
+  {
+    "name": "Total War: WARHAMMER",
+    "executables": [
+      "Warhammer.exe",
+      "warhammer.exe",
+      "TotalWarWarhammer.exe",
+      "totalwarwarhammer.exe"
+    ]
+  },
+  {
+    "name": "Valheim",
+    "executables": [
+      "valheim.exe",
+      "Valheim.exe"
+    ]
+  },
+  {
+    "name": "VALORANT",
+    "executables": [
+      "VALORANT-Win64-Shipping.exe",
+      "valorant-win64-shipping.exe",
+      "VALORANT.exe",
+      "valorant.exe",
+      "RiotClientServices.exe"
+    ]
+  },
+  {
+    "name": "Warframe",
+    "executables": [
+      "Warframe.x64.exe",
+      "warframe.x64.exe",
+      "Warframe.exe",
+      "warframe.exe"
+    ]
+  },
+  {
+    "name": "Warhammer 40,000: Space Marine 2",
+    "executables": [
+      "SpaceMarine2.exe",
+      "spacemarine2.exe"
+    ]
+  },
+  {
+    "name": "WWE 2K26",
+    "executables": [
+      "WWE2K26_x64.exe",
+      "wwe2k26_x64.exe",
+      "WWE2K26.exe",
+      "wwe2k26.exe"
+    ]
+  },
+  {
+    "name": "XCOM 2",
+    "executables": [
+      "XCOM2.exe",
+      "xcom2.exe"
+    ]
+  },
+  {
+    "name": "Yu-Gi-Oh! Master Duel",
+    "executables": [
+      "masterduel.exe",
+      "MasterDuel.exe",
+      "YuGiOhMasterDuel.exe",
+      "yugiohmasterduel.exe"
+    ]
+  }
 ]
