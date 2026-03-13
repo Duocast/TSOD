@@ -24,6 +24,15 @@ const PROFILE_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60
 /// Maximum number of cached profile entries before eviction.
 const PROFILE_CACHE_MAX_ENTRIES: usize = 100;
 
+/// Minimum delay between automatic profile fetch retries for the same user.
+const PROFILE_FETCH_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(10);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProfileFetchOrigin {
+    AutomaticPrefetch,
+    ManualProfileOpen,
+}
+
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash)]
 pub enum AudioBackend {
     Auto,
@@ -1937,6 +1946,8 @@ pub struct UiModel {
     pub custom_status_text_draft: String,
     pub custom_status_emoji_draft: String,
     pub profile_cache: HashMap<String, CachedProfile>,
+    pub profile_fetch_in_flight: HashSet<String>,
+    pub profile_fetch_last_requested_at: HashMap<String, std::time::Instant>,
     pub show_away_message_dialog: bool,
     pub show_set_avatar_dialog: bool,
     pub show_share_content_dialog: bool,
@@ -2272,6 +2283,8 @@ impl Default for UiModel {
             custom_status_text_draft: String::new(),
             custom_status_emoji_draft: String::new(),
             profile_cache: HashMap::new(),
+            profile_fetch_in_flight: HashSet::new(),
+            profile_fetch_last_requested_at: HashMap::new(),
             show_away_message_dialog: false,
             show_set_avatar_dialog: false,
             show_share_content_dialog: false,
@@ -2383,7 +2396,47 @@ impl UiModel {
         self.profile_popup_loading = true;
         self.profile_popup_user_id = Some(user_id.clone());
         self.profile_popup_anchor = Some(click_pos);
+        self.queue_profile_fetch(user_id, tx_intent, ProfileFetchOrigin::ManualProfileOpen);
+    }
+
+    fn queue_profile_fetch(
+        &mut self,
+        user_id: String,
+        tx_intent: &crossbeam_channel::Sender<UiIntent>,
+        origin: ProfileFetchOrigin,
+    ) {
+        let now = std::time::Instant::now();
+        if self.get_cached_profile(&user_id).is_some() {
+            self.profile_fetch_in_flight.remove(&user_id);
+            return;
+        }
+        if self.profile_fetch_in_flight.contains(&user_id) {
+            return;
+        }
+        let should_throttle = origin == ProfileFetchOrigin::AutomaticPrefetch
+            && self
+                .profile_fetch_last_requested_at
+                .get(&user_id)
+                .is_some_and(|last| now.duration_since(*last) < PROFILE_FETCH_RETRY_DELAY);
+        if should_throttle {
+            return;
+        }
+
+        self.profile_fetch_last_requested_at
+            .insert(user_id.clone(), now);
+        self.profile_fetch_in_flight.insert(user_id.clone());
         let _ = tx_intent.send(UiIntent::FetchUserProfile { user_id });
+    }
+
+    pub fn prefetch_member_profiles(&mut self, tx_intent: &crossbeam_channel::Sender<UiIntent>) {
+        let user_ids: Vec<String> = self
+            .current_members()
+            .iter()
+            .map(|member| member.user_id.clone())
+            .collect();
+        for user_id in user_ids {
+            self.queue_profile_fetch(user_id, tx_intent, ProfileFetchOrigin::AutomaticPrefetch);
+        }
     }
 
     pub fn get_cached_profile(&self, user_id: &str) -> Option<&UserProfileData> {
@@ -2860,6 +2913,7 @@ impl UiModel {
                 });
             }
             UiEvent::UserProfileLoaded(mut profile) => {
+                self.profile_fetch_in_flight.remove(&profile.user_id);
                 if should_prefer_fallback_name(&profile.display_name) {
                     if let Some(member_name) = self
                         .current_members()
@@ -2926,6 +2980,7 @@ impl UiModel {
                 self.refresh_message_author_metadata();
             }
             UiEvent::UserProfileFetchFailed { user_id } => {
+                self.profile_fetch_in_flight.remove(&user_id);
                 // Clear the loading state so the user isn't stuck on an
                 // infinite spinner.  If stub data was already populated from
                 // the member list it will remain visible.

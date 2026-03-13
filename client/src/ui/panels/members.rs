@@ -138,29 +138,29 @@ pub fn show(ui: &mut egui::Ui, model: &mut UiModel, tx_intent: &Sender<UiIntent>
             ui.painter()
                 .circle_filled(center, radius, theme::bg_light());
 
-            let avatar_url = member
-                .avatar_url
-                .as_deref()
-                .filter(|url| !url.is_empty())
-                .map(str::to_owned)
-                .or_else(|| {
-                    if member.user_id == model.user_id {
-                        model
-                            .avatar_url
-                            .as_deref()
-                            .filter(|url| !url.is_empty())
-                            .map(str::to_owned)
-                    } else {
-                        None
-                    }
-                })
-                .or_else(|| {
-                    model
-                        .get_cached_profile_stale(&member.user_id)
-                        .and_then(|profile| profile.avatar_url.as_deref())
-                        .filter(|url| !url.is_empty())
-                        .map(str::to_owned)
-                });
+            let avatar_url = if member.user_id == model.user_id {
+                model
+                    .avatar_url
+                    .as_deref()
+                    .filter(|url| !url.is_empty())
+                    .map(str::to_owned)
+            } else {
+                None
+            }
+            .or_else(|| {
+                model
+                    .get_cached_profile_stale(&member.user_id)
+                    .and_then(|profile| profile.avatar_url.as_deref())
+                    .filter(|url| !url.is_empty())
+                    .map(str::to_owned)
+            })
+            .or_else(|| {
+                member
+                    .avatar_url
+                    .as_deref()
+                    .filter(|url| !url.is_empty())
+                    .map(str::to_owned)
+            });
 
             if let Some(avatar_url) = avatar_url {
                 ui.put(
