@@ -92,6 +92,8 @@ pub fn probe_media_caps(source: &crate::ShareSource) -> MediaRuntimeCaps {
         .iter()
         .any(|backend| !matches!(backend, SystemAudioBackendKind::Off));
 
+    let supports_1440p60 = estimate_encode_headroom_1440p60(&encode_backends);
+
     MediaRuntimeCaps {
         capture_backends,
         encode_backends,
@@ -100,8 +102,44 @@ pub fn probe_media_caps(source: &crate::ShareSource) -> MediaRuntimeCaps {
         supports_system_audio,
         max_simulcast_layers: 1,
         preferred_codec,
-        supports_1440p60: false,
+        supports_1440p60,
     }
+}
+
+fn estimate_encode_headroom_1440p60(
+    encode_backends: &HashMap<pb::VideoCodec, Vec<EncodeBackendKind>>,
+) -> bool {
+    let cpu = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+
+    let has_hw_av1 = encode_backends
+        .get(&pb::VideoCodec::Av1)
+        .map(|backends| {
+            backends.iter().any(|backend| {
+                matches!(
+                    backend,
+                    EncodeBackendKind::NvencAv1
+                        | EncodeBackendKind::MfHwVp9
+                        | EncodeBackendKind::VaapiVp9
+                )
+            })
+        })
+        .unwrap_or(false);
+
+    let has_hw_vp9 = encode_backends
+        .get(&pb::VideoCodec::Vp9)
+        .map(|backends| {
+            backends.iter().any(|backend| {
+                matches!(
+                    backend,
+                    EncodeBackendKind::MfHwVp9 | EncodeBackendKind::VaapiVp9
+                )
+            })
+        })
+        .unwrap_or(false);
+
+    has_hw_av1 || has_hw_vp9 || cpu >= 12
 }
 
 fn preferred_capture_backends(_source: &crate::ShareSource) -> Vec<CaptureBackendKind> {

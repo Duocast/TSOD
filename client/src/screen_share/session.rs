@@ -2,6 +2,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering},
     Arc,
 };
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::Sender;
 use tokio::sync::watch;
@@ -12,11 +13,12 @@ use crate::media_codec::VideoSessionConfig;
 use crate::net::egress::EgressScheduler;
 use crate::net::overwrite_queue::OverwriteQueue;
 use crate::net::video_encode::build_screen_encoder;
-use crate::net::video_frame::VideoFrame;
+use crate::net::video_frame::{FramePlanes, VideoFrame};
 use crate::net::video_transport::{VideoSender, VideoStreamProfile};
 use crate::net::voice_datagram::make_voice_datagram;
 use crate::proto::voiceplatform::v1 as pb;
 use crate::screen_share::config::SenderPolicy;
+use crate::screen_share::policy::bitrate::bitrate_for_pressure;
 use crate::screen_share::runtime_probe::MediaRuntimeCaps;
 use crate::ui::model::UiEvent;
 
@@ -58,9 +60,187 @@ pub struct StartLocalShareParams {
     pub backend_label: Arc<std::sync::Mutex<String>>,
     pub active_voice_channel_route: Arc<AtomicU32>,
     pub tx_event: Sender<UiEvent>,
+    pub target_fps: u32,
+    pub target_bitrate_bps: u32,
+    pub target_width: u32,
+    pub target_height: u32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FramePacer {
+    interval: Duration,
+    next_deadline: Instant,
+}
+
+impl FramePacer {
+    fn new(target_fps: u32) -> Self {
+        let fps = target_fps.clamp(1, 60);
+        let interval = Duration::from_secs_f64(1.0 / fps as f64);
+        Self {
+            interval,
+            next_deadline: Instant::now() + interval,
+        }
+    }
+
+    fn wait(&mut self) {
+        let now = Instant::now();
+        if self.next_deadline > now {
+            std::thread::sleep(self.next_deadline - now);
+            self.next_deadline += self.interval;
+            return;
+        }
+        self.next_deadline = now + self.interval;
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PressureSnapshot {
+    encode_queue_len: usize,
+    packet_queue_len: usize,
+    dropped_video_fragments: u64,
+}
+
+#[derive(Debug, Clone)]
+struct AdaptiveQualityController {
+    base_bitrate_bps: u32,
+    min_bitrate_bps: u32,
+    base_fps: u32,
+    min_fps: u32,
+    max_encode_queue_len: usize,
+    max_packet_queue_len: usize,
+    last_drop_count: u64,
+    current_bitrate_bps: u32,
+    current_fps: u32,
+}
+
+impl AdaptiveQualityController {
+    fn new(base_bitrate_bps: u32, base_fps: u32) -> Self {
+        let base_fps = base_fps.clamp(5, 60);
+        Self {
+            base_bitrate_bps,
+            min_bitrate_bps: (base_bitrate_bps / 3).max(600_000),
+            base_fps,
+            min_fps: (base_fps / 2).max(10),
+            max_encode_queue_len: ENCODE_QUEUE_DEPTH,
+            max_packet_queue_len: PACKETIZATION_QUEUE_DEPTH,
+            last_drop_count: 0,
+            current_bitrate_bps: base_bitrate_bps,
+            current_fps: base_fps,
+        }
+    }
+
+    fn evaluate(&mut self, snapshot: PressureSnapshot) -> (u32, u32) {
+        let dropped_since_last = snapshot
+            .dropped_video_fragments
+            .saturating_sub(self.last_drop_count);
+        self.last_drop_count = snapshot.dropped_video_fragments;
+
+        let queue_pressure = snapshot.encode_queue_len >= self.max_encode_queue_len
+            || snapshot.packet_queue_len >= self.max_packet_queue_len;
+        let network_pressure = dropped_since_last > 0;
+
+        let pressure_level = if network_pressure && queue_pressure {
+            3
+        } else if network_pressure || queue_pressure {
+            2
+        } else {
+            0
+        };
+
+        let next_bitrate =
+            bitrate_for_pressure(self.base_bitrate_bps, pressure_level, self.min_bitrate_bps);
+
+        let next_fps = if pressure_level >= 3 {
+            self.min_fps
+        } else if pressure_level >= 2 {
+            (self.base_fps * 2 / 3).max(self.min_fps)
+        } else {
+            self.base_fps
+        };
+
+        self.current_bitrate_bps = next_bitrate;
+        self.current_fps = next_fps;
+        (next_bitrate, next_fps)
+    }
+}
+
+fn downscale_frame_to_fit(frame: VideoFrame, target_width: u32, target_height: u32) -> VideoFrame {
+    if frame.width <= target_width && frame.height <= target_height {
+        return frame;
+    }
+    let scale =
+        (target_width as f32 / frame.width as f32).min(target_height as f32 / frame.height as f32);
+    if scale >= 1.0 {
+        return frame;
+    }
+    let out_width = ((frame.width as f32 * scale).round() as u32).max(2) & !1;
+    let out_height = ((frame.height as f32 * scale).round() as u32).max(2) & !1;
+
+    let VideoFrame {
+        width,
+        height,
+        ts_ms,
+        format,
+        planes,
+    } = frame;
+    match planes {
+        FramePlanes::Bgra { bytes, stride } => {
+            let stride = stride as usize;
+            let mut out = vec![0_u8; (out_width * out_height * 4) as usize];
+            for y in 0..out_height {
+                let src_y = ((y as u64 * height as u64) / out_height as u64) as usize;
+                for x in 0..out_width {
+                    let src_x = ((x as u64 * width as u64) / out_width as u64) as usize;
+                    let src_idx = src_y * stride + src_x * 4;
+                    let dst_idx = ((y * out_width + x) * 4) as usize;
+                    if src_idx + 4 <= bytes.len() && dst_idx + 4 <= out.len() {
+                        out[dst_idx..dst_idx + 4].copy_from_slice(&bytes[src_idx..src_idx + 4]);
+                    }
+                }
+            }
+
+            VideoFrame {
+                width: out_width,
+                height: out_height,
+                ts_ms,
+                format,
+                planes: FramePlanes::Bgra {
+                    bytes: bytes::Bytes::from(out),
+                    stride: out_width * 4,
+                },
+            }
+        }
+        _ => VideoFrame {
+            width,
+            height,
+            ts_ms,
+            format,
+            planes,
+        },
+    }
+}
+
+fn build_session_config(
+    frame: &VideoFrame,
+    target_fps: u32,
+    target_bitrate_bps: u32,
+) -> VideoSessionConfig {
+    VideoSessionConfig {
+        width: frame.width,
+        height: frame.height,
+        fps: target_fps,
+        target_bitrate_bps,
+        low_latency: true,
+        allow_frame_drop: true,
+    }
 }
 
 pub async fn start_local_share(params: StartLocalShareParams) {
+    let target_fps = params.target_fps.clamp(5, 60);
+    let target_bitrate_bps = params.target_bitrate_bps.max(600_000);
+    let target_width = params.target_width.max(320);
+    let target_height = params.target_height.max(180);
+
     let stop_flag = Arc::new(AtomicBool::new(false));
     let capture_queue = Arc::new(OverwriteQueue::<VideoFrame>::new(CAPTURE_QUEUE_DEPTH));
 
@@ -188,7 +368,9 @@ pub async fn start_local_share(params: StartLocalShareParams) {
     let capture_len = params.capture_queue_len_gauge.clone();
     let capture_ovf = params.capture_queue_overflow_total.clone();
     let counters = params.counters.clone();
+    let capture_fps = target_fps;
     let capture_task = tokio::task::spawn_blocking(move || {
+        let mut pacer = FramePacer::new(capture_fps);
         let mut cap = match crate::screen_share::capture::build_capture_backend(
             &capture_source,
             capture_caps.as_ref(),
@@ -203,6 +385,7 @@ pub async fn start_local_share(params: StartLocalShareParams) {
         while !capture_stop.load(Ordering::Relaxed) {
             match cap.next_frame() {
                 Ok(frame) => {
+                    pacer.wait();
                     capture_q.push(frame);
                     counters.capture_frames.fetch_add(1, Ordering::Relaxed);
                     capture_len.store(capture_q.len() as u64, Ordering::Relaxed);
@@ -280,24 +463,43 @@ pub async fn start_local_share(params: StartLocalShareParams) {
         let encode_depth = params.encode_queue_len_gauge.clone();
         let packet_depth = params.packetize_queue_len_gauge.clone();
         let counters = params.counters.clone();
+        let egress_stats = params.egress.stats();
         let encode_task = tokio::spawn(async move {
             let mut configured = false;
+            let mut quality = AdaptiveQualityController::new(target_bitrate_bps, target_fps);
+            let mut last_report = std::time::Instant::now();
+            let mut encoded_frames = 0_u32;
+            let mut last_encoded_at = std::time::Instant::now();
             while let Some(frame) = stream_encode_q.pop_latest_or_wait().await {
                 encode_depth.store(stream_encode_q.len() as u64, Ordering::Relaxed);
+                let frame = downscale_frame_to_fit(frame, target_width, target_height);
                 if !configured {
-                    if let Err(e) = encoder.configure_session(VideoSessionConfig {
-                        width: frame.width,
-                        height: frame.height,
-                        fps: 30,
-                        target_bitrate_bps: 2_000_000,
-                        low_latency: true,
-                        allow_frame_drop: true,
-                    }) {
+                    if let Err(e) = encoder.configure_session(build_session_config(
+                        &frame,
+                        target_fps,
+                        target_bitrate_bps,
+                    )) {
                         warn!(error=?e, stream_tag, "[video] failed to configure encoder session");
                         continue;
                     }
                     configured = true;
                 }
+
+                let snapshot = PressureSnapshot {
+                    encode_queue_len: stream_encode_q.len(),
+                    packet_queue_len: stream_packet_q.len(),
+                    dropped_video_fragments: egress_stats
+                        .drop_queue_full_video
+                        .load(Ordering::Relaxed),
+                };
+                let (next_bitrate, next_fps) = quality.evaluate(snapshot);
+                let _ = encoder.update_bitrate(next_bitrate);
+
+                let min_interval = Duration::from_secs_f64(1.0 / next_fps.max(1) as f64);
+                if last_encoded_at.elapsed() < min_interval {
+                    continue;
+                }
+                last_encoded_at = std::time::Instant::now();
 
                 if force_keyframe.swap(false, Ordering::Relaxed) {
                     let _ = encoder.request_keyframe();
@@ -305,6 +507,14 @@ pub async fn start_local_share(params: StartLocalShareParams) {
 
                 match encoder.encode(frame) {
                     Ok(encoded) => {
+                        encoded_frames = encoded_frames.saturating_add(1);
+                        let elapsed = last_report.elapsed();
+                        if elapsed >= Duration::from_secs(1) {
+                            let runtime_fps = encoded_frames as f32 / elapsed.as_secs_f32();
+                            crate::net::dispatcher::report_runtime_encode_fps(runtime_fps);
+                            last_report = std::time::Instant::now();
+                            encoded_frames = 0;
+                        }
                         stream_packet_q.push(EncodedFrame {
                             ts_ms: encoded.ts_ms,
                             is_keyframe: encoded.is_keyframe,
@@ -382,4 +592,63 @@ pub async fn start_local_share(params: StartLocalShareParams) {
     }
     let _ = stop_watch_task.await;
     let _ = capture_task.await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::net::video_frame::FramePlanes;
+
+    fn make_frame(width: u32, height: u32) -> VideoFrame {
+        VideoFrame {
+            width,
+            height,
+            ts_ms: 0,
+            format: crate::net::video_frame::PixelFormat::Bgra,
+            planes: FramePlanes::Bgra {
+                bytes: bytes::Bytes::from(vec![0_u8; (width * height * 4) as usize]),
+                stride: width * 4,
+            },
+        }
+    }
+
+    #[test]
+    fn settings_drive_encoder_session_config() {
+        let frame = make_frame(1280, 720);
+        let config = build_session_config(&frame, 24, 2_400_000);
+        assert_eq!(config.width, 1280);
+        assert_eq!(config.height, 720);
+        assert_eq!(config.fps, 24);
+        assert_eq!(config.target_bitrate_bps, 2_400_000);
+    }
+
+    #[test]
+    fn frame_pacer_honors_target_fps() {
+        let mut pacer = FramePacer::new(20);
+        let start = std::time::Instant::now();
+        for _ in 0..3 {
+            pacer.wait();
+        }
+        assert!(start.elapsed() >= Duration::from_millis(120));
+    }
+
+    #[test]
+    fn pressure_reduces_bitrate_and_fps() {
+        let mut controller = AdaptiveQualityController::new(3_000_000, 30);
+        let (bitrate_a, fps_a) = controller.evaluate(PressureSnapshot {
+            encode_queue_len: 0,
+            packet_queue_len: 0,
+            dropped_video_fragments: 0,
+        });
+        assert_eq!(bitrate_a, 3_000_000);
+        assert_eq!(fps_a, 30);
+
+        let (bitrate_b, fps_b) = controller.evaluate(PressureSnapshot {
+            encode_queue_len: ENCODE_QUEUE_DEPTH,
+            packet_queue_len: PACKETIZATION_QUEUE_DEPTH,
+            dropped_video_fragments: 10,
+        });
+        assert!(bitrate_b < bitrate_a);
+        assert!(fps_b < fps_a);
+    }
 }

@@ -1293,7 +1293,12 @@ pub fn report_runtime_encode_fps(fps: f32) {
 fn runtime_headroom_fps() -> f32 {
     let sampled = RUNTIME_HEADROOM_FPS_X100.load(Ordering::Relaxed);
     if sampled == 0 {
-        0.0
+        let measured = measured_media_caps();
+        if measured.runtime_caps.supports_1440p60 {
+            60.0
+        } else {
+            30.0
+        }
     } else {
         sampled as f32 / FPS_SCALE
     }
