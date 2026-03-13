@@ -25,6 +25,7 @@ pub trait VideoEncoder: Send {
     fn backend_name(&self) -> &'static str;
 }
 
+#[derive(Clone)]
 pub struct DecodedVideoFrame {
     pub width: usize,
     pub height: usize,

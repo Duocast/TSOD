@@ -59,6 +59,7 @@ egui = "0.33.3"
 egui_extras = { version = "0.33.3", features = ["image"] }
 image = { version = "0.25.9", default-features = false, features = ["png", "jpeg", "gif", "webp", "avif"] }
 cosmic-text = "0.18"
+rav1e = "0.8.1"
 
 # Utilities
 serde = { version = "1.0.228", features = ["derive"] }
