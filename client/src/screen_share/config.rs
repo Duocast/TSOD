@@ -55,8 +55,7 @@ pub fn env_video_encoder_override() -> Option<String> {
         normalized.as_str(),
         "auto"
             | "vp9-libvpx"
-            | "vp9-mf"
-            | "vp9-vaapi"
+            | "vp9-svt"
             | "av1-rav1e"
             | "av1-svt"
             | "av1-mf"
@@ -70,7 +69,7 @@ pub fn env_video_decoder_override() -> Option<String> {
     let normalized = value.trim().to_ascii_lowercase();
     matches!(
         normalized.as_str(),
-        "auto" | "vp9-libvpx" | "vp9-mf" | "vp9-vaapi" | "av1-dav1d" | "av1-mf" | "av1-vaapi"
+        "auto" | "vp9-libvpx" | "vp9-ffvp9" | "av1-dav1d" | "av1-mf" | "av1-vaapi"
     )
     .then_some(normalized)
 }

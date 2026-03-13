@@ -287,11 +287,8 @@ fn apply_encoder_override(
         "vp9-libvpx" => {
             backends.insert(pb::VideoCodec::Vp9, vec![EncodeBackendKind::Libvpx]);
         }
-        "vp9-mf" => {
+        "vp9-svt" => {
             backends.insert(pb::VideoCodec::Vp9, vec![EncodeBackendKind::MfHwVp9]);
-        }
-        "vp9-vaapi" => {
-            backends.insert(pb::VideoCodec::Vp9, vec![EncodeBackendKind::VaapiVp9]);
         }
         "av1-rav1e" | "av1-svt" => {
             backends.insert(pb::VideoCodec::Av1, vec![EncodeBackendKind::SvtAv1]);
@@ -314,11 +311,8 @@ fn apply_decoder_override(
         "vp9-libvpx" => {
             backends.insert(pb::VideoCodec::Vp9, vec![DecodeBackendKind::Libvpx]);
         }
-        "vp9-mf" => {
+        "vp9-ffvp9" => {
             backends.insert(pb::VideoCodec::Vp9, vec![DecodeBackendKind::MfHwVp9]);
-        }
-        "vp9-vaapi" => {
-            backends.insert(pb::VideoCodec::Vp9, vec![DecodeBackendKind::VaapiVp9]);
         }
         "av1-dav1d" => {
             backends.insert(pb::VideoCodec::Av1, vec![DecodeBackendKind::Dav1d]);
