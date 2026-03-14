@@ -158,8 +158,31 @@ mod linux {
                 u32::MAX,
             );
 
-            match request.and_then(|cookie| cookie.reply()) {
-                Ok(reply) => Ok(reply),
+            match request {
+                Ok(cookie) => match cookie.reply() {
+                    Ok(reply) => Ok(reply),
+                    Err(e) => {
+                        if matches!(self.drawable, Drawable::Pixmap(_)) {
+                            let fallback = self
+                                .conn
+                                .get_image(
+                                    ImageFormat::Z_PIXMAP,
+                                    self.window_id,
+                                    0,
+                                    0,
+                                    self.geometry.width.max(1) as u16,
+                                    self.geometry.height.max(1) as u16,
+                                    u32::MAX,
+                                )
+                                .context("request X11 window image fallback")?
+                                .reply()
+                                .context("decode X11 window image fallback")?;
+                            Ok(fallback)
+                        } else {
+                            Err(anyhow!(e)).context("capture X11 image")
+                        }
+                    }
+                },
                 Err(e) => {
                     if matches!(self.drawable, Drawable::Pixmap(_)) {
                         let fallback = self
