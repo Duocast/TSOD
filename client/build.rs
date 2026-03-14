@@ -24,9 +24,9 @@ fn main() {
             .or_else(|_| {
                 env::var("VCPKG_ROOT")
                     .map(PathBuf::from)
-                    .map(|p| p.join("installed").join("x64-windows"))
+                    .map(|p| p.join("installed").join("x64-windows-static-md"))
             })
-            .unwrap_or_else(|_| PathBuf::from(r"C:\src\vcpkg\installed\x64-windows"));
+            .unwrap_or_else(|_| PathBuf::from(r"C:\src\vcpkg\installed\x64-windows-static-md"));
 
         let lib_dir = if profile == "release" {
             vpx_root.join("lib")
@@ -43,7 +43,7 @@ fn main() {
         }
 
         println!("cargo:rustc-link-search=native={}", lib_dir.display());
-        println!("cargo:rustc-link-lib=vpx");
+        println!("cargo:rustc-link-lib=static=vpx");
     } else if target_os == "linux" {
         match pkg_config::Config::new().cargo_metadata(false).probe("vpx") {
             Ok(lib) => {
@@ -69,9 +69,9 @@ fn main() {
             .or_else(|_| {
                 env::var("VCPKG_ROOT")
                     .map(PathBuf::from)
-                    .map(|p| p.join("installed").join("x64-windows"))
+                    .map(|p| p.join("installed").join("x64-windows-static-md"))
             })
-            .unwrap_or_else(|_| PathBuf::from(r"C:\src\vcpkg\installed\x64-windows"));
+            .unwrap_or_else(|_| PathBuf::from(r"C:\src\vcpkg\installed\x64-windows-static-md"));
 
         let lib_dir = if profile == "release" {
             dav1d_root.join("lib")
