@@ -564,6 +564,24 @@ pub enum UiIntent {
     },
     StopScreenShare,
 
+    // Remote screen-share lifecycle events (from server push)
+    RemoteScreenShareStarted {
+        stream_id: String,
+        user_id: String,
+        channel_id: String,
+        codec: i32,
+        has_audio: bool,
+    },
+    RemoteScreenShareStopped {
+        stream_id: String,
+        user_id: String,
+        channel_id: String,
+    },
+    RemoteScreenShareLayerChanged {
+        stream_id: String,
+        active_layer_id: u32,
+    },
+    
     // Updater
     CheckForUpdates,
     InstallUpdate,
@@ -1827,6 +1845,20 @@ pub fn enumerate_share_sources() -> Vec<ShareSourceOption> {
     }
 }
 
+// ── Remote share state ─────────────────────────────────────────────────
+ 
+/// Information about an active screen share by a remote peer.
+#[derive(Debug, Clone)]
+pub struct RemoteShareInfo {
+    pub stream_id: String,
+    pub user_id: String,
+    pub channel_id: String,
+    pub codec: i32,
+    pub has_audio: bool,
+    /// Active simulcast layer selected by this viewer, updated by LayerChanged events.
+    pub active_layer_id: Option<u32>,
+}
+ 
 // ── Main UI model ──────────────────────────────────────────────────────
 
 pub struct UiModel {
@@ -1964,6 +1996,8 @@ pub struct UiModel {
     pub selected_share_source: Option<ShareSourceSelection>,
     pub sharing_active: bool,
     pub start_share_in_flight: bool,
+    /// Active screen shares by remote peers, keyed by stream_id.
+    pub remote_shares: HashMap<String, RemoteShareInfo>,    
     pub screen_share_system_audio_available: bool,
     pub screen_share_system_audio_detail: String,
     pub stream_debug: StreamDebugView,
@@ -2301,6 +2335,7 @@ impl Default for UiModel {
             selected_share_source: None,
             sharing_active: false,
             start_share_in_flight: false,
+            remote_shares: HashMap::new(),
             screen_share_system_audio_available: true,
             screen_share_system_audio_detail: "System audio: ready".into(),
             stream_debug: StreamDebugView::default(),
@@ -2574,6 +2609,36 @@ impl UiModel {
             UiEvent::SetScreenShareSystemAudioStatus { available, detail } => {
                 self.screen_share_system_audio_available = available;
                 self.screen_share_system_audio_detail = detail;
+            }
+            UiEvent::RemoteScreenShareStarted {
+                stream_id,
+                user_id,
+                channel_id,
+                codec,
+                has_audio,
+            } => {
+                self.remote_shares.insert(
+                    stream_id.clone(),
+                    RemoteShareInfo {
+                        stream_id,
+                        user_id,
+                        channel_id,
+                        codec,
+                        has_audio,
+                        active_layer_id: None,
+                    },
+                );
+            }
+            UiEvent::RemoteScreenShareStopped { stream_id, .. } => {
+                self.remote_shares.remove(&stream_id);
+            }
+            UiEvent::RemoteScreenShareLayerChanged {
+                stream_id,
+                active_layer_id,
+            } => {
+                if let Some(share) = self.remote_shares.get_mut(&stream_id) {
+                    share.active_layer_id = Some(active_layer_id);
+                }
             }
             UiEvent::SetAwayMessage(message) => {
                 self.away_message = message.clone();
@@ -4149,5 +4214,97 @@ mod tests {
         ));
 
         assert_eq!(model.selected_channel_name, "Lounge 1");
+    }
+    
+    // ── ScreenShare lifecycle event tests ──────────────────────────────
+ 
+    #[test]
+    fn remote_screen_share_started_adds_entry() {
+        let mut model = UiModel::new();
+        assert!(model.remote_shares.is_empty());
+ 
+        model.apply_event(UiEvent::RemoteScreenShareStarted {
+            stream_id: "stream-abc".into(),
+            user_id: "user-1".into(),
+            channel_id: "chan-1".into(),
+            codec: 2, // Vp9
+            has_audio: true,
+        });
+ 
+        assert_eq!(model.remote_shares.len(), 1);
+        let info = model.remote_shares.get("stream-abc").expect("share must be present");
+        assert_eq!(info.user_id, "user-1");
+        assert_eq!(info.channel_id, "chan-1");
+        assert_eq!(info.codec, 2);
+        assert!(info.has_audio);
+        assert!(info.active_layer_id.is_none());
+    }
+ 
+    #[test]
+    fn remote_screen_share_stopped_removes_entry() {
+        let mut model = UiModel::new();
+        model.apply_event(UiEvent::RemoteScreenShareStarted {
+            stream_id: "stream-abc".into(),
+            user_id: "user-1".into(),
+            channel_id: "chan-1".into(),
+            codec: 2,
+            has_audio: false,
+        });
+        assert_eq!(model.remote_shares.len(), 1);
+ 
+        model.apply_event(UiEvent::RemoteScreenShareStopped {
+            stream_id: "stream-abc".into(),
+            user_id: "user-1".into(),
+            channel_id: "chan-1".into(),
+        });
+        assert!(model.remote_shares.is_empty());
+    }
+ 
+    #[test]
+    fn remote_screen_share_layer_changed_updates_active_layer() {
+        let mut model = UiModel::new();
+        model.apply_event(UiEvent::RemoteScreenShareStarted {
+            stream_id: "stream-xyz".into(),
+            user_id: "user-2".into(),
+            channel_id: "chan-2".into(),
+            codec: 1,
+            has_audio: false,
+        });
+ 
+        model.apply_event(UiEvent::RemoteScreenShareLayerChanged {
+            stream_id: "stream-xyz".into(),
+            active_layer_id: 2,
+        });
+ 
+        let info = model.remote_shares.get("stream-xyz").expect("share must be present");
+        assert_eq!(info.active_layer_id, Some(2));
+    }
+ 
+    #[test]
+    fn remote_screen_share_started_idempotent_on_reconnect() {
+        // If the server replays a Started event on reconnect, the map entry should
+        // be overwritten rather than duplicated.
+        let mut model = UiModel::new();
+        for _ in 0..3 {
+            model.apply_event(UiEvent::RemoteScreenShareStarted {
+                stream_id: "stream-idem".into(),
+                user_id: "user-3".into(),
+                channel_id: "chan-3".into(),
+                codec: 2,
+                has_audio: true,
+            });
+        }
+        assert_eq!(model.remote_shares.len(), 1);
+    }
+ 
+    #[test]
+    fn remote_screen_share_layer_changed_noop_for_unknown_stream() {
+        let mut model = UiModel::new();
+        // Should not panic for a stream_id that was never started.
+        model.apply_event(UiEvent::RemoteScreenShareLayerChanged {
+            stream_id: "nonexistent".into(),
+            active_layer_id: 1,
+        });
+        assert!(model.remote_shares.is_empty());
     }
 }
