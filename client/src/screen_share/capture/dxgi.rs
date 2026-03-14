@@ -1,7 +1,8 @@
+#[cfg(not(target_os = "windows"))]
 use anyhow::anyhow;
 
 use crate::media_capture::CaptureBackend;
-use crate::net::video_frame::{FramePlanes, PixelFormat, VideoFrame};
+use crate::net::video_frame::{PixelFormat, VideoFrame};
 
 #[derive(Debug, Clone)]
 pub struct DirtyRegion {
@@ -47,6 +48,9 @@ impl DxgiCapture {
     }
 }
 
+// SAFETY: HWND is a simple handle (pointer-sized integer) that is safe to send across threads.
+unsafe impl Send for DxgiCapture {}
+
 impl CaptureBackend for DxgiCapture {
     fn next_frame(&mut self) -> anyhow::Result<VideoFrame> {
         #[cfg(not(target_os = "windows"))]
@@ -88,12 +92,12 @@ mod windows_impl {
     use bytes::Bytes;
     use windows::Win32::Foundation::{HWND, RECT};
     use windows::Win32::Graphics::Gdi::{
-        BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetClientRect,
-        GetDC, GetDIBits, GetWindowDC, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER,
-        BI_RGB, DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ, SRCCOPY,
+        BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC,
+        GetDIBits, GetWindowDC, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+        DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ, SRCCOPY,
     };
+    use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
 
-    use crate::media_capture::CaptureBackend;
     use crate::net::video_frame::{FramePlanes, PixelFormat, VideoFrame};
 
     pub(super) enum WindowsCapture {
@@ -156,7 +160,7 @@ mod windows_impl {
             .unwrap_or(id)
             .parse::<isize>()
             .map_err(|_| anyhow!("invalid window id: {id}"))?;
-        Ok(HWND(raw))
+        Ok(HWND(raw as *mut std::ffi::c_void))
     }
 
     fn capture_display() -> anyhow::Result<VideoFrame> {
@@ -166,11 +170,11 @@ mod windows_impl {
     fn capture_window(hwnd: HWND) -> anyhow::Result<VideoFrame> {
         let mut rect = RECT::default();
         unsafe {
-            GetClientRect(hwnd, &mut rect).ok()?;
+            GetClientRect(hwnd, &mut rect)?;
         }
         let width = (rect.right - rect.left).max(1) as u32;
         let height = (rect.bottom - rect.top).max(1) as u32;
-        unsafe { capture_dc(GetWindowDC(hwnd), Some((width, height))) }
+        unsafe { capture_dc(GetWindowDC(Some(hwnd)), Some((width, height))) }
     }
 
     unsafe fn capture_dc(src: HDC, force_size: Option<(u32, u32)>) -> anyhow::Result<VideoFrame> {
@@ -178,21 +182,20 @@ mod windows_impl {
             return Err(anyhow!("failed to get source DC"));
         }
         let (width, height) = force_size.unwrap_or((1920, 1080));
-        let mem_dc = CreateCompatibleDC(src);
+        let mem_dc = CreateCompatibleDC(Some(src));
         let bmp: HBITMAP = CreateCompatibleBitmap(src, width as i32, height as i32);
-        let old: HGDIOBJ = SelectObject(mem_dc, bmp);
+        let old: HGDIOBJ = SelectObject(mem_dc, bmp.into());
         BitBlt(
             mem_dc,
             0,
             0,
             width as i32,
             height as i32,
-            src,
+            Some(src),
             0,
             0,
             SRCCOPY,
-        )
-        .ok()?;
+        )?;
 
         let mut bi = BITMAPINFO::default();
         bi.bmiHeader = BITMAPINFOHEADER {
@@ -216,7 +219,7 @@ mod windows_impl {
         );
 
         let _ = SelectObject(mem_dc, old);
-        let _ = DeleteObject(bmp);
+        let _ = DeleteObject(bmp.into());
         let _ = DeleteDC(mem_dc);
         let _ = ReleaseDC(None, src);
 
