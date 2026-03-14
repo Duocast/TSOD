@@ -335,7 +335,8 @@ const DAV1D_PIXEL_LAYOUT_I420: i32 = 1;
 const DAV1D_PIXEL_LAYOUT_I422: i32 = 2;
 const DAV1D_PIXEL_LAYOUT_I444: i32 = 3;
 
-#[link(name = "dav1d")]
+// Native library linkage is provided by build.rs so Windows can force
+// static linking for a single-file client binary.
 unsafe extern "C" {
     fn dav1d_default_settings(s: *mut Dav1dSettings);
     fn dav1d_open(c_out: *mut *mut Dav1dContext, s: *const Dav1dSettings) -> i32;
