@@ -320,7 +320,7 @@ fn bilinear_downscale_bgra(
 
                 let top = p00 * fx_inv + p10 * fx;
                 let bot = p01 * fx_inv + p11 * fx;
-                let val = (top * fy_inv + bot * fy + (1 << 15)) >> 16;
+                let val = (top as u32 * fy_inv as u32 + bot as u32 * fy as u32 + (1 << 15)) >> 16;
                 out[dst_idx + c] = val.min(255) as u8;
             }
         }
