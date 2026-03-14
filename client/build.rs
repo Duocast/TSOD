@@ -2,6 +2,15 @@ use std::{env, path::PathBuf};
 
 include!("../proto/proto_files.rs");
 
+fn vcpkg_installed_root() -> Option<PathBuf> {
+    let vcpkg_root = env::var("VCPKG_ROOT").ok().map(PathBuf::from)?;
+    let triplet = env::var("VCPKG_TARGET_TRIPLET")
+        .or_else(|_| env::var("VCPKG_DEFAULT_TRIPLET"))
+        .unwrap_or_else(|_| "x64-windows-static".to_string());
+
+    Some(vcpkg_root.join("installed").join(triplet))
+}
+
 fn main() {
     let build_version = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
     println!("cargo:rustc-env=VP_CLIENT_BUILD_VERSION={build_version}");
@@ -11,6 +20,8 @@ fn main() {
     println!("cargo:rerun-if-env-changed=VPX_ROOT");
     println!("cargo:rerun-if-env-changed=PKG_CONFIG_PATH");
     println!("cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR");
+    println!("cargo:rerun-if-env-changed=VCPKG_DEFAULT_TRIPLET");
+    println!("cargo:rerun-if-env-changed=VCPKG_TARGET_TRIPLET");
 
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
@@ -21,12 +32,9 @@ fn main() {
         // On Windows/MSVC, resolve libvpx from VPX_ROOT or VCPKG_ROOT.
         let vpx_root = env::var("VPX_ROOT")
             .map(PathBuf::from)
-            .or_else(|_| {
-                env::var("VCPKG_ROOT")
-                    .map(PathBuf::from)
-                    .map(|p| p.join("installed").join("x64-windows-static-md"))
-            })
-            .unwrap_or_else(|_| PathBuf::from(r"C:\src\vcpkg\installed\x64-windows-static-md"));
+            .ok()
+            .or_else(vcpkg_installed_root)
+            .unwrap_or_else(|| PathBuf::from(r"C:\src\vcpkg\installed\x64-windows-static"));
 
         let lib_dir = if profile == "release" {
             vpx_root.join("lib")
@@ -66,12 +74,9 @@ fn main() {
     if target_os == "windows" && target_env == "msvc" {
         let dav1d_root = env::var("DAV1D_ROOT")
             .map(PathBuf::from)
-            .or_else(|_| {
-                env::var("VCPKG_ROOT")
-                    .map(PathBuf::from)
-                    .map(|p| p.join("installed").join("x64-windows-static-md"))
-            })
-            .unwrap_or_else(|_| PathBuf::from(r"C:\src\vcpkg\installed\x64-windows-static-md"));
+            .ok()
+            .or_else(vcpkg_installed_root)
+            .unwrap_or_else(|| PathBuf::from(r"C:\src\vcpkg\installed\x64-windows-static"));
 
         let lib_dir = if profile == "release" {
             dav1d_root.join("lib")
@@ -88,6 +93,7 @@ fn main() {
         }
 
         println!("cargo:rustc-link-search=native={}", lib_dir.display());
+        println!("cargo:rustc-link-lib=static=dav1d");
     } else if target_os == "linux" {
         let lib = pkg_config::Config::new()
             .cargo_metadata(false)
