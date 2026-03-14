@@ -3021,6 +3021,70 @@ async fn connect_and_run_session(
                             None => {}
                         }
                     }
+                    PushEvent::ScreenShare { event, event_seq } => {
+                        maybe_note_event_gap(&tx_event, event_seq);
+                        if let Some(kind) = event.kind {
+                            match kind {
+                                pb::screen_share_event::Kind::Started(started) => {
+                                    let stream_id = started
+                                        .stream_id
+                                        .as_ref()
+                                        .map(|s| s.value.clone())
+                                        .unwrap_or_default();
+                                    let user_id = started
+                                        .user_id
+                                        .as_ref()
+                                        .map(|u| u.value.clone())
+                                        .unwrap_or_default();
+                                    let channel_id = started
+                                        .channel_id
+                                        .as_ref()
+                                        .map(|c| c.value.clone())
+                                        .unwrap_or_default();
+                                    let _ = tx_event.send(UiEvent::RemoteScreenShareStarted {
+                                        stream_id,
+                                        user_id,
+                                        channel_id,
+                                        codec: started.codec,
+                                        has_audio: started.has_audio,
+                                    });
+                                }
+                                pb::screen_share_event::Kind::Stopped(stopped) => {
+                                    let stream_id = stopped
+                                        .stream_id
+                                        .as_ref()
+                                        .map(|s| s.value.clone())
+                                        .unwrap_or_default();
+                                    let user_id = stopped
+                                        .user_id
+                                        .as_ref()
+                                        .map(|u| u.value.clone())
+                                        .unwrap_or_default();
+                                    let channel_id = stopped
+                                        .channel_id
+                                        .as_ref()
+                                        .map(|c| c.value.clone())
+                                        .unwrap_or_default();
+                                    let _ = tx_event.send(UiEvent::RemoteScreenShareStopped {
+                                        stream_id,
+                                        user_id,
+                                        channel_id,
+                                    });
+                                }
+                                pb::screen_share_event::Kind::LayerChanged(changed) => {
+                                    let stream_id = changed
+                                        .stream_id
+                                        .as_ref()
+                                        .map(|s| s.value.clone())
+                                        .unwrap_or_default();
+                                    let _ = tx_event.send(UiEvent::RemoteScreenShareLayerChanged {
+                                        stream_id,
+                                        active_layer_id: changed.active_layer_id,
+                                    });
+                                }
+                            }
+                        }
+                    }
                     PushEvent::Unknown(_) => {}
                 }
             }

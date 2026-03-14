@@ -257,6 +257,24 @@ pub enum UiEvent {
         user_id: String,
     },
 
+    // Remote screen-share lifecycle events (from server push)
+    RemoteScreenShareStarted {
+        stream_id: String,
+        user_id: String,
+        channel_id: String,
+        codec: i32,
+        has_audio: bool,
+    },
+    RemoteScreenShareStopped {
+        stream_id: String,
+        user_id: String,
+        channel_id: String,
+    },
+    RemoteScreenShareLayerChanged {
+        stream_id: String,
+        active_layer_id: u32,
+    },
+
     // Members
     MemberJoined {
         channel_id: String,
@@ -563,25 +581,6 @@ pub enum UiIntent {
         selection: ShareSourceSelection,
     },
     StopScreenShare,
-
-    // Remote screen-share lifecycle events (from server push)
-    RemoteScreenShareStarted {
-        stream_id: String,
-        user_id: String,
-        channel_id: String,
-        codec: i32,
-        has_audio: bool,
-    },
-    RemoteScreenShareStopped {
-        stream_id: String,
-        user_id: String,
-        channel_id: String,
-    },
-    RemoteScreenShareLayerChanged {
-        stream_id: String,
-        active_layer_id: u32,
-    },
-    
     // Updater
     CheckForUpdates,
     InstallUpdate,
