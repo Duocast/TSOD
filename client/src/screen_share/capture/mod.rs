@@ -4,6 +4,7 @@ use crate::media_capture::CaptureBackend;
 use crate::screen_share::runtime_probe::{CaptureBackendKind, MediaRuntimeCaps};
 
 pub mod dxgi;
+#[cfg(target_os = "linux")]
 pub mod pipewire;
 pub mod scrap_fallback;
 pub mod x11;
@@ -30,9 +31,18 @@ pub fn build_capture_backend(
     for backend in &caps.capture_backends {
         let attempt: anyhow::Result<Box<dyn CaptureBackend>> = match backend {
             CaptureBackendKind::Dxgi => Ok(Box::new(dxgi::DxgiCapture::from_source(source)?)),
-            CaptureBackendKind::PipewirePortal => Ok(Box::new(
-                pipewire::PipewirePortalCapture::from_source(source)?,
-            )),
+            CaptureBackendKind::PipewirePortal => {
+                #[cfg(target_os = "linux")]
+                {
+                    Ok(Box::new(
+                        pipewire::PipewirePortalCapture::from_source(source)?,
+                    ))
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    Err(anyhow!("PipeWire capture not available on this platform"))
+                }
+            }
             CaptureBackendKind::X11 => Ok(Box::new(x11::X11Capture::from_source(source)?)),
             CaptureBackendKind::Scrap => {
                 Ok(Box::new(scrap_fallback::ScrapCapture::from_source(source)?))

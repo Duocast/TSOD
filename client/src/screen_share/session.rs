@@ -446,7 +446,7 @@ pub async fn start_local_share(params: StartLocalShareParams) {
 
     let mut stream_workers = Vec::new();
     for stream in params.streams {
-        for target in &layer_targets {
+        for &target in &layer_targets {
             let mut sender = VideoSender::new(
                 stream.stream_tag,
                 target.layer_id,
