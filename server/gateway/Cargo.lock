@@ -3298,6 +3298,46 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
+name = "tsod-gateway"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "chrono",
+ "clap",
+ "dashmap",
+ "hex",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "image",
+ "infer",
+ "metrics",
+ "prost",
+ "prost-build",
+ "quinn",
+ "rcgen",
+ "ring",
+ "rustls",
+ "rustls-pemfile",
+ "scopeguard",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "vp-control",
+ "vp-media",
+ "vp-metrics",
+ "vp-route-hash",
+ "vp-voice",
+]
+
+[[package]]
 name = "typenum"
 version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3433,46 +3473,6 @@ dependencies = [
  "tracing",
  "ulid",
  "uuid",
-]
-
-[[package]]
-name = "vp-gateway"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "bytes",
- "chrono",
- "clap",
- "dashmap",
- "hex",
- "http-body-util",
- "hyper",
- "hyper-util",
- "image",
- "infer",
- "metrics",
- "prost",
- "prost-build",
- "quinn",
- "rcgen",
- "ring",
- "rustls",
- "rustls-pemfile",
- "scopeguard",
- "serde",
- "serde_json",
- "sha2",
- "sqlx",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "uuid",
- "vp-control",
- "vp-media",
- "vp-metrics",
- "vp-route-hash",
- "vp-voice",
 ]
 
 [[package]]
