@@ -269,7 +269,8 @@ struct VpxCodecCxPkt {
 
 // ── External C functions ─────────────────────────────────────────────────────
 
-#[link(name = "vpx")]
+#[cfg_attr(all(target_os = "windows", target_env = "msvc"), link(name = "vpx", kind = "static"))]
+#[cfg_attr(not(all(target_os = "windows", target_env = "msvc")), link(name = "vpx"))]
 unsafe extern "C" {
     pub fn vpx_codec_vp9_cx() -> *const VpxCodecIface;
     pub fn vpx_codec_vp9_dx() -> *const VpxCodecIface;
