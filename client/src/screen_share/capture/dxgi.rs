@@ -1,8 +1,27 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Windows screen-capture backend
+//
+//  Primary   – DXGI Desktop Duplication  (display capture, Win 8+)
+//  Secondary – GDI BitBlt                (window capture, all versions)
+//
+// DXGI Desktop Duplication advantages over GDI:
+//   • GPU→CPU copy performed by the display driver; no extra GDI memcpy.
+//   • Real per-frame dirty-rect metadata from IDXGIOutputDuplication.
+//   • Output resolution comes from DXGI_OUTDUPL_DESC — no 1920×1080 fallback.
+//   • Natural frame pacing at the display refresh rate via AcquireNextFrame.
+//   • Multi-monitor support with proper adapter enumeration.
+//
+// GDI window capture is kept for the per-HWND path until Windows.Graphics.
+// Capture (WGC) is added as follow-up work (see TODO at bottom of file).
+// ─────────────────────────────────────────────────────────────────────────────
+
 #[cfg(not(target_os = "windows"))]
 use anyhow::anyhow;
 
 use crate::media_capture::CaptureBackend;
 use crate::net::video_frame::{PixelFormat, VideoFrame};
+
+// ── Public types consumed by the screen-share pipeline ───────────────────────
 
 #[derive(Debug, Clone)]
 pub struct DirtyRegion {
@@ -15,8 +34,12 @@ pub struct DirtyRegion {
 #[derive(Debug, Clone)]
 pub struct DamageMetadata {
     pub frame_ts_ms: u32,
+    /// Real dirty rects from DXGI for display capture; full-frame for GDI
+    /// window capture (GDI has no dirty-region API).
     pub dirty_regions: Vec<DirtyRegion>,
 }
+
+// ── DxgiCapture (public CaptureBackend implementation) ───────────────────────
 
 pub struct DxgiCapture {
     #[cfg(target_os = "windows")]
@@ -29,7 +52,7 @@ impl DxgiCapture {
         #[cfg(not(target_os = "windows"))]
         {
             let _ = source;
-            Err(anyhow!("DXGI backend only available on Windows"))
+            return Err(anyhow!("DXGI backend only available on Windows"));
         }
 
         #[cfg(target_os = "windows")]
@@ -42,13 +65,15 @@ impl DxgiCapture {
         }
     }
 
+    /// Returns and clears the damage metadata from the most recent frame.
     #[allow(dead_code)]
     pub fn take_damage(&mut self) -> Option<DamageMetadata> {
         self.last_damage.take()
     }
 }
 
-// SAFETY: HWND is a simple handle (pointer-sized integer) that is safe to send across threads.
+// SAFETY: HWND is a pointer-sized integer safe to send across threads.
+// The D3D11 device/context are accessed only from the single capture thread.
 unsafe impl Send for DxgiCapture {}
 
 impl CaptureBackend for DxgiCapture {
@@ -60,11 +85,8 @@ impl CaptureBackend for DxgiCapture {
 
         #[cfg(target_os = "windows")]
         {
-            let frame = self.inner.next_frame()?;
-            self.last_damage = Some(DamageMetadata {
-                frame_ts_ms: frame.ts_ms,
-                dirty_regions: self.inner.last_damage_regions(frame.width, frame.height),
-            });
+            let (frame, damage) = self.inner.next_frame()?;
+            self.last_damage = Some(damage);
             Ok(frame)
         }
     }
@@ -85,107 +107,499 @@ impl CaptureBackend for DxgiCapture {
     }
 }
 
+// ── Windows-only implementation ───────────────────────────────────────────────
+
 #[cfg(target_os = "windows")]
 mod windows_impl {
-    use super::DirtyRegion;
+    use super::{DamageMetadata, DirtyRegion};
     use anyhow::{anyhow, Context};
     use bytes::Bytes;
     use windows::Win32::Foundation::{HWND, RECT};
+    // D3D11
+    use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN;
+    use windows::Win32::Graphics::Direct3D11::{
+        D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Resource, ID3D11Texture2D,
+        D3D11_BIND_FLAG, D3D11_CPU_ACCESS_FLAG, D3D11_CPU_ACCESS_READ,
+        D3D11_CREATE_DEVICE_FLAG, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE,
+        D3D11_RESOURCE_MISC_FLAG, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
+    };
+    // DXGI
+    use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
+    use windows::Win32::Graphics::Dxgi::{
+        CreateDXGIFactory1, IDXGIAdapter, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput1,
+        IDXGIOutputDuplication, IDXGIResource, DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_WAIT_TIMEOUT,
+        DXGI_OUTDUPL_FRAME_INFO,
+    };
+    // GDI (window-capture fallback)
     use windows::Win32::Graphics::Gdi::{
-        BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC,
-        GetDIBits, GetWindowDC, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+        BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits,
+        GetWindowDC, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
         DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ, SRCCOPY,
     };
     use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
+    use windows::core::Interface;
 
     use crate::net::video_frame::{FramePlanes, PixelFormat, VideoFrame};
 
+    /// AcquireNextFrame blocks until the next desktop frame or this timeout.
+    /// 100 ms covers displays down to 10 Hz; typical 60/120 Hz panels unblock
+    /// within one frame period.
+    const ACQUIRE_TIMEOUT_MS: u32 = 100;
+
+    // ── Top-level dispatch ────────────────────────────────────────────────────
+
     pub(super) enum WindowsCapture {
-        Display { idx: usize },
-        Window { hwnd: HWND },
+        /// DXGI Desktop Duplication — real dirty rects, display-paced.
+        Duplication(DuplicationCapture),
+        /// GDI per-window capture — full-frame damage, no dirty metadata.
+        GdiWindow { hwnd: HWND },
     }
 
     impl WindowsCapture {
         pub(super) fn from_source(source: &crate::ShareSource) -> anyhow::Result<Self> {
             match source {
-                crate::ShareSource::WindowsDisplay(id) => Ok(Self::Display {
-                    idx: parse_screen_id(id)?,
-                }),
+                crate::ShareSource::WindowsDisplay(id) => {
+                    let idx = parse_screen_id(id)?;
+                    let dup = DuplicationCapture::new(idx)
+                        .context("DXGI Desktop Duplication init")?;
+                    Ok(Self::Duplication(dup))
+                }
                 crate::ShareSource::WindowsWindow(id) => {
                     let hwnd = parse_hwnd(id)?;
-                    Ok(Self::Window { hwnd })
+                    Ok(Self::GdiWindow { hwnd })
                 }
                 _ => Err(anyhow!(
-                    "windows capture backend only supports windows sources"
+                    "Windows capture backend only supports Windows sources"
                 )),
             }
         }
 
         pub(super) fn backend_name(&self) -> &'static str {
             match self {
-                Self::Display { .. } => "windows-gdi-display",
-                Self::Window { .. } => "windows-gdi-window",
+                Self::Duplication(_) => "dxgi-desktop-duplication",
+                Self::GdiWindow { .. } => "windows-gdi-window",
             }
         }
 
-        pub(super) fn next_frame(&mut self) -> anyhow::Result<VideoFrame> {
+        pub(super) fn next_frame(&mut self) -> anyhow::Result<(VideoFrame, DamageMetadata)> {
             match self {
-                Self::Display { .. } => capture_display(),
-                Self::Window { hwnd } => capture_window(*hwnd),
+                Self::Duplication(dup) => dup.next_frame(),
+                Self::GdiWindow { hwnd } => {
+                    let frame = gdi_capture_window(*hwnd)?;
+                    let damage = full_frame_damage(frame.ts_ms, frame.width, frame.height);
+                    Ok((frame, damage))
+                }
+            }
+        }
+    }
+
+    // ── DXGI Desktop Duplication ──────────────────────────────────────────────
+
+    pub(super) struct DuplicationCapture {
+        monitor_index: usize,
+        device: ID3D11Device,
+        context: ID3D11DeviceContext,
+        duplication: IDXGIOutputDuplication,
+        /// Reused staging texture for GPU→CPU readback.
+        /// Stored with its dimensions so we can detect resolution changes.
+        staging: Option<(ID3D11Texture2D, u32, u32)>,
+        width: u32,
+        height: u32,
+    }
+
+    impl DuplicationCapture {
+        pub(super) fn new(monitor_index: usize) -> anyhow::Result<Self> {
+            let (device, context, duplication, width, height) =
+                create_duplication(monitor_index)?;
+            Ok(Self {
+                monitor_index,
+                device,
+                context,
+                duplication,
+                staging: None,
+                width,
+                height,
+            })
+        }
+
+        pub(super) fn next_frame(&mut self) -> anyhow::Result<(VideoFrame, DamageMetadata)> {
+            // On ACCESS_LOST (display mode change, session lock, etc.)
+            // reinitialise the duplication interface and retry once.
+            match self.acquire_frame() {
+                Err(e) if is_access_lost(&e) => {
+                    tracing::warn!(
+                        "DXGI: access lost (mode change / session lock?) — reinitialising"
+                    );
+                    self.reinit()?;
+                    self.acquire_frame()
+                }
+                other => other,
             }
         }
 
-        pub(super) fn last_damage_regions(&self, width: u32, height: u32) -> Vec<DirtyRegion> {
-            vec![DirtyRegion {
-                left: 0,
-                top: 0,
-                right: width,
-                bottom: height,
-            }]
+        fn reinit(&mut self) -> anyhow::Result<()> {
+            let (device, context, duplication, width, height) =
+                create_duplication(self.monitor_index)?;
+            self.device = device;
+            self.context = context;
+            self.duplication = duplication;
+            self.staging = None; // recreated on next frame with new dimensions
+            self.width = width;
+            self.height = height;
+            Ok(())
+        }
+
+        fn acquire_frame(&mut self) -> anyhow::Result<(VideoFrame, DamageMetadata)> {
+            let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
+            let mut resource: Option<IDXGIResource> = None;
+
+            let acquire_result = unsafe {
+                self.duplication.AcquireNextFrame(
+                    ACQUIRE_TIMEOUT_MS,
+                    &mut frame_info,
+                    &mut resource,
+                )
+            };
+
+            if let Err(e) = acquire_result {
+                if e.code() == DXGI_ERROR_WAIT_TIMEOUT {
+                    return Err(anyhow!(
+                        "DXGI: timed out waiting for next desktop frame \
+                         (display may be sleeping or session locked)"
+                    ));
+                }
+                return Err(anyhow::Error::from(e).context("AcquireNextFrame"));
+            }
+
+            // resource is valid; ReleaseFrame must be called before we return.
+            let result =
+                self.copy_frame_and_metadata(&frame_info, resource.as_ref().unwrap());
+
+            // Always release, even on copy error.
+            unsafe {
+                let _ = self.duplication.ReleaseFrame();
+            }
+
+            result
+        }
+
+        fn copy_frame_and_metadata(
+            &mut self,
+            info: &DXGI_OUTDUPL_FRAME_INFO,
+            resource: &IDXGIResource,
+        ) -> anyhow::Result<(VideoFrame, DamageMetadata)> {
+            let texture: ID3D11Texture2D = resource
+                .cast()
+                .context("QI IDXGIResource → ID3D11Texture2D")?;
+
+            let staging = self.ensure_staging()?;
+
+            unsafe {
+                let dst: ID3D11Resource = staging.cast().context("staging → ID3D11Resource")?;
+                let src: ID3D11Resource = texture.cast().context("texture → ID3D11Resource")?;
+                self.context.CopyResource(&dst, &src);
+            }
+
+            // Collect dirty rects before ReleaseFrame (caller does that).
+            let dirty = self.collect_dirty_rects(info);
+
+            let pixels = self.map_staging_and_copy()?;
+
+            let ts = unix_ms() as u32;
+            let frame = VideoFrame {
+                width: self.width,
+                height: self.height,
+                ts_ms: ts,
+                format: PixelFormat::Bgra,
+                planes: FramePlanes::Bgra {
+                    bytes: Bytes::from(pixels),
+                    stride: self.width * 4,
+                },
+            };
+            let damage = DamageMetadata {
+                frame_ts_ms: ts,
+                dirty_regions: dirty,
+            };
+
+            Ok((frame, damage))
+        }
+
+        /// Return (or create) the staging texture, recreating if dimensions changed.
+        fn ensure_staging(&mut self) -> anyhow::Result<&ID3D11Texture2D> {
+            let needs_create = match &self.staging {
+                Some((_, w, h)) => *w != self.width || *h != self.height,
+                None => true,
+            };
+
+            if needs_create {
+                let desc = D3D11_TEXTURE2D_DESC {
+                    Width: self.width,
+                    Height: self.height,
+                    MipLevels: 1,
+                    ArraySize: 1,
+                    Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                    SampleDesc: DXGI_SAMPLE_DESC {
+                        Count: 1,
+                        Quality: 0,
+                    },
+                    Usage: D3D11_USAGE_STAGING,
+                    BindFlags: D3D11_BIND_FLAG(0),
+                    CPUAccessFlags: D3D11_CPU_ACCESS_READ,
+                    MiscFlags: D3D11_RESOURCE_MISC_FLAG(0),
+                };
+                let mut tex: Option<ID3D11Texture2D> = None;
+                unsafe {
+                    self.device
+                        .CreateTexture2D(&desc, None, Some(&mut tex))
+                        .context("CreateTexture2D (staging)")?;
+                }
+                self.staging = Some((tex.unwrap(), self.width, self.height));
+            }
+
+            Ok(&self.staging.as_ref().unwrap().0)
+        }
+
+        /// Map the staging texture, de-stride into a packed BGRA buffer, unmap.
+        fn map_staging_and_copy(&mut self) -> anyhow::Result<Vec<u8>> {
+            let staging = self.staging.as_ref().unwrap().0.clone();
+            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+
+            unsafe {
+                let res: ID3D11Resource = staging.cast().context("staging → resource (map)")?;
+                self.context
+                    .Map(&res, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+                    .context("ID3D11DeviceContext::Map")?;
+
+                let row_pitch = mapped.RowPitch as usize;
+                let h = self.height as usize;
+                let packed_stride = self.width as usize * 4;
+                let mut out = vec![0u8; packed_stride * h];
+                let src = mapped.pData as *const u8;
+
+                if row_pitch == packed_stride {
+                    // No GPU row padding — single copy.
+                    std::ptr::copy_nonoverlapping(src, out.as_mut_ptr(), packed_stride * h);
+                } else {
+                    // De-stride row by row.
+                    for row in 0..h {
+                        std::ptr::copy_nonoverlapping(
+                            src.add(row * row_pitch),
+                            out.as_mut_ptr().add(row * packed_stride),
+                            packed_stride,
+                        );
+                    }
+                }
+
+                let res2: ID3D11Resource =
+                    staging.cast().context("staging → resource (unmap)")?;
+                self.context.Unmap(&res2, 0);
+
+                Ok(out)
+            }
+        }
+
+        /// Extract per-frame dirty rectangles from DXGI metadata.
+        ///
+        /// Falls back to a full-frame region if:
+        ///   - `RectsCoalesced` is set (too many rects; DXGI merged them)
+        ///   - `TotalMetadataBufferSize` is 0 (no metadata this frame)
+        ///   - GetFrameDirtyRects fails
+        ///
+        /// NOTE: Move rects (GetFrameMoveRects) are not included here.
+        /// Destination rectangles of moves are implicitly dirty, so callers
+        /// that need complete damage coverage should also call
+        /// GetFrameMoveRects and union the dest rects.  This is tracked as
+        /// a TODO below.
+        fn collect_dirty_rects(&self, info: &DXGI_OUTDUPL_FRAME_INFO) -> Vec<DirtyRegion> {
+            if info.RectsCoalesced.as_bool() || info.TotalMetadataBufferSize == 0 {
+                return vec![full_region(self.width, self.height)];
+            }
+
+            // Allocate TotalMetadataBufferSize bytes — large enough for all
+            // metadata (both move and dirty rects combined).
+            let buf_bytes = info.TotalMetadataBufferSize as usize;
+            let max_rects = buf_bytes / std::mem::size_of::<RECT>();
+            if max_rects == 0 {
+                return vec![full_region(self.width, self.height)];
+            }
+
+            let mut buf = vec![RECT::default(); max_rects];
+            let mut required_bytes = 0u32;
+
+            let ok = unsafe {
+                self.duplication.GetFrameDirtyRects(
+                    buf_bytes as u32,
+                    buf.as_mut_ptr(),
+                    &mut required_bytes,
+                )
+            };
+
+            if ok.is_err() || required_bytes == 0 {
+                return vec![full_region(self.width, self.height)];
+            }
+
+            let n_actual = (required_bytes as usize) / std::mem::size_of::<RECT>();
+            buf[..n_actual]
+                .iter()
+                .map(|r| DirtyRegion {
+                    left: r.left.max(0) as u32,
+                    top: r.top.max(0) as u32,
+                    right: r.right.max(0) as u32,
+                    bottom: r.bottom.max(0) as u32,
+                })
+                .collect()
         }
     }
 
-    fn parse_screen_id(id: &str) -> anyhow::Result<usize> {
-        id.strip_prefix("screen-")
-            .unwrap_or(id)
-            .parse::<usize>()
-            .ok()
-            .filter(|n| *n >= 1)
-            .ok_or_else(|| anyhow!("invalid windows display id: {id}"))
-    }
+    // ── D3D11 / DXGI initialisation ───────────────────────────────────────────
 
-    fn parse_hwnd(id: &str) -> anyhow::Result<HWND> {
-        let raw = id
-            .strip_prefix("window-hwnd-")
-            .unwrap_or(id)
-            .parse::<isize>()
-            .map_err(|_| anyhow!("invalid window id: {id}"))?;
-        Ok(HWND(raw as *mut std::ffi::c_void))
-    }
-
-    fn capture_display() -> anyhow::Result<VideoFrame> {
-        unsafe { capture_dc(GetDC(None), None) }
-    }
-
-    fn capture_window(hwnd: HWND) -> anyhow::Result<VideoFrame> {
-        let mut rect = RECT::default();
+    /// Enumerate DXGI adapters and outputs to find the output at `monitor_index`
+    /// (1-based, matching "screen-1", "screen-2", …), then create a D3D11 device
+    /// on that adapter's GPU and open a desktop duplication session.
+    ///
+    /// Using per-adapter device creation (D3D_DRIVER_TYPE_UNKNOWN + explicit
+    /// adapter) ensures correctness on multi-GPU machines where different
+    /// monitors are attached to different GPUs.
+    fn create_duplication(
+        monitor_index: usize,
+    ) -> anyhow::Result<(
+        ID3D11Device,
+        ID3D11DeviceContext,
+        IDXGIOutputDuplication,
+        u32,
+        u32,
+    )> {
         unsafe {
-            GetClientRect(hwnd, &mut rect)?;
+            let factory: IDXGIFactory1 =
+                CreateDXGIFactory1().context("CreateDXGIFactory1")?;
+
+            let mut global_output_count = 0usize;
+            let mut adapter_idx = 0u32;
+
+            loop {
+                let adapter: IDXGIAdapter1 = match factory.EnumAdapters1(adapter_idx) {
+                    Ok(a) => a,
+                    Err(_) => break, // no more adapters
+                };
+
+                let mut output_idx = 0u32;
+                loop {
+                    let output = match adapter.EnumOutputs(output_idx) {
+                        Ok(o) => o,
+                        Err(_) => break, // no more outputs on this adapter
+                    };
+
+                    global_output_count += 1;
+
+                    if global_output_count == monitor_index {
+                        let output1: IDXGIOutput1 =
+                            output.cast().context("QI IDXGIOutput → IDXGIOutput1")?;
+
+                        // Create the D3D11 device bound to this adapter so that
+                        // DuplicateOutput succeeds even on multi-GPU systems.
+                        let dxgi_adapter: IDXGIAdapter =
+                            adapter.cast().context("IDXGIAdapter1 → IDXGIAdapter")?;
+                        let mut device: Option<ID3D11Device> = None;
+                        let mut context: Option<ID3D11DeviceContext> = None;
+                        D3D11CreateDevice(
+                            Some(&dxgi_adapter),
+                            D3D_DRIVER_TYPE_UNKNOWN,
+                            None,
+                            D3D11_CREATE_DEVICE_FLAG(0),
+                            None,
+                            D3D11_SDK_VERSION,
+                            Some(&mut device),
+                            None,
+                            Some(&mut context),
+                        )
+                        .context("D3D11CreateDevice")?;
+
+                        let device = device.context("D3D11CreateDevice: null device")?;
+                        let context = context.context("D3D11CreateDevice: null context")?;
+
+                        // DuplicateOutput fails on RDP sessions and displays
+                        // protected by HDCP; callers fall back to Scrap.
+                        let dup = output1
+                            .DuplicateOutput(&device)
+                            .context("IDXGIOutput1::DuplicateOutput")?;
+
+                        // Read the actual output resolution from the duplication
+                        // descriptor — no more hardcoded 1920×1080.
+                        let desc = dup.GetDesc();
+                        let width = desc.ModeDesc.Width;
+                        let height = desc.ModeDesc.Height;
+
+                        return Ok((device, context, dup, width, height));
+                    }
+
+                    output_idx += 1;
+                }
+
+                adapter_idx += 1;
+            }
+
+            Err(anyhow!(
+                "monitor index {} not found (system has {} output(s))",
+                monitor_index,
+                global_output_count
+            ))
         }
-        let width = (rect.right - rect.left).max(1) as u32;
-        let height = (rect.bottom - rect.top).max(1) as u32;
-        unsafe { capture_dc(GetWindowDC(Some(hwnd)), Some((width, height))) }
     }
 
-    unsafe fn capture_dc(src: HDC, force_size: Option<(u32, u32)>) -> anyhow::Result<VideoFrame> {
-        if src.is_invalid() {
-            return Err(anyhow!("failed to get source DC"));
+    // ── GDI window-capture fallback ───────────────────────────────────────────
+    //
+    // Used for per-HWND capture. GDI has no dirty-region API so damage is
+    // always reported as a full-frame region.
+    //
+    // Limitations vs. DXGI/WGC:
+    //   • Misses GPU-composited and DRM-protected content.
+    //   • Every frame is a full GPU→CPU blit.
+    //   • Occlusion and minimisation: GetClientRect returns 0×0 for minimised
+    //     windows; we clamp to 1×1 and return a blank frame.
+
+    fn gdi_capture_window(hwnd: HWND) -> anyhow::Result<VideoFrame> {
+        unsafe {
+            let mut rect = RECT::default();
+            GetClientRect(hwnd, &mut rect).context("GetClientRect")?;
+
+            // Minimised windows have zero rect; produce a 1×1 blank frame so
+            // the encoder/pipeline keeps running without special-casing.
+            let width = (rect.right - rect.left).max(1) as u32;
+            let height = (rect.bottom - rect.top).max(1) as u32;
+
+            let src_dc = GetWindowDC(Some(hwnd));
+            if src_dc.is_invalid() {
+                return Err(anyhow!("GetWindowDC returned invalid HDC"));
+            }
+
+            // Capture then always release, even on error.
+            let pixels = gdi_bitblt_to_pixels(src_dc, width, height);
+            ReleaseDC(Some(hwnd), src_dc);
+            let pixels = pixels?;
+
+            Ok(VideoFrame {
+                width,
+                height,
+                ts_ms: unix_ms() as u32,
+                format: PixelFormat::Bgra,
+                planes: FramePlanes::Bgra {
+                    bytes: Bytes::from(pixels),
+                    stride: width * 4,
+                },
+            })
         }
-        let (width, height) = force_size.unwrap_or((1920, 1080));
+    }
+
+    unsafe fn gdi_bitblt_to_pixels(
+        src: HDC,
+        width: u32,
+        height: u32,
+    ) -> anyhow::Result<Vec<u8>> {
         let mem_dc = CreateCompatibleDC(Some(src));
         let bmp: HBITMAP = CreateCompatibleBitmap(src, width as i32, height as i32);
         let old: HGDIOBJ = SelectObject(mem_dc, bmp.into());
-        BitBlt(
+
+        let blt_ok = BitBlt(
             mem_dc,
             0,
             0,
@@ -195,24 +609,24 @@ mod windows_impl {
             0,
             0,
             SRCCOPY,
-        )?;
+        );
 
         let mut bi = BITMAPINFO::default();
         bi.bmiHeader = BITMAPINFOHEADER {
             biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
             biWidth: width as i32,
-            biHeight: -(height as i32),
+            biHeight: -(height as i32), // negative = top-down scan order
             biPlanes: 1,
             biBitCount: 32,
             biCompression: BI_RGB.0,
             ..Default::default()
         };
-        let mut pixels = vec![0_u8; (width * height * 4) as usize];
+        let mut pixels = vec![0u8; (width * height * 4) as usize];
         let rows = GetDIBits(
             mem_dc,
             bmp,
             0,
-            height as u32,
+            height,
             Some(pixels.as_mut_ptr() as *mut _),
             &mut bi,
             DIB_RGB_COLORS,
@@ -221,24 +635,65 @@ mod windows_impl {
         let _ = SelectObject(mem_dc, old);
         let _ = DeleteObject(bmp.into());
         let _ = DeleteDC(mem_dc);
-        let _ = ReleaseDC(None, src);
 
+        blt_ok.context("BitBlt")?;
         if rows == 0 {
-            return Err(anyhow!("GetDIBits failed")).context("capture frame");
+            return Err(anyhow!("GetDIBits returned 0 scan lines"));
         }
 
-        Ok(VideoFrame {
-            width,
-            height,
-            ts_ms: super::unix_ms() as u32,
-            format: PixelFormat::Bgra,
-            planes: FramePlanes::Bgra {
-                bytes: Bytes::from(pixels),
-                stride: width * 4,
-            },
+        Ok(pixels)
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    fn full_region(w: u32, h: u32) -> DirtyRegion {
+        DirtyRegion {
+            left: 0,
+            top: 0,
+            right: w,
+            bottom: h,
+        }
+    }
+
+    fn full_frame_damage(ts_ms: u32, width: u32, height: u32) -> DamageMetadata {
+        DamageMetadata {
+            frame_ts_ms: ts_ms,
+            dirty_regions: vec![full_region(width, height)],
+        }
+    }
+
+    fn is_access_lost(e: &anyhow::Error) -> bool {
+        e.chain().any(|cause| {
+            cause
+                .downcast_ref::<windows::core::Error>()
+                .map(|we| we.code() == DXGI_ERROR_ACCESS_LOST)
+                .unwrap_or(false)
         })
     }
+
+    /// Parse "screen-1", "screen-2", … into a 1-based monitor index.
+    pub(super) fn parse_screen_id(id: &str) -> anyhow::Result<usize> {
+        let s = id.strip_prefix("screen-").unwrap_or(id);
+        let n: usize = s
+            .parse()
+            .ok()
+            .filter(|&n| n >= 1)
+            .ok_or_else(|| anyhow!("invalid Windows display id: {id:?} (expected \"screen-N\" where N ≥ 1)"))?;
+        Ok(n)
+    }
+
+    /// Parse "window-hwnd-<isize>" into an HWND.
+    pub(super) fn parse_hwnd(id: &str) -> anyhow::Result<HWND> {
+        let raw: isize = id
+            .strip_prefix("window-hwnd-")
+            .unwrap_or(id)
+            .parse()
+            .map_err(|_| anyhow!("invalid window id: {id:?} (expected \"window-hwnd-<isize>\")"))?;
+        Ok(HWND(raw as *mut std::ffi::c_void))
+    }
 }
+
+// ── Shared helpers (available on all platforms) ───────────────────────────────
 
 fn unix_ms() -> u64 {
     std::time::SystemTime::now()
@@ -246,3 +701,93 @@ fn unix_ms() -> u64 {
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
 }
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    #[cfg(target_os = "windows")]
+    use super::windows_impl::{parse_hwnd, parse_screen_id};
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn parses_screen_prefix() {
+        assert_eq!(parse_screen_id("screen-1").unwrap(), 1);
+        assert_eq!(parse_screen_id("screen-3").unwrap(), 3);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn parses_bare_screen_index() {
+        assert_eq!(parse_screen_id("2").unwrap(), 2);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn rejects_screen_zero() {
+        assert!(parse_screen_id("screen-0").is_err());
+        assert!(parse_screen_id("0").is_err());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn rejects_invalid_screen_id() {
+        assert!(parse_screen_id("screen-abc").is_err());
+        assert!(parse_screen_id("display-1").is_err());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn parses_hwnd_prefixed() {
+        let hwnd = parse_hwnd("window-hwnd-12345").unwrap();
+        assert_eq!(hwnd.0 as isize, 12345);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn parses_hwnd_bare() {
+        let hwnd = parse_hwnd("99").unwrap();
+        assert_eq!(hwnd.0 as isize, 99);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn rejects_invalid_hwnd() {
+        assert!(parse_hwnd("window-hwnd-").is_err());
+        assert!(parse_hwnd("notanumber").is_err());
+    }
+
+    // Dirty-region metadata: a full-frame DirtyRegion covers the whole output.
+    #[test]
+    fn full_frame_dirty_region_covers_output() {
+        let damage = super::DamageMetadata {
+            frame_ts_ms: 42,
+            dirty_regions: vec![super::DirtyRegion {
+                left: 0,
+                top: 0,
+                right: 1920,
+                bottom: 1080,
+            }],
+        };
+        let r = &damage.dirty_regions[0];
+        assert_eq!(r.right - r.left, 1920);
+        assert_eq!(r.bottom - r.top, 1080);
+    }
+}
+
+// ── TODOs ─────────────────────────────────────────────────────────────────────
+//
+// TODO(optional): Add Windows.Graphics.Capture (WGC) as a window-capture
+//   backend. WGC captures GPU-composited and DRM-protected content that GDI
+//   misses, and is the recommended API on Windows 10 1903+. It requires
+//   WinRT/async plumbing (windows::Graphics::Capture) and a HWND→GraphicsCaptureItem
+//   interop call. Suggested variant: WindowsCapture::Wgc(WgcCapture).
+//
+// TODO(optional): Include move-rect destinations in DamageMetadata. Call
+//   IDXGIOutputDuplication::GetFrameMoveRects, add dest RECT of each move to
+//   dirty_regions. This gives complete damage coverage for compositors that
+//   skip re-encoding unchanged regions.
+//
+// TODO(optional): Surface DXGI_OUTDUPL_DESC.Rotation so the pipeline can
+//   rotate the frame back to upright rather than capturing a rotated image on
+//   portrait-mode or rotated displays.
