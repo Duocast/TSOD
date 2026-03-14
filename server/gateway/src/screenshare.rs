@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::time::Instant;
 
 use crate::screenshare_policy::ScreenSharePolicy;
-use crate::state::{StreamSessionRegistry, StreamSessionOwnership};
+use crate::state::{ShareMetadata, StreamSessionRegistry, StreamSessionOwnership};
 use vp_control::ids::UserId;
 use vp_control::ControlError;
 
@@ -72,8 +72,9 @@ pub fn should_request_keyframe_on_layer_change(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proto::voiceplatform::v1 as pb;
     use crate::screenshare_policy::ScreenSharePolicy;
-    use crate::state::{StreamSessionOwnership, StreamSessionRegistry};
+    use crate::state::{ShareMetadata, StreamSessionOwnership, StreamSessionRegistry};
     use vp_control::ids::{ChannelId, UserId};
 
     fn make_registry(primary_tag: u64, fallback_tag: Option<u64>) -> StreamSessionRegistry {
@@ -86,6 +87,11 @@ mod tests {
                 owner_user_id: UserId::new(),
                 channel_id: ChannelId::new(),
                 active_layer_ids: vec![0, 1, 2],
+                metadata: ShareMetadata {
+                    codec: pb::VideoCodec::Vp9 as i32,
+                    layers: vec![],
+                    has_audio: false,
+                },
             },
         );
         registry
