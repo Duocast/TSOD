@@ -8,6 +8,7 @@ fn main() {
 
     println!("cargo:rerun-if-env-changed=VCPKG_ROOT");
     println!("cargo:rerun-if-env-changed=DAV1D_ROOT");
+    println!("cargo:rerun-if-env-changed=VPX_ROOT");
     println!("cargo:rerun-if-env-changed=PKG_CONFIG_PATH");
     println!("cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR");
 
@@ -15,6 +16,53 @@ fn main() {
     let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
     let profile = env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
 
+    // ── libvpx (VP9 encode/decode) ────────────────────────────────────────────
+    if target_os == "windows" && target_env == "msvc" {
+        // On Windows/MSVC, resolve libvpx from VPX_ROOT or VCPKG_ROOT.
+        let vpx_root = env::var("VPX_ROOT")
+            .map(PathBuf::from)
+            .or_else(|_| {
+                env::var("VCPKG_ROOT")
+                    .map(PathBuf::from)
+                    .map(|p| p.join("installed").join("x64-windows"))
+            })
+            .unwrap_or_else(|_| PathBuf::from(r"C:\src\vcpkg\installed\x64-windows"));
+
+        let lib_dir = if profile == "release" {
+            vpx_root.join("lib")
+        } else {
+            vpx_root.join("debug").join("lib")
+        };
+
+        let vpx_lib = lib_dir.join("vpx.lib");
+        if !vpx_lib.exists() {
+            println!(
+                "cargo:warning=vpx.lib was not found at {}. Set VPX_ROOT or VCPKG_ROOT if needed.",
+                vpx_lib.display()
+            );
+        }
+
+        println!("cargo:rustc-link-search=native={}", lib_dir.display());
+        println!("cargo:rustc-link-lib=vpx");
+    } else if target_os == "linux" {
+        match pkg_config::Config::new().cargo_metadata(false).probe("vpx") {
+            Ok(lib) => {
+                for path in lib.link_paths {
+                    println!("cargo:rustc-link-search=native={}", path.display());
+                }
+            }
+            Err(e) => {
+                println!(
+                    "cargo:warning=libvpx not found via pkg-config ({e}). \
+                     VP9 backends will be disabled at runtime. \
+                     Install libvpx-dev / libvpx-devel to enable them."
+                );
+            }
+        }
+        println!("cargo:rustc-link-lib=vpx");
+    }
+
+    // ── libdav1d (AV1 decode) ─────────────────────────────────────────────────
     if target_os == "windows" && target_env == "msvc" {
         let dav1d_root = env::var("DAV1D_ROOT")
             .map(PathBuf::from)
