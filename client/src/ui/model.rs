@@ -1764,10 +1764,13 @@ pub fn enumerate_share_sources() -> Vec<ShareSourceOption> {
         let is_wayland = session_type == "wayland" || std::env::var("WAYLAND_DISPLAY").is_ok();
 
         if is_wayland {
+            // Selecting this option triggers the full xdg-desktop-portal
+            // ScreenCast D-Bus flow (source picker → PipeWire node IDs).
+            // No VP_PORTAL_NODE_ID environment variable is required.
             sources.push(ShareSourceOption {
                 selection: ShareSourceSelection::LinuxPortal("portal-picker".to_string()),
                 title: "Share via system picker".to_string(),
-                subtitle: "Wayland (xdg-desktop-portal + PipeWire)".to_string(),
+                subtitle: "Wayland · xdg-desktop-portal + PipeWire".to_string(),
                 kind: ShareSourceKind::Screen,
             });
             return sources;

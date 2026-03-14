@@ -2,6 +2,8 @@ pub mod audio;
 pub mod capture;
 pub mod config;
 pub mod fsm;
+#[cfg(target_os = "linux")]
+pub mod portal;
 pub mod policy;
 pub mod runtime_probe;
 pub mod session;
