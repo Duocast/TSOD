@@ -1444,25 +1444,29 @@ impl Gateway {
                     let channel_members = self.membership.members_of(ownership.channel_id);
                     validate_viewer_access(&stream_registry, &sid.value, user_id, channel_members.as_ref())?;
                     let previous_layer = stream_registry.viewer_preferred_layer(&sid.value, user_id);
-                    let (active_layer_id, primary_tag) = select_and_persist_layer(
+                    let (active_layer_id, stream_tags) = select_and_persist_layer(
                         &mut stream_registry,
                         &mut screenshare_policy,
                         &sid.value,
                         user_id,
                         r.preferred_layer_id,
                     )?;
-                    self.video
-                        .set_viewer_preferred_layer(primary_tag, user_id, active_layer_id)
-                        .await;
+                    for &tag in &stream_tags {
+                        self.video
+                            .set_viewer_preferred_layer(tag, user_id, active_layer_id)
+                            .await;
+                    }
                     if should_request_keyframe_on_layer_change(previous_layer, active_layer_id) {
-                        self.push.send_to(owner_user_id, pb::ServerToClient {
-                            request_id: None,
-                            session_id: None,
-                            sent_at: Some(now_ts()),
-                            error: None,
-                            event_seq: 0,
-                            payload: Some(pb::server_to_client::Payload::RequestRecovery(pb::RequestRecovery { stream_tag: primary_tag })),
-                        }).await;
+                        for &tag in &stream_tags {
+                            self.push.send_to(owner_user_id, pb::ServerToClient {
+                                request_id: None,
+                                session_id: None,
+                                sent_at: Some(now_ts()),
+                                error: None,
+                                event_seq: 0,
+                                payload: Some(pb::server_to_client::Payload::RequestRecovery(pb::RequestRecovery { stream_tag: tag })),
+                            }).await;
+                        }
                     }
 
                     let resp = pb::ServerToClient {
