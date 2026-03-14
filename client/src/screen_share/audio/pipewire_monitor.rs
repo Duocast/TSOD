@@ -56,8 +56,8 @@ impl PipeWireMonitor {
             .input_devices()
             .context("enumerate PipeWire input devices")?
         {
-            let name = match device.name() {
-                Ok(name) => name,
+            let name = match device.description() {
+                Ok(desc) => desc.to_string(),
                 Err(_) => continue,
             };
             let Some(rank) = Self::monitor_rank(&name) else {
@@ -87,8 +87,8 @@ impl PipeWireMonitor {
             .context("query PipeWire monitor input configs")?
         {
             if cfg.sample_format() == cpal::SampleFormat::F32
-                && cfg.min_sample_rate().0 <= SAMPLE_RATE
-                && cfg.max_sample_rate().0 >= SAMPLE_RATE
+                && cfg.min_sample_rate() <= SAMPLE_RATE
+                && cfg.max_sample_rate() >= SAMPLE_RATE
             {
                 let c = cfg.channels();
                 if c > best {
@@ -107,7 +107,7 @@ impl PipeWireMonitor {
 
         let config = cpal::StreamConfig {
             channels: channel_count,
-            sample_rate: cpal::SampleRate(SAMPLE_RATE),
+            sample_rate: SAMPLE_RATE,
             buffer_size: cpal::BufferSize::Default,
         };
 
