@@ -114,14 +114,14 @@ mod windows_impl {
     use super::{DamageMetadata, DirtyRegion};
     use anyhow::{anyhow, Context};
     use bytes::Bytes;
-    use windows::Win32::Foundation::{HWND, RECT};
+    use windows::Win32::Foundation::{HMODULE, HWND, RECT};
     // D3D11
     use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN;
     use windows::Win32::Graphics::Direct3D11::{
         D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Resource, ID3D11Texture2D,
-        D3D11_BIND_FLAG, D3D11_CPU_ACCESS_FLAG, D3D11_CPU_ACCESS_READ,
-        D3D11_CREATE_DEVICE_FLAG, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE,
-        D3D11_RESOURCE_MISC_FLAG, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
+        D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_FLAG, D3D11_MAP_READ,
+        D3D11_MAPPED_SUBRESOURCE, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC,
+        D3D11_USAGE_STAGING,
     };
     // DXGI
     use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
@@ -305,7 +305,7 @@ mod windows_impl {
 
             let pixels = self.map_staging_and_copy()?;
 
-            let ts = unix_ms() as u32;
+            let ts = super::unix_ms() as u32;
             let frame = VideoFrame {
                 width: self.width,
                 height: self.height,
@@ -343,9 +343,9 @@ mod windows_impl {
                         Quality: 0,
                     },
                     Usage: D3D11_USAGE_STAGING,
-                    BindFlags: D3D11_BIND_FLAG(0),
-                    CPUAccessFlags: D3D11_CPU_ACCESS_READ,
-                    MiscFlags: D3D11_RESOURCE_MISC_FLAG(0),
+                    BindFlags: 0,
+                    CPUAccessFlags: D3D11_CPU_ACCESS_READ.0,
+                    MiscFlags: 0,
                 };
                 let mut tex: Option<ID3D11Texture2D> = None;
                 unsafe {
@@ -504,7 +504,7 @@ mod windows_impl {
                         D3D11CreateDevice(
                             Some(&dxgi_adapter),
                             D3D_DRIVER_TYPE_UNKNOWN,
-                            None,
+                            HMODULE::default(),
                             D3D11_CREATE_DEVICE_FLAG(0),
                             None,
                             D3D11_SDK_VERSION,
@@ -580,7 +580,7 @@ mod windows_impl {
             Ok(VideoFrame {
                 width,
                 height,
-                ts_ms: unix_ms() as u32,
+                ts_ms: super::unix_ms() as u32,
                 format: PixelFormat::Bgra,
                 planes: FramePlanes::Bgra {
                     bytes: Bytes::from(pixels),
