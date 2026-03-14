@@ -109,6 +109,11 @@ windows = { version = "0.62.2", features = [
   "Win32_System_Memory",
   "Win32_System_ProcessStatus",
   "Win32_System_Threading",
+  # DXGI Desktop Duplication (display capture backend)
+  "Win32_Graphics_Direct3D",
+  "Win32_Graphics_Direct3D11",
+  "Win32_Graphics_Dxgi",
+  "Win32_Graphics_Dxgi_Common",
 ] }
 
 
