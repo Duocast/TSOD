@@ -102,7 +102,7 @@ pub fn request_screencast_nodes() -> anyhow::Result<ScreenCastNodes> {
         &sender_flat,
         &req_token,
         "CreateSession",
-        |p| p.call::<(OwnedObjectPath,)>("CreateSession", &(&opts,)),
+        |p| p.call::<_, _, (OwnedObjectPath,)>("CreateSession", &(&opts,)),
     )
     .context("CreateSession")?;
 
@@ -131,7 +131,7 @@ pub fn request_screencast_nodes() -> anyhow::Result<ScreenCastNodes> {
         &sender_flat,
         &req_token,
         "SelectSources",
-        |p| p.call::<(OwnedObjectPath,)>("SelectSources", &(&session_path, &opts)),
+        |p| p.call::<_, _, (OwnedObjectPath,)>("SelectSources", &(&session_path, &opts)),
     )
     .context("SelectSources")?;
 
@@ -148,7 +148,7 @@ pub fn request_screencast_nodes() -> anyhow::Result<ScreenCastNodes> {
         &sender_flat,
         &req_token,
         "Start",
-        |p| p.call::<(OwnedObjectPath,)>("Start", &(&session_path, "", &opts)),
+        |p| p.call::<_, _, (OwnedObjectPath,)>("Start", &(&session_path, "", &opts)),
     )
     .context("Start")?;
 
@@ -200,8 +200,7 @@ fn portal_call(
     // Block until the Response signal arrives.
     let msg = resp_iter
         .next()
-        .ok_or_else(|| anyhow!("portal: Response stream ended for {step}"))?
-        .with_context(|| format!("receive Response for {step}"))?;
+        .ok_or_else(|| anyhow!("portal: Response stream ended for {step}"))?;
 
     let (code, results): (u32, Results) = msg
         .body()
@@ -223,8 +222,7 @@ fn extract_object_path_str(results: &Results, key: &str) -> anyhow::Result<Strin
         .get(key)
         .ok_or_else(|| anyhow!("missing '{key}' in portal results"))?;
 
-    let v: Value<'static> = val.clone().into();
-    match v {
+    match &**val {
         Value::ObjectPath(p) => Ok(p.to_string()),
         Value::Str(s) => Ok(s.to_string()),
         other => Err(anyhow!(
@@ -242,8 +240,7 @@ fn extract_stream_node_ids(results: &Results) -> anyhow::Result<Vec<u32>> {
         .get("streams")
         .ok_or_else(|| anyhow!("Start response has no 'streams' key"))?;
 
-    let v: Value<'static> = val.clone().into();
-    let arr = match v {
+    let arr = match &**val {
         Value::Array(a) => a,
         other => {
             return Err(anyhow!(
