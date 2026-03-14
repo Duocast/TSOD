@@ -344,7 +344,7 @@ mod windows_impl {
                     },
                     Usage: D3D11_USAGE_STAGING,
                     BindFlags: 0,
-                    CPUAccessFlags: D3D11_CPU_ACCESS_READ.0,
+                    CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
                     MiscFlags: 0,
                 };
                 let mut tex: Option<ID3D11Texture2D> = None;
