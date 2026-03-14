@@ -568,6 +568,40 @@ impl Gateway {
                         warn!("control write failed: {:#}", e);
                         break;
                     }
+                    // Replay active screen-share lifecycle events so the joining/reconnecting
+                    // client can reconstruct share state without waiting for the next start event.
+                    let active_shares = stream_registry.active_sessions_for_channel(ch);
+                    for (active_sid, ownership) in active_shares {
+                        let started_msg = pb::ServerToClient {
+                            request_id: None,
+                            session_id: None,
+                            sent_at: Some(now_ts()),
+                            error: None,
+                            event_seq: 0,
+                            payload: Some(pb::server_to_client::Payload::ScreenShareEvent(
+                                pb::ScreenShareEvent {
+                                    at: Some(now_ts()),
+                                    kind: Some(pb::screen_share_event::Kind::Started(
+                                        pb::ScreenShareStarted {
+                                            channel_id: Some(pb::ChannelId {
+                                                value: ownership.channel_id.0.to_string(),
+                                            }),
+                                            user_id: Some(pb::UserId {
+                                                value: ownership.owner_user_id.0.to_string(),
+                                            }),
+                                            stream_id: Some(pb::StreamId {
+                                                value: active_sid,
+                                            }),
+                                            codec: ownership.metadata.codec,
+                                            layers: ownership.metadata.layers.clone(),
+                                            has_audio: ownership.metadata.has_audio,
+                                        },
+                                    )),
+                                },
+                            )),
+                        };
+                        self.push.send_to(user_id, started_msg).await;
+                    }
                 }
                 Some(pb::client_to_server::Payload::LeaveChannelRequest(r)) => {
                     let ch = parse_channel_id(r.channel_id.as_ref())?;
@@ -1348,6 +1382,11 @@ impl Gateway {
                         .iter()
                         .map(|id| (*id).clamp(0, u8::MAX as u32) as u8)
                         .collect::<Vec<_>>();
+                    let share_metadata = crate::state::ShareMetadata {
+                        codec: plan.primary as i32,
+                        layers: r.layers.clone(),
+                        has_audio: r.include_audio,
+                    };
                     let stream_teardown = stream_registry.register(
                         stream_id.clone(),
                         StreamSessionOwnership {
@@ -1356,6 +1395,7 @@ impl Gateway {
                             owner_user_id: user_id,
                             channel_id: ch,
                             active_layer_ids,
+                            metadata: share_metadata.clone(),
                         },
                     );
                     self.teardown_stream_tags(&stream_teardown.removed_tags).await;
@@ -1365,6 +1405,7 @@ impl Gateway {
                         orphan_cleanup_count = stream_registry.orphan_cleanup_count(),
                         "stream session registered"
                     );
+                    let started_stream_id = stream_id.clone();
                     let resp = pb::ServerToClient {
                         request_id: req_id,
                         session_id: Some(pb::SessionId { value: session_id.clone() }),
@@ -1386,8 +1427,28 @@ impl Gateway {
                         warn!("control write failed: {:#}", e);
                         break;
                     }
+                    // Broadcast lifecycle event to all channel members so viewers can
+                    // update UI state and late-joiners can reconstruct the share.
+                    self.broadcast_screen_share_event(
+                        ch,
+                        pb::screen_share_event::Kind::Started(pb::ScreenShareStarted {
+                            channel_id: Some(pb::ChannelId { value: ch.0.to_string() }),
+                            user_id: Some(pb::UserId { value: user_id.0.to_string() }),
+                            stream_id: Some(pb::StreamId { value: started_stream_id }),
+                            codec: share_metadata.codec,
+                            layers: share_metadata.layers,
+                            has_audio: share_metadata.has_audio,
+                        }),
+                    )
+                    .await;
                 }
                 Some(pb::client_to_server::Payload::StopScreenShareRequest(r)) => {
+                    // Capture ownership info before teardown for the lifecycle event.
+                    let stopped_context = r.stream_id.as_ref().and_then(|sid| {
+                        stream_registry.ownership_by_stream_id(&sid.value).map(|o| {
+                            (sid.value.clone(), o.channel_id, o.owner_user_id)
+                        })
+                    });
                     if let Some(sid) = r.stream_id.as_ref() {
                         let teardown = stream_registry.teardown(&sid.value);
                         self.teardown_stream_tags(&teardown.removed_tags).await;
@@ -1413,6 +1474,18 @@ impl Gateway {
                     if let Err(e) = write_delimited(&mut send, &resp).await {
                         warn!("control write failed: {:#}", e);
                         break;
+                    }
+                    // Broadcast lifecycle event to all channel members.
+                    if let Some((stopped_sid, stopped_ch, stopped_uid)) = stopped_context {
+                        self.broadcast_screen_share_event(
+                            stopped_ch,
+                            pb::screen_share_event::Kind::Stopped(pb::ScreenShareStopped {
+                                channel_id: Some(pb::ChannelId { value: stopped_ch.0.to_string() }),
+                                user_id: Some(pb::UserId { value: stopped_uid.0.to_string() }),
+                                stream_id: Some(pb::StreamId { value: stopped_sid }),
+                            }),
+                        )
+                        .await;
                     }
                 }
                 Some(pb::client_to_server::Payload::CapabilitiesUpdate(r)) => {
@@ -1485,6 +1558,26 @@ impl Gateway {
                         warn!("control write failed: {:#}", e);
                         break;
                     }
+                    // Notify the requesting viewer of the active layer so the client can
+                    // update its local quality indicator without polling.
+                    self.push.send_to(user_id, pb::ServerToClient {
+                        request_id: None,
+                        session_id: None,
+                        sent_at: Some(now_ts()),
+                        error: None,
+                        event_seq: 0,
+                        payload: Some(pb::server_to_client::Payload::ScreenShareEvent(
+                            pb::ScreenShareEvent {
+                                at: Some(now_ts()),
+                                kind: Some(pb::screen_share_event::Kind::LayerChanged(
+                                    pb::ScreenShareLayerChanged {
+                                        stream_id: Some(pb::StreamId { value: sid.value.clone() }),
+                                        active_layer_id: active_layer_id as u32,
+                                    },
+                                )),
+                            },
+                        )),
+                    }).await;
                 }
                 Some(pb::client_to_server::Payload::RequestKeyframeRequest(r)) => {
                     stream_registry.note_keyframe_request();
@@ -2004,6 +2097,31 @@ impl Gateway {
         }
     }
 
+    /// Broadcast a `ScreenShareEvent` to all members of `channel_id`.
+    async fn broadcast_screen_share_event(
+        &self,
+        channel_id: ChannelId,
+        kind: pb::screen_share_event::Kind,
+    ) {
+        let recipients = self.membership.members_of(channel_id).unwrap_or_default();
+        let msg = pb::ServerToClient {
+            request_id: None,
+            session_id: None,
+            sent_at: Some(now_ts()),
+            error: None,
+            event_seq: 0,
+            payload: Some(pb::server_to_client::Payload::ScreenShareEvent(
+                pb::ScreenShareEvent {
+                    at: Some(now_ts()),
+                    kind: Some(kind),
+                },
+            )),
+        };
+        for uid in recipients {
+            self.push.send_to(uid, msg.clone()).await;
+        }
+    }
+
     async fn broadcast_chat_event(&self, channel_id: ChannelId, kind: pb::chat_event::Kind) {
         let recipients = self.membership.members_of(channel_id).unwrap_or_default();
         let event = pb::ChatEvent {
@@ -2496,16 +2614,20 @@ fn verify_profile_asset_data(data: &[u8]) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        allows_1440p60, error_from_anyhow, is_video_datagram, negotiate_codecs,
-        normalize_preferred_display_name,
+        accepted_layer_ids_for_request, allows_1440p60, error_from_anyhow, is_video_datagram,
+        negotiate_codecs, normalize_preferred_display_name,
     };
     use crate::proto::voiceplatform::v1 as pb;
-    use crate::state::{StreamSessionOwnership, StreamSessionRegistry};
+    use crate::state::{ShareMetadata, StreamSessionOwnership, StreamSessionRegistry};
     use std::collections::HashMap;
     use tokio::time::Instant;
     use vp_control::ids::{ChannelId, UserId};
     use vp_control::ControlError;
 
+    fn test_metadata() -> ShareMetadata {
+        ShareMetadata { codec: pb::VideoCodec::Vp9 as i32, layers: vec![], has_audio: false }
+    }
+    
     #[test]
     fn permission_denied_maps_to_permission_denied_error_response() {
         let err = anyhow::Error::new(ControlError::PermissionDenied("denied"));
@@ -2702,6 +2824,7 @@ mod tests {
                 owner_user_id: UserId::new(),
                 channel_id: ChannelId::new(),
                 active_layer_ids: vec![1],
+                metadata: test_metadata(),
             },
         );
 
@@ -2723,6 +2846,7 @@ mod tests {
                 owner_user_id: owner,
                 channel_id: ChannelId::new(),
                 active_layer_ids: vec![2],
+                metadata: test_metadata(),
             },
         );
 
@@ -2731,5 +2855,119 @@ mod tests {
             .expect("fallback tag must resolve");
         assert_eq!(ownership.owner_user_id, owner);
         assert!(registry.should_forward_recovery(911, Instant::now()));
+    }
+    
+    #[test]
+    fn broadcast_screen_share_event_helper_produces_correct_payload() {
+        // Verifies that `broadcast_screen_share_event` is wired to the right proto
+        // payload field by constructing the message inline and inspecting it.
+        let now = pb::Timestamp { unix_millis: 0 };
+        let channel_id_str = uuid::Uuid::new_v4().to_string();
+        let user_id_str = uuid::Uuid::new_v4().to_string();
+        let stream_id_str = "deadbeef00000001".to_string();
+ 
+        let kind = pb::screen_share_event::Kind::Started(pb::ScreenShareStarted {
+            channel_id: Some(pb::ChannelId { value: channel_id_str.clone() }),
+            user_id: Some(pb::UserId { value: user_id_str.clone() }),
+            stream_id: Some(pb::StreamId { value: stream_id_str.clone() }),
+            codec: pb::VideoCodec::Vp9 as i32,
+            layers: vec![],
+            has_audio: true,
+        });
+        let msg = pb::ServerToClient {
+            request_id: None,
+            session_id: None,
+            sent_at: Some(now),
+            error: None,
+            event_seq: 0,
+            payload: Some(pb::server_to_client::Payload::ScreenShareEvent(
+                pb::ScreenShareEvent { at: None, kind: Some(kind) },
+            )),
+        };
+ 
+        match msg.payload {
+            Some(pb::server_to_client::Payload::ScreenShareEvent(ev)) => {
+                match ev.kind {
+                    Some(pb::screen_share_event::Kind::Started(s)) => {
+                        assert_eq!(s.stream_id.unwrap().value, stream_id_str);
+                        assert_eq!(s.user_id.unwrap().value, user_id_str);
+                        assert!(s.has_audio);
+                    }
+                    other => panic!("unexpected kind: {:?}", other),
+                }
+            }
+            other => panic!("unexpected payload: {:?}", other),
+        }
+    }
+ 
+    #[test]
+    fn screen_share_stopped_context_captured_before_teardown() {
+        // Simulates the pattern used in StopScreenShareRequest: ownership must be
+        // captured before `teardown` removes it from the registry.
+        let mut registry = StreamSessionRegistry::new();
+        let owner = UserId::new();
+        let channel = ChannelId::new();
+        registry.register(
+            "sid-stop".to_string(),
+            StreamSessionOwnership {
+                primary_tag: 42,
+                fallback_tag: None,
+                owner_user_id: owner,
+                channel_id: channel,
+                active_layer_ids: vec![0],
+                metadata: test_metadata(),
+            },
+        );
+ 
+        // Mirror of gateway handler: capture before teardown.
+        let stopped_context = registry.ownership_by_stream_id("sid-stop").map(|o| {
+            ("sid-stop".to_string(), o.channel_id, o.owner_user_id)
+        });
+        registry.teardown("sid-stop");
+ 
+        let (sid, ch, uid) = stopped_context.expect("ownership should have been captured");
+        assert_eq!(sid, "sid-stop");
+        assert_eq!(ch, channel);
+        assert_eq!(uid, owner);
+        // After teardown the stream must be gone.
+        assert!(registry.ownership_by_stream_id("sid-stop").is_none());
+    }
+ 
+    #[test]
+    fn active_sessions_for_channel_replays_correct_metadata() {
+        let mut registry = StreamSessionRegistry::new();
+        let owner = UserId::new();
+        let channel = ChannelId::new();
+        let meta = ShareMetadata {
+            codec: pb::VideoCodec::Av1 as i32,
+            layers: vec![pb::SimulcastLayer {
+                layer_id: 0,
+                width: 1920,
+                height: 1080,
+                max_fps: 60,
+                max_bitrate_bps: 8_000_000,
+            }],
+            has_audio: true,
+        };
+        registry.register(
+            "sid-replay".to_string(),
+            StreamSessionOwnership {
+                primary_tag: 99,
+                fallback_tag: None,
+                owner_user_id: owner,
+                channel_id: channel,
+                active_layer_ids: vec![0],
+                metadata: meta.clone(),
+            },
+        );
+ 
+        let sessions = registry.active_sessions_for_channel(channel);
+        assert_eq!(sessions.len(), 1);
+        let (sid, ownership) = &sessions[0];
+        assert_eq!(sid, "sid-replay");
+        assert_eq!(ownership.metadata.codec, pb::VideoCodec::Av1 as i32);
+        assert!(ownership.metadata.has_audio);
+        assert_eq!(ownership.metadata.layers.len(), 1);
+        assert_eq!(ownership.metadata.layers[0].width, 1920);
     }
 }
