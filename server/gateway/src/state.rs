@@ -431,12 +431,16 @@ impl ViewerProvider for MembershipCache {
 
 #[cfg(test)]
 mod tests {
-    use super::{MembershipCache, PushHub, StreamSessionOwnership, StreamSessionRegistry};
+    use super::{MembershipCache, PushHub, ShareMetadata, StreamSessionOwnership, StreamSessionRegistry};
     use crate::proto::voiceplatform::v1 as pb;
     use tokio::sync::mpsc;
     use tokio::time::Instant;
     use vp_control::ids::{ChannelId, UserId};
 
+    fn test_metadata() -> ShareMetadata {
+        ShareMetadata { codec: pb::VideoCodec::Vp9 as i32, layers: vec![], has_audio: false }
+    }
+    
     #[tokio::test]
     async fn pushhub_sends_to_all_sessions_for_same_user() {
         let hub = PushHub::new();
@@ -572,6 +576,7 @@ mod tests {
                 owner_user_id: owner,
                 channel_id: channel,
                 active_layer_ids: vec![1],
+                metadata: test_metadata(),
             },
         );
 
@@ -596,6 +601,7 @@ mod tests {
                 owner_user_id: owner,
                 channel_id: channel,
                 active_layer_ids: vec![1],
+                metadata: test_metadata(),
             },
         );
 
@@ -621,6 +627,7 @@ mod tests {
                     owner_user_id: owner,
                     channel_id: channel,
                     active_layer_ids: vec![1],
+                    metadata: test_metadata(),
                 },
             );
             registry.teardown(&stream_id);
@@ -630,9 +637,62 @@ mod tests {
         assert_eq!(registry.active_stream_tags(), 0);
         assert_eq!(registry.orphan_cleanup_count(), 0);
     }
+
+    #[test]
+    fn active_sessions_for_channel_returns_only_matching_channel() {
+        let mut registry = StreamSessionRegistry::new();
+        let owner = UserId::new();
+        let ch_a = ChannelId::new();
+        let ch_b = ChannelId::new();
+ 
+        registry.register(
+            "s-a".to_string(),
+            StreamSessionOwnership {
+                primary_tag: 1,
+                fallback_tag: None,
+                owner_user_id: owner,
+                channel_id: ch_a,
+                active_layer_ids: vec![0],
+                metadata: test_metadata(),
+            },
+        );
+        registry.register(
+            "s-b".to_string(),
+            StreamSessionOwnership {
+                primary_tag: 2,
+                fallback_tag: None,
+                owner_user_id: owner,
+                channel_id: ch_b,
+                active_layer_ids: vec![0],
+                metadata: test_metadata(),
+            },
+        );
+ 
+        let for_a = registry.active_sessions_for_channel(ch_a);
+        assert_eq!(for_a.len(), 1);
+        assert_eq!(for_a[0].0, "s-a");
+ 
+        let for_b = registry.active_sessions_for_channel(ch_b);
+        assert_eq!(for_b.len(), 1);
+        assert_eq!(for_b[0].0, "s-b");
+ 
+        assert!(registry.active_sessions_for_channel(ChannelId::new()).is_empty());
+    }
 }
 
 pub type Sessions = SessionMap;
+
+/// Metadata stored at share-start time and used to reconstruct `ScreenShareStarted`
+/// events for late-joining or reconnecting viewers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShareMetadata {
+    /// Primary codec negotiated for this stream.
+    pub codec: i32,
+    /// Simulcast layers offered by the sender (width/height/fps/bitrate).
+    pub layers: Vec<crate::proto::voiceplatform::v1::SimulcastLayer>,
+    /// Whether the share includes system audio.
+    pub has_audio: bool,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StreamSessionOwnership {
@@ -641,6 +701,8 @@ pub struct StreamSessionOwnership {
     pub owner_user_id: UserId,
     pub channel_id: ChannelId,
     pub active_layer_ids: Vec<u8>,
+    /// Rich start-time metadata for lifecycle event replay.
+    pub metadata: ShareMetadata,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -664,6 +726,18 @@ pub struct StreamSessionRegistry {
 impl StreamSessionRegistry {
     const RECOVERY_THROTTLE: Duration = Duration::from_millis(500);
 
+    /// Returns all active sessions in a given channel as `(stream_id, ownership)` pairs.
+    pub fn active_sessions_for_channel(
+        &self,
+        channel_id: ChannelId,
+    ) -> Vec<(String, &StreamSessionOwnership)> {
+        self.sessions_by_stream_id
+            .iter()
+            .filter(|(_, o)| o.channel_id == channel_id)
+            .map(|(sid, o)| (sid.clone(), o))
+            .collect()
+    }
+ 
     pub fn new() -> Self {
         Self::default()
     }
