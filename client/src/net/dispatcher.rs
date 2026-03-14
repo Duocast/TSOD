@@ -104,6 +104,10 @@ pub enum PushEvent {
         event: pb::UserProfileEvent,
         event_seq: u64,
     },
+    ScreenShare {
+        event: pb::ScreenShareEvent,
+        event_seq: u64,
+    },
     Unknown(pb::ServerToClient),
 }
 
@@ -1229,6 +1233,10 @@ fn classify_push(msg: pb::ServerToClient) -> PushEvent {
             event,
             event_seq: msg.event_seq,
         },
+        Some(pb::server_to_client::Payload::ScreenShareEvent(event)) => PushEvent::ScreenShare {
+            event,
+            event_seq: msg.event_seq,
+        },
         _ => PushEvent::Unknown(msg),
     }
 }
@@ -1513,10 +1521,105 @@ fn default_caps(alpn: &str) -> pb::ClientCaps {
 
 #[cfg(test)]
 mod tests {
-    use super::screen_share_profiles_for;
+    use super::{classify_push, screen_share_profiles_for, PushEvent};
+    use crate::proto::voiceplatform::v1 as pb;
 
     #[test]
     fn screen_share_profiles_hide_1440_without_headroom() {
         assert_eq!(screen_share_profiles_for(true, 54.0), vec!["1080p60"]);
+    }
+
+    #[test]
+    fn classify_push_screen_share_started_event() {
+        let msg = pb::ServerToClient {
+            event_seq: 7,
+            payload: Some(pb::server_to_client::Payload::ScreenShareEvent(
+                pb::ScreenShareEvent {
+                    at: None,
+                    kind: Some(pb::screen_share_event::Kind::Started(
+                        pb::ScreenShareStarted {
+                            stream_id: Some(pb::StreamId { value: "sid-1".into() }),
+                            user_id: Some(pb::UserId { value: "uid-1".into() }),
+                            channel_id: Some(pb::ChannelId { value: "cid-1".into() }),
+                            codec: pb::VideoCodec::Vp9 as i32,
+                            layers: vec![],
+                            has_audio: false,
+                        },
+                    )),
+                },
+            )),
+            ..Default::default()
+        };
+ 
+        match classify_push(msg) {
+            PushEvent::ScreenShare { event, event_seq: 7 } => {
+                match event.kind {
+                    Some(pb::screen_share_event::Kind::Started(s)) => {
+                        assert_eq!(s.stream_id.unwrap().value, "sid-1");
+                    }
+                    other => panic!("wrong kind: {:?}", other),
+                }
+            }
+            other => panic!("wrong PushEvent variant: {:?}", other),
+        }
+    }
+ 
+    #[test]
+    fn classify_push_screen_share_stopped_event() {
+        let msg = pb::ServerToClient {
+            event_seq: 8,
+            payload: Some(pb::server_to_client::Payload::ScreenShareEvent(
+                pb::ScreenShareEvent {
+                    at: None,
+                    kind: Some(pb::screen_share_event::Kind::Stopped(pb::ScreenShareStopped {
+                        stream_id: Some(pb::StreamId { value: "sid-2".into() }),
+                        user_id: Some(pb::UserId { value: "uid-1".into() }),
+                        channel_id: Some(pb::ChannelId { value: "cid-1".into() }),
+                    })),
+                },
+            )),
+            ..Default::default()
+        };
+ 
+        match classify_push(msg) {
+            PushEvent::ScreenShare { event, event_seq: 8 } => {
+                assert!(matches!(
+                    event.kind,
+                    Some(pb::screen_share_event::Kind::Stopped(_))
+                ));
+            }
+            other => panic!("wrong variant: {:?}", other),
+        }
+    }
+ 
+    #[test]
+    fn classify_push_screen_share_layer_changed_event() {
+        let msg = pb::ServerToClient {
+            event_seq: 9,
+            payload: Some(pb::server_to_client::Payload::ScreenShareEvent(
+                pb::ScreenShareEvent {
+                    at: None,
+                    kind: Some(pb::screen_share_event::Kind::LayerChanged(
+                        pb::ScreenShareLayerChanged {
+                            stream_id: Some(pb::StreamId { value: "sid-3".into() }),
+                            active_layer_id: 2,
+                        },
+                    )),
+                },
+            )),
+            ..Default::default()
+        };
+ 
+        match classify_push(msg) {
+            PushEvent::ScreenShare { event, event_seq: 9 } => {
+                match event.kind {
+                    Some(pb::screen_share_event::Kind::LayerChanged(l)) => {
+                        assert_eq!(l.active_layer_id, 2);
+                    }
+                    other => panic!("wrong kind: {:?}", other),
+                }
+            }
+            other => panic!("wrong variant: {:?}", other),
+        }
     }
 }
