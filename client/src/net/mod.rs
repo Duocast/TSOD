@@ -12,5 +12,6 @@ pub mod video_metrics;
 pub mod video_policy;
 pub mod video_transport;
 pub mod voice_datagram;
+pub mod vpx_codec;
 
 pub type UiLogTx = tokio::sync::mpsc::UnboundedSender<String>;
