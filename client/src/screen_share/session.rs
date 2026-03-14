@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::Sender;
 use tokio::sync::watch;
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::audio::opus::{OpusEncoder, OpusEncoderProfile};
 use crate::media_codec::VideoSessionConfig;
@@ -273,7 +273,10 @@ pub async fn start_local_share(params: StartLocalShareParams) {
 
     let mut audio_worker: Option<tokio::task::JoinHandle<()>> = None;
     if params.include_audio {
-        match crate::screen_share::audio::build_system_audio_backend(params.runtime_caps.as_ref()) {
+        match crate::screen_share::audio::build_system_audio_backend(
+            params.runtime_caps.as_ref(),
+            &params.source,
+        ) {
             Ok(Some(mut backend)) => {
                 let backend_name = backend.backend_name().to_string();
                 match backend.start() {
@@ -288,38 +291,57 @@ pub async fn start_local_share(params: StartLocalShareParams) {
                         let egress = params.egress.clone();
                         let active_route = params.active_voice_channel_route.clone();
                         audio_worker = Some(tokio::spawn(async move {
+                            let channels = backend.channels();
                             let mut encoder = match OpusEncoder::new(
                                 48_000,
-                                1,
+                                channels as u8,
                                 OpusEncoderProfile::Music,
                             ) {
                                 Ok(enc) => enc,
                                 Err(e) => {
-                                    warn!(error=?e, "[audio-share] failed to initialize opus encoder");
+                                    warn!(error=?e, channels, "[audio-share] failed to initialize opus encoder");
                                     backend.stop();
                                     return;
                                 }
                             };
-                            if let Err(e) = encoder.set_bitrate(64_000) {
+                            if let Err(e) =
+                                encoder.set_bitrate(if channels > 1 { 96_000 } else { 64_000 })
+                            {
                                 warn!(error=?e, "[audio-share] failed to set opus bitrate");
                             }
-                            let mut pcm = vec![0i16; 960];
+                            let mut pcm = vec![0i16; 960 * channels];
                             let mut out = vec![0u8; 4000];
                             let ssrc: u32 = rand::random();
                             let mut seq = 0u32;
-                            let mut ts_ms = 0u32;
+                            let session_zero = Instant::now();
+                            let mut stall_spins = 0u64;
+                            let mut underflows = 0u64;
                             while !stop.load(Ordering::Relaxed) {
                                 if !backend.read_frame(&mut pcm) {
+                                    stall_spins = stall_spins.wrapping_add(1);
+                                    underflows = underflows.wrapping_add(1);
+                                    if stall_spins % 200 == 0 {
+                                        warn!(
+                                            stall_spins,
+                                            underflows,
+                                            "[audio-share] system audio stalled waiting for frame"
+                                        );
+                                    }
                                     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                                     continue;
                                 }
+                                stall_spins = 0;
                                 let Ok(n) = encoder.encode(&pcm, &mut out) else {
+                                    warn!(
+                                        "[audio-share] opus encode failed for system audio frame"
+                                    );
                                     continue;
                                 };
                                 let route = active_route.load(Ordering::Relaxed);
                                 if route == 0 {
                                     continue;
                                 }
+                                let ts_ms = session_zero.elapsed().as_millis() as u32;
                                 let d =
                                     make_voice_datagram(route, ssrc, seq, ts_ms, true, &out[..n]);
                                 if let Err(reason) = egress.enqueue_voice(d) {
@@ -329,8 +351,8 @@ pub async fn start_local_share(params: StartLocalShareParams) {
                                     );
                                 }
                                 seq = seq.wrapping_add(1);
-                                ts_ms = ts_ms.wrapping_add(20);
                             }
+                            info!(underflows, "[audio-share] system audio worker stopped");
                             backend.stop();
                         }));
                     }

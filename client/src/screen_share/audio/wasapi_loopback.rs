@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, Mutex,
 };
 
@@ -11,24 +11,38 @@ use crate::media_audio_loopback::AudioLoopbackBackend;
 
 const SAMPLE_RATE: u32 = 48_000;
 const CHANNELS: usize = 2;
-const FRAME_SAMPLES_MONO: usize = (SAMPLE_RATE as usize / 1000) * 20;
+const FRAME_SAMPLES_STEREO: usize = (SAMPLE_RATE as usize / 1000) * 20 * CHANNELS;
 
 pub struct WasapiLoopback {
     queue: Arc<Mutex<VecDeque<i16>>>,
     stop: Arc<AtomicBool>,
+    thread_failed: Arc<AtomicBool>,
+    restart_count: Arc<AtomicU64>,
+    underflow_count: Arc<AtomicU64>,
+    stall_count: Arc<AtomicU64>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl WasapiLoopback {
     pub fn new() -> Result<Self> {
         Ok(Self {
-            queue: Arc::new(Mutex::new(VecDeque::with_capacity(FRAME_SAMPLES_MONO * 8))),
+            queue: Arc::new(Mutex::new(VecDeque::with_capacity(
+                FRAME_SAMPLES_STEREO * 8,
+            ))),
             stop: Arc::new(AtomicBool::new(false)),
+            thread_failed: Arc::new(AtomicBool::new(false)),
+            restart_count: Arc::new(AtomicU64::new(0)),
+            underflow_count: Arc::new(AtomicU64::new(0)),
+            stall_count: Arc::new(AtomicU64::new(0)),
             thread: None,
         })
     }
 
-    fn run_capture(queue: Arc<Mutex<VecDeque<i16>>>, stop: Arc<AtomicBool>) -> Result<()> {
+    fn run_capture(
+        queue: Arc<Mutex<VecDeque<i16>>>,
+        stop: Arc<AtomicBool>,
+        thread_failed: Arc<AtomicBool>,
+    ) -> Result<()> {
         wasapi::initialize_mta()
             .ok()
             .map_err(|e| anyhow!("initialize COM MTA: {e}"))?;
@@ -66,7 +80,10 @@ impl WasapiLoopback {
 
         let mut packet = VecDeque::<u8>::new();
         while !stop.load(Ordering::Relaxed) {
-            let _ = capture.read_from_device_to_deque(&mut packet);
+            if capture.read_from_device_to_deque(&mut packet).is_err() {
+                thread_failed.store(true, Ordering::Relaxed);
+                break;
+            }
             while packet.len() >= CHANNELS * 4 {
                 let mut frame = [0u8; CHANNELS * 4];
                 for b in &mut frame {
@@ -74,10 +91,10 @@ impl WasapiLoopback {
                 }
                 let l = f32::from_le_bytes([frame[0], frame[1], frame[2], frame[3]]);
                 let r = f32::from_le_bytes([frame[4], frame[5], frame[6], frame[7]]);
-                let mono = ((l + r) * 0.5 * 32767.0).clamp(-32768.0, 32767.0) as i16;
                 if let Ok(mut q) = queue.lock() {
-                    q.push_back(mono);
-                    while q.len() > FRAME_SAMPLES_MONO * 20 {
+                    q.push_back((l * 32767.0).clamp(-32768.0, 32767.0) as i16);
+                    q.push_back((r * 32767.0).clamp(-32768.0, 32767.0) as i16);
+                    while q.len() > FRAME_SAMPLES_STEREO * 20 {
                         q.pop_front();
                     }
                 }
@@ -87,6 +104,38 @@ impl WasapiLoopback {
         let _ = audio_client.stop_stream();
         Ok(())
     }
+
+    fn start_capture_thread(&mut self) -> Result<()> {
+        let queue = self.queue.clone();
+        let stop = self.stop.clone();
+        let failed = self.thread_failed.clone();
+        self.stop.store(false, Ordering::Relaxed);
+        self.thread = Some(
+            std::thread::Builder::new()
+                .name("tsod-wasapi-loopback".into())
+                .spawn(move || {
+                    if let Err(e) = Self::run_capture(queue, stop, failed.clone()) {
+                        failed.store(true, Ordering::Relaxed);
+                        tracing::warn!(error=?e, "[audio-share] WASAPI loopback failed");
+                    }
+                })?,
+        );
+        Ok(())
+    }
+
+    fn recover_if_needed(&mut self) {
+        if !self.thread_failed.load(Ordering::Relaxed) {
+            return;
+        }
+        tracing::warn!("[audio-share] restarting WASAPI loopback after failure");
+        self.thread_failed.store(false, Ordering::Relaxed);
+        self.stop();
+        self.restart_count.fetch_add(1, Ordering::Relaxed);
+        if let Err(e) = self.start_capture_thread() {
+            self.thread_failed.store(true, Ordering::Relaxed);
+            tracing::warn!(error=?e, "[audio-share] failed to restart WASAPI loopback");
+        }
+    }
 }
 
 impl AudioLoopbackBackend for WasapiLoopback {
@@ -94,20 +143,12 @@ impl AudioLoopbackBackend for WasapiLoopback {
         "wasapi-loopback"
     }
 
+    fn channels(&self) -> usize {
+        CHANNELS
+    }
+
     fn start(&mut self) -> Result<()> {
-        let queue = self.queue.clone();
-        let stop = self.stop.clone();
-        self.stop.store(false, Ordering::Relaxed);
-        self.thread = Some(
-            std::thread::Builder::new()
-                .name("tsod-wasapi-loopback".into())
-                .spawn(move || {
-                    if let Err(e) = Self::run_capture(queue, stop) {
-                        tracing::warn!(error=?e, "[audio-share] WASAPI loopback failed");
-                    }
-                })?,
-        );
-        Ok(())
+        self.start_capture_thread()
     }
 
     fn stop(&mut self) {
@@ -120,14 +161,17 @@ impl AudioLoopbackBackend for WasapiLoopback {
         }
     }
 
-    fn read_frame(&self, pcm: &mut [i16]) -> bool {
-        if pcm.len() != FRAME_SAMPLES_MONO {
+    fn read_frame(&mut self, pcm: &mut [i16]) -> bool {
+        if pcm.len() != FRAME_SAMPLES_STEREO {
             return false;
         }
+        self.recover_if_needed();
         let Ok(mut q) = self.queue.lock() else {
             return false;
         };
-        if q.len() < FRAME_SAMPLES_MONO {
+        if q.len() < FRAME_SAMPLES_STEREO {
+            self.underflow_count.fetch_add(1, Ordering::Relaxed);
+            self.stall_count.fetch_add(1, Ordering::Relaxed);
             return false;
         }
         for s in pcm.iter_mut() {
