@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use axoupdater::AxoUpdater;
 use serde::Deserialize;
 use tracing::{info, warn};
