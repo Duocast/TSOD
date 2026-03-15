@@ -22,7 +22,8 @@ use crate::{
     overwrite_queue::{pop_voice_realtime, OverwriteQueue, StampedBytes},
     proto::voiceplatform::v1 as pb,
     screenshare::{
-        select_and_persist_layer, should_request_keyframe_on_layer_change, validate_viewer_access,
+        select_and_persist_layer, should_request_keyframe_on_layer_change,
+        validate_owner_action, validate_start_share_authorization, validate_viewer_access,
     },
     screenshare_policy::ScreenSharePolicy,
     state::{
@@ -1310,6 +1311,8 @@ impl Gateway {
                 }
                 Some(pb::client_to_server::Payload::StartScreenShareRequest(r)) => {
                     let ch = parse_channel_id(r.channel_id.as_ref())?;
+                    let members = self.membership.members_of(ch);
+                    validate_start_share_authorization(user_id, ch, members.as_ref())?;
 
                     let streamer_caps = self.membership.streamer_encode_codecs(user_id);
                     let mut viewer_caps = HashMap::new();
@@ -1443,6 +1446,10 @@ impl Gateway {
                     .await;
                 }
                 Some(pb::client_to_server::Payload::StopScreenShareRequest(r)) => {
+                    // Validate the requesting user owns this stream before allowing stop.
+                    if let Some(sid) = r.stream_id.as_ref() {
+                        validate_owner_action(&stream_registry, &sid.value, user_id)?;
+                    }
                     // Capture ownership info before teardown for the lifecycle event.
                     let stopped_context = r.stream_id.as_ref().and_then(|sid| {
                         stream_registry.ownership_by_stream_id(&sid.value).map(|o| {
@@ -1585,6 +1592,13 @@ impl Gateway {
                         .stream_id
                         .as_ref()
                         .ok_or(ControlError::InvalidArgument("stream_id missing"))?;
+                    {
+                        let ownership = stream_registry
+                            .ownership_by_stream_id(&sid.value)
+                            .ok_or(ControlError::InvalidArgument("unknown stream_id"))?;
+                        let channel_members = self.membership.members_of(ownership.channel_id);
+                        validate_viewer_access(&stream_registry, &sid.value, user_id, channel_members.as_ref())?;
+                    }
                     let stream_tag = stream_registry
                         .primary_tag_for_stream_id(&sid.value)
                         .ok_or(ControlError::InvalidArgument("unknown stream_id"))?;
@@ -1632,6 +1646,8 @@ impl Gateway {
                         .ok_or(ControlError::InvalidArgument("unknown stream_tag"))?;
                     let resolved_stream_id = resolved_stream_id.to_string();
                     let owner_user_id = ownership.owner_user_id;
+                    let channel_members = self.membership.members_of(ownership.channel_id);
+                    validate_viewer_access(&stream_registry, &resolved_stream_id, user_id, channel_members.as_ref())?;
                     let layer_id = ownership.active_layer_ids.first().copied().unwrap_or(0);
                     let now = Instant::now();
                     let should_forward = stream_registry.should_forward_recovery(r.stream_tag, now);
