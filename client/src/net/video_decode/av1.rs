@@ -10,6 +10,14 @@ use crate::screen_share::runtime_probe::DecodeBackendKind;
 
 const DAV1D_EAGAIN: i32 = 11;
 
+const SOFTWARE_CODEC_MAX_THREADS: usize = 16;
+
+fn decoder_thread_count() -> i32 {
+    std::thread::available_parallelism()
+        .map(|parallelism| parallelism.get().clamp(1, SOFTWARE_CODEC_MAX_THREADS))
+        .unwrap_or(1) as i32
+}
+
 pub fn build_av1_decoder(backends: &[DecodeBackendKind]) -> Result<Box<dyn VideoDecoder>> {
     for backend in backends {
         if matches!(backend, DecodeBackendKind::Dav1d) {
@@ -96,7 +104,7 @@ impl Dav1dDecoder {
         unsafe { dav1d_default_settings(settings.as_mut_ptr()) };
         let mut settings = unsafe { settings.assume_init() };
         settings.max_frame_delay = 1;
-        settings.n_threads = 1;
+        settings.n_threads = decoder_thread_count();
 
         let mut ctx: *mut Dav1dContext = ptr::null_mut();
         let rc = unsafe { dav1d_open(&mut ctx, &settings) };
