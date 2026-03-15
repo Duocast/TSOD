@@ -1401,19 +1401,7 @@ fn measure_media_caps() -> MeasuredMediaCaps {
             })
         })
         .unwrap_or(false);
-    let hw_decode_av1 = runtime_caps
-        .decode_backends
-        .get(&pb::VideoCodec::Av1)
-        .map(|backends| {
-            backends.iter().any(|backend| {
-                matches!(
-                    backend,
-                    crate::screen_share::runtime_probe::DecodeBackendKind::MfHwAv1
-                        | crate::screen_share::runtime_probe::DecodeBackendKind::VaapiAv1
-                )
-            })
-        })
-        .unwrap_or(false);
+    let hw_decode_av1 = false;
     let hw_decode_vp9 = runtime_caps
         .decode_backends
         .get(&pb::VideoCodec::Vp9)

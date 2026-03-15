@@ -49,11 +49,7 @@ impl VideoDecoderCache {
 pub fn decoder_for_codec(codec: pb::VideoCodec) -> Option<Box<dyn VideoDecoder>> {
     match codec {
         pb::VideoCodec::Av1 if cfg!(feature = "video-av1-decode") => {
-            let backends = vec![
-                DecodeBackendKind::Dav1d,
-                DecodeBackendKind::MfHwAv1,
-                DecodeBackendKind::VaapiAv1,
-            ];
+            let backends = vec![DecodeBackendKind::Dav1d];
             av1::build_av1_decoder(&backends).ok()
         }
         pb::VideoCodec::Vp9 if cfg!(feature = "video-vp9") => {

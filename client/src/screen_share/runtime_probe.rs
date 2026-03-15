@@ -73,10 +73,8 @@ pub enum EncodeBackendKind {
 pub enum DecodeBackendKind {
     MfHwVp9,
     Libvpx,
-    MfHwAv1,
     Dav1d,
     VaapiVp9,
-    VaapiAv1,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -446,7 +444,6 @@ fn can_init_decode_backend(codec: pb::VideoCodec, backend: DecodeBackendKind) ->
         (pb::VideoCodec::Av1, DecodeBackendKind::Dav1d) => {
             av1_decode::can_initialize_backend(backend)
         }
-        (pb::VideoCodec::Av1, DecodeBackendKind::MfHwAv1 | DecodeBackendKind::VaapiAv1) => false,
         _ => false,
     }
 }
@@ -466,12 +463,7 @@ fn preferred_decode_backends() -> HashMap<pb::VideoCodec, Vec<DecodeBackendKind>
             },
         );
 
-        let mut av1 = Vec::new();
-        av1.push(DecodeBackendKind::Dav1d);
-        if !hw_disabled {
-            av1.push(DecodeBackendKind::MfHwAv1);
-        }
-        map.insert(pb::VideoCodec::Av1, av1);
+        map.insert(pb::VideoCodec::Av1, vec![DecodeBackendKind::Dav1d]);
         return map;
     }
 
@@ -486,12 +478,7 @@ fn preferred_decode_backends() -> HashMap<pb::VideoCodec, Vec<DecodeBackendKind>
             },
         );
 
-        let mut av1 = Vec::new();
-        av1.push(DecodeBackendKind::Dav1d);
-        if !hw_disabled {
-            av1.push(DecodeBackendKind::VaapiAv1);
-        }
-        map.insert(pb::VideoCodec::Av1, av1);
+        map.insert(pb::VideoCodec::Av1, vec![DecodeBackendKind::Dav1d]);
         return map;
     }
 
@@ -578,12 +565,6 @@ fn apply_decoder_override(
         }
         "av1-dav1d" => {
             backends.insert(pb::VideoCodec::Av1, vec![DecodeBackendKind::Dav1d]);
-        }
-        "av1-mf" => {
-            backends.insert(pb::VideoCodec::Av1, vec![DecodeBackendKind::MfHwAv1]);
-        }
-        "av1-vaapi" => {
-            backends.insert(pb::VideoCodec::Av1, vec![DecodeBackendKind::VaapiAv1]);
         }
         _ => {}
     }
@@ -776,4 +757,53 @@ mod tests {
         let order = preferred_codec_order(SenderPolicy::AutoLowLatency, &enc, true);
         assert_eq!(order, vec![pb::VideoCodec::Av1, pb::VideoCodec::Vp9]);
     }
+
+    #[test]
+    fn every_verified_decode_backend_is_initializable() {
+        let verified = verified_decode_backends(preferred_decode_backends());
+        for (codec, backends) in verified {
+            for backend in backends {
+                assert!(
+                    can_init_decode_backend(codec, backend),
+                    "verified backend {:?} for {:?} must be constructible",
+                    backend,
+                    codec
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_verified_encode_backend_is_initializable() {
+        let verified = verified_encode_backends(preferred_encode_backends());
+        for (codec, backends) in verified {
+            for backend in backends {
+                assert!(
+                    can_init_encode_backend(codec, backend),
+                    "verified backend {:?} for {:?} must be constructible",
+                    backend,
+                    codec
+                );
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_av1_decode_selection_prefers_dav1d_only() {
+        let backends = preferred_decode_backends()
+            .remove(&pb::VideoCodec::Av1)
+            .unwrap_or_default();
+        assert_eq!(backends, vec![DecodeBackendKind::Dav1d]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_av1_decode_selection_prefers_dav1d_only() {
+        let backends = preferred_decode_backends()
+            .remove(&pb::VideoCodec::Av1)
+            .unwrap_or_default();
+        assert_eq!(backends, vec![DecodeBackendKind::Dav1d]);
+    }
+
 }
