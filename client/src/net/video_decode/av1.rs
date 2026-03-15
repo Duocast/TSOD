@@ -9,7 +9,6 @@ use crate::net::video_frame::EncodedAccessUnit;
 use crate::screen_share::runtime_probe::DecodeBackendKind;
 
 const DAV1D_EAGAIN: i32 = 11;
-
 const SOFTWARE_CODEC_MAX_THREADS: usize = 16;
 
 fn decoder_thread_count() -> i32 {
