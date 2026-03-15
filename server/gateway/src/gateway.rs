@@ -2240,6 +2240,7 @@ impl Gateway {
                     display_name: m.display_name,
                     muted: m.muted,
                     deafened: m.deafened,
+                    away_message: m.custom_status_text,
                     ..Default::default()
                 })
                 .collect::<Vec<_>>();
