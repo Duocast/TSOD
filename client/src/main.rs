@@ -412,6 +412,22 @@ fn video_codec_encoder_name(codec: pb::VideoCodec) -> Option<&'static str> {
     }
 }
 
+fn preferred_share_codec_order(
+    sender_policy: crate::screen_share::config::SenderPolicy,
+    runtime_preferred: pb::VideoCodec,
+) -> Vec<pb::VideoCodec> {
+    let mut order = Vec::new();
+    if video_codec_encoder_name(runtime_preferred).is_some() {
+        order.push(runtime_preferred);
+    }
+    for codec in sender_policy.preferred_codec_order() {
+        if video_codec_encoder_name(codec).is_some() && !order.contains(&codec) {
+            order.push(codec);
+        }
+    }
+    order
+}
+
 fn is_video_datagram(datagram: &Bytes) -> bool {
     datagram.len() >= 2
         && datagram[0] == vp_voice::VIDEO_VERSION
@@ -4345,31 +4361,28 @@ async fn connect_and_run_session(
                                     ),
                                 ),
                             );
-                            let preferred_codec = sender_policy
-                                .preferred_codec_order()
-                                .into_iter()
-                                .find_map(|codec| {
-                                    let codec_name = match codec {
-                                        pb::VideoCodec::Av1 => "AV1",
-                                        pb::VideoCodec::Vp8 => "VP8",
-                                        pb::VideoCodec::Vp9 => "VP9",
-                                        _ => return None,
+                            let preferred_codec = preferred_share_codec_order(
+                                sender_policy,
+                                probed_caps.preferred_codec,
+                            )
+                            .into_iter()
+                            .find_map(|codec| {
+                                let codec_name = video_codec_name(codec);
+                                available_codecs
+                                    .iter()
+                                    .any(|candidate| *candidate == codec_name)
+                                    .then_some((codec_name.to_string(), codec))
+                            })
+                            .or_else(|| {
+                                available_codecs.first().map(|codec| {
+                                    let codec_enum = match *codec {
+                                        "AV1" => pb::VideoCodec::Av1,
+                                        "VP8" => pb::VideoCodec::Vp8,
+                                        _ => pb::VideoCodec::Vp9,
                                     };
-                                    available_codecs
-                                        .iter()
-                                        .any(|candidate| *candidate == codec_name)
-                                        .then_some((codec_name.to_string(), codec))
+                                    ((*codec).to_string(), codec_enum)
                                 })
-                                .or_else(|| {
-                                    available_codecs.first().map(|codec| {
-                                        let codec_enum = match *codec {
-                                            "AV1" => pb::VideoCodec::Av1,
-                                            "VP8" => pb::VideoCodec::Vp8,
-                                            _ => pb::VideoCodec::Vp9,
-                                        };
-                                        ((*codec).to_string(), codec_enum)
-                                    })
-                                });
+                            });
                             let Some((selected_codec, preferred_codec)) = preferred_codec else {
                                 let _ = tx_event.send(UiEvent::AppendLog(
                                     "[video] start share aborted: no supported codecs available".into(),
@@ -7266,6 +7279,24 @@ mod tests {
             choose_initial_selected_channel(&snapshot, Some(requested)),
             Some(requested.to_string())
         );
+    }
+
+    #[test]
+    fn preferred_share_codec_order_prioritizes_runtime_probe_preference() {
+        let order = super::preferred_share_codec_order(
+            crate::screen_share::config::SenderPolicy::AutoLowLatency,
+            pb::VideoCodec::Av1,
+        );
+        assert_eq!(order, vec![pb::VideoCodec::Av1, pb::VideoCodec::Vp9]);
+    }
+
+    #[test]
+    fn preferred_share_codec_order_deduplicates_policy_codec() {
+        let order = super::preferred_share_codec_order(
+            crate::screen_share::config::SenderPolicy::AutoPremiumAv1,
+            pb::VideoCodec::Av1,
+        );
+        assert_eq!(order, vec![pb::VideoCodec::Av1, pb::VideoCodec::Vp9]);
     }
 
     #[test]
