@@ -1260,15 +1260,23 @@ pub fn available_screen_share_codecs() -> Vec<&'static str> {
 
 pub fn available_screen_share_profiles() -> Vec<&'static str> {
     let measured = measured_media_caps();
-    screen_share_profiles_for(
-        measured.runtime_caps.supports_1440p60,
-        runtime_headroom_fps(),
-    )
+    let preflight = preflight_1440p60_eligible();
+    screen_share_profiles_for(preflight, runtime_headroom_fps())
 }
 
-fn screen_share_profiles_for(supports_1440p60: bool, headroom_fps: f32) -> Vec<&'static str> {
-    if supports_1440p60 && headroom_fps >= 55.0 {
-        vec!["1080p60", "1440p60"]
+fn screen_share_profiles_for(preflight_eligible: bool, headroom_fps: f32) -> Vec<&'static str> {
+    // If the preflight/cache says the encoder can handle 1440p60, offer it.
+    // During a live session the headroom may drop — but the *initial* offering
+    // no longer requires a live measurement (breaking the circular dependency).
+    if preflight_eligible {
+        // If we have a live measurement that is too low, respect the runtime
+        // downshift and hide 1440p60.  headroom_fps == 0.0 means "no live
+        // measurement yet", which is fine — we trust the preflight result.
+        if headroom_fps > 0.0 && headroom_fps < 55.0 {
+            vec!["1080p60"]
+        } else {
+            vec!["1080p60", "1440p60"]
+        }
     } else {
         vec!["1080p60"]
     }
@@ -1291,9 +1299,47 @@ fn default_media_capabilities() -> pb::ClientMediaCapabilities {
     measured_media_caps().caps
 }
 
+/// Whether 1440p60 can be offered at share-start time.
+///
+/// Uses the preflight benchmark / persisted cache to determine eligibility
+/// *without* requiring a live runtime measurement (fixing the circular
+/// dependency where `runtime_headroom_fps` was 0.0 before the first share).
+///
+/// During an active share, runtime downshift still applies via
+/// `available_screen_share_profiles()` which checks `runtime_headroom_fps()`.
 pub fn can_offer_1440p60() -> bool {
+        let preflight = preflight_1440p60_eligible();
+    if !preflight {
+        return false;
+    }
+    // If we have a live measurement that is too low, respect runtime pressure.
+    let headroom = runtime_headroom_fps();
+    headroom == 0.0 || headroom >= 55.0
+}
+ 
+/// Static + preflight eligibility check (no live runtime dependency).
+pub fn preflight_1440p60_eligible() -> bool {
     let measured = measured_media_caps();
-    measured.runtime_caps.supports_1440p60 && runtime_headroom_fps() >= 55.0
+    let hw_backends = measured
+        .runtime_caps
+        .encode_backends
+        .values()
+        .flatten()
+        .copied()
+        .filter(|b| {
+            matches!(
+                b,
+                crate::screen_share::runtime_probe::EncodeBackendKind::NvencAv1
+                    | crate::screen_share::runtime_probe::EncodeBackendKind::MfHwVp9
+                    | crate::screen_share::runtime_probe::EncodeBackendKind::VaapiVp9
+            )
+        })
+        .collect::<Vec<_>>();
+    let outcome = crate::screen_share::preflight::evaluate_1440p60_eligibility(
+        measured.runtime_caps.supports_1440p60,
+        &hw_backends,
+    );
+    outcome.should_offer_1440p60()
 }
 
 pub fn report_runtime_encode_fps(fps: f32) {
@@ -1301,12 +1347,14 @@ pub fn report_runtime_encode_fps(fps: f32) {
     RUNTIME_HEADROOM_FPS_X100.store(scaled, Ordering::Relaxed);
 }
 
-/// Returns the last reported encode FPS, or a conservative default.
+/// Returns the last reported encode FPS from a live share session, or 0.0.
 ///
-/// Before any real measurement arrives we return 0.0 so that
-/// `can_offer_1440p60()` stays false until the encoder has actually
-/// proven it can sustain the target frame rate.  This avoids advertising
-/// 1440p60 based on inference alone.
+/// A value of 0.0 means "no live measurement yet".  The initial 1440p60
+/// offering now relies on the preflight benchmark / persisted cache
+/// (see `preflight_1440p60_eligible`), so 0.0 no longer blocks the first
+/// share.  Once a live share is running, this value is used for runtime
+/// downshift: if it drops below 55 FPS, `available_screen_share_profiles()`
+/// hides 1440p60.
 fn runtime_headroom_fps() -> f32 {
     let sampled = RUNTIME_HEADROOM_FPS_X100.load(Ordering::Relaxed);
     if sampled == 0 {
@@ -1522,7 +1570,8 @@ mod tests {
     use crate::proto::voiceplatform::v1 as pb;
 
     #[test]
-    fn screen_share_profiles_hide_1440_without_headroom() {
+    fn screen_share_profiles_runtime_downshift_hides_1440() {
+        // During a live share, if runtime FPS drops below 55, hide 1440p60.
         assert_eq!(screen_share_profiles_for(true, 54.0), vec!["1080p60"]);
     }
 
@@ -1535,16 +1584,20 @@ mod tests {
     }
 
     #[test]
-    fn screen_share_profiles_hide_1440_when_hw_unsupported() {
-        // Even with high FPS, if HW doesn't support 1440p60, don't show it.
+    fn screen_share_profiles_hide_1440_when_preflight_failed() {
+        // Preflight failed — don't show 1440p60 even with high live FPS.
         assert_eq!(screen_share_profiles_for(false, 60.0), vec!["1080p60"]);
     }
 
     #[test]
-    fn conservative_headroom_hides_1440_before_measurement() {
-        // Before any real encode measurement, headroom is 0.0 (conservative).
-        // This ensures 1440p60 is not offered based on inference alone.
-        assert_eq!(screen_share_profiles_for(true, 0.0), vec!["1080p60"]);
+    fn preflight_eligible_shows_1440_before_live_measurement() {
+        // Before any live measurement (headroom == 0.0), trust the preflight
+        // result.  This is the fix for the circular dependency: the first
+        // share can now offer 1440p60 without a prior live encode.
+        assert_eq!(
+            screen_share_profiles_for(true, 0.0),
+            vec!["1080p60", "1440p60"]
+        );
     }
 
     #[test]
