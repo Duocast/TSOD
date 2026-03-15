@@ -275,6 +275,9 @@ pub enum UiEvent {
         active_layer_id: u32,
     },
 
+    // Local screen-share lifecycle
+    LocalScreenShareStopped,
+
     // Members
     MemberJoined {
         channel_id: String,
@@ -2637,6 +2640,10 @@ impl UiModel {
                 if let Some(share) = self.remote_shares.get_mut(&stream_id) {
                     share.active_layer_id = Some(active_layer_id);
                 }
+            }
+            UiEvent::LocalScreenShareStopped => {
+                self.sharing_active = false;
+                self.start_share_in_flight = false;
             }
             UiEvent::SetAwayMessage(message) => {
                 self.away_message = message.clone();
