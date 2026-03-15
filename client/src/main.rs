@@ -2867,13 +2867,12 @@ async fn connect_and_run_session(
                         }
                         {
                             let mut streams = stream_state.active_streams.write().await;
-                            streams.insert(
-                                event.stream_tag,
-                                Arc::new(Mutex::new(VideoReceiver::new(
+                            streams
+                                .entry(event.stream_tag)
+                                .or_insert_with(|| Arc::new(Mutex::new(VideoReceiver::new(
                                     4,
                                     vp_voice::MAX_FRAGS_PER_FRAME,
-                                ))),
-                            );
+                                ))));
                         }
                         {
                             let mut policy = stream_state.recovery_policy.lock().await;
@@ -3564,6 +3563,7 @@ async fn connect_and_run_session(
                     Some(ShareWorkerEvent::Stopped) => {
                         active_share_handle.take();
                         share_state = screen_share::fsm::ShareState::Idle;
+                        let _ = tx_event.send(UiEvent::LocalScreenShareStopped);
                     }
                     Some(ShareWorkerEvent::Fatal(reason)) => {
                         warn!("[video] share pipeline fatal: {reason}");
@@ -3592,6 +3592,7 @@ async fn connect_and_run_session(
                         active_share_session.clear();
                         active_share_handle.take();
                         share_state = screen_share::fsm::ShareState::Idle;
+                        let _ = tx_event.send(UiEvent::LocalScreenShareStopped);
                     }
                     None => {
                         // Worker channel closed without a terminal event — task crashed or was aborted.
@@ -3621,6 +3622,7 @@ async fn connect_and_run_session(
                         active_share_session.clear();
                         active_share_handle.take();
                         share_state = screen_share::fsm::ShareState::Idle;
+                        let _ = tx_event.send(UiEvent::LocalScreenShareStopped);
                     }
                 }
             }
@@ -4307,6 +4309,7 @@ async fn connect_and_run_session(
                                 let _ = tx_event.send(UiEvent::AppendLog(format!(
                                     "[video] start share ignored (state={share_state:?})"
                                 )));
+                                let _ = tx_event.send(UiEvent::LocalScreenShareStopped);
                                 continue;
                             }
                             let source = map_share_selection(selection);
@@ -4332,6 +4335,7 @@ async fn connect_and_run_session(
                                 let _ = tx_event.send(UiEvent::AppendLog(
                                     "[video] start share aborted: no supported codecs available".into(),
                                 ));
+                                let _ = tx_event.send(UiEvent::LocalScreenShareStopped);
                                 continue;
                             }
                             let sender_policy = crate::screen_share::config::SenderPolicy::from_settings_or_env(
@@ -4370,6 +4374,7 @@ async fn connect_and_run_session(
                                 let _ = tx_event.send(UiEvent::AppendLog(
                                     "[video] start share aborted: no supported codecs available".into(),
                                 ));
+                                let _ = tx_event.send(UiEvent::LocalScreenShareStopped);
                                 continue;
                             };
                             selected_share_codec = selected_codec;
@@ -4490,6 +4495,7 @@ async fn connect_and_run_session(
                                                 requested_layer_id,
                                                 r.accepted_layer_ids
                                             )));
+                                            let _ = tx_event.send(UiEvent::LocalScreenShareStopped);
                                             continue;
                                         };
                                         if active_layer_id <= 1 && requested_layer_id > 1 {
@@ -4593,15 +4599,18 @@ async fn connect_and_run_session(
                                             "[video] start share failed: missing StartScreenShareResponse payload"
                                                 .into(),
                                         ));
+                                        let _ = tx_event.send(UiEvent::LocalScreenShareStopped);
                                     }
                                 }
                                 Ok(Err(e)) => {
                                     share_state = screen_share::fsm::ShareState::Idle;
                                     let _ = tx_event.send(UiEvent::AppendLog(format!("[video] start share rejected: {e:#}")));
+                                    let _ = tx_event.send(UiEvent::LocalScreenShareStopped);
                                 }
                                 Err(e) => {
                                     share_state = screen_share::fsm::ShareState::Idle;
                                     let _ = tx_event.send(UiEvent::AppendLog(format!("[video] start share failed: {e:#}")));
+                                    let _ = tx_event.send(UiEvent::LocalScreenShareStopped);
                                 }
                             }
                         }
