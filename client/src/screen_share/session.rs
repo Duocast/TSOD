@@ -423,6 +423,37 @@ fn downscale_frame_to_fit(frame: &VideoFrame, target_width: u32, target_height: 
     }
 }
 
+fn bgra_frame_to_rgba_bytes(frame: &VideoFrame) -> Option<Vec<u8>> {
+    match &frame.planes {
+        FramePlanes::Bgra { bytes, stride } => {
+            let width = frame.width as usize;
+            let height = frame.height as usize;
+            let src_stride = (*stride as usize).max(width.saturating_mul(4));
+            let mut rgba = vec![0_u8; width.saturating_mul(height).saturating_mul(4)];
+            for y in 0..height {
+                let src_row_start = y.saturating_mul(src_stride);
+                let src_row_end = src_row_start.saturating_add(width.saturating_mul(4));
+                if src_row_end > bytes.len() {
+                    return None;
+                }
+                let src_row = &bytes[src_row_start..src_row_end];
+                let dst_row_start = y.saturating_mul(width).saturating_mul(4);
+                let dst_row = &mut rgba[dst_row_start..dst_row_start + width * 4];
+                for x in 0..width {
+                    let src_idx = x * 4;
+                    let dst_idx = x * 4;
+                    dst_row[dst_idx] = src_row[src_idx + 2];
+                    dst_row[dst_idx + 1] = src_row[src_idx + 1];
+                    dst_row[dst_idx + 2] = src_row[src_idx];
+                    dst_row[dst_idx + 3] = src_row[src_idx + 3];
+                }
+            }
+            Some(rgba)
+        }
+        _ => None,
+    }
+}
+
 /// Build the shared `ScaledFrameSet` for a captured frame, producing each
 /// distinct resolution exactly once.
 fn build_scaled_frame_set(frame: VideoFrame, targets: &[LayerEncodingTarget]) -> ScaledFrameSet {
@@ -976,6 +1007,9 @@ pub async fn start_local_share(params: StartLocalShareParams) {
     let scale_stop = stop_flag.clone();
     let scale_counters = params.counters.clone();
     let scale_targets = layer_targets.clone();
+    let preview_stream_tag = params.streams.first().map(|stream| stream.stream_tag);
+    let preview_target = scale_targets.last().copied();
+    let preview_tx_event = params.tx_event.clone();
     // Collect just the queues for the fanout push.
     let fanout_queues: Vec<Arc<OverwriteQueue<Arc<ScaledFrameSet>>>> = encoder_slots
         .iter()
@@ -995,11 +1029,28 @@ pub async fn start_local_share(params: StartLocalShareParams) {
     let _ = num_distinct; // used for logging only
 
     let scale_fanout_task = tokio::spawn(async move {
+        let mut preview_frame_seq = 0_u64;
         while !scale_stop.load(Ordering::Relaxed) {
             let Some(frame) = scale_capture_q.pop_latest_or_wait().await else {
                 break;
             };
             let scaled_set = Arc::new(build_scaled_frame_set(frame, &scale_targets));
+            if let (Some(stream_tag), Some(target)) = (preview_stream_tag, preview_target) {
+                let preview_frame = scaled_set.frame_for(&target);
+                if let Some(rgba) = bgra_frame_to_rgba_bytes(&preview_frame) {
+                    let _ = preview_tx_event.send(UiEvent::StreamFrame(
+                        crate::ui::model::StreamFrameView {
+                            stream_tag,
+                            frame_seq: preview_frame_seq,
+                            ts_ms: preview_frame.ts_ms as u64,
+                            width: preview_frame.width as usize,
+                            height: preview_frame.height as usize,
+                            rgba,
+                        },
+                    ));
+                    preview_frame_seq = preview_frame_seq.wrapping_add(1);
+                }
+            }
             scale_counters
                 .queue_depth_encode
                 .store(0, Ordering::Relaxed);
