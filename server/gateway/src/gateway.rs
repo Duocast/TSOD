@@ -2314,12 +2314,13 @@ struct CodecPlan {
     remaining_viewers: Vec<UserId>,
 }
 
-fn codec_rank() -> [pb::VideoCodec; 3] {
-    [
-        pb::VideoCodec::Av1,
-        pb::VideoCodec::Vp9,
-        pb::VideoCodec::Vp8,
-    ]
+/// Codec preference order for screen-share negotiation.
+///
+/// VP8 is intentionally excluded: the client sender path only supports
+/// AV1 and VP9, so advertising VP8 would create a mismatch between what
+/// the server negotiates and what the client can actually encode.
+fn codec_rank() -> [pb::VideoCodec; 2] {
+    [pb::VideoCodec::Av1, pb::VideoCodec::Vp9]
 }
 
 fn codec_hw_encode(caps: &pb::ClientMediaCapabilities, codec: pb::VideoCodec) -> bool {
@@ -2377,8 +2378,17 @@ fn negotiate_codecs(
 ) -> Result<CodecPlan> {
     let mut effective_streamer = streamer.to_vec();
     if effective_streamer.is_empty() {
-        warn!("streamer missing codec capabilities; defaulting to VP8 encode support");
-        effective_streamer.push(pb::VideoCodec::Vp8);
+        warn!("streamer missing codec capabilities; defaulting to VP9 encode support");
+        effective_streamer.push(pb::VideoCodec::Vp9);
+    }
+
+    // Filter out VP8 — client senders cannot produce it.
+    effective_streamer.retain(|c| matches!(c, pb::VideoCodec::Av1 | pb::VideoCodec::Vp9));
+    if effective_streamer.is_empty() {
+        return Err(ControlError::FailedPrecondition(
+            "streamer has no supported screen-share codec (AV1 or VP9 required)",
+        )
+        .into());
     }
 
     let sset: HashSet<i32> = effective_streamer.iter().map(|c| *c as i32).collect();
@@ -2390,17 +2400,11 @@ fn negotiate_codecs(
             .ok_or(ControlError::FailedPrecondition(
                 "streamer missing codec capabilities",
             ))?;
-        let fallback =
-            if primary != pb::VideoCodec::Vp8 && sset.contains(&(pb::VideoCodec::Vp8 as i32)) {
-                Some(pb::VideoCodec::Vp8)
-            } else {
-                None
-            };
 
         return Ok(CodecPlan {
             primary,
             primary_viewers: Vec::new(),
-            fallback,
+            fallback: None,
             remaining_viewers: Vec::new(),
         });
     }
@@ -2662,26 +2666,23 @@ mod tests {
     }
 
     #[test]
-    fn negotiate_codecs_primary_and_fallback() {
-        let streamer = vec![
-            pb::VideoCodec::Av1,
-            pb::VideoCodec::Vp9,
-            pb::VideoCodec::Vp8,
-        ];
+    fn negotiate_codecs_av1_primary_vp9_fallback() {
+        let streamer = vec![pb::VideoCodec::Av1, pb::VideoCodec::Vp9];
         let a = vp_control::ids::UserId::new();
         let b = vp_control::ids::UserId::new();
         let viewers = HashMap::from([
             (a, vec![pb::VideoCodec::Av1, pb::VideoCodec::Vp9]),
-            (b, vec![pb::VideoCodec::Vp8]),
+            (b, vec![pb::VideoCodec::Vp9]),
         ]);
 
         let plan = negotiate_codecs(&streamer, &viewers).expect("plan");
         assert_eq!(plan.primary, pb::VideoCodec::Av1);
-        assert_eq!(plan.fallback, Some(pb::VideoCodec::Vp8));
+        assert_eq!(plan.fallback, Some(pb::VideoCodec::Vp9));
     }
 
     #[test]
-    fn negotiate_codecs_rejects_unsupported() {
+    fn negotiate_codecs_rejects_viewer_with_only_vp8() {
+        // Viewer only supports VP8 which the sender cannot produce.
         let streamer = vec![pb::VideoCodec::Av1];
         let a = vp_control::ids::UserId::new();
         let viewers = HashMap::from([(a, vec![pb::VideoCodec::Vp8])]);
@@ -2690,25 +2691,21 @@ mod tests {
             .downcast_ref::<ControlError>()
             .expect("should return control error");
         match control {
-            ControlError::FailedPrecondition(msg) => assert_eq!(*msg, "viewer unsupported"),
+            ControlError::FailedPrecondition(_) => {}
             other => panic!("unexpected error variant: {other:?}"),
         }
     }
 
     #[test]
     fn negotiate_codecs_rejects_when_remaining_viewers_share_no_codec() {
-        let streamer = vec![
-            pb::VideoCodec::Av1,
-            pb::VideoCodec::Vp9,
-            pb::VideoCodec::Vp8,
-        ];
+        // Three viewers each only decode a different codec — no common fallback.
+        let streamer = vec![pb::VideoCodec::Av1, pb::VideoCodec::Vp9];
         let a = vp_control::ids::UserId::new();
         let b = vp_control::ids::UserId::new();
-        let c = vp_control::ids::UserId::new();
         let viewers = HashMap::from([
             (a, vec![pb::VideoCodec::Av1]),
-            (b, vec![pb::VideoCodec::Vp9]),
-            (c, vec![pb::VideoCodec::Vp8]),
+            // b only decodes VP8, which is not in the sender matrix.
+            (b, vec![pb::VideoCodec::Vp8]),
         ]);
 
         let err = negotiate_codecs(&streamer, &viewers).expect_err("should fail");
@@ -2716,21 +2713,22 @@ mod tests {
             .downcast_ref::<ControlError>()
             .expect("should return control error");
         match control {
-            ControlError::FailedPrecondition(msg) => assert_eq!(*msg, "viewer unsupported"),
+            ControlError::FailedPrecondition(_) => {}
             other => panic!("unexpected error variant: {other:?}"),
         }
     }
 
     #[test]
     fn negotiate_codecs_accepts_no_viewers() {
-        let streamer = vec![pb::VideoCodec::Vp9, pb::VideoCodec::Vp8];
+        let streamer = vec![pb::VideoCodec::Vp9];
         let viewers = HashMap::new();
 
         let plan = negotiate_codecs(&streamer, &viewers).expect("plan");
         assert_eq!(plan.primary, pb::VideoCodec::Vp9);
         assert!(plan.primary_viewers.is_empty());
         assert!(plan.remaining_viewers.is_empty());
-        assert_eq!(plan.fallback, Some(pb::VideoCodec::Vp8));
+        // No fallback: only one codec in sender matrix → nothing to fall back to.
+        assert_eq!(plan.fallback, None);
     }
 
     #[test]
@@ -2739,8 +2737,52 @@ mod tests {
         let viewers = HashMap::new();
 
         let plan = negotiate_codecs(&streamer, &viewers).expect("plan");
-        assert_eq!(plan.primary, pb::VideoCodec::Vp8);
+        // Default is VP9 (not VP8) — matches actual sender capabilities.
+        assert_eq!(plan.primary, pb::VideoCodec::Vp9);
         assert_eq!(plan.fallback, None);
+    }
+
+    #[test]
+    fn negotiate_codecs_strips_vp8_from_streamer() {
+        // Even if a stale client advertises VP8, it should be filtered out.
+        let streamer = vec![pb::VideoCodec::Vp8, pb::VideoCodec::Vp9];
+        let viewers = HashMap::new();
+
+        let plan = negotiate_codecs(&streamer, &viewers).expect("plan");
+        assert_eq!(plan.primary, pb::VideoCodec::Vp9);
+    }
+
+    #[test]
+    fn negotiate_codecs_rejects_vp8_only_streamer() {
+        let streamer = vec![pb::VideoCodec::Vp8];
+        let viewers = HashMap::new();
+
+        let err = negotiate_codecs(&streamer, &viewers).expect_err("should fail");
+        let control = err
+            .downcast_ref::<ControlError>()
+            .expect("should return control error");
+        match control {
+            ControlError::FailedPrecondition(msg) => {
+                assert!(msg.contains("AV1 or VP9 required"), "got: {msg}");
+            }
+            other => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn negotiate_codecs_all_viewers_same_codec() {
+        let streamer = vec![pb::VideoCodec::Av1, pb::VideoCodec::Vp9];
+        let a = vp_control::ids::UserId::new();
+        let b = vp_control::ids::UserId::new();
+        let viewers = HashMap::from([
+            (a, vec![pb::VideoCodec::Vp9]),
+            (b, vec![pb::VideoCodec::Vp9]),
+        ]);
+
+        let plan = negotiate_codecs(&streamer, &viewers).expect("plan");
+        assert_eq!(plan.primary, pb::VideoCodec::Vp9);
+        assert_eq!(plan.fallback, None);
+        assert!(plan.remaining_viewers.is_empty());
     }
 
     #[test]
@@ -2811,6 +2853,50 @@ mod tests {
             &bad_viewers
         ));
     }
+
+    #[test]
+    fn allows_1440_rejects_vp8_codec() {
+        // VP8 has no HW encode path, so 1440p60 must never be allowed for VP8.
+        let streamer = pb::ClientMediaCapabilities {
+            decode: vec![pb::VideoCodec::Vp8 as i32],
+            encode: vec![pb::VideoCodec::Vp8 as i32],
+            hw_encode_av1: false,
+            hw_encode_vp9: false,
+            hw_encode_vp8: false,
+            hw_decode_av1: false,
+            hw_decode_vp9: false,
+            hw_decode_vp8: false,
+        };
+        let viewers = HashMap::new();
+        assert!(!allows_1440p60(
+            pb::VideoCodec::Vp8,
+            Some(&streamer),
+            &viewers
+        ));
+    }
+
+    #[test]
+    fn negotiated_codecs_are_in_sender_matrix() {
+        // Any codec returned by negotiate_codecs must be AV1 or VP9.
+        let streamer = vec![pb::VideoCodec::Av1, pb::VideoCodec::Vp9];
+        let a = vp_control::ids::UserId::new();
+        let viewers = HashMap::from([(a, vec![pb::VideoCodec::Vp9])]);
+        let plan = negotiate_codecs(&streamer, &viewers).expect("plan");
+        let allowed = [pb::VideoCodec::Av1, pb::VideoCodec::Vp9];
+        assert!(
+            allowed.contains(&plan.primary),
+            "primary {:?} not in sender matrix",
+            plan.primary
+        );
+        if let Some(fb) = plan.fallback {
+            assert!(
+                allowed.contains(&fb),
+                "fallback {:?} not in sender matrix",
+                fb
+            );
+        }
+    }
+
     #[test]
     fn preferred_display_name_is_trimmed_and_limited() {
         assert_eq!(normalize_preferred_display_name("   "), None);

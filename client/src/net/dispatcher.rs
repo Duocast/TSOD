@@ -1249,12 +1249,18 @@ fn now_ts() -> pb::Timestamp {
     pb::Timestamp { unix_millis: ms }
 }
 
+/// Returns the list of screen-share codecs the client can both encode and
+/// decode.  Only `Initialized`-level codecs are included — this list is
+/// safe to show in the UI and advertise to the server.
 pub fn available_screen_share_codecs() -> Vec<&'static str> {
     let caps = measured_media_caps();
     let policy_codecs = [pb::VideoCodec::Vp9, pb::VideoCodec::Av1];
     policy_codecs
         .into_iter()
-        .filter(|codec| caps.runtime_caps.encode_backends.contains_key(codec))
+        .filter(|codec| {
+            caps.runtime_caps.encode_backends.contains_key(codec)
+                && caps.runtime_caps.decode_backends.contains_key(codec)
+        })
         .map(|codec| match codec {
             pb::VideoCodec::Vp9 => "VP9",
             pb::VideoCodec::Av1 => "AV1",
@@ -1306,15 +1312,17 @@ pub fn report_runtime_encode_fps(fps: f32) {
     RUNTIME_HEADROOM_FPS_X100.store(scaled, Ordering::Relaxed);
 }
 
+/// Returns the last reported encode FPS, or a conservative default.
+///
+/// Before any real measurement arrives we return 0.0 so that
+/// `can_offer_1440p60()` stays false until the encoder has actually
+/// proven it can sustain the target frame rate.  This avoids advertising
+/// 1440p60 based on inference alone.
 fn runtime_headroom_fps() -> f32 {
     let sampled = RUNTIME_HEADROOM_FPS_X100.load(Ordering::Relaxed);
     if sampled == 0 {
-        let measured = measured_media_caps();
-        if measured.runtime_caps.supports_1440p60 {
-            60.0
-        } else {
-            30.0
-        }
+        // No measurement yet — be conservative.
+        0.0
     } else {
         sampled as f32 / FPS_SCALE
     }
@@ -1527,6 +1535,27 @@ mod tests {
     #[test]
     fn screen_share_profiles_hide_1440_without_headroom() {
         assert_eq!(screen_share_profiles_for(true, 54.0), vec!["1080p60"]);
+    }
+
+    #[test]
+    fn screen_share_profiles_show_1440_with_headroom() {
+        assert_eq!(
+            screen_share_profiles_for(true, 60.0),
+            vec!["1080p60", "1440p60"]
+        );
+    }
+
+    #[test]
+    fn screen_share_profiles_hide_1440_when_hw_unsupported() {
+        // Even with high FPS, if HW doesn't support 1440p60, don't show it.
+        assert_eq!(screen_share_profiles_for(false, 60.0), vec!["1080p60"]);
+    }
+
+    #[test]
+    fn conservative_headroom_hides_1440_before_measurement() {
+        // Before any real encode measurement, headroom is 0.0 (conservative).
+        // This ensures 1440p60 is not offered based on inference alone.
+        assert_eq!(screen_share_profiles_for(true, 0.0), vec!["1080p60"]);
     }
 
     #[test]
