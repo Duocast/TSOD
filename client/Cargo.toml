@@ -15,6 +15,7 @@ video-av1-software = []
 screen-share-hw-windows = []
 screen-share-hw-linux = []
 capture-dxgi = []
+capture-wgc = []
 capture-pipewire = []
 capture-x11 = []
 system-audio-windows = []
@@ -116,6 +117,15 @@ windows = { version = "0.62.2", features = [
   "Win32_Graphics_Direct3D11",
   "Win32_Graphics_Dxgi",
   "Win32_Graphics_Dxgi_Common",
+  # Windows.Graphics.Capture (WGC window capture backend, Win 10 1903+)
+  "Graphics_Capture",
+  "Graphics_DirectX",
+  "Graphics_DirectX_Direct3D11",
+  "Graphics",
+  "Foundation",
+  "Win32_System_WinRT_Direct3D11",
+  "Win32_System_WinRT_Graphics_Capture",
+  "Win32_System_WinRT",
 ] }
 
 
