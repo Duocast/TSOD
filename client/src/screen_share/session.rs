@@ -1029,7 +1029,7 @@ pub async fn start_local_share(params: StartLocalShareParams) {
     let _ = num_distinct; // used for logging only
 
     let scale_fanout_task = tokio::spawn(async move {
-        let mut preview_frame_seq = 0_u64;
+        let mut preview_frame_seq = 0_u32;
         while !scale_stop.load(Ordering::Relaxed) {
             let Some(frame) = scale_capture_q.pop_latest_or_wait().await else {
                 break;
@@ -1042,7 +1042,7 @@ pub async fn start_local_share(params: StartLocalShareParams) {
                         crate::ui::model::StreamFrameView {
                             stream_tag,
                             frame_seq: preview_frame_seq,
-                            ts_ms: preview_frame.ts_ms as u64,
+                            ts_ms: preview_frame.ts_ms,
                             width: preview_frame.width as usize,
                             height: preview_frame.height as usize,
                             rgba,
