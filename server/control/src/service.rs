@@ -464,6 +464,16 @@ impl<R: ControlRepo> ControlService<R> {
         )
         .await?;
 
+        let away_message = <R as ControlRepo>::get_user_profile(
+            &self.repo,
+            &mut tx,
+            ctx.user_id,
+            ctx.server_id,
+        )
+        .await?
+        .map(|profile| profile.custom_status_text)
+        .unwrap_or_default();
+
         <R as ControlRepo>::insert_outbox(
             &self.repo,
             &mut tx,
@@ -477,6 +487,7 @@ impl<R: ControlRepo> ControlService<R> {
                     "display_name": m.display_name,
                     "muted": m.muted,
                     "deafened": m.deafened,
+                    "away_message": away_message,
                 }),
             },
         )
