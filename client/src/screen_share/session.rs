@@ -48,7 +48,10 @@ pub enum ShareWorkerEvent {
     /// At least one encoder/send pair started successfully.
     Started { active_layer_count: usize },
     /// Some encoder pipelines failed to initialize; the remaining set is live.
-    Degraded { remaining_layers: usize, reason: String },
+    Degraded {
+        remaining_layers: usize,
+        reason: String,
+    },
     /// A fatal error stopped the pipeline; the caller should clear share state.
     Fatal(String),
     /// The pipeline exited cleanly because the stop signal was received.
@@ -632,8 +635,7 @@ pub async fn start_local_share(params: StartLocalShareParams) {
     let counters = params.counters.clone();
     // Oneshot to propagate capture-backend init success/failure back to this
     // async context before the encoder pipeline is set up.
-    let (capture_init_tx, capture_init_rx) =
-        tokio::sync::oneshot::channel::<Result<(), String>>();
+    let (capture_init_tx, capture_init_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
     let event_tx_capture = event_tx.clone();
     let capture_task = tokio::task::spawn_blocking(move || {
         let mut pacer = FramePacer::new(capture_fps);
@@ -688,12 +690,7 @@ pub async fn start_local_share(params: StartLocalShareParams) {
     // ---- Wait for capture backend to initialize ----
     // capture_init_rx: oneshot::Receiver<Result<(), String>>
     // timeout wraps it: Result<Result<Result<(), String>, RecvError>, Elapsed>
-    match tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        capture_init_rx,
-    )
-    .await
-    {
+    match tokio::time::timeout(std::time::Duration::from_secs(10), capture_init_rx).await {
         Ok(Ok(Ok(()))) => {} // capture started successfully
         Ok(Ok(Err(_reason))) => {
             // Init failed; Fatal was already sent by the capture task.
@@ -775,8 +772,9 @@ pub async fn start_local_share(params: StartLocalShareParams) {
             }
             total_built += 1;
 
-            let encode_queue =
-                Arc::new(OverwriteQueue::<Arc<ScaledFrameSet>>::new(ENCODE_QUEUE_DEPTH));
+            let encode_queue = Arc::new(OverwriteQueue::<Arc<ScaledFrameSet>>::new(
+                ENCODE_QUEUE_DEPTH,
+            ));
             let packet_queue = Arc::new(OverwriteQueue::<EncodedFrame>::new(
                 PACKETIZATION_QUEUE_DEPTH,
             ));
@@ -800,6 +798,7 @@ pub async fn start_local_share(params: StartLocalShareParams) {
             let layer_id = target.layer_id;
             let encode_task = tokio::spawn(async move {
                 let mut configured = false;
+                let mut bootstrap_keyframe_pending = true;
                 let mut quality = AdaptiveQualityController::new(target.bitrate_bps, target.fps);
                 let mut last_report = std::time::Instant::now();
                 let mut encoded_frames = 0_u32;
@@ -819,6 +818,13 @@ pub async fn start_local_share(params: StartLocalShareParams) {
                             continue;
                         }
                         configured = true;
+                    }
+
+                    if bootstrap_keyframe_pending {
+                        if let Err(e) = encoder.request_keyframe() {
+                            warn!(error=?e, stream_tag, layer_id, "[video] failed to request bootstrap keyframe");
+                        }
+                        bootstrap_keyframe_pending = false;
                     }
 
                     let snapshot = PressureSnapshot {
@@ -957,7 +963,9 @@ pub async fn start_local_share(params: StartLocalShareParams) {
             ),
         });
     }
-    let _ = event_tx.try_send(ShareWorkerEvent::Started { active_layer_count: total_built });
+    let _ = event_tx.try_send(ShareWorkerEvent::Started {
+        active_layer_count: total_built,
+    });
 
     // ---- Scale-fanout task ----
     //
@@ -1169,7 +1177,10 @@ mod tests {
     #[test]
     fn compute_output_resolution_no_downscale_needed() {
         // Source fits within target: output = source.
-        assert_eq!(compute_output_resolution(1280, 720, 1920, 1080), (1280, 720));
+        assert_eq!(
+            compute_output_resolution(1280, 720, 1920, 1080),
+            (1280, 720)
+        );
     }
 
     #[test]
@@ -1375,7 +1386,9 @@ mod tests {
 
     #[test]
     fn share_worker_event_debug_and_clone() {
-        let e1 = ShareWorkerEvent::Started { active_layer_count: 2 };
+        let e1 = ShareWorkerEvent::Started {
+            active_layer_count: 2,
+        };
         let _e2 = e1.clone();
         assert!(format!("{e1:?}").contains("Started"));
 
@@ -1383,7 +1396,10 @@ mod tests {
         let _e4 = e3.clone();
         assert!(format!("{e3:?}").contains("Fatal"));
 
-        let e5 = ShareWorkerEvent::Degraded { remaining_layers: 1, reason: "one failed".into() };
+        let e5 = ShareWorkerEvent::Degraded {
+            remaining_layers: 1,
+            reason: "one failed".into(),
+        };
         let _e6 = e5.clone();
         assert!(format!("{e5:?}").contains("Degraded"));
 
@@ -1404,10 +1420,17 @@ mod tests {
             }
             let _ = event_tx.try_send(ShareWorkerEvent::Stopped);
         });
-        let handle = LocalShareHandle { stop_tx, join_handle, event_rx };
+        let handle = LocalShareHandle {
+            stop_tx,
+            join_handle,
+            event_rx,
+        };
         handle.request_stop();
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        assert!(*handle.stop_tx.borrow(), "stop watch should be true after request_stop");
+        assert!(
+            *handle.stop_tx.borrow(),
+            "stop watch should be true after request_stop"
+        );
     }
 
     #[tokio::test]
@@ -1420,7 +1443,11 @@ mod tests {
                 let _ = event_tx.try_send(ShareWorkerEvent::Stopped); // never reached
             }
         });
-        let handle = LocalShareHandle { stop_tx, join_handle, event_rx };
+        let handle = LocalShareHandle {
+            stop_tx,
+            join_handle,
+            event_rx,
+        };
         // cancel() should abort without blocking.
         handle.cancel();
         // If cancel() didn't abort, this test would hang indefinitely.
@@ -1454,7 +1481,10 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<ShareWorkerEvent>(16);
         drop(tx);
         let result = rx.recv().await;
-        assert!(result.is_none(), "closed channel should return None (treated as crash)");
+        assert!(
+            result.is_none(),
+            "closed channel should return None (treated as crash)"
+        );
     }
 
     #[tokio::test]
@@ -1470,8 +1500,7 @@ mod tests {
 
     #[tokio::test]
     async fn worker_event_channel_capacity() {
-        let (tx, mut rx) =
-            tokio::sync::mpsc::channel::<ShareWorkerEvent>(WORKER_EVENT_CHANNEL_CAP);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<ShareWorkerEvent>(WORKER_EVENT_CHANNEL_CAP);
         // Fill the channel to capacity.
         for i in 0..WORKER_EVENT_CHANNEL_CAP {
             let _ = tx.try_send(ShareWorkerEvent::Fatal(format!("error {i}")));
