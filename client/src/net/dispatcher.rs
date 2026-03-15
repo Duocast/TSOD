@@ -625,25 +625,14 @@ impl ControlDispatcher {
         Ok(())
     }
     pub async fn set_away_message(&self, message: &str) -> Result<()> {
-        let req = pb::UpdateUserProfileRequest {
-            display_name: None,
-            description: None,
-            status: if message.trim().is_empty() {
-                pb::OnlineStatus::Online as i32
-            } else {
-                pb::OnlineStatus::Idle as i32
-            },
-            custom_status_text: Some(message.to_string()),
-            custom_status_emoji: None,
-            custom_status_expires: None,
-            accent_color: None,
-            links: Vec::new(),
-            activity_update: None,
+        let req = pb::SetCustomStatusRequest {
+            status_text: Some(message.to_string()),
+            status_emoji: None,
         };
         let resp = self
             .send_request(
-                pb::client_to_server::Payload::UpdateUserProfileRequest(req),
-                Duration::from_secs(1),
+                pb::client_to_server::Payload::SetCustomStatusRequest(req),
+                Duration::from_secs(3),
             )
             .await??;
 
