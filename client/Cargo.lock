@@ -5839,6 +5839,7 @@ dependencies = [
  "egui",
  "egui_extras",
  "image",
+ "libc",
  "libloading",
  "nnnoiseless",
  "open",

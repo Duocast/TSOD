@@ -7,21 +7,20 @@ use crate::net::vpx_codec::{self, LibvpxEncoder};
 use crate::proto::voiceplatform::v1 as pb;
 use crate::screen_share::runtime_probe::EncodeBackendKind;
 
+#[cfg(target_os = "linux")]
+mod vaapi_vp9_enc;
+
 /// Build a real VP9 encoder for the first usable backend in `backends`.
 ///
 /// Backend selection:
-/// - `Libvpx`  → software VP9 via libvpx (supported)
-/// - `MfHwVp9` → Windows Media Foundation hardware VP9 (not yet implemented; skipped)
-/// - `VaapiVp9`→ Linux VAAPI hardware VP9 (not yet implemented; skipped)
-///
-/// Skipped backends are **not** removed from the preference list here; runtime
-/// probing calls `can_initialize_backend` and will never advertise a backend
-/// that returns an error.
+/// - `Libvpx`   → software VP9 via libvpx (supported everywhere)
+/// - `VaapiVp9` → Linux VAAPI hardware VP9 (supported when VA-API driver
+///                 exposes a VP9 encode entrypoint)
+/// - `MfHwVp9`  → Windows Media Foundation hardware VP9 (not yet implemented)
 pub fn build_vp9_encoder(backends: &[EncodeBackendKind]) -> Result<Box<dyn VideoEncoder>> {
     for backend in backends {
         match backend {
             EncodeBackendKind::Libvpx => {
-                // Eagerly verify the library can init before advertising.
                 match Vp9RealtimeEncoder::new_libvpx() {
                     Ok(enc) => return Ok(Box::new(enc)),
                     Err(err) => {
@@ -30,10 +29,18 @@ pub fn build_vp9_encoder(backends: &[EncodeBackendKind]) -> Result<Box<dyn Video
                     }
                 }
             }
-            EncodeBackendKind::MfHwVp9 | EncodeBackendKind::VaapiVp9 => {
-                // Hardware VP9 paths are not yet implemented.
-                // Returning an error here ensures `can_initialize_backend`
-                // returns false and the backend is never advertised.
+            #[cfg(target_os = "linux")]
+            EncodeBackendKind::VaapiVp9 => {
+                match vaapi_vp9_enc::VaapiVp9Encoder::open() {
+                    Ok(enc) => return Ok(Box::new(enc)),
+                    Err(err) => {
+                        warn!(error = %err, "[vp9] VAAPI VP9 init failed, skipping");
+                        continue;
+                    }
+                }
+            }
+            EncodeBackendKind::MfHwVp9 => {
+                // Windows MF hardware VP9 not yet implemented.
                 continue;
             }
             _ => continue,
@@ -163,8 +170,14 @@ impl VideoEncoder for Vp9RealtimeEncoder {
 pub(crate) fn can_initialize_backend(backend: EncodeBackendKind) -> bool {
     match backend {
         EncodeBackendKind::Libvpx => vpx_codec::probe_encoder(),
-        // Hardware VP9 paths not implemented; never advertise them.
-        EncodeBackendKind::MfHwVp9 | EncodeBackendKind::VaapiVp9 => false,
+        #[cfg(target_os = "linux")]
+        EncodeBackendKind::VaapiVp9 => {
+            crate::screen_share::runtime_probe::vaapi::probe_vaapi_vp9().encode_available
+        }
+        #[cfg(not(target_os = "linux"))]
+        EncodeBackendKind::VaapiVp9 => false,
+        // Windows MF hardware VP9 not yet implemented.
+        EncodeBackendKind::MfHwVp9 => false,
         _ => false,
     }
 }
