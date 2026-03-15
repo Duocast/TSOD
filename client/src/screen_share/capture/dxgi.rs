@@ -317,7 +317,7 @@ mod windows_impl {
             }
 
             // Collect dirty rects before ReleaseFrame (caller does that).
-            let dirty = rotate_dirty_regions(
+            let dirty = super::rotate_dirty_regions(
                 &self.collect_dirty_rects(info),
                 self.width,
                 self.height,
@@ -326,7 +326,7 @@ mod windows_impl {
 
             let pixels = self.map_staging_and_copy()?;
             let (pixels, frame_width, frame_height) =
-                rotate_bgra_frame(&pixels, self.width, self.height, self.rotation);
+                super::rotate_bgra_frame(&pixels, self.width, self.height, self.rotation);
 
             let ts = super::unix_ms() as u32;
             let frame = VideoFrame {
