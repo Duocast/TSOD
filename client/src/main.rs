@@ -1733,6 +1733,7 @@ fn apply_authoritative_snapshot(
                     .unwrap_or_default(),
                 display_name: m.display_name.clone(),
                 away_message: m.away_message.clone(),
+                custom_status_emoji: m.custom_status_emoji.clone(),
                 muted: m.muted,
                 deafened: m.deafened,
                 self_muted: m.self_muted,
@@ -2551,6 +2552,7 @@ async fn connect_and_run_session(
                                                 user_id: user_id.clone(),
                                                 display_name: member.display_name,
                                                 away_message: member.away_message,
+                                                custom_status_emoji: member.custom_status_emoji,
                                                 muted: member.muted,
                                                 deafened: member.deafened,
                                                 self_muted: member.self_muted,
@@ -2645,6 +2647,8 @@ async fn connect_and_run_session(
                                     let _ = tx_event.send(UiEvent::MemberAwayMessageUpdated {
                                         user_id,
                                         away_message: status.custom_status_text,
+                                        custom_status_emoji: status.custom_status_emoji,
+                                        custom_status_expires_ms: status.custom_status_expires.map(|ts| ts.unix_millis),
                                     });
                                 }
                             }
@@ -2991,6 +2995,7 @@ async fn connect_and_run_session(
                                         status: ui_status_from_pb(profile.status),
                                         custom_status_text: profile.custom_status_text,
                                         custom_status_emoji: profile.custom_status_emoji,
+                                        custom_status_expires_ms: profile.custom_status_expires.as_ref().map(|ts| ts.unix_millis),
                                         accent_color: profile.accent_color,
                                         avatar_url,
                                         banner_url,
@@ -3993,6 +3998,7 @@ async fn connect_and_run_session(
                                             user_id: m.user_id.map(|u| u.value).unwrap_or_default(),
                                             display_name: m.display_name,
                                             away_message: m.away_message,
+                                            custom_status_emoji: m.custom_status_emoji,
                                             muted: m.muted,
                                             deafened: m.deafened,
                                             self_muted: m.self_muted,
@@ -5379,6 +5385,7 @@ async fn connect_and_run_session(
                                                 status: ui_status_from_pb(profile.status),
                                                 custom_status_text: profile.custom_status_text,
                                                 custom_status_emoji: profile.custom_status_emoji,
+                                                custom_status_expires_ms: profile.custom_status_expires.as_ref().map(|ts| ts.unix_millis),
                                                 accent_color: profile.accent_color,
                                                 avatar_url,
                                                 banner_url,

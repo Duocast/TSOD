@@ -44,4 +44,6 @@ message UserOnlineStatusChanged {
   UserId user_id = 1;
   OnlineStatus status = 2;
   string custom_status_text = 3;
+  string custom_status_emoji = 4;
+  Timestamp custom_status_expires = 5;
 }

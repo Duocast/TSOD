@@ -290,6 +290,8 @@ pub enum UiEvent {
     MemberAwayMessageUpdated {
         user_id: String,
         away_message: String,
+        custom_status_emoji: String,
+        custom_status_expires_ms: Option<i64>,
     },
 
     // Voice
@@ -1431,6 +1433,7 @@ pub struct MemberEntry {
     pub user_id: String,
     pub display_name: String,
     pub away_message: String,
+    pub custom_status_emoji: String,
     pub muted: bool,
     pub deafened: bool,
     pub self_muted: bool,
@@ -1517,6 +1520,7 @@ pub struct UserProfileData {
     pub status: OnlineStatus,
     pub custom_status_text: String,
     pub custom_status_emoji: String,
+    pub custom_status_expires_ms: Option<i64>,
     pub accent_color: u32,
     pub avatar_url: Option<String>,
     pub banner_url: Option<String>,
@@ -1537,6 +1541,7 @@ impl Default for UserProfileData {
             status: OnlineStatus::default(),
             custom_status_text: String::new(),
             custom_status_emoji: String::new(),
+            custom_status_expires_ms: None,
             accent_color: 0,
             avatar_url: None,
             banner_url: None,
@@ -2925,10 +2930,13 @@ impl UiModel {
             UiEvent::MemberAwayMessageUpdated {
                 user_id,
                 away_message,
+                custom_status_emoji,
+                custom_status_expires_ms,
             } => {
                 for members in self.members.values_mut() {
                     if let Some(member) = members.iter_mut().find(|m| m.user_id == user_id) {
                         member.away_message = away_message.clone();
+                        member.custom_status_emoji = custom_status_emoji.clone();
                     }
                 }
                 // Keep self_profile in sync so build_status_text() reflects
@@ -2936,6 +2944,8 @@ impl UiModel {
                 if user_id == self.user_id {
                     if let Some(ref mut p) = self.self_profile {
                         p.custom_status_text = away_message.clone();
+                        p.custom_status_emoji = custom_status_emoji.clone();
+                        p.custom_status_expires_ms = custom_status_expires_ms;
                     }
                     self.away_message = away_message;
                 }
@@ -3696,6 +3706,7 @@ mod tests {
                 user_id: "user-1".into(),
                 display_name: "Overdose".into(),
                 away_message: String::new(),
+                custom_status_emoji: String::new(),
                 muted: false,
                 deafened: false,
                 self_muted: false,
@@ -3764,6 +3775,7 @@ mod tests {
                 user_id: "u-overdose".into(),
                 display_name: "Overdose".into(),
                 away_message: String::new(),
+                custom_status_emoji: String::new(),
                 muted: false,
                 deafened: false,
                 self_muted: false,
@@ -3780,6 +3792,7 @@ mod tests {
                 user_id: "u-dresk".into(),
                 display_name: "Dresk".into(),
                 away_message: String::new(),
+                custom_status_emoji: String::new(),
                 muted: false,
                 deafened: false,
                 self_muted: false,
@@ -3805,6 +3818,7 @@ mod tests {
                 user_id: "local-user".into(),
                 display_name: "Me".into(),
                 away_message: String::new(),
+                custom_status_emoji: String::new(),
                 muted: false,
                 deafened: false,
                 self_muted: false,
@@ -3831,6 +3845,7 @@ mod tests {
                 user_id: "u1".into(),
                 display_name: "Other".into(),
                 away_message: String::new(),
+                custom_status_emoji: String::new(),
                 muted: false,
                 deafened: false,
                 self_muted: false,
@@ -3845,10 +3860,160 @@ mod tests {
         model.apply_event(UiEvent::MemberAwayMessageUpdated {
             user_id: "u1".into(),
             away_message: "Lunch".into(),
+            custom_status_emoji: String::new(),
+            custom_status_expires_ms: None,
         });
 
         let member = &model.members["c1"][0];
         assert_eq!(member.away_message, "Lunch");
+    }
+
+    #[test]
+    fn away_message_updated_propagates_emoji() {
+        let mut model = UiModel::new();
+        model.apply_event(UiEvent::MemberJoined {
+            channel_id: "c1".into(),
+            member: MemberEntry {
+                user_id: "u1".into(),
+                display_name: "Alice".into(),
+                away_message: String::new(),
+                custom_status_emoji: String::new(),
+                muted: false,
+                deafened: false,
+                self_muted: false,
+                self_deafened: false,
+                streaming: false,
+                speaking: false,
+                avatar_url: None,
+                accent_color: None,
+            },
+        });
+
+        model.apply_event(UiEvent::MemberAwayMessageUpdated {
+            user_id: "u1".into(),
+            away_message: "In a meeting".into(),
+            custom_status_emoji: "\u{1F4BC}".into(),
+            custom_status_expires_ms: Some(1700000000000),
+        });
+
+        let member = &model.members["c1"][0];
+        assert_eq!(member.away_message, "In a meeting");
+        assert_eq!(member.custom_status_emoji, "\u{1F4BC}");
+    }
+
+    #[test]
+    fn away_message_updated_emoji_only() {
+        let mut model = UiModel::new();
+        model.apply_event(UiEvent::MemberJoined {
+            channel_id: "c1".into(),
+            member: MemberEntry {
+                user_id: "u1".into(),
+                display_name: "Alice".into(),
+                away_message: String::new(),
+                custom_status_emoji: String::new(),
+                muted: false,
+                deafened: false,
+                self_muted: false,
+                self_deafened: false,
+                streaming: false,
+                speaking: false,
+                avatar_url: None,
+                accent_color: None,
+            },
+        });
+
+        model.apply_event(UiEvent::MemberAwayMessageUpdated {
+            user_id: "u1".into(),
+            away_message: String::new(),
+            custom_status_emoji: "\u{2615}".into(),
+            custom_status_expires_ms: None,
+        });
+
+        let member = &model.members["c1"][0];
+        assert_eq!(member.away_message, "");
+        assert_eq!(member.custom_status_emoji, "\u{2615}");
+    }
+
+    #[test]
+    fn away_message_updated_syncs_self_profile_emoji_and_expiry() {
+        let mut model = UiModel::new();
+        model.user_id = "local-user".into();
+        model.self_profile = Some(UserProfileData::default());
+        model.apply_event(UiEvent::MemberJoined {
+            channel_id: "c1".into(),
+            member: MemberEntry {
+                user_id: "local-user".into(),
+                display_name: "Me".into(),
+                away_message: String::new(),
+                custom_status_emoji: String::new(),
+                muted: false,
+                deafened: false,
+                self_muted: false,
+                self_deafened: false,
+                streaming: false,
+                speaking: false,
+                avatar_url: None,
+                accent_color: None,
+            },
+        });
+
+        model.apply_event(UiEvent::MemberAwayMessageUpdated {
+            user_id: "local-user".into(),
+            away_message: "Coding".into(),
+            custom_status_emoji: "\u{1F4BB}".into(),
+            custom_status_expires_ms: Some(1700000000000),
+        });
+
+        let p = model.self_profile.as_ref().unwrap();
+        assert_eq!(p.custom_status_text, "Coding");
+        assert_eq!(p.custom_status_emoji, "\u{1F4BB}");
+        assert_eq!(p.custom_status_expires_ms, Some(1700000000000));
+        assert_eq!(model.away_message, "Coding");
+    }
+
+    #[test]
+    fn away_message_clear_resets_all_fields() {
+        let mut model = UiModel::new();
+        model.user_id = "local-user".into();
+        model.self_profile = Some(UserProfileData {
+            custom_status_text: "Old".into(),
+            custom_status_emoji: "\u{1F600}".into(),
+            custom_status_expires_ms: Some(123),
+            ..Default::default()
+        });
+        model.apply_event(UiEvent::MemberJoined {
+            channel_id: "c1".into(),
+            member: MemberEntry {
+                user_id: "local-user".into(),
+                display_name: "Me".into(),
+                away_message: "Old".into(),
+                custom_status_emoji: "\u{1F600}".into(),
+                muted: false,
+                deafened: false,
+                self_muted: false,
+                self_deafened: false,
+                streaming: false,
+                speaking: false,
+                avatar_url: None,
+                accent_color: None,
+            },
+        });
+
+        model.apply_event(UiEvent::MemberAwayMessageUpdated {
+            user_id: "local-user".into(),
+            away_message: String::new(),
+            custom_status_emoji: String::new(),
+            custom_status_expires_ms: None,
+        });
+
+        let member = &model.members["c1"][0];
+        assert_eq!(member.away_message, "");
+        assert_eq!(member.custom_status_emoji, "");
+
+        let p = model.self_profile.as_ref().unwrap();
+        assert_eq!(p.custom_status_text, "");
+        assert_eq!(p.custom_status_emoji, "");
+        assert_eq!(p.custom_status_expires_ms, None);
     }
     #[test]
     fn member_joined_updates_existing_member_instead_of_dup() {
@@ -3859,6 +4024,7 @@ mod tests {
                 user_id: "u1".into(),
                 display_name: "Old".into(),
                 away_message: String::new(),
+                custom_status_emoji: String::new(),
                 muted: false,
                 deafened: false,
                 self_muted: false,
@@ -3875,6 +4041,7 @@ mod tests {
                 user_id: "u1".into(),
                 display_name: "New".into(),
                 away_message: String::new(),
+                custom_status_emoji: String::new(),
                 muted: false,
                 deafened: false,
                 self_muted: false,

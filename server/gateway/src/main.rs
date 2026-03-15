@@ -148,6 +148,22 @@ async fn main() -> Result<()> {
         },
     ));
 
+    // Custom status expiry sweeper
+    {
+        let control_for_expiry = Arc::clone(&control);
+        let expiry_server_id = server_id;
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(30));
+            interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                if let Err(e) = control_for_expiry.clear_expired_statuses(expiry_server_id).await {
+                    tracing::warn!("status expiry sweep error: {:#}", e);
+                }
+            }
+        });
+    }
+
     // Orphan upload file cleaner
     if cfg.orphan_scan_interval_secs > 0 {
         let orphan_pool = pool.clone();
