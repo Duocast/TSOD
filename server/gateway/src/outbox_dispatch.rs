@@ -221,6 +221,17 @@ fn translate_record(rec: &OutboxEventRow) -> Result<(ChannelId, pb::ServerToClie
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string();
+            let custom_status_emoji = rec
+                .payload_json
+                .get("custom_status_emoji")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let custom_status_expires = rec
+                .payload_json
+                .get("custom_status_expires_ms")
+                .and_then(Value::as_i64)
+                .map(|ms| pb::Timestamp { unix_millis: ms });
 
             let ev = pb::PresenceEvent {
                 at: Some(now_ts()),
@@ -231,6 +242,8 @@ fn translate_record(rec: &OutboxEventRow) -> Result<(ChannelId, pb::ServerToClie
                         }),
                         status: pb::OnlineStatus::Online as i32,
                         custom_status_text,
+                        custom_status_emoji,
+                        custom_status_expires,
                     },
                 )),
             };
@@ -1055,5 +1068,158 @@ mod tests {
 
         assert!(membership.is_muted(channel, user).await);
         assert!(!membership.is_deafened(channel, user).await);
+    }
+
+    #[test]
+    fn status_changed_propagates_text_and_emoji() {
+        let channel_id = uuid::Uuid::new_v4();
+        let user_id = uuid::Uuid::new_v4();
+        let rec = OutboxEventRow {
+            id: OutboxId(uuid::Uuid::new_v4()),
+            server_id: ServerId(uuid::Uuid::new_v4()),
+            topic: "presence.user_online_status_changed".to_string(),
+            payload_json: json!({
+                "channel_id": channel_id,
+                "user_id": user_id,
+                "custom_status_text": "In a meeting",
+                "custom_status_emoji": "\u{1F4BC}",
+            }),
+        };
+
+        let (_ch, push) = translate_record(&rec).expect("should translate");
+        match push.payload {
+            Some(pb::server_to_client::Payload::PresenceEvent(ev)) => match ev.kind {
+                Some(pb::presence_event::Kind::UserOnlineStatusChanged(s)) => {
+                    assert_eq!(s.custom_status_text, "In a meeting");
+                    assert_eq!(s.custom_status_emoji, "\u{1F4BC}");
+                    assert!(s.custom_status_expires.is_none());
+                }
+                other => panic!("unexpected: {:?}", other),
+            },
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn status_changed_propagates_emoji_only() {
+        let channel_id = uuid::Uuid::new_v4();
+        let user_id = uuid::Uuid::new_v4();
+        let rec = OutboxEventRow {
+            id: OutboxId(uuid::Uuid::new_v4()),
+            server_id: ServerId(uuid::Uuid::new_v4()),
+            topic: "presence.user_online_status_changed".to_string(),
+            payload_json: json!({
+                "channel_id": channel_id,
+                "user_id": user_id,
+                "custom_status_text": "",
+                "custom_status_emoji": "\u{2615}",
+            }),
+        };
+
+        let (_ch, push) = translate_record(&rec).expect("should translate");
+        match push.payload {
+            Some(pb::server_to_client::Payload::PresenceEvent(ev)) => match ev.kind {
+                Some(pb::presence_event::Kind::UserOnlineStatusChanged(s)) => {
+                    assert_eq!(s.custom_status_text, "");
+                    assert_eq!(s.custom_status_emoji, "\u{2615}");
+                }
+                other => panic!("unexpected: {:?}", other),
+            },
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn status_changed_propagates_expiry() {
+        let channel_id = uuid::Uuid::new_v4();
+        let user_id = uuid::Uuid::new_v4();
+        let expires_ms: i64 = 1700000000000;
+        let rec = OutboxEventRow {
+            id: OutboxId(uuid::Uuid::new_v4()),
+            server_id: ServerId(uuid::Uuid::new_v4()),
+            topic: "presence.user_online_status_changed".to_string(),
+            payload_json: json!({
+                "channel_id": channel_id,
+                "user_id": user_id,
+                "custom_status_text": "BRB",
+                "custom_status_emoji": "\u{1F6B6}",
+                "custom_status_expires_ms": expires_ms,
+            }),
+        };
+
+        let (_ch, push) = translate_record(&rec).expect("should translate");
+        match push.payload {
+            Some(pb::server_to_client::Payload::PresenceEvent(ev)) => match ev.kind {
+                Some(pb::presence_event::Kind::UserOnlineStatusChanged(s)) => {
+                    assert_eq!(s.custom_status_text, "BRB");
+                    assert_eq!(s.custom_status_emoji, "\u{1F6B6}");
+                    let ts = s.custom_status_expires.expect("should have expiry");
+                    assert_eq!(ts.unix_millis, expires_ms);
+                }
+                other => panic!("unexpected: {:?}", other),
+            },
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn status_changed_clear_propagates_empty_fields() {
+        let channel_id = uuid::Uuid::new_v4();
+        let user_id = uuid::Uuid::new_v4();
+        let rec = OutboxEventRow {
+            id: OutboxId(uuid::Uuid::new_v4()),
+            server_id: ServerId(uuid::Uuid::new_v4()),
+            topic: "presence.user_online_status_changed".to_string(),
+            payload_json: json!({
+                "channel_id": channel_id,
+                "user_id": user_id,
+                "custom_status_text": "",
+                "custom_status_emoji": "",
+                "custom_status_expires_ms": null,
+            }),
+        };
+
+        let (_ch, push) = translate_record(&rec).expect("should translate");
+        match push.payload {
+            Some(pb::server_to_client::Payload::PresenceEvent(ev)) => match ev.kind {
+                Some(pb::presence_event::Kind::UserOnlineStatusChanged(s)) => {
+                    assert_eq!(s.custom_status_text, "");
+                    assert_eq!(s.custom_status_emoji, "");
+                    assert!(s.custom_status_expires.is_none());
+                }
+                other => panic!("unexpected: {:?}", other),
+            },
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn status_changed_backward_compat_missing_emoji_fields() {
+        // Old-format outbox events without emoji/expiry should still work
+        let channel_id = uuid::Uuid::new_v4();
+        let user_id = uuid::Uuid::new_v4();
+        let rec = OutboxEventRow {
+            id: OutboxId(uuid::Uuid::new_v4()),
+            server_id: ServerId(uuid::Uuid::new_v4()),
+            topic: "presence.user_online_status_changed".to_string(),
+            payload_json: json!({
+                "channel_id": channel_id,
+                "user_id": user_id,
+                "custom_status_text": "Legacy status"
+            }),
+        };
+
+        let (_ch, push) = translate_record(&rec).expect("should translate");
+        match push.payload {
+            Some(pb::server_to_client::Payload::PresenceEvent(ev)) => match ev.kind {
+                Some(pb::presence_event::Kind::UserOnlineStatusChanged(s)) => {
+                    assert_eq!(s.custom_status_text, "Legacy status");
+                    assert_eq!(s.custom_status_emoji, "");
+                    assert!(s.custom_status_expires.is_none());
+                }
+                other => panic!("unexpected: {:?}", other),
+            },
+            other => panic!("unexpected: {:?}", other),
+        }
     }
 }

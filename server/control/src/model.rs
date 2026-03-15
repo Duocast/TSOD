@@ -68,6 +68,7 @@ pub struct Member {
     pub deafened: bool,
     pub joined_at: DateTime<Utc>,
     pub custom_status_text: String,
+    pub custom_status_emoji: String,
 }
 
 /// Chat message (NO Default; uses author_user_id + attachments + created_at)
@@ -204,6 +205,7 @@ pub struct UserProfileRow {
     pub accent_color: i32,
     pub custom_status_text: String,
     pub custom_status_emoji: String,
+    pub custom_status_expires: Option<chrono::DateTime<chrono::Utc>>,
     pub avatar_asset_url: String,
     pub banner_asset_url: String,
     pub links: serde_json::Value,

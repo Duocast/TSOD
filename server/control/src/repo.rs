@@ -297,8 +297,15 @@ pub trait ControlRepo: Send + Sync {
         accent_color: Option<i32>,
         custom_status_text: Option<&str>,
         custom_status_emoji: Option<&str>,
+        custom_status_expires: Option<Option<DateTime<Utc>>>,
         links_json: Option<serde_json::Value>,
     ) -> ControlResult<()>;
+
+    /// Clear custom status for all profiles whose expiry has passed.
+    async fn clear_expired_custom_statuses(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+    ) -> ControlResult<Vec<(UserId, ServerId)>>;
 
     async fn get_user_profile(
         &self,
@@ -733,7 +740,8 @@ impl ControlRepo for PgControlRepo {
         let row = sqlx::query(
             r#"
             SELECT m.channel_id, m.user_id, m.display_name, m.muted, m.deafened, m.joined_at,
-                   COALESCE(up.custom_status_text, '') AS custom_status_text
+                   COALESCE(up.custom_status_text, '') AS custom_status_text,
+                   COALESCE(up.custom_status_emoji, '') AS custom_status_emoji
             FROM members m
             LEFT JOIN user_profiles up ON up.user_id = m.user_id AND up.server_id = m.server_id
             WHERE m.server_id = $1 AND m.channel_id = $2 AND m.user_id = $3
@@ -754,6 +762,7 @@ impl ControlRepo for PgControlRepo {
             deafened: r.get::<bool, _>("deafened"),
             joined_at: r.get::<DateTime<Utc>, _>("joined_at"),
             custom_status_text: r.get::<String, _>("custom_status_text"),
+            custom_status_emoji: r.get::<String, _>("custom_status_emoji"),
         }))
     }
 
@@ -766,7 +775,8 @@ impl ControlRepo for PgControlRepo {
         let rows = sqlx::query(
             r#"
             SELECT m.channel_id, m.user_id, m.display_name, m.muted, m.deafened, m.joined_at,
-                   COALESCE(up.custom_status_text, '') AS custom_status_text
+                   COALESCE(up.custom_status_text, '') AS custom_status_text,
+                   COALESCE(up.custom_status_emoji, '') AS custom_status_emoji
             FROM members m
             LEFT JOIN user_profiles up ON up.user_id = m.user_id AND up.server_id = m.server_id
             WHERE m.server_id = $1 AND m.channel_id = $2
@@ -789,6 +799,7 @@ impl ControlRepo for PgControlRepo {
                 deafened: r.get::<bool, _>("deafened"),
                 joined_at: r.get::<DateTime<Utc>, _>("joined_at"),
                 custom_status_text: r.get::<String, _>("custom_status_text"),
+                custom_status_emoji: r.get::<String, _>("custom_status_emoji"),
             });
         }
         Ok(out)
@@ -1623,13 +1634,19 @@ impl ControlRepo for PgControlRepo {
         accent_color: Option<i32>,
         custom_status_text: Option<&str>,
         custom_status_emoji: Option<&str>,
+        custom_status_expires: Option<Option<DateTime<Utc>>>,
         links_json: Option<Json>,
     ) -> ControlResult<()> {
+        // $9 is a bool flag: true means "update custom_status_expires", false means "leave it alone".
+        // $10 is the actual expiry value (nullable).
+        let update_expires = custom_status_expires.is_some();
+        let expires_val = custom_status_expires.flatten();
         sqlx::query(
             r#"
             INSERT INTO user_profiles
                 (user_id, server_id, display_name, description, accent_color,
-                 custom_status_text, custom_status_emoji, links, created_at, updated_at)
+                 custom_status_text, custom_status_emoji, links,
+                 custom_status_expires, created_at, updated_at)
             VALUES ($1, $2,
                 COALESCE($3, ''),
                 COALESCE($4, ''),
@@ -1637,6 +1654,7 @@ impl ControlRepo for PgControlRepo {
                 COALESCE($6, ''),
                 COALESCE($7, ''),
                 COALESCE($8, '[]'::jsonb),
+                $10,
                 NOW(), NOW())
             ON CONFLICT (user_id) DO UPDATE SET
                 server_id          = $2,
@@ -1646,6 +1664,7 @@ impl ControlRepo for PgControlRepo {
                 custom_status_text = CASE WHEN $6 IS NOT NULL THEN $6 ELSE user_profiles.custom_status_text END,
                 custom_status_emoji= CASE WHEN $7 IS NOT NULL THEN $7 ELSE user_profiles.custom_status_emoji END,
                 links              = CASE WHEN $8 IS NOT NULL THEN $8 ELSE user_profiles.links END,
+                custom_status_expires = CASE WHEN $9 THEN $10 ELSE user_profiles.custom_status_expires END,
                 updated_at         = NOW()
             "#,
         )
@@ -1657,10 +1676,38 @@ impl ControlRepo for PgControlRepo {
         .bind(custom_status_text)
         .bind(custom_status_emoji)
         .bind(links_json)
+        .bind(update_expires)
+        .bind(expires_val)
         .execute(&mut **tx)
         .await
         .context("upsert user profile")?;
         Ok(())
+    }
+
+    async fn clear_expired_custom_statuses(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+    ) -> ControlResult<Vec<(UserId, ServerId)>> {
+        let rows = sqlx::query(
+            r#"
+            UPDATE user_profiles
+            SET custom_status_text = '',
+                custom_status_emoji = '',
+                custom_status_expires = NULL,
+                updated_at = NOW()
+            WHERE custom_status_expires IS NOT NULL
+              AND custom_status_expires <= NOW()
+            RETURNING user_id, server_id
+            "#,
+        )
+        .fetch_all(&mut **tx)
+        .await
+        .context("clear expired custom statuses")?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| (UserId(r.get("user_id")), ServerId(r.get("server_id"))))
+            .collect())
     }
 
     async fn get_user_profile(
@@ -1678,6 +1725,7 @@ impl ControlRepo for PgControlRepo {
                 COALESCE(accent_color, 0)  AS accent_color,
                 COALESCE(custom_status_text, '')  AS custom_status_text,
                 COALESCE(custom_status_emoji, '') AS custom_status_emoji,
+                custom_status_expires,
                 COALESCE(avatar_asset_url, '')    AS avatar_asset_url,
                 COALESCE(banner_asset_url, '')    AS banner_asset_url,
                 COALESCE(links, '[]'::jsonb)      AS links,
@@ -1700,6 +1748,7 @@ impl ControlRepo for PgControlRepo {
             accent_color: r.get("accent_color"),
             custom_status_text: r.get("custom_status_text"),
             custom_status_emoji: r.get("custom_status_emoji"),
+            custom_status_expires: r.get("custom_status_expires"),
             avatar_asset_url: r.get("avatar_asset_url"),
             banner_asset_url: r.get("banner_asset_url"),
             links: r.get("links"),

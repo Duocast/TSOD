@@ -628,6 +628,7 @@ impl ControlDispatcher {
         let req = pb::SetCustomStatusRequest {
             status_text: Some(message.to_string()),
             status_emoji: None,
+            status_expires: None,
         };
         let resp = self
             .send_request(
@@ -745,6 +746,7 @@ impl ControlDispatcher {
         let req = pb::SetCustomStatusRequest {
             status_text,
             status_emoji,
+            status_expires: None,
         };
         let resp = self
             .send_request(
@@ -1139,6 +1141,7 @@ pub fn pb_profile_to_ui(p: &pb::UserProfile) -> crate::ui::model::UserProfileDat
         status,
         custom_status_text: p.custom_status_text.clone(),
         custom_status_emoji: p.custom_status_emoji.clone(),
+        custom_status_expires_ms: p.custom_status_expires.as_ref().map(|ts| ts.unix_millis),
         accent_color: p.accent_color,
         avatar_url,
         banner_url,

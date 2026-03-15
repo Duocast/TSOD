@@ -147,6 +147,7 @@ message CompleteProfileAssetUploadResponse {
 message SetCustomStatusRequest {
   optional string status_text  = 1;  // absent = clear; empty string = clear
   optional string status_emoji = 2;  // single Unicode emoji or empty to clear
+  optional Timestamp status_expires = 3; // optional auto-clear time; absent = no change; set to 0 = clear
 }
 
 message SetCustomStatusResponse {
@@ -168,6 +169,8 @@ message UserStatusChanged {
   UserId user_id = 1;
   OnlineStatus status = 2;
   string custom_status_text = 3;
+  string custom_status_emoji = 4;
+  Timestamp custom_status_expires = 5;
 }
 
 message UserProfileUpdated {

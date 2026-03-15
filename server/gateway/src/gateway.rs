@@ -534,6 +534,7 @@ impl Gateway {
                                 muted: m.muted,
                                 deafened: m.deafened,
                                 away_message: m.custom_status_text,
+                                custom_status_emoji: m.custom_status_emoji,
                                 ..Default::default()
                             })
                             .collect(),
@@ -1884,10 +1885,19 @@ impl Gateway {
                     if let Err(e) = write_delimited(&mut send, &resp).await { warn!("control write failed: {:#}", e); break; }
                 }
                 Some(pb::client_to_server::Payload::SetCustomStatusRequest(r)) => {
+                    let expires = r.status_expires.map(|ts| {
+                        if ts.unix_millis == 0 {
+                            None // explicit clear
+                        } else {
+                            Some(chrono::DateTime::from_timestamp_millis(ts.unix_millis)
+                                .unwrap_or_else(chrono::Utc::now))
+                        }
+                    });
                     self.control.set_custom_status(
                         &ctx,
                         r.status_text.clone(),
                         r.status_emoji.clone(),
+                        expires,
                     ).await?;
                     let resp = pb::ServerToClient {
                         request_id: req_id,
@@ -2580,7 +2590,9 @@ fn profile_row_to_pb(row: vp_control::model::UserProfileRow) -> pb::UserProfile 
         accent_color: row.accent_color.max(0) as u32,
         links,
         custom_status_emoji: row.custom_status_emoji,
-        custom_status_expires: None,
+        custom_status_expires: row.custom_status_expires.map(|dt| pb::Timestamp {
+            unix_millis: dt.timestamp_millis(),
+        }),
         current_activity: None,
         audio_profile: None,
     }

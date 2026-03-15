@@ -439,6 +439,7 @@ impl<R: ControlRepo> ControlService<R> {
             deafened: false,
             joined_at: Utc::now(),
             custom_status_text: String::new(),
+            custom_status_emoji: String::new(),
         };
 
         debug!(
@@ -1545,6 +1546,7 @@ impl<R: ControlRepo> ControlService<R> {
             accent_color,
             None,
             None,
+            None,
             links_json,
         )
         .await?;
@@ -1781,6 +1783,7 @@ impl<R: ControlRepo> ControlService<R> {
         ctx: &RequestContext,
         status_text: Option<String>,
         status_emoji: Option<String>,
+        status_expires: Option<Option<chrono::DateTime<chrono::Utc>>>,
     ) -> ControlResult<()> {
         if let Some(ref t) = status_text {
             if t.len() > 128 {
@@ -1803,6 +1806,7 @@ impl<R: ControlRepo> ControlService<R> {
             None,
             status_text.as_deref(),
             status_emoji.as_deref(),
+            status_expires,
             None,
         )
         .await?;
@@ -1815,6 +1819,10 @@ impl<R: ControlRepo> ControlService<R> {
         )
         .await?;
         let custom_status_text = status_text.unwrap_or_default();
+        let custom_status_emoji = status_emoji.unwrap_or_default();
+        let custom_status_expires_ms = status_expires
+            .flatten()
+            .map(|dt| dt.timestamp_millis());
         for channel_id in member_channels {
             <R as ControlRepo>::insert_outbox(
                 &self.repo,
@@ -1827,10 +1835,50 @@ impl<R: ControlRepo> ControlService<R> {
                         "channel_id": channel_id.0,
                         "user_id": ctx.user_id.0,
                         "custom_status_text": custom_status_text,
+                        "custom_status_emoji": custom_status_emoji,
+                        "custom_status_expires_ms": custom_status_expires_ms,
                     }),
                 },
             )
             .await?;
+        }
+
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Clear expired custom statuses and emit outbox events for each affected user.
+    pub async fn clear_expired_statuses(&self, server_id: ServerId) -> ControlResult<()> {
+        let mut tx = <R as ControlRepo>::tx(&self.repo).await?;
+        let cleared = <R as ControlRepo>::clear_expired_custom_statuses(&self.repo, &mut tx).await?;
+
+        for (user_id, _sid) in &cleared {
+            let member_channels = <R as ControlRepo>::list_member_channels_for_user(
+                &self.repo,
+                &mut tx,
+                server_id,
+                *user_id,
+            )
+            .await?;
+            for channel_id in member_channels {
+                <R as ControlRepo>::insert_outbox(
+                    &self.repo,
+                    &mut tx,
+                    &OutboxEvent {
+                        id: OutboxId(Uuid::new_v4()),
+                        server_id,
+                        topic: "presence.user_online_status_changed".to_string(),
+                        payload_json: json!({
+                            "channel_id": channel_id.0,
+                            "user_id": user_id.0,
+                            "custom_status_text": "",
+                            "custom_status_emoji": "",
+                            "custom_status_expires_ms": null,
+                        }),
+                    },
+                )
+                .await?;
+            }
         }
 
         tx.commit().await?;
