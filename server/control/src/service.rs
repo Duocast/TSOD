@@ -438,6 +438,7 @@ impl<R: ControlRepo> ControlService<R> {
             muted: false,
             deafened: false,
             joined_at: Utc::now(),
+            custom_status_text: String::new(),
         };
 
         debug!(

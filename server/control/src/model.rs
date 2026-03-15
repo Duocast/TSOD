@@ -67,6 +67,7 @@ pub struct Member {
     pub muted: bool,
     pub deafened: bool,
     pub joined_at: DateTime<Utc>,
+    pub custom_status_text: String,
 }
 
 /// Chat message (NO Default; uses author_user_id + attachments + created_at)

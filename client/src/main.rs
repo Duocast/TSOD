@@ -1713,7 +1713,7 @@ fn apply_authoritative_snapshot(
                     .map(|u| u.value.clone())
                     .unwrap_or_default(),
                 display_name: m.display_name.clone(),
-                away_message: String::new(),
+                away_message: m.away_message.clone(),
                 muted: m.muted,
                 deafened: m.deafened,
                 self_muted: m.self_muted,
@@ -2514,7 +2514,7 @@ async fn connect_and_run_session(
                                             member: ui::model::MemberEntry {
                                                 user_id: user_id.clone(),
                                                 display_name: member.display_name,
-                                                away_message: String::new(),
+                                                away_message: member.away_message,
                                                 muted: member.muted,
                                                 deafened: member.deafened,
                                                 self_muted: member.self_muted,
@@ -3953,7 +3953,7 @@ async fn connect_and_run_session(
                                         members.push(ui::model::MemberEntry {
                                             user_id: m.user_id.map(|u| u.value).unwrap_or_default(),
                                             display_name: m.display_name,
-                                            away_message: String::new(),
+                                            away_message: m.away_message,
                                             muted: m.muted,
                                             deafened: m.deafened,
                                             self_muted: m.self_muted,
