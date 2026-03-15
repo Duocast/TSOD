@@ -121,6 +121,7 @@ impl CaptureBackend for WgcCapture {
 #[cfg(target_os = "windows")]
 mod wgc_impl {
     use super::{DamageMetadata, DirtyRegion};
+    use crate::screen_share::capture::dxgi;
     use anyhow::{anyhow, Context};
     use bytes::Bytes;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -191,7 +192,7 @@ mod wgc_impl {
                 ));
             }
 
-            let hwnd = super::dxgi::parse_hwnd(hwnd_str)?;
+            let hwnd = dxgi::parse_hwnd(hwnd_str)?;
 
             // Create D3D11 device with BGRA support (required for WinRT interop).
             let (device, context) = create_d3d11_device()?;
@@ -315,7 +316,7 @@ mod wgc_impl {
 
             let pixels = self.copy_texture_to_cpu(&texture)?;
 
-            let ts = super::dxgi::unix_ms() as u32;
+            let ts = dxgi::unix_ms() as u32;
             let video_frame = VideoFrame {
                 width: self.width,
                 height: self.height,
