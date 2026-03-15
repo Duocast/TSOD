@@ -14,6 +14,14 @@ pub fn build_rav1e_encoder() -> Result<Box<dyn VideoEncoder>> {
     Ok(Box::new(Rav1eAv1RealtimeEncoder::new()))
 }
 
+const SOFTWARE_CODEC_MAX_THREADS: usize = 16;
+
+fn encoder_thread_count() -> usize {
+    std::thread::available_parallelism()
+        .map(|parallelism| parallelism.get().clamp(1, SOFTWARE_CODEC_MAX_THREADS))
+        .unwrap_or(1)
+}
+
 pub struct Rav1eAv1RealtimeEncoder {
     frame_seq: u32,
     force_next_keyframe: bool,
@@ -137,7 +145,9 @@ impl SoftwareAv1Encoder {
             matrix_coefficients: MatrixCoefficients::BT709,
         });
 
-        let cfg = Config::new().with_encoder_config(enc).with_threads(1);
+        let cfg = Config::new()
+            .with_encoder_config(enc)
+            .with_threads(encoder_thread_count());
         let ctx = cfg
             .new_context()
             .map_err(|e| anyhow!("failed to initialize AV1 encoder context: {e}"))?;
