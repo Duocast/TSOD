@@ -8,9 +8,11 @@ use crate::net::{
 use crate::proto::voiceplatform::v1 as pb;
 use crate::screen_share::config::{
     env_disable_hw, env_screen_capture_override, env_system_audio_override,
-    env_video_decoder_override, env_video_encoder_override, SenderPolicy,
+    env_video_decoder_override, env_video_encoder_override, SenderPolicy, VideoDecoderOverride,
+    VideoEncoderOverride,
 };
 use std::collections::HashMap;
+use tracing::warn;
 
 /// Capability readiness level for a codec.
 ///
@@ -118,12 +120,20 @@ pub fn probe_media_caps(source: &crate::ShareSource) -> MediaRuntimeCaps {
         };
     }
 
-    if let Some(encoder_override) = env_video_encoder_override() {
-        apply_encoder_override(&encoder_override, &mut encode_backends);
+    match env_video_encoder_override() {
+        Ok(Some(encoder_override)) => {
+            apply_encoder_override(encoder_override, &mut encode_backends)
+        }
+        Ok(None) => {}
+        Err(err) => warn!(error = %err, "[video] ignoring invalid TSOD_VIDEO_ENCODER override"),
     }
 
-    if let Some(decoder_override) = env_video_decoder_override() {
-        apply_decoder_override(&decoder_override, &mut decode_backends);
+    match env_video_decoder_override() {
+        Ok(Some(decoder_override)) => {
+            apply_decoder_override(decoder_override, &mut decode_backends)
+        }
+        Ok(None) => {}
+        Err(err) => warn!(error = %err, "[video] ignoring invalid TSOD_VIDEO_DECODER override"),
     }
 
     encode_backends = verified_encode_backends(encode_backends);
@@ -532,41 +542,35 @@ fn default_audio_backends() -> Vec<SystemAudioBackendKind> {
 }
 
 fn apply_encoder_override(
-    override_value: &str,
+    override_value: VideoEncoderOverride,
     backends: &mut HashMap<pb::VideoCodec, Vec<EncodeBackendKind>>,
 ) {
     match override_value {
-        "vp9-libvpx" => {
+        VideoEncoderOverride::Auto => {}
+        VideoEncoderOverride::Vp9Libvpx => {
             backends.insert(pb::VideoCodec::Vp9, vec![EncodeBackendKind::Libvpx]);
         }
-        "vp9-svt" => {
-            backends.insert(pb::VideoCodec::Vp9, vec![EncodeBackendKind::MfHwVp9]);
-        }
-        "av1-svt" => {
+        VideoEncoderOverride::Av1Svt => {
             backends.insert(pb::VideoCodec::Av1, vec![EncodeBackendKind::SvtAv1]);
         }
-        "av1-nvenc" => {
+        VideoEncoderOverride::Av1Nvenc => {
             backends.insert(pb::VideoCodec::Av1, vec![EncodeBackendKind::NvencAv1]);
         }
-        _ => {}
     }
 }
 
 fn apply_decoder_override(
-    override_value: &str,
+    override_value: VideoDecoderOverride,
     backends: &mut HashMap<pb::VideoCodec, Vec<DecodeBackendKind>>,
 ) {
     match override_value {
-        "vp9-libvpx" => {
+        VideoDecoderOverride::Auto => {}
+        VideoDecoderOverride::Vp9Libvpx => {
             backends.insert(pb::VideoCodec::Vp9, vec![DecodeBackendKind::Libvpx]);
         }
-        "vp9-ffvp9" => {
-            backends.insert(pb::VideoCodec::Vp9, vec![DecodeBackendKind::MfHwVp9]);
-        }
-        "av1-dav1d" => {
+        VideoDecoderOverride::Av1Dav1d => {
             backends.insert(pb::VideoCodec::Av1, vec![DecodeBackendKind::Dav1d]);
         }
-        _ => {}
     }
 }
 
@@ -586,7 +590,7 @@ mod tests {
     #[test]
     fn explicit_nvenc_selection_no_fallback() {
         let mut map = HashMap::new();
-        apply_encoder_override("av1-nvenc", &mut map);
+        apply_encoder_override(VideoEncoderOverride::Av1Nvenc, &mut map);
         assert_eq!(
             map.get(&pb::VideoCodec::Av1),
             Some(&vec![EncodeBackendKind::NvencAv1])
@@ -596,10 +600,73 @@ mod tests {
     #[test]
     fn explicit_svt_selection_software_only() {
         let mut map = HashMap::new();
-        apply_encoder_override("av1-svt", &mut map);
+        apply_encoder_override(VideoEncoderOverride::Av1Svt, &mut map);
         assert_eq!(
             map.get(&pb::VideoCodec::Av1),
             Some(&vec![EncodeBackendKind::SvtAv1])
+        );
+    }
+
+    #[test]
+    fn encoder_override_namespace_maps_to_concrete_backends() {
+        let cases = [
+            (
+                VideoEncoderOverride::Vp9Libvpx,
+                pb::VideoCodec::Vp9,
+                vec![EncodeBackendKind::Libvpx],
+            ),
+            (
+                VideoEncoderOverride::Av1Nvenc,
+                pb::VideoCodec::Av1,
+                vec![EncodeBackendKind::NvencAv1],
+            ),
+            (
+                VideoEncoderOverride::Av1Svt,
+                pb::VideoCodec::Av1,
+                vec![EncodeBackendKind::SvtAv1],
+            ),
+        ];
+
+        for (override_value, codec, expected) in cases {
+            let mut map = HashMap::new();
+            apply_encoder_override(override_value, &mut map);
+            assert_eq!(map.get(&codec), Some(&expected));
+        }
+
+        let mut map = HashMap::from([(pb::VideoCodec::Vp9, vec![EncodeBackendKind::Libvpx])]);
+        apply_encoder_override(VideoEncoderOverride::Auto, &mut map);
+        assert_eq!(
+            map.get(&pb::VideoCodec::Vp9),
+            Some(&vec![EncodeBackendKind::Libvpx])
+        );
+    }
+
+    #[test]
+    fn decoder_override_namespace_maps_to_concrete_backends() {
+        let cases = [
+            (
+                VideoDecoderOverride::Vp9Libvpx,
+                pb::VideoCodec::Vp9,
+                vec![DecodeBackendKind::Libvpx],
+            ),
+            (
+                VideoDecoderOverride::Av1Dav1d,
+                pb::VideoCodec::Av1,
+                vec![DecodeBackendKind::Dav1d],
+            ),
+        ];
+
+        for (override_value, codec, expected) in cases {
+            let mut map = HashMap::new();
+            apply_decoder_override(override_value, &mut map);
+            assert_eq!(map.get(&codec), Some(&expected));
+        }
+
+        let mut map = HashMap::from([(pb::VideoCodec::Vp9, vec![DecodeBackendKind::Libvpx])]);
+        apply_decoder_override(VideoDecoderOverride::Auto, &mut map);
+        assert_eq!(
+            map.get(&pb::VideoCodec::Vp9),
+            Some(&vec![DecodeBackendKind::Libvpx])
         );
     }
 
@@ -805,5 +872,4 @@ mod tests {
             .unwrap_or_default();
         assert_eq!(backends, vec![DecodeBackendKind::Dav1d]);
     }
-
 }

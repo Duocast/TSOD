@@ -2,7 +2,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use tracing::warn;
 
 use crate::media_codec::VideoEncoder;
-use crate::screen_share::config::{env_video_encoder_override, SenderPolicy};
+use crate::screen_share::config::{env_video_encoder_override, SenderPolicy, VideoEncoderOverride};
 use crate::screen_share::runtime_probe::EncodeBackendKind;
 
 pub mod caps;
@@ -13,11 +13,14 @@ pub fn build_av1_encoder(
     backends: &[EncodeBackendKind],
     policy: SenderPolicy,
 ) -> Result<Box<dyn VideoEncoder>> {
-    let explicit = env_video_encoder_override().and_then(|value| match value.as_str() {
-        "av1-nvenc" => Some(EncodeBackendKind::NvencAv1),
-        "av1-svt" => Some(EncodeBackendKind::SvtAv1),
-        _ => None,
-    });
+    let explicit = env_video_encoder_override()
+        .ok()
+        .flatten()
+        .and_then(|value| match value {
+            VideoEncoderOverride::Av1Nvenc => Some(EncodeBackendKind::NvencAv1),
+            VideoEncoderOverride::Av1Svt => Some(EncodeBackendKind::SvtAv1),
+            _ => None,
+        });
 
     if let Some(requested) = explicit {
         return build_backend(requested)

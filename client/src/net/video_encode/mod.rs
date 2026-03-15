@@ -36,7 +36,11 @@ pub fn build_screen_encoder(
         }
     }
 
-    let requested = env_video_encoder_override().unwrap_or_else(|| "auto".to_string());
+    let requested = env_video_encoder_override()
+        .ok()
+        .flatten()
+        .map(|value| value.as_str().to_string())
+        .unwrap_or_else(|| "auto".to_string());
     let backends = caps
         .encode_backends
         .get(&codec)
