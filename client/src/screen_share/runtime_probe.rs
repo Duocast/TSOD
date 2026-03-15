@@ -132,11 +132,14 @@ pub fn probe_media_caps(source: &crate::ShareSource) -> MediaRuntimeCaps {
     decode_backends = verified_decode_backends(decode_backends);
 
     let sender_policy = SenderPolicy::from_settings_or_env(None);
-    let preferred_codec = sender_policy
-        .preferred_codec_order()
-        .into_iter()
-        .find(|codec| encode_backends.contains_key(codec))
-        .unwrap_or(pb::VideoCodec::Vp9);
+    let preferred_codec = preferred_codec_order(
+        sender_policy,
+        &encode_backends,
+        prefers_av1_low_latency_nvidia(),
+    )
+    .into_iter()
+    .find(|codec| encode_backends.contains_key(codec))
+    .unwrap_or(pb::VideoCodec::Vp9);
 
     let supports_system_audio = audio_backends
         .iter()
@@ -158,6 +161,31 @@ pub fn probe_media_caps(source: &crate::ShareSource) -> MediaRuntimeCaps {
         supports_1440p60,
         codec_capabilities,
     }
+}
+
+fn preferred_codec_order(
+    sender_policy: SenderPolicy,
+    encode_backends: &HashMap<pb::VideoCodec, Vec<EncodeBackendKind>>,
+    prefer_av1_low_latency_nvidia: bool,
+) -> Vec<pb::VideoCodec> {
+    let mut order = sender_policy.preferred_codec_order();
+
+    if sender_policy == SenderPolicy::AutoLowLatency
+        && encode_backends.contains_key(&pb::VideoCodec::Av1)
+        && prefer_av1_low_latency_nvidia
+    {
+        order = vec![pb::VideoCodec::Av1, pb::VideoCodec::Vp9];
+    }
+
+    order
+}
+
+fn prefers_av1_low_latency_nvidia() -> bool {
+    prefers_av1_low_latency_nvidia_adapter(nvidia::detect_nvidia_adapter().as_ref())
+}
+
+fn prefers_av1_low_latency_nvidia_adapter(adapter: Option<&nvidia::NvidiaAdapterInfo>) -> bool {
+    adapter.is_some_and(nvidia::is_rtx_40_or_50_series)
 }
 
 /// Build per-codec capability summaries from already-verified backend maps.
@@ -651,14 +679,8 @@ mod tests {
 
     #[test]
     fn codec_capability_fully_runnable_requires_both_encode_and_decode() {
-        let enc = HashMap::from([(
-            pb::VideoCodec::Vp9,
-            vec![EncodeBackendKind::Libvpx],
-        )]);
-        let dec = HashMap::from([(
-            pb::VideoCodec::Vp9,
-            vec![DecodeBackendKind::Libvpx],
-        )]);
+        let enc = HashMap::from([(pb::VideoCodec::Vp9, vec![EncodeBackendKind::Libvpx])]);
+        let dec = HashMap::from([(pb::VideoCodec::Vp9, vec![DecodeBackendKind::Libvpx])]);
         let caps = build_codec_capabilities(&enc, &dec);
         assert_eq!(caps.len(), 1);
         assert!(caps[0].is_fully_runnable());
@@ -668,10 +690,7 @@ mod tests {
 
     #[test]
     fn codec_capability_encode_only_is_not_runnable() {
-        let enc = HashMap::from([(
-            pb::VideoCodec::Av1,
-            vec![EncodeBackendKind::SvtAv1],
-        )]);
+        let enc = HashMap::from([(pb::VideoCodec::Av1, vec![EncodeBackendKind::SvtAv1])]);
         let dec = HashMap::new();
         let caps = build_codec_capabilities(&enc, &dec);
         assert_eq!(caps.len(), 1);
@@ -683,10 +702,7 @@ mod tests {
     #[test]
     fn codec_capability_decode_only_is_not_runnable() {
         let enc = HashMap::new();
-        let dec = HashMap::from([(
-            pb::VideoCodec::Vp9,
-            vec![DecodeBackendKind::Libvpx],
-        )]);
+        let dec = HashMap::from([(pb::VideoCodec::Vp9, vec![DecodeBackendKind::Libvpx])]);
         let caps = build_codec_capabilities(&enc, &dec);
         assert_eq!(caps.len(), 1);
         assert!(!caps[0].is_fully_runnable());
@@ -699,10 +715,7 @@ mod tests {
             (pb::VideoCodec::Av1, vec![EncodeBackendKind::SvtAv1]),
         ]);
         // Only VP9 has decode backends.
-        let dec = HashMap::from([(
-            pb::VideoCodec::Vp9,
-            vec![DecodeBackendKind::Libvpx],
-        )]);
+        let dec = HashMap::from([(pb::VideoCodec::Vp9, vec![DecodeBackendKind::Libvpx])]);
         let caps = build_codec_capabilities(&enc, &dec);
         let media = MediaRuntimeCaps {
             capture_backends: vec![],
@@ -723,5 +736,44 @@ mod tests {
     fn empty_backends_produce_no_capabilities() {
         let caps = build_codec_capabilities(&HashMap::new(), &HashMap::new());
         assert!(caps.is_empty());
+    }
+
+    #[test]
+    fn low_latency_policy_prefers_av1_on_rtx_4090_or_5090() {
+        let rtx_4090 = nvidia::NvidiaAdapterInfo {
+            vendor_id: 0x10DE,
+            device_id: 0x2704,
+            name: "NVIDIA GeForce RTX 4090".into(),
+        };
+        let rtx_5090 = nvidia::NvidiaAdapterInfo {
+            vendor_id: 0x10DE,
+            device_id: 0x2B80,
+            name: "NVIDIA GeForce RTX 5090".into(),
+        };
+
+        assert!(prefers_av1_low_latency_nvidia_adapter(Some(&rtx_4090)));
+        assert!(prefers_av1_low_latency_nvidia_adapter(Some(&rtx_5090)));
+    }
+
+    #[test]
+    fn low_latency_policy_does_not_force_av1_for_non_ada_blackwell() {
+        let rtx_3090 = nvidia::NvidiaAdapterInfo {
+            vendor_id: 0x10DE,
+            device_id: 0x2204,
+            name: "NVIDIA GeForce RTX 3090".into(),
+        };
+
+        assert!(!prefers_av1_low_latency_nvidia_adapter(Some(&rtx_3090)));
+        assert!(!prefers_av1_low_latency_nvidia_adapter(None));
+    }
+
+    #[test]
+    fn low_latency_policy_reorders_codec_preference_on_av1_capable_nvidia() {
+        let mut enc = HashMap::new();
+        enc.insert(pb::VideoCodec::Vp9, vec![EncodeBackendKind::Libvpx]);
+        enc.insert(pb::VideoCodec::Av1, vec![EncodeBackendKind::NvencAv1]);
+
+        let order = preferred_codec_order(SenderPolicy::AutoLowLatency, &enc, true);
+        assert_eq!(order, vec![pb::VideoCodec::Av1, pb::VideoCodec::Vp9]);
     }
 }
