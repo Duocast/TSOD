@@ -12,6 +12,43 @@ use crate::screen_share::config::{
 };
 use std::collections::HashMap;
 
+/// Capability readiness level for a codec.
+///
+/// Each level is a strict superset of the previous one:
+/// - **Compiled** — the backend was compiled into this binary.
+/// - **Detected** — the OS/driver reports that the hardware or library is
+///   present (e.g. VAAPI device node exists, NVENC driver loads).
+/// - **Initialized** — a minimal encode/decode session was opened and torn
+///   down successfully.  Only codecs at this level are advertised to the
+///   server and shown in the UI.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub enum CapabilityLevel {
+    /// Backend code is compiled in but not yet probed.
+    Compiled,
+    /// Driver/library detected on this machine.
+    Detected,
+    /// A test init succeeded — ready to encode/decode.
+    Initialized,
+}
+
+/// Per-codec capability summary after probing.
+#[derive(Clone, Debug)]
+pub struct CodecCapability {
+    pub codec: pb::VideoCodec,
+    pub encode_level: CapabilityLevel,
+    pub decode_level: CapabilityLevel,
+    pub encode_backends: Vec<EncodeBackendKind>,
+    pub decode_backends: Vec<DecodeBackendKind>,
+}
+
+impl CodecCapability {
+    /// True only when both encode and decode reached `Initialized`.
+    pub fn is_fully_runnable(&self) -> bool {
+        self.encode_level == CapabilityLevel::Initialized
+            && self.decode_level == CapabilityLevel::Initialized
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum CaptureBackendKind {
     Dxgi,
@@ -56,6 +93,8 @@ pub struct MediaRuntimeCaps {
     pub max_simulcast_layers: u8,
     pub preferred_codec: pb::VideoCodec,
     pub supports_1440p60: bool,
+    /// Per-codec capability breakdown (only codecs that reached `Initialized`).
+    pub codec_capabilities: Vec<CodecCapability>,
 }
 
 pub fn probe_media_caps(source: &crate::ShareSource) -> MediaRuntimeCaps {
@@ -102,6 +141,8 @@ pub fn probe_media_caps(source: &crate::ShareSource) -> MediaRuntimeCaps {
     let supports_1440p60 = estimate_encode_headroom_1440p60(&encode_backends);
     let max_simulcast_layers = estimate_max_simulcast_layers(&encode_backends, supports_1440p60);
 
+    let codec_capabilities = build_codec_capabilities(&encode_backends, &decode_backends);
+
     MediaRuntimeCaps {
         capture_backends,
         encode_backends,
@@ -111,7 +152,61 @@ pub fn probe_media_caps(source: &crate::ShareSource) -> MediaRuntimeCaps {
         max_simulcast_layers,
         preferred_codec,
         supports_1440p60,
+        codec_capabilities,
     }
+}
+
+/// Build per-codec capability summaries from already-verified backend maps.
+///
+/// Because `verified_encode_backends` / `verified_decode_backends` only keep
+/// backends that passed `can_init_*_backend`, any codec present in both maps
+/// is at `Initialized` level.  Codecs present in only one map get `Detected`.
+fn build_codec_capabilities(
+    encode_backends: &HashMap<pb::VideoCodec, Vec<EncodeBackendKind>>,
+    decode_backends: &HashMap<pb::VideoCodec, Vec<DecodeBackendKind>>,
+) -> Vec<CodecCapability> {
+    let mut codecs: Vec<pb::VideoCodec> = Vec::new();
+    for codec in encode_backends.keys().chain(decode_backends.keys()) {
+        if !codecs.contains(codec) {
+            codecs.push(*codec);
+        }
+    }
+
+    codecs
+        .into_iter()
+        .map(|codec| {
+            let enc = encode_backends.get(&codec);
+            let dec = decode_backends.get(&codec);
+
+            let encode_level = if enc.is_some() {
+                CapabilityLevel::Initialized
+            } else {
+                CapabilityLevel::Compiled
+            };
+            let decode_level = if dec.is_some() {
+                CapabilityLevel::Initialized
+            } else {
+                CapabilityLevel::Compiled
+            };
+
+            CodecCapability {
+                codec,
+                encode_level,
+                decode_level,
+                encode_backends: enc.cloned().unwrap_or_default(),
+                decode_backends: dec.cloned().unwrap_or_default(),
+            }
+        })
+        .collect()
+}
+
+/// Returns only codecs where both encode and decode are `Initialized`.
+pub fn runnable_codecs(caps: &MediaRuntimeCaps) -> Vec<pb::VideoCodec> {
+    caps.codec_capabilities
+        .iter()
+        .filter(|c| c.is_fully_runnable())
+        .map(|c| c.codec)
+        .collect()
 }
 
 fn estimate_max_simulcast_layers(
@@ -536,5 +631,83 @@ mod tests {
     fn profile_1440_not_advertised_when_empty() {
         let map = HashMap::new();
         assert!(!estimate_encode_headroom_1440p60(&map));
+    }
+
+    // ── Capability-layer tests ──────────────────────────────────────────
+
+    #[test]
+    fn codec_capability_fully_runnable_requires_both_encode_and_decode() {
+        let enc = HashMap::from([(
+            pb::VideoCodec::Vp9,
+            vec![EncodeBackendKind::Libvpx],
+        )]);
+        let dec = HashMap::from([(
+            pb::VideoCodec::Vp9,
+            vec![DecodeBackendKind::Libvpx],
+        )]);
+        let caps = build_codec_capabilities(&enc, &dec);
+        assert_eq!(caps.len(), 1);
+        assert!(caps[0].is_fully_runnable());
+        assert_eq!(caps[0].encode_level, CapabilityLevel::Initialized);
+        assert_eq!(caps[0].decode_level, CapabilityLevel::Initialized);
+    }
+
+    #[test]
+    fn codec_capability_encode_only_is_not_runnable() {
+        let enc = HashMap::from([(
+            pb::VideoCodec::Av1,
+            vec![EncodeBackendKind::SvtAv1],
+        )]);
+        let dec = HashMap::new();
+        let caps = build_codec_capabilities(&enc, &dec);
+        assert_eq!(caps.len(), 1);
+        assert!(!caps[0].is_fully_runnable());
+        assert_eq!(caps[0].encode_level, CapabilityLevel::Initialized);
+        assert_eq!(caps[0].decode_level, CapabilityLevel::Compiled);
+    }
+
+    #[test]
+    fn codec_capability_decode_only_is_not_runnable() {
+        let enc = HashMap::new();
+        let dec = HashMap::from([(
+            pb::VideoCodec::Vp9,
+            vec![DecodeBackendKind::Libvpx],
+        )]);
+        let caps = build_codec_capabilities(&enc, &dec);
+        assert_eq!(caps.len(), 1);
+        assert!(!caps[0].is_fully_runnable());
+    }
+
+    #[test]
+    fn runnable_codecs_filters_correctly() {
+        let enc = HashMap::from([
+            (pb::VideoCodec::Vp9, vec![EncodeBackendKind::Libvpx]),
+            (pb::VideoCodec::Av1, vec![EncodeBackendKind::SvtAv1]),
+        ]);
+        // Only VP9 has decode backends.
+        let dec = HashMap::from([(
+            pb::VideoCodec::Vp9,
+            vec![DecodeBackendKind::Libvpx],
+        )]);
+        let caps = build_codec_capabilities(&enc, &dec);
+        let media = MediaRuntimeCaps {
+            capture_backends: vec![],
+            encode_backends: enc,
+            decode_backends: dec,
+            audio_backends: vec![],
+            supports_system_audio: false,
+            max_simulcast_layers: 1,
+            preferred_codec: pb::VideoCodec::Vp9,
+            supports_1440p60: false,
+            codec_capabilities: caps,
+        };
+        let runnable = runnable_codecs(&media);
+        assert_eq!(runnable, vec![pb::VideoCodec::Vp9]);
+    }
+
+    #[test]
+    fn empty_backends_produce_no_capabilities() {
+        let caps = build_codec_capabilities(&HashMap::new(), &HashMap::new());
+        assert!(caps.is_empty());
     }
 }

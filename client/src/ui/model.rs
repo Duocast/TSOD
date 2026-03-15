@@ -782,6 +782,9 @@ pub struct AppSettings {
     pub screen_share_max_bitrate_kbps: u32,
     #[serde(default = "default_screen_share_sender_policy")]
     pub screen_share_sender_policy: String,
+    /// Deprecated: codec selection is driven by `screen_share_sender_policy`.
+    /// Kept for backwards-compatible deserialization of saved settings files.
+    #[serde(default)]
     pub screen_share_codec: String,
     pub screen_share_profile: String,
     pub screen_share_capture_audio: bool,
@@ -881,11 +884,7 @@ impl Default for AppSettings {
             screen_share_fps: 30,
             screen_share_max_bitrate_kbps: 3000,
             screen_share_sender_policy: default_screen_share_sender_policy(),
-            screen_share_codec: crate::net::dispatcher::available_screen_share_codecs()
-                .first()
-                .copied()
-                .unwrap_or("VP9")
-                .to_string(),
+            screen_share_codec: String::new(), // deprecated, unused
             screen_share_profile: "1080p60".into(),
             screen_share_capture_audio: true,
 
