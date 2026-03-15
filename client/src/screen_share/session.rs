@@ -964,6 +964,9 @@ pub async fn start_local_share(params: StartLocalShareParams) {
     // Single task that reads from the capture queue, builds a ScaledFrameSet
     // (scaling each distinct resolution once), and pushes Arc<ScaledFrameSet>
     // into every encoder's queue.
+    //
+    // Also produces local preview frames for the sender's own stream view,
+    // since the server does not echo video datagrams back to the sender.
     let scale_capture_q = capture_queue.clone();
     let scale_stop = stop_flag.clone();
     let scale_counters = params.counters.clone();
@@ -986,7 +989,11 @@ pub async fn start_local_share(params: StartLocalShareParams) {
     };
     let _ = num_distinct; // used for logging only
 
+    let preview_tx = params.tx_event.clone();
+    let preview_stream_tag = params.streams.first().map(|s| s.stream_tag).unwrap_or(0);
     let scale_fanout_task = tokio::spawn(async move {
+        let mut frame_seq = 0_u32;
+        let mut last_preview = Instant::now() - Duration::from_millis(100);
         while !scale_stop.load(Ordering::Relaxed) {
             let Some(frame) = scale_capture_q.pop_latest_or_wait().await else {
                 break;
@@ -997,6 +1004,43 @@ pub async fn start_local_share(params: StartLocalShareParams) {
                 .store(0, Ordering::Relaxed);
             for q in &fanout_queues {
                 q.push(Arc::clone(&scaled_set));
+            }
+
+            // Send a local preview frame at ~15 fps to avoid UI overhead.
+            let now = Instant::now();
+            if now.duration_since(last_preview) >= Duration::from_millis(66) {
+                last_preview = now;
+                let orig = &scaled_set.original;
+                if let FramePlanes::Bgra { ref bytes, stride } = orig.planes {
+                    let w = orig.width as usize;
+                    let h = orig.height as usize;
+                    let stride = stride as usize;
+                    let mut rgba = Vec::with_capacity(w * h * 4);
+                    for row in 0..h {
+                        let row_start = row * stride;
+                        let row_end = row_start + w * 4;
+                        if row_end <= bytes.len() {
+                            for pixel in bytes[row_start..row_end].chunks_exact(4) {
+                                // BGRA -> RGBA
+                                rgba.push(pixel[2]);
+                                rgba.push(pixel[1]);
+                                rgba.push(pixel[0]);
+                                rgba.push(pixel[3]);
+                            }
+                        }
+                    }
+                    let _ = preview_tx.send(UiEvent::StreamFrame(
+                        crate::ui::model::StreamFrameView {
+                            stream_tag: preview_stream_tag,
+                            frame_seq,
+                            ts_ms: orig.ts_ms,
+                            width: w,
+                            height: h,
+                            rgba,
+                        },
+                    ));
+                    frame_seq = frame_seq.wrapping_add(1);
+                }
             }
         }
         // Close all downstream encode queues.
