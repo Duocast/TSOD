@@ -1,25 +1,39 @@
 use anyhow::{anyhow, bail, Result};
+use tracing::warn;
 
 use crate::media_codec::{DecodeMetadata, DecodedVideoFrame, VideoDecoder, VideoSessionConfig};
 use crate::net::video_frame::EncodedAccessUnit;
 use crate::net::vpx_codec::{self, LibvpxDecoder};
 use crate::screen_share::runtime_probe::DecodeBackendKind;
 
+#[cfg(target_os = "linux")]
+mod vaapi_vp9_dec;
+
 /// Build a real VP9 decoder for the first usable backend in `backends`.
 ///
 /// Backend selection:
-/// - `Libvpx`  → software VP9 via libvpx (supported)
-/// - `MfHwVp9` → Windows Media Foundation hardware VP9 (not yet implemented; skipped)
-/// - `VaapiVp9`→ Linux VAAPI hardware VP9 (not yet implemented; skipped)
+/// - `Libvpx`   → software VP9 via libvpx (supported everywhere)
+/// - `VaapiVp9` → Linux VAAPI hardware VP9 (supported when VA-API driver
+///                 exposes a VP9 decode entrypoint)
+/// - `MfHwVp9`  → Windows Media Foundation hardware VP9 (not yet implemented)
 pub fn build_vp9_decoder(backends: &[DecodeBackendKind]) -> Result<Box<dyn VideoDecoder>> {
     for backend in backends {
         match backend {
             DecodeBackendKind::Libvpx => {
                 return Ok(Box::new(Vp9RealtimeDecoder::new()?));
             }
-            DecodeBackendKind::MfHwVp9 | DecodeBackendKind::VaapiVp9 => {
-                // Hardware VP9 not yet implemented; skip so runtime probe doesn't
-                // advertise them.
+            #[cfg(target_os = "linux")]
+            DecodeBackendKind::VaapiVp9 => {
+                match vaapi_vp9_dec::VaapiVp9Decoder::open() {
+                    Ok(dec) => return Ok(Box::new(dec)),
+                    Err(err) => {
+                        warn!(error = %err, "[vp9] VAAPI VP9 decoder init failed, skipping");
+                        continue;
+                    }
+                }
+            }
+            DecodeBackendKind::MfHwVp9 => {
+                // Windows MF hardware VP9 not yet implemented.
                 continue;
             }
             _ => continue,
@@ -127,7 +141,14 @@ impl VideoDecoder for Vp9RealtimeDecoder {
 pub(crate) fn can_initialize_backend(backend: DecodeBackendKind) -> bool {
     match backend {
         DecodeBackendKind::Libvpx => vpx_codec::probe_decoder(),
-        DecodeBackendKind::MfHwVp9 | DecodeBackendKind::VaapiVp9 => false,
+        #[cfg(target_os = "linux")]
+        DecodeBackendKind::VaapiVp9 => {
+            crate::screen_share::runtime_probe::vaapi::probe_vaapi_vp9().decode_available
+        }
+        #[cfg(not(target_os = "linux"))]
+        DecodeBackendKind::VaapiVp9 => false,
+        // Windows MF hardware VP9 not yet implemented.
+        DecodeBackendKind::MfHwVp9 => false,
         _ => false,
     }
 }

@@ -1,4 +1,5 @@
 pub mod nvidia;
+pub mod vaapi;
 
 use crate::net::{
     video_decode::{av1 as av1_decode, vp9 as vp9_decode},
@@ -136,24 +137,26 @@ fn estimate_max_simulcast_layers(
     }
 }
 
+/// Conservative 1440p60 gating.
+///
+/// 1440p60 is **only** advertised when a verified hardware encoder backend is
+/// present in the *already-verified* `encode_backends` map.  By the time this
+/// function is called, every backend in the map has passed its
+/// `can_initialize_backend` probe — so this is no longer optimistic inference.
+///
+/// The CPU-core heuristic (≥ 12 cores → true) is intentionally removed:
+/// software encoders (libvpx, SVT-AV1) cannot reliably sustain 1440p60 on
+/// commodity hardware without frame drops, so advertising the capability
+/// without a hardware backend leads to a degraded experience.
 fn estimate_encode_headroom_1440p60(
     encode_backends: &HashMap<pb::VideoCodec, Vec<EncodeBackendKind>>,
 ) -> bool {
-    let cpu = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4);
-
     let has_hw_av1 = encode_backends
         .get(&pb::VideoCodec::Av1)
         .map(|backends| {
-            backends.iter().any(|backend| {
-                matches!(
-                    backend,
-                    EncodeBackendKind::NvencAv1
-                        | EncodeBackendKind::MfHwVp9
-                        | EncodeBackendKind::VaapiVp9
-                )
-            })
+            backends
+                .iter()
+                .any(|backend| matches!(backend, EncodeBackendKind::NvencAv1))
         })
         .unwrap_or(false);
 
@@ -169,7 +172,8 @@ fn estimate_encode_headroom_1440p60(
         })
         .unwrap_or(false);
 
-    has_hw_av1 || has_hw_vp9 || cpu >= 12
+    // Only advertise 1440p60 when a real, verified hardware encoder is present.
+    has_hw_av1 || has_hw_vp9
 }
 
 fn preferred_capture_backends(_source: &crate::ShareSource) -> Vec<CaptureBackendKind> {
@@ -482,9 +486,55 @@ mod tests {
     }
 
     #[test]
-    fn profile_1440_hidden_when_runtime_headroom_insufficient() {
+    fn profile_1440_hidden_when_software_only() {
         let mut map = HashMap::new();
         map.insert(pb::VideoCodec::Vp9, vec![EncodeBackendKind::Libvpx]);
+        assert!(!estimate_encode_headroom_1440p60(&map));
+    }
+
+    #[test]
+    fn profile_1440_hidden_when_svt_av1_only() {
+        let mut map = HashMap::new();
+        map.insert(pb::VideoCodec::Av1, vec![EncodeBackendKind::SvtAv1]);
+        assert!(
+            !estimate_encode_headroom_1440p60(&map),
+            "software AV1 must not enable 1440p60"
+        );
+    }
+
+    #[test]
+    fn profile_1440_advertised_with_nvenc_av1() {
+        let mut map = HashMap::new();
+        map.insert(pb::VideoCodec::Av1, vec![EncodeBackendKind::NvencAv1]);
+        assert!(
+            estimate_encode_headroom_1440p60(&map),
+            "NVENC AV1 should enable 1440p60"
+        );
+    }
+
+    #[test]
+    fn profile_1440_advertised_with_vaapi_vp9() {
+        let mut map = HashMap::new();
+        map.insert(pb::VideoCodec::Vp9, vec![EncodeBackendKind::VaapiVp9]);
+        assert!(
+            estimate_encode_headroom_1440p60(&map),
+            "VAAPI VP9 should enable 1440p60"
+        );
+    }
+
+    #[test]
+    fn profile_1440_advertised_with_mf_hw_vp9() {
+        let mut map = HashMap::new();
+        map.insert(pb::VideoCodec::Vp9, vec![EncodeBackendKind::MfHwVp9]);
+        assert!(
+            estimate_encode_headroom_1440p60(&map),
+            "MF HW VP9 should enable 1440p60"
+        );
+    }
+
+    #[test]
+    fn profile_1440_not_advertised_when_empty() {
+        let map = HashMap::new();
         assert!(!estimate_encode_headroom_1440p60(&map));
     }
 }
