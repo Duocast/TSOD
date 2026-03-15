@@ -10,11 +10,11 @@ use crate::media_codec::{VideoEncoder, VideoSessionConfig};
 use crate::net::video_frame::{EncodedAccessUnit, FramePlanes, PixelFormat, VideoFrame};
 use crate::proto::voiceplatform::v1 as pb;
 
-pub fn build_svt_encoder() -> Result<Box<dyn VideoEncoder>> {
-    Ok(Box::new(SvtAv1RealtimeEncoder::new()))
+pub fn build_rav1e_encoder() -> Result<Box<dyn VideoEncoder>> {
+    Ok(Box::new(Rav1eAv1RealtimeEncoder::new()))
 }
 
-pub struct SvtAv1RealtimeEncoder {
+pub struct Rav1eAv1RealtimeEncoder {
     frame_seq: u32,
     force_next_keyframe: bool,
     config: VideoSessionConfig,
@@ -22,7 +22,7 @@ pub struct SvtAv1RealtimeEncoder {
     software: Option<SoftwareAv1Encoder>,
 }
 
-impl SvtAv1RealtimeEncoder {
+impl Rav1eAv1RealtimeEncoder {
     fn new() -> Self {
         Self {
             frame_seq: 0,
@@ -63,7 +63,7 @@ impl SvtAv1RealtimeEncoder {
     }
 }
 
-impl VideoEncoder for SvtAv1RealtimeEncoder {
+impl VideoEncoder for Rav1eAv1RealtimeEncoder {
     fn configure_session(&mut self, config: VideoSessionConfig) -> Result<()> {
         self.config = config;
         self.active_signature = None;
@@ -110,7 +110,7 @@ impl VideoEncoder for SvtAv1RealtimeEncoder {
     }
 
     fn backend_name(&self) -> &'static str {
-        "av1-svt"
+        "av1-rav1e"
     }
 }
 

@@ -1842,7 +1842,7 @@ fn page_screen_share(ui: &mut egui::Ui, s: &mut AppSettings) -> bool {
             "auto_low_latency: VP9(hw) -> VP9(sw)"
         }
         crate::screen_share::config::SenderPolicy::AutoPremiumAv1 => {
-            "auto_premium_av1: AV1(auto: NVENC -> SVT) -> VP9(hw) -> VP9(sw)"
+            "auto_premium_av1: AV1(auto: NVENC -> rav1e) -> VP9(hw) -> VP9(sw)"
         }
     };
     ui.label(

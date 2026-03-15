@@ -65,7 +65,7 @@ pub enum EncodeBackendKind {
     MfHwVp9,
     Libvpx,
     NvencAv1,
-    SvtAv1,
+    Rav1eAv1,
     VaapiVp9,
 }
 
@@ -270,7 +270,7 @@ fn estimate_max_simulcast_layers(
 /// `can_initialize_backend` probe — so this is no longer optimistic inference.
 ///
 /// The CPU-core heuristic (≥ 12 cores → true) is intentionally removed:
-/// software encoders (libvpx, SVT-AV1) cannot reliably sustain 1440p60 on
+/// software encoders (libvpx, rav1e) cannot reliably sustain 1440p60 on
 /// commodity hardware without frame drops, so advertising the capability
 /// without a hardware backend leads to a degraded experience.
 fn estimate_encode_headroom_1440p60(
@@ -388,7 +388,7 @@ fn av1_encode_backends(hw_disabled: bool) -> Vec<EncodeBackendKind> {
     if !hw_disabled {
         av1.push(EncodeBackendKind::NvencAv1);
     }
-    av1.push(EncodeBackendKind::SvtAv1);
+    av1.push(EncodeBackendKind::Rav1eAv1);
     av1
 }
 
@@ -413,7 +413,7 @@ fn can_init_encode_backend(codec: pb::VideoCodec, backend: EncodeBackendKind) ->
             pb::VideoCodec::Vp9,
             EncodeBackendKind::MfHwVp9 | EncodeBackendKind::VaapiVp9 | EncodeBackendKind::Libvpx,
         ) => vp9_encode::can_initialize_backend(backend),
-        (pb::VideoCodec::Av1, EncodeBackendKind::NvencAv1 | EncodeBackendKind::SvtAv1) => {
+        (pb::VideoCodec::Av1, EncodeBackendKind::NvencAv1 | EncodeBackendKind::Rav1eAv1) => {
             av1_encode::can_initialize_backend(backend)
         }
         _ => false,
@@ -542,8 +542,8 @@ fn apply_encoder_override(
         "vp9-svt" => {
             backends.insert(pb::VideoCodec::Vp9, vec![EncodeBackendKind::MfHwVp9]);
         }
-        "av1-svt" => {
-            backends.insert(pb::VideoCodec::Av1, vec![EncodeBackendKind::SvtAv1]);
+        "av1-rav1e" => {
+            backends.insert(pb::VideoCodec::Av1, vec![EncodeBackendKind::Rav1eAv1]);
         }
         "av1-nvenc" => {
             backends.insert(pb::VideoCodec::Av1, vec![EncodeBackendKind::NvencAv1]);
@@ -594,12 +594,12 @@ mod tests {
     }
 
     #[test]
-    fn explicit_svt_selection_software_only() {
+    fn explicit_rav1e_selection_software_only() {
         let mut map = HashMap::new();
-        apply_encoder_override("av1-svt", &mut map);
+        apply_encoder_override("av1-rav1e", &mut map);
         assert_eq!(
             map.get(&pb::VideoCodec::Av1),
-            Some(&vec![EncodeBackendKind::SvtAv1])
+            Some(&vec![EncodeBackendKind::Rav1eAv1])
         );
     }
 
@@ -611,9 +611,9 @@ mod tests {
     }
 
     #[test]
-    fn profile_1440_hidden_when_svt_av1_only() {
+    fn profile_1440_hidden_when_rav1e_av1_only() {
         let mut map = HashMap::new();
-        map.insert(pb::VideoCodec::Av1, vec![EncodeBackendKind::SvtAv1]);
+        map.insert(pb::VideoCodec::Av1, vec![EncodeBackendKind::Rav1eAv1]);
         assert!(
             !estimate_encode_headroom_1440p60(&map),
             "software AV1 must not enable 1440p60"
@@ -671,7 +671,7 @@ mod tests {
 
     #[test]
     fn codec_capability_encode_only_is_not_runnable() {
-        let enc = HashMap::from([(pb::VideoCodec::Av1, vec![EncodeBackendKind::SvtAv1])]);
+        let enc = HashMap::from([(pb::VideoCodec::Av1, vec![EncodeBackendKind::Rav1eAv1])]);
         let dec = HashMap::new();
         let caps = build_codec_capabilities(&enc, &dec);
         assert_eq!(caps.len(), 1);
@@ -693,7 +693,7 @@ mod tests {
     fn runnable_codecs_filters_correctly() {
         let enc = HashMap::from([
             (pb::VideoCodec::Vp9, vec![EncodeBackendKind::Libvpx]),
-            (pb::VideoCodec::Av1, vec![EncodeBackendKind::SvtAv1]),
+            (pb::VideoCodec::Av1, vec![EncodeBackendKind::Rav1eAv1]),
         ]);
         // Only VP9 has decode backends.
         let dec = HashMap::from([(pb::VideoCodec::Vp9, vec![DecodeBackendKind::Libvpx])]);
@@ -805,5 +805,4 @@ mod tests {
             .unwrap_or_default();
         assert_eq!(backends, vec![DecodeBackendKind::Dav1d]);
     }
-
 }

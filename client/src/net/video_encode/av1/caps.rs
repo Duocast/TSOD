@@ -4,7 +4,7 @@ use crate::screen_share::runtime_probe::nvidia;
 pub struct Av1RuntimeCaps {
     pub nvenc_available: bool,
     pub nvenc_reason: Option<String>,
-    pub svt_available: bool,
+    pub rav1e_available: bool,
 }
 
 pub fn probe_av1_caps() -> Av1RuntimeCaps {
@@ -12,6 +12,6 @@ pub fn probe_av1_caps() -> Av1RuntimeCaps {
     Av1RuntimeCaps {
         nvenc_available: nv.available,
         nvenc_reason: nv.reason,
-        svt_available: cfg!(feature = "video-av1-software"),
+        rav1e_available: cfg!(feature = "video-av1-software"),
     }
 }

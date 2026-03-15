@@ -109,10 +109,10 @@ fn synthetic_frame(ts_ms: u32) -> VideoFrame {
     for y in 0..BENCH_HEIGHT {
         for x in 0..BENCH_WIDTH {
             let idx = ((y * stride) + x * 4) as usize;
-            pixels[idx] = (x & 0xFF) as u8;         // B
-            pixels[idx + 1] = (y & 0xFF) as u8;     // G
-            pixels[idx + 2] = 128;                    // R
-            pixels[idx + 3] = 255;                    // A
+            pixels[idx] = (x & 0xFF) as u8; // B
+            pixels[idx + 1] = (y & 0xFF) as u8; // G
+            pixels[idx + 2] = 128; // R
+            pixels[idx + 3] = 255; // A
         }
     }
     VideoFrame {
@@ -151,7 +151,7 @@ pub fn run_preflight_benchmark(backends: &[EncodeBackendKind]) -> PreflightResul
     let av1_backends: Vec<EncodeBackendKind> = backends
         .iter()
         .copied()
-        .filter(|b| matches!(b, EncodeBackendKind::NvencAv1 | EncodeBackendKind::SvtAv1))
+        .filter(|b| matches!(b, EncodeBackendKind::NvencAv1 | EncodeBackendKind::Rav1eAv1))
         .collect();
 
     // Try AV1 HW first (typically fastest), then VP9 HW.
