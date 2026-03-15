@@ -4898,6 +4898,28 @@ async fn connect_and_run_session(
                             {
                                 Ok(()) => {
                                     let _ = tx_event.send(UiEvent::CustomStatusSet);
+                                    // Re-fetch self profile so the user panel
+                                    // reflects the updated custom status immediately.
+                                    if let Ok(mut profile) =
+                                        dispatcher.fetch_self_profile(&local_user_id).await
+                                    {
+                                        if let Some(raw) = profile.avatar_url.as_deref() {
+                                            if let Ok(resolved) =
+                                                resolve_profile_asset_uri(&conn, raw).await
+                                            {
+                                                profile.avatar_url = resolved;
+                                            }
+                                        }
+                                        if let Some(raw) = profile.banner_url.as_deref() {
+                                            if let Ok(resolved) =
+                                                resolve_profile_asset_uri(&conn, raw).await
+                                            {
+                                                profile.banner_url = resolved;
+                                            }
+                                        }
+                                        let _ =
+                                            tx_event.send(UiEvent::SelfProfileLoaded(profile));
+                                    }
                                 }
                                 Err(e) => {
                                     let _ = tx_event

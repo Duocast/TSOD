@@ -2924,6 +2924,14 @@ impl UiModel {
                         member.away_message = away_message.clone();
                     }
                 }
+                // Keep self_profile in sync so build_status_text() reflects
+                // changes made by the current user (received back via outbox).
+                if user_id == self.user_id {
+                    if let Some(ref mut p) = self.self_profile {
+                        p.custom_status_text = away_message.clone();
+                    }
+                    self.away_message = away_message;
+                }
             }
             UiEvent::MemberVoiceStateUpdated {
                 channel_id,
@@ -3110,6 +3118,12 @@ impl UiModel {
             }
             UiEvent::CustomStatusSet => {
                 self.show_custom_status_popover = false;
+                self.custom_status_text_draft.clear();
+                self.custom_status_emoji_draft.clear();
+                // Invalidate cached profile so popup refreshes.
+                if !self.user_id.is_empty() {
+                    self.profile_cache.remove(&self.user_id);
+                }
             }
             UiEvent::CustomStatusFailed(err) => {
                 self.log
