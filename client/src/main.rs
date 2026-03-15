@@ -1152,6 +1152,7 @@ async fn app_task(
     ));
 
     let mut backoff = Backoff::new(Duration::from_millis(250), Duration::from_secs(10));
+    let mut pending_away_message: Option<String> = None;
 
     while running.load(Ordering::Relaxed) && !*shutdown_rx.borrow() {
         match connect_and_run_session(
@@ -1187,6 +1188,7 @@ async fn app_task(
             frame_ms,
             &mut shutdown_rx,
             &mut saved_settings,
+            &mut pending_away_message,
         )
         .await
         {
@@ -1559,6 +1561,7 @@ async fn app_task(
                             UiIntent::StopScreenShare => {}
                             UiIntent::SetAwayMessage { message } => {
                                 let _ = tx_event.send(UiEvent::SetAwayMessage(message.clone()));
+                                pending_away_message = Some(message.clone());
                                 let text = if message.trim().is_empty() {
                                     "[presence] away message cleared".to_string()
                                 } else {
@@ -2043,6 +2046,7 @@ async fn connect_and_run_session(
     frame_ms: u32,
     shutdown_rx: &mut watch::Receiver<bool>,
     saved_settings: &mut ui::model::AppSettings,
+    pending_away_message: &mut Option<String>,
 ) -> Result<()> {
     let _ = tx_event.send(UiEvent::SetConnected(false));
     let _ = tx_event.send(UiEvent::SetAuthed(false));
@@ -2216,6 +2220,22 @@ async fn connect_and_run_session(
             let _ = tx_event.send(UiEvent::AppendLog(format!(
                 "[profile] fetch self profile failed: {e:#}"
             )));
+        }
+    }
+
+    // Re-send any away message that was set while disconnected.
+    if let Some(message) = pending_away_message.take() {
+        match dispatcher.set_away_message(&message).await {
+            Ok(()) => {
+                let _ = tx_event.send(UiEvent::AppendLog(format!(
+                    "[presence] re-sent pending away message on reconnect: {message}"
+                )));
+            }
+            Err(e) => {
+                let _ = tx_event.send(UiEvent::AppendLog(format!(
+                    "[presence] failed to re-send pending away message: {e:#}"
+                )));
+            }
         }
     }
 
@@ -2768,6 +2788,7 @@ async fn connect_and_run_session(
                             snapshot.channel_members.len(),
                             snapshot.self_user_id.as_ref().map(|u| u.value.clone()).unwrap_or_default(),
                         )));
+                        apply_authoritative_snapshot(&snapshot, &tx_event, None);
                     }
                     PushEvent::Permissions { event, event_seq } => {
                         maybe_note_event_gap(&tx_event, event_seq);
