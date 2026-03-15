@@ -7,7 +7,7 @@ use crate::screen_share::runtime_probe::EncodeBackendKind;
 
 pub mod caps;
 mod nvenc;
-mod svt;
+mod rav1e;
 
 pub fn build_av1_encoder(
     backends: &[EncodeBackendKind],
@@ -15,7 +15,7 @@ pub fn build_av1_encoder(
 ) -> Result<Box<dyn VideoEncoder>> {
     let explicit = env_video_encoder_override().and_then(|value| match value.as_str() {
         "av1-nvenc" => Some(EncodeBackendKind::NvencAv1),
-        "av1-svt" => Some(EncodeBackendKind::SvtAv1),
+        "av1-rav1e" => Some(EncodeBackendKind::Rav1eAv1),
         _ => None,
     });
 
@@ -34,7 +34,7 @@ pub fn build_av1_encoder(
     }
 
     if matches!(policy, SenderPolicy::AutoLowLatency) {
-        bail!("interactive AV1 encode requires NVENC AV1 or SVT-AV1 backend")
+        bail!("interactive AV1 encode requires NVENC AV1 or rav1e backend")
     }
 
     Err(anyhow!("no AV1 encoder backend available"))
@@ -43,8 +43,8 @@ pub fn build_av1_encoder(
 fn build_backend(backend: EncodeBackendKind) -> Result<Box<dyn VideoEncoder>> {
     match backend {
         EncodeBackendKind::NvencAv1 => nvenc::build_nvenc_encoder(),
-        EncodeBackendKind::SvtAv1 if cfg!(feature = "video-av1-software") => {
-            svt::build_svt_encoder()
+        EncodeBackendKind::Rav1eAv1 if cfg!(feature = "video-av1-software") => {
+            rav1e::build_rav1e_encoder()
         }
         _ => bail!("unsupported AV1 backend {backend:?}"),
     }
