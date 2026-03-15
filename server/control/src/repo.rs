@@ -1639,6 +1639,7 @@ impl ControlRepo for PgControlRepo {
                 COALESCE($8, '[]'::jsonb),
                 NOW(), NOW())
             ON CONFLICT (user_id) DO UPDATE SET
+                server_id          = $2,
                 display_name       = CASE WHEN $3 IS NOT NULL THEN $3 ELSE user_profiles.display_name END,
                 description        = CASE WHEN $4 IS NOT NULL THEN $4 ELSE user_profiles.description END,
                 accent_color       = CASE WHEN $5 IS NOT NULL THEN $5 ELSE user_profiles.accent_color END,
@@ -1719,6 +1720,7 @@ impl ControlRepo for PgControlRepo {
             INSERT INTO user_profiles (user_id, server_id, avatar_asset_url, created_at, updated_at)
             VALUES ($1, $2, $3, NOW(), NOW())
             ON CONFLICT (user_id) DO UPDATE SET
+                server_id = $2,
                 avatar_asset_url = $3,
                 updated_at = NOW()
             "#,
@@ -1744,6 +1746,7 @@ impl ControlRepo for PgControlRepo {
             INSERT INTO user_profiles (user_id, server_id, banner_asset_url, created_at, updated_at)
             VALUES ($1, $2, $3, NOW(), NOW())
             ON CONFLICT (user_id) DO UPDATE SET
+                server_id = $2,
                 banner_asset_url = $3,
                 updated_at = NOW()
             "#,
