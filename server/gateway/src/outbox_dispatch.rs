@@ -124,6 +124,12 @@ fn translate_record(rec: &OutboxEventRow) -> Result<(ChannelId, pb::ServerToClie
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string();
+            let away_message = rec
+                .payload_json
+                .get("away_message")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
 
             let ev = pb::PresenceEvent {
                 at: Some(now_ts()),
@@ -138,6 +144,7 @@ fn translate_record(rec: &OutboxEventRow) -> Result<(ChannelId, pb::ServerToClie
                         display_name,
                         muted: false,
                         deafened: false,
+                        away_message,
                         ..Default::default()
                     }),
                 })),
@@ -935,7 +942,40 @@ mod tests {
             other => panic!("unexpected payload: {:?}", other),
         }
     }
+    
+    #[test]
+    fn translate_presence_member_joined_includes_away_message() {
+        let channel_id = uuid::Uuid::new_v4();
+        let user_id = uuid::Uuid::new_v4();
+        let rec = OutboxEventRow {
+            id: OutboxId(uuid::Uuid::new_v4()),
+            server_id: ServerId(uuid::Uuid::new_v4()),
+            topic: "presence.member_joined".to_string(),
+            payload_json: json!({
+                "channel_id": channel_id,
+                "user_id": user_id,
+                "display_name": "alice",
+                "away_message": "Out to lunch"
+            }),
+        };
 
+        let (parsed_channel, push) =
+            translate_record(&rec).expect("presence.member_joined should be supported");
+        assert_eq!(parsed_channel.0, channel_id);
+        match push.payload {
+            Some(pb::server_to_client::Payload::PresenceEvent(ev)) => match ev.kind {
+                Some(pb::presence_event::Kind::MemberJoined(joined)) => {
+                    let member = joined.member.expect("member");
+                    assert_eq!(member.user_id.expect("user id").value, user_id.to_string());
+                    assert_eq!(member.display_name, "alice");
+                    assert_eq!(member.away_message, "Out to lunch");
+                }
+                other => panic!("unexpected presence event: {:?}", other),
+            },
+            other => panic!("unexpected payload: {:?}", other),
+        }
+    }
+    
     #[test]
     fn member_join_left_side_effects_update_channel_members() {
         let membership = MembershipCache::new();
