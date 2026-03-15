@@ -3291,8 +3291,7 @@ async fn connect_and_run_session(
             }
         }
     });
-    let mut active_share_stop: Option<watch::Sender<bool>> = None;
-    let mut active_share_task: Option<tokio::task::JoinHandle<()>> = None;
+    let mut active_share_handle: Option<screen_share::session::LocalShareHandle> = None;
     let mut active_local_stream_id: Option<pb::StreamId> = None;
     let mut share_state = screen_share::fsm::ShareState::Idle;
     let mut selected_share_codec = "unknown".to_string();
@@ -3521,6 +3520,88 @@ async fn connect_and_run_session(
                 active_share_session
                     .active_layer_id
                     .store(decision.preferred_layer_id as u8, Ordering::Relaxed);
+            }
+            worker_event = async {
+                match active_share_handle.as_mut() {
+                    Some(h) => h.event_rx.recv().await,
+                    None => std::future::pending::<Option<screen_share::session::ShareWorkerEvent>>().await,
+                }
+            } => {
+                use screen_share::session::ShareWorkerEvent;
+                match worker_event {
+                    Some(ShareWorkerEvent::Started { active_layer_count }) => {
+                        let _ = tx_event.send(UiEvent::AppendLog(format!(
+                            "[video] share pipeline started ({active_layer_count} layer(s))"
+                        )));
+                    }
+                    Some(ShareWorkerEvent::Degraded { remaining_layers, reason }) => {
+                        warn!("[video] share pipeline degraded: {reason} ({remaining_layers} layer(s) remaining)");
+                        let _ = tx_event.send(UiEvent::AppendLog(format!(
+                            "[video] share pipeline degraded: {reason}"
+                        )));
+                    }
+                    Some(ShareWorkerEvent::Stopped) => {
+                        active_share_handle.take();
+                        share_state = screen_share::fsm::ShareState::Idle;
+                    }
+                    Some(ShareWorkerEvent::Fatal(reason)) => {
+                        warn!("[video] share pipeline fatal: {reason}");
+                        let _ = tx_event.send(UiEvent::AppendLog(format!(
+                            "[video] share pipeline stopped unexpectedly: {reason}"
+                        )));
+                        if let Some(stream_id) = active_local_stream_id.take() {
+                            let req = pb::StopScreenShareRequest {
+                                stream_id: Some(stream_id.clone()),
+                            };
+                            let _ = dispatcher
+                                .send_request(
+                                    pb::client_to_server::Payload::StopScreenShareRequest(req),
+                                    Duration::from_secs(5),
+                                )
+                                .await;
+                        }
+                        {
+                            let mut stream_tags = active_share_session.stream_tags.lock().await;
+                            stream_tags.clear();
+                        }
+                        {
+                            let mut stream_id = active_share_session.stream_id.lock().await;
+                            *stream_id = None;
+                        }
+                        active_share_session.clear();
+                        active_share_handle.take();
+                        share_state = screen_share::fsm::ShareState::Idle;
+                    }
+                    None => {
+                        // Worker channel closed without a terminal event — task crashed or was aborted.
+                        warn!("[video] share worker channel closed unexpectedly (task may have crashed)");
+                        let _ = tx_event.send(UiEvent::AppendLog(
+                            "[video] share pipeline crashed (channel closed unexpectedly)".into(),
+                        ));
+                        if let Some(stream_id) = active_local_stream_id.take() {
+                            let req = pb::StopScreenShareRequest {
+                                stream_id: Some(stream_id.clone()),
+                            };
+                            let _ = dispatcher
+                                .send_request(
+                                    pb::client_to_server::Payload::StopScreenShareRequest(req),
+                                    Duration::from_secs(5),
+                                )
+                                .await;
+                        }
+                        {
+                            let mut stream_tags = active_share_session.stream_tags.lock().await;
+                            stream_tags.clear();
+                        }
+                        {
+                            let mut stream_id = active_share_session.stream_id.lock().await;
+                            *stream_id = None;
+                        }
+                        active_share_session.clear();
+                        active_share_handle.take();
+                        share_state = screen_share::fsm::ShareState::Idle;
+                    }
+                }
             }
             _ = audio_health_tick.tick() => {
                 let ping_rtt_ms = disp_health
@@ -4436,7 +4517,10 @@ async fn connect_and_run_session(
                                         )));
                                         share_state = screen_share::fsm::ShareState::Active { stream_id: r.stream_id.as_ref().map(|sid| sid.value.clone()).unwrap_or_default() };
                                         let (share_stop_tx, share_stop_rx) = watch::channel(false);
-                                        active_share_stop = Some(share_stop_tx);
+                                        let (worker_event_tx, worker_event_rx) =
+                                            tokio::sync::mpsc::channel(
+                                                screen_share::session::WORKER_EVENT_CHANNEL_CAP,
+                                            );
 
                                         let runtime_caps = std::sync::Arc::new(probed_caps);
                                         let session_streams = negotiated_streams
@@ -4446,7 +4530,7 @@ async fn connect_and_run_session(
                                                 codec: *codec,
                                             })
                                             .collect::<Vec<_>>();
-                                        active_share_task = Some(tokio::spawn(screen_share::session::start_local_share(
+                                        let join_handle = tokio::spawn(screen_share::session::start_local_share(
                                             screen_share::session::StartLocalShareParams {
                                                 source: source.clone(),
                                                 include_audio,
@@ -4469,8 +4553,16 @@ async fn connect_and_run_session(
                                                 tx_event: tx_event.clone(),
                                                 offered_layers: offered_layers.clone(),
                                                 accepted_layer_ids: r.accepted_layer_ids.clone(),
+                                                worker_event_tx,
                                             },
-                                        )));
+                                        ));
+                                        active_share_handle = Some(
+                                            screen_share::session::LocalShareHandle {
+                                                stop_tx: share_stop_tx,
+                                                join_handle,
+                                                event_rx: worker_event_rx,
+                                            },
+                                        );
                                     } else {
                                         share_state = screen_share::fsm::ShareState::Idle;
                                         let _ = tx_event.send(UiEvent::AppendLog(
@@ -4499,11 +4591,8 @@ async fn connect_and_run_session(
                                 let mut stream_id = active_share_session.stream_id.lock().await;
                                 *stream_id = None;
                             }
-                            if let Some(stop_tx) = active_share_stop.take() {
-                                let _ = stop_tx.send(true);
-                            }
-                            if let Some(task) = active_share_task.take() {
-                                task.abort();
+                            if let Some(handle) = active_share_handle.take() {
+                                handle.cancel();
                             }
                             if let Some(stream_id) = active_local_stream_id.take() {
                                 let req = pb::StopScreenShareRequest { stream_id: Some(stream_id.clone()) };

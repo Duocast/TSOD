@@ -827,6 +827,7 @@ impl VideoReceiver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::net::video_datagram::MAX_VIDEO_PAYLOAD;
 
     fn make_frag(
         stream_tag: u64,
