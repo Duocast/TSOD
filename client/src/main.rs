@@ -4383,7 +4383,10 @@ async fn connect_and_run_session(
                                 .screen_share_max_bitrate_kbps
                                 .saturating_mul(1_000)
                                 .max(600_000);
-                            let allow_1440p60 = probed_caps.supports_1440p60 && net::dispatcher::can_offer_1440p60();
+                            // can_offer_1440p60() now uses preflight benchmark + cache
+                            // instead of requiring a live runtime_headroom_fps measurement,
+                            // breaking the circular dependency on first share.
+                            let allow_1440p60 = net::dispatcher::can_offer_1440p60();
                             let max_layers = probed_caps.max_simulcast_layers.max(1) as usize;
                             let mut offered_layers = vec![
                                 pb::SimulcastLayer {

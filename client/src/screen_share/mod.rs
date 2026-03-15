@@ -5,5 +5,6 @@ pub mod fsm;
 #[cfg(target_os = "linux")]
 pub mod portal;
 pub mod policy;
+pub mod preflight;
 pub mod runtime_probe;
 pub mod session;
