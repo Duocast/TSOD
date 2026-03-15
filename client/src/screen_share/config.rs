@@ -43,7 +43,7 @@ pub fn env_screen_capture_override() -> Option<String> {
     let normalized = value.trim().to_ascii_lowercase();
     matches!(
         normalized.as_str(),
-        "auto" | "dxgi" | "pipewire" | "x11" | "scrap"
+        "auto" | "wgc" | "dxgi" | "pipewire" | "x11" | "scrap"
     )
     .then_some(normalized)
 }

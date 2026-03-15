@@ -51,6 +51,9 @@ impl CodecCapability {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum CaptureBackendKind {
+    /// Windows.Graphics.Capture — preferred for per-HWND capture on Win 10 1903+.
+    /// Falls back to GDI (via Dxgi backend) on older Windows or init failure.
+    Wgc,
     Dxgi,
     PipewirePortal,
     X11,
@@ -105,6 +108,7 @@ pub fn probe_media_caps(source: &crate::ShareSource) -> MediaRuntimeCaps {
 
     if let Some(override_capture) = env_screen_capture_override() {
         capture_backends = match override_capture.as_str() {
+            "wgc" => vec![CaptureBackendKind::Wgc, CaptureBackendKind::Scrap],
             "dxgi" => vec![CaptureBackendKind::Dxgi, CaptureBackendKind::Scrap],
             "pipewire" => vec![
                 CaptureBackendKind::PipewirePortal,
@@ -274,6 +278,16 @@ fn estimate_encode_headroom_1440p60(
 fn preferred_capture_backends(_source: &crate::ShareSource) -> Vec<CaptureBackendKind> {
     #[cfg(target_os = "windows")]
     {
+        // For window capture, prefer WGC (GPU-composited + DRM content) then
+        // fall back to DXGI/GDI.  For display capture, DXGI Desktop Duplication
+        // is still the best backend (real dirty-rect metadata, display-paced).
+        if matches!(_source, crate::ShareSource::WindowsWindow(_)) {
+            return vec![
+                CaptureBackendKind::Wgc,
+                CaptureBackendKind::Dxgi,
+                CaptureBackendKind::Scrap,
+            ];
+        }
         return vec![CaptureBackendKind::Dxgi, CaptureBackendKind::Scrap];
     }
 

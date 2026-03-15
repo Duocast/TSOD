@@ -4,6 +4,7 @@ use crate::media_capture::CaptureBackend;
 use crate::screen_share::runtime_probe::{CaptureBackendKind, MediaRuntimeCaps};
 
 pub mod dxgi;
+pub mod wgc;
 #[cfg(target_os = "linux")]
 pub mod pipewire;
 pub mod scrap_fallback;
@@ -30,6 +31,16 @@ pub fn build_capture_backend(
     let mut errors = Vec::new();
     for backend in &caps.capture_backends {
         let attempt: anyhow::Result<Box<dyn CaptureBackend>> = match backend {
+            CaptureBackendKind::Wgc => {
+                // WGC is only meaningful for WindowsWindow sources.
+                // For display sources, skip to the next backend (DXGI).
+                match source {
+                    crate::ShareSource::WindowsWindow(id) => {
+                        Ok(Box::new(wgc::WgcCapture::from_hwnd_str(id)?))
+                    }
+                    _ => Err(anyhow!("WGC backend only supports window capture")),
+                }
+            }
             CaptureBackendKind::Dxgi => Ok(Box::new(dxgi::DxgiCapture::from_source(source)?)),
             CaptureBackendKind::PipewirePortal => {
                 #[cfg(target_os = "linux")]

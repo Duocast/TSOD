@@ -11,8 +11,9 @@
 //   • Natural frame pacing at the display refresh rate via AcquireNextFrame.
 //   • Multi-monitor support with proper adapter enumeration.
 //
-// GDI window capture is kept for the per-HWND path until Windows.Graphics.
-// Capture (WGC) is added as follow-up work (see TODO at bottom of file).
+// GDI window capture is kept as a fallback for per-HWND capture on pre-1903
+// Windows or when WGC initialisation fails.  The preferred per-HWND backend
+// is now Windows.Graphics.Capture (WGC) — see wgc.rs.
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[cfg(not(target_os = "windows"))]
@@ -695,7 +696,16 @@ mod windows_impl {
 
 // ── Shared helpers (available on all platforms) ───────────────────────────────
 
-fn unix_ms() -> u64 {
+/// Parse "window-hwnd-<isize>" into an HWND.
+///
+/// Exposed as a crate-level helper so the WGC backend can reuse the same
+/// parser without duplicating the logic.
+#[cfg(target_os = "windows")]
+pub(crate) fn parse_hwnd(id: &str) -> anyhow::Result<windows::Win32::Foundation::HWND> {
+    windows_impl::parse_hwnd(id)
+}
+
+pub(crate) fn unix_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -777,11 +787,9 @@ mod tests {
 
 // ── TODOs ─────────────────────────────────────────────────────────────────────
 //
-// TODO(optional): Add Windows.Graphics.Capture (WGC) as a window-capture
-//   backend. WGC captures GPU-composited and DRM-protected content that GDI
-//   misses, and is the recommended API on Windows 10 1903+. It requires
-//   WinRT/async plumbing (windows::Graphics::Capture) and a HWND→GraphicsCaptureItem
-//   interop call. Suggested variant: WindowsCapture::Wgc(WgcCapture).
+// DONE: Windows.Graphics.Capture (WGC) window-capture backend added in wgc.rs.
+//   WGC is now the preferred per-HWND backend on Win 10 1903+; GDI is kept as
+//   fallback for older OS versions or WGC init failure.
 //
 // TODO(optional): Include move-rect destinations in DamageMetadata. Call
 //   IDXGIOutputDuplication::GetFrameMoveRects, add dest RECT of each move to
