@@ -337,6 +337,7 @@ mod wgc_impl {
                     right: self.width,
                     bottom: self.height,
                 }],
+                rotation: super::super::dxgi::FrameRotation::Identity,
             };
 
             Ok((video_frame, damage))

@@ -38,6 +38,16 @@ pub struct DamageMetadata {
     /// Real dirty rects from DXGI for display capture; full-frame for GDI
     /// window capture (GDI has no dirty-region API).
     pub dirty_regions: Vec<DirtyRegion>,
+    /// Rotation reported by the capture backend.
+    pub rotation: FrameRotation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameRotation {
+    Identity,
+    Rotate90,
+    Rotate180,
+    Rotate270,
 }
 
 // ── DxgiCapture (public CaptureBackend implementation) ───────────────────────
@@ -112,7 +122,7 @@ impl CaptureBackend for DxgiCapture {
 
 #[cfg(target_os = "windows")]
 mod windows_impl {
-    use super::{DamageMetadata, DirtyRegion};
+    use super::{DamageMetadata, DirtyRegion, FrameRotation};
     use anyhow::{anyhow, Context};
     use bytes::Bytes;
     use windows::Win32::Foundation::{HMODULE, HWND, RECT};
@@ -120,25 +130,28 @@ mod windows_impl {
     use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN;
     use windows::Win32::Graphics::Direct3D11::{
         D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Resource, ID3D11Texture2D,
-        D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_FLAG, D3D11_MAP_READ,
-        D3D11_MAPPED_SUBRESOURCE, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC,
-        D3D11_USAGE_STAGING,
+        D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_FLAG, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ,
+        D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
     };
     // DXGI
-    use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
+    use windows::Win32::Graphics::Dxgi::Common::{
+        DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_MODE_ROTATION, DXGI_MODE_ROTATION_IDENTITY,
+        DXGI_MODE_ROTATION_ROTATE180, DXGI_MODE_ROTATION_ROTATE270, DXGI_MODE_ROTATION_ROTATE90,
+        DXGI_SAMPLE_DESC,
+    };
     use windows::Win32::Graphics::Dxgi::{
         CreateDXGIFactory1, IDXGIAdapter, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput1,
         IDXGIOutputDuplication, IDXGIResource, DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_WAIT_TIMEOUT,
         DXGI_OUTDUPL_FRAME_INFO,
     };
     // GDI (window-capture fallback)
+    use windows::core::Interface;
     use windows::Win32::Graphics::Gdi::{
         BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits,
-        GetWindowDC, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
-        DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ, SRCCOPY,
+        GetWindowDC, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
+        HBITMAP, HDC, HGDIOBJ, SRCCOPY,
     };
     use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
-    use windows::core::Interface;
 
     use crate::net::video_frame::{FramePlanes, PixelFormat, VideoFrame};
 
@@ -161,8 +174,8 @@ mod windows_impl {
             match source {
                 crate::ShareSource::WindowsDisplay(id) => {
                     let idx = parse_screen_id(id)?;
-                    let dup = DuplicationCapture::new(idx)
-                        .context("DXGI Desktop Duplication init")?;
+                    let dup =
+                        DuplicationCapture::new(idx).context("DXGI Desktop Duplication init")?;
                     Ok(Self::Duplication(dup))
                 }
                 crate::ShareSource::WindowsWindow(id) => {
@@ -206,11 +219,12 @@ mod windows_impl {
         staging: Option<(ID3D11Texture2D, u32, u32)>,
         width: u32,
         height: u32,
+        rotation: FrameRotation,
     }
 
     impl DuplicationCapture {
         pub(super) fn new(monitor_index: usize) -> anyhow::Result<Self> {
-            let (device, context, duplication, width, height) =
+            let (device, context, duplication, width, height, rotation) =
                 create_duplication(monitor_index)?;
             Ok(Self {
                 monitor_index,
@@ -220,6 +234,7 @@ mod windows_impl {
                 staging: None,
                 width,
                 height,
+                rotation,
             })
         }
 
@@ -239,7 +254,7 @@ mod windows_impl {
         }
 
         fn reinit(&mut self) -> anyhow::Result<()> {
-            let (device, context, duplication, width, height) =
+            let (device, context, duplication, width, height, rotation) =
                 create_duplication(self.monitor_index)?;
             self.device = device;
             self.context = context;
@@ -247,6 +262,7 @@ mod windows_impl {
             self.staging = None; // recreated on next frame with new dimensions
             self.width = width;
             self.height = height;
+            self.rotation = rotation;
             Ok(())
         }
 
@@ -273,8 +289,7 @@ mod windows_impl {
             }
 
             // resource is valid; ReleaseFrame must be called before we return.
-            let result =
-                self.copy_frame_and_metadata(&frame_info, resource.as_ref().unwrap());
+            let result = self.copy_frame_and_metadata(&frame_info, resource.as_ref().unwrap());
 
             // Always release, even on copy error.
             unsafe {
@@ -302,24 +317,32 @@ mod windows_impl {
             }
 
             // Collect dirty rects before ReleaseFrame (caller does that).
-            let dirty = self.collect_dirty_rects(info);
+            let dirty = rotate_dirty_regions(
+                &self.collect_dirty_rects(info),
+                self.width,
+                self.height,
+                self.rotation,
+            );
 
             let pixels = self.map_staging_and_copy()?;
+            let (pixels, frame_width, frame_height) =
+                rotate_bgra_frame(&pixels, self.width, self.height, self.rotation);
 
             let ts = super::unix_ms() as u32;
             let frame = VideoFrame {
-                width: self.width,
-                height: self.height,
+                width: frame_width,
+                height: frame_height,
                 ts_ms: ts,
                 format: PixelFormat::Bgra,
                 planes: FramePlanes::Bgra {
                     bytes: Bytes::from(pixels),
-                    stride: self.width * 4,
+                    stride: frame_width * 4,
                 },
             };
             let damage = DamageMetadata {
                 frame_ts_ms: ts,
                 dirty_regions: dirty,
+                rotation: self.rotation,
             };
 
             Ok((frame, damage))
@@ -391,8 +414,7 @@ mod windows_impl {
                     }
                 }
 
-                let res2: ID3D11Resource =
-                    staging.cast().context("staging → resource (unmap)")?;
+                let res2: ID3D11Resource = staging.cast().context("staging → resource (unmap)")?;
                 self.context.Unmap(&res2, 0);
 
                 Ok(out)
@@ -452,6 +474,20 @@ mod windows_impl {
         }
     }
 
+    fn map_dxgi_rotation(rotation: DXGI_MODE_ROTATION) -> FrameRotation {
+        if rotation == DXGI_MODE_ROTATION_ROTATE90 {
+            FrameRotation::Rotate90
+        } else if rotation == DXGI_MODE_ROTATION_ROTATE180 {
+            FrameRotation::Rotate180
+        } else if rotation == DXGI_MODE_ROTATION_ROTATE270 {
+            FrameRotation::Rotate270
+        } else if rotation == DXGI_MODE_ROTATION_IDENTITY {
+            FrameRotation::Identity
+        } else {
+            FrameRotation::Identity
+        }
+    }
+
     // ── D3D11 / DXGI initialisation ───────────────────────────────────────────
 
     /// Enumerate DXGI adapters and outputs to find the output at `monitor_index`
@@ -469,10 +505,10 @@ mod windows_impl {
         IDXGIOutputDuplication,
         u32,
         u32,
+        FrameRotation,
     )> {
         unsafe {
-            let factory: IDXGIFactory1 =
-                CreateDXGIFactory1().context("CreateDXGIFactory1")?;
+            let factory: IDXGIFactory1 = CreateDXGIFactory1().context("CreateDXGIFactory1")?;
 
             let mut global_output_count = 0usize;
             let mut adapter_idx = 0u32;
@@ -529,8 +565,9 @@ mod windows_impl {
                         let desc = dup.GetDesc();
                         let width = desc.ModeDesc.Width;
                         let height = desc.ModeDesc.Height;
+                        let rotation = map_dxgi_rotation(desc.Rotation);
 
-                        return Ok((device, context, dup, width, height));
+                        return Ok((device, context, dup, width, height, rotation));
                     }
 
                     output_idx += 1;
@@ -591,11 +628,7 @@ mod windows_impl {
         }
     }
 
-    unsafe fn gdi_bitblt_to_pixels(
-        src: HDC,
-        width: u32,
-        height: u32,
-    ) -> anyhow::Result<Vec<u8>> {
+    unsafe fn gdi_bitblt_to_pixels(src: HDC, width: u32, height: u32) -> anyhow::Result<Vec<u8>> {
         let mem_dc = CreateCompatibleDC(Some(src));
         let bmp: HBITMAP = CreateCompatibleBitmap(src, width as i32, height as i32);
         let old: HGDIOBJ = SelectObject(mem_dc, bmp.into());
@@ -660,6 +693,7 @@ mod windows_impl {
         DamageMetadata {
             frame_ts_ms: ts_ms,
             dirty_regions: vec![full_region(width, height)],
+            rotation: FrameRotation::Identity,
         }
     }
 
@@ -675,11 +709,9 @@ mod windows_impl {
     /// Parse "screen-1", "screen-2", … into a 1-based monitor index.
     pub(super) fn parse_screen_id(id: &str) -> anyhow::Result<usize> {
         let s = id.strip_prefix("screen-").unwrap_or(id);
-        let n: usize = s
-            .parse()
-            .ok()
-            .filter(|&n| n >= 1)
-            .ok_or_else(|| anyhow!("invalid Windows display id: {id:?} (expected \"screen-N\" where N ≥ 1)"))?;
+        let n: usize = s.parse().ok().filter(|&n| n >= 1).ok_or_else(|| {
+            anyhow!("invalid Windows display id: {id:?} (expected \"screen-N\" where N ≥ 1)")
+        })?;
         Ok(n)
     }
 
@@ -710,6 +742,96 @@ pub(crate) fn unix_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+fn rotate_bgra_frame(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    rotation: FrameRotation,
+) -> (Vec<u8>, u32, u32) {
+    let src_w = width as usize;
+    let src_h = height as usize;
+    let src_stride = src_w * 4;
+
+    match rotation {
+        FrameRotation::Identity => (pixels.to_vec(), width, height),
+        FrameRotation::Rotate180 => {
+            let mut out = vec![0u8; pixels.len()];
+            for y in 0..src_h {
+                for x in 0..src_w {
+                    let src_idx = (y * src_w + x) * 4;
+                    let dst_x = src_w - 1 - x;
+                    let dst_y = src_h - 1 - y;
+                    let dst_idx = (dst_y * src_w + dst_x) * 4;
+                    out[dst_idx..dst_idx + 4].copy_from_slice(&pixels[src_idx..src_idx + 4]);
+                }
+            }
+            (out, width, height)
+        }
+        FrameRotation::Rotate90 => {
+            let dst_w = src_h;
+            let dst_h = src_w;
+            let mut out = vec![0u8; dst_w * dst_h * 4];
+            for y in 0..src_h {
+                for x in 0..src_w {
+                    let src_idx = y * src_stride + x * 4;
+                    let dst_x = src_h - 1 - y;
+                    let dst_y = x;
+                    let dst_idx = (dst_y * dst_w + dst_x) * 4;
+                    out[dst_idx..dst_idx + 4].copy_from_slice(&pixels[src_idx..src_idx + 4]);
+                }
+            }
+            (out, height, width)
+        }
+        FrameRotation::Rotate270 => {
+            let dst_w = src_h;
+            let dst_h = src_w;
+            let mut out = vec![0u8; dst_w * dst_h * 4];
+            for y in 0..src_h {
+                for x in 0..src_w {
+                    let src_idx = y * src_stride + x * 4;
+                    let dst_x = y;
+                    let dst_y = src_w - 1 - x;
+                    let dst_idx = (dst_y * dst_w + dst_x) * 4;
+                    out[dst_idx..dst_idx + 4].copy_from_slice(&pixels[src_idx..src_idx + 4]);
+                }
+            }
+            (out, height, width)
+        }
+    }
+}
+
+fn rotate_dirty_regions(
+    regions: &[DirtyRegion],
+    width: u32,
+    height: u32,
+    rotation: FrameRotation,
+) -> Vec<DirtyRegion> {
+    regions
+        .iter()
+        .map(|r| match rotation {
+            FrameRotation::Identity => r.clone(),
+            FrameRotation::Rotate180 => DirtyRegion {
+                left: width.saturating_sub(r.right),
+                top: height.saturating_sub(r.bottom),
+                right: width.saturating_sub(r.left),
+                bottom: height.saturating_sub(r.top),
+            },
+            FrameRotation::Rotate90 => DirtyRegion {
+                left: height.saturating_sub(r.bottom),
+                top: r.left,
+                right: height.saturating_sub(r.top),
+                bottom: r.right,
+            },
+            FrameRotation::Rotate270 => DirtyRegion {
+                left: r.top,
+                top: width.saturating_sub(r.right),
+                right: r.bottom,
+                bottom: width.saturating_sub(r.left),
+            },
+        })
+        .collect()
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -767,6 +889,46 @@ mod tests {
         assert!(parse_hwnd("notanumber").is_err());
     }
 
+    fn px(v: u8) -> [u8; 4] {
+        [v, v, v, v]
+    }
+
+    #[test]
+    fn rotates_bgra_frame_90_degrees() {
+        let pixels = [px(1), px(2), px(3), px(4), px(5), px(6)].concat();
+
+        let (rotated, w, h) =
+            super::rotate_bgra_frame(&pixels, 2, 3, super::FrameRotation::Rotate90);
+
+        let expected = [px(5), px(3), px(1), px(6), px(4), px(2)].concat();
+        assert_eq!((w, h), (3, 2));
+        assert_eq!(rotated, expected);
+    }
+
+    #[test]
+    fn rotates_bgra_frame_180_degrees() {
+        let pixels = [px(1), px(2), px(3), px(4), px(5), px(6)].concat();
+
+        let (rotated, w, h) =
+            super::rotate_bgra_frame(&pixels, 2, 3, super::FrameRotation::Rotate180);
+
+        let expected = [px(6), px(5), px(4), px(3), px(2), px(1)].concat();
+        assert_eq!((w, h), (2, 3));
+        assert_eq!(rotated, expected);
+    }
+
+    #[test]
+    fn rotates_bgra_frame_270_degrees() {
+        let pixels = [px(1), px(2), px(3), px(4), px(5), px(6)].concat();
+
+        let (rotated, w, h) =
+            super::rotate_bgra_frame(&pixels, 2, 3, super::FrameRotation::Rotate270);
+
+        let expected = [px(2), px(4), px(6), px(1), px(3), px(5)].concat();
+        assert_eq!((w, h), (3, 2));
+        assert_eq!(rotated, expected);
+    }
+
     // Dirty-region metadata: a full-frame DirtyRegion covers the whole output.
     #[test]
     fn full_frame_dirty_region_covers_output() {
@@ -778,6 +940,7 @@ mod tests {
                 right: 1920,
                 bottom: 1080,
             }],
+            rotation: super::FrameRotation::Identity,
         };
         let r = &damage.dirty_regions[0];
         assert_eq!(r.right - r.left, 1920);
@@ -796,6 +959,3 @@ mod tests {
 //   dirty_regions. This gives complete damage coverage for compositors that
 //   skip re-encoding unchanged regions.
 //
-// TODO(optional): Surface DXGI_OUTDUPL_DESC.Rotation so the pipeline can
-//   rotate the frame back to upright rather than capturing a rotated image on
-//   portrait-mode or rotated displays.
