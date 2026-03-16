@@ -4,7 +4,7 @@ version = "0.1.6"
 edition = "2021"
 
 [features]
-default = ["dsp", "aec"]
+default = ["dsp", "aec", "screen-share"]
 dsp = []
 aec = ["dsp", "dep:sonora-aec3"]
 screen-share = ["video-vp9", "video-av1-decode", "video-av1-software"]

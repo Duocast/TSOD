@@ -152,7 +152,8 @@ fn default_caps(alpn: &str) -> pb::ClientCaps {
             _ => unreachable!("policy codecs only include VP9/AV1"),
         })
         .collect::<Vec<_>>();
-    let supports_screen_share = cfg!(feature = "screen-share") && !screen_video_codecs.is_empty();
+    let supports_screen_share =
+        crate::net::dispatcher::screen_share_supported_for_runtime(&runtime_caps);
 
     pb::ClientCaps {
         build: Some(pb::BuildInfo {

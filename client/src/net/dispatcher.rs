@@ -1245,13 +1245,17 @@ fn now_ts() -> pb::Timestamp {
 /// decode.  Only `Initialized`-level codecs are included — this list is
 /// safe to show in the UI and advertise to the server.
 pub fn available_screen_share_codecs() -> Vec<&'static str> {
-    let caps = measured_media_caps();
-    let policy_codecs = [pb::VideoCodec::Vp9, pb::VideoCodec::Av1];
-    policy_codecs
+    screen_share_codecs_for(&measured_media_caps().runtime_caps)
+}
+
+fn screen_share_codecs_for(caps: &MediaRuntimeCaps) -> Vec<&'static str> {
+    if !screen_share_support_for(caps) {
+        return Vec::new();
+    }
+    [pb::VideoCodec::Vp9, pb::VideoCodec::Av1]
         .into_iter()
         .filter(|codec| {
-            caps.runtime_caps.encode_backends.contains_key(codec)
-                && caps.runtime_caps.decode_backends.contains_key(codec)
+            caps.encode_backends.contains_key(codec) && caps.decode_backends.contains_key(codec)
         })
         .map(|codec| match codec {
             pb::VideoCodec::Vp9 => "VP9",
@@ -1259,6 +1263,43 @@ pub fn available_screen_share_codecs() -> Vec<&'static str> {
             _ => unreachable!("policy codecs only include VP9/AV1"),
         })
         .collect()
+}
+
+fn screen_share_support_for(caps: &MediaRuntimeCaps) -> bool {
+    cfg!(feature = "screen-share")
+        && platform_has_capture_backend()
+        && !caps.capture_backends.is_empty()
+        && !screen_share_codecs_for_runtime(caps).is_empty()
+}
+
+pub fn screen_share_supported_for_runtime(caps: &MediaRuntimeCaps) -> bool {
+    screen_share_support_for(caps)
+}
+
+fn screen_share_codecs_for_runtime(caps: &MediaRuntimeCaps) -> Vec<pb::VideoCodec> {
+    [pb::VideoCodec::Vp9, pb::VideoCodec::Av1]
+        .into_iter()
+        .filter(|codec| {
+            caps.encode_backends.contains_key(codec) && caps.decode_backends.contains_key(codec)
+        })
+        .collect()
+}
+
+pub fn screen_share_supported() -> bool {
+    screen_share_support_for(&measured_media_caps().runtime_caps)
+}
+
+pub fn validate_screen_share_capability_consistency() {
+    let advertised = default_caps("screen-share-consistency-check")
+        .features
+        .as_ref()
+        .map(|f| f.supports_screen_share)
+        .unwrap_or(false);
+    let runtime = screen_share_supported();
+    debug_assert_eq!(
+        advertised, runtime,
+        "screen-share capability mismatch: runtime support={runtime} advertised={advertised}"
+    );
 }
 
 pub fn available_screen_share_profiles() -> Vec<&'static str> {
@@ -1311,7 +1352,7 @@ fn default_media_capabilities() -> pb::ClientMediaCapabilities {
 /// During an active share, runtime downshift still applies via
 /// `available_screen_share_profiles()` which checks `runtime_headroom_fps()`.
 pub fn can_offer_1440p60() -> bool {
-        let preflight = preflight_1440p60_eligible();
+    let preflight = preflight_1440p60_eligible();
     if !preflight {
         return false;
     }
@@ -1319,7 +1360,7 @@ pub fn can_offer_1440p60() -> bool {
     let headroom = runtime_headroom_fps();
     headroom == 0.0 || headroom >= 55.0
 }
- 
+
 /// Static + preflight eligibility check (no live runtime dependency).
 pub fn preflight_1440p60_eligible() -> bool {
     let measured = measured_media_caps();
@@ -1504,10 +1545,7 @@ fn default_caps(alpn: &str) -> pb::ClientCaps {
             _ => None,
         })
         .collect();
-    let supports_screen_share = cfg!(feature = "screen-share")
-        && platform_has_capture_backend()
-        && !media_caps.encode.is_empty()
-        && !media_caps.decode.is_empty();
+    let supports_screen_share = screen_share_support_for(&measured.runtime_caps);
 
     pb::ClientCaps {
         build: Some(pb::BuildInfo {
@@ -1557,8 +1595,31 @@ fn default_caps(alpn: &str) -> pb::ClientCaps {
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_push, screen_share_profiles_for, PushEvent};
+    use super::{
+        classify_push, screen_share_codecs_for, screen_share_profiles_for,
+        screen_share_supported_for_runtime, PushEvent,
+    };
     use crate::proto::voiceplatform::v1 as pb;
+    use crate::screen_share::runtime_probe::MediaRuntimeCaps;
+    use std::collections::HashMap;
+
+    fn runtime_caps_with_codecs() -> MediaRuntimeCaps {
+        let mut encode = HashMap::new();
+        encode.insert(pb::VideoCodec::Vp9, vec![]);
+        let mut decode = HashMap::new();
+        decode.insert(pb::VideoCodec::Vp9, vec![]);
+        MediaRuntimeCaps {
+            capture_backends: vec![crate::screen_share::runtime_probe::CaptureBackendKind::Scrap],
+            encode_backends: encode,
+            decode_backends: decode,
+            audio_backends: vec![],
+            supports_system_audio: false,
+            max_simulcast_layers: 1,
+            preferred_codec: pb::VideoCodec::Vp9,
+            supports_1440p60: false,
+            codec_capabilities: vec![],
+        }
+    }
 
     #[test]
     fn screen_share_profiles_runtime_downshift_hides_1440() {
@@ -1592,6 +1653,36 @@ mod tests {
     }
 
     #[test]
+    fn screen_share_disabled_feature_or_runtime_has_no_codecs() {
+        let mut caps = runtime_caps_with_codecs();
+        caps.encode_backends.clear();
+        caps.decode_backends.clear();
+        assert!(!screen_share_supported_for_runtime(&caps));
+        assert!(screen_share_codecs_for(&caps).is_empty());
+
+        let caps = runtime_caps_with_codecs();
+        assert_eq!(
+            screen_share_supported_for_runtime(&caps),
+            cfg!(feature = "screen-share")
+        );
+    }
+
+    #[test]
+    fn screen_share_enabled_runtime_caps_and_codecs_agree() {
+        let caps = runtime_caps_with_codecs();
+        let codecs = screen_share_codecs_for(&caps);
+        assert_eq!(
+            screen_share_supported_for_runtime(&caps),
+            !codecs.is_empty()
+        );
+        if cfg!(feature = "screen-share") {
+            assert_eq!(codecs, vec!["VP9"]);
+        } else {
+            assert!(codecs.is_empty());
+        }
+    }
+
+    #[test]
     fn classify_push_screen_share_started_event() {
         let msg = pb::ServerToClient {
             event_seq: 7,
@@ -1600,9 +1691,15 @@ mod tests {
                     at: None,
                     kind: Some(pb::screen_share_event::Kind::Started(
                         pb::ScreenShareStarted {
-                            stream_id: Some(pb::StreamId { value: "sid-1".into() }),
-                            user_id: Some(pb::UserId { value: "uid-1".into() }),
-                            channel_id: Some(pb::ChannelId { value: "cid-1".into() }),
+                            stream_id: Some(pb::StreamId {
+                                value: "sid-1".into(),
+                            }),
+                            user_id: Some(pb::UserId {
+                                value: "uid-1".into(),
+                            }),
+                            channel_id: Some(pb::ChannelId {
+                                value: "cid-1".into(),
+                            }),
                             codec: pb::VideoCodec::Vp9 as i32,
                             layers: vec![],
                             has_audio: false,
@@ -1612,20 +1709,21 @@ mod tests {
             )),
             ..Default::default()
         };
- 
+
         match classify_push(msg) {
-            PushEvent::ScreenShare { event, event_seq: 7 } => {
-                match event.kind {
-                    Some(pb::screen_share_event::Kind::Started(s)) => {
-                        assert_eq!(s.stream_id.unwrap().value, "sid-1");
-                    }
-                    other => panic!("wrong kind: {:?}", other),
+            PushEvent::ScreenShare {
+                event,
+                event_seq: 7,
+            } => match event.kind {
+                Some(pb::screen_share_event::Kind::Started(s)) => {
+                    assert_eq!(s.stream_id.unwrap().value, "sid-1");
                 }
-            }
+                other => panic!("wrong kind: {:?}", other),
+            },
             other => panic!("wrong PushEvent variant: {:?}", other),
         }
     }
- 
+
     #[test]
     fn classify_push_screen_share_stopped_event() {
         let msg = pb::ServerToClient {
@@ -1633,18 +1731,29 @@ mod tests {
             payload: Some(pb::server_to_client::Payload::ScreenShareEvent(
                 pb::ScreenShareEvent {
                     at: None,
-                    kind: Some(pb::screen_share_event::Kind::Stopped(pb::ScreenShareStopped {
-                        stream_id: Some(pb::StreamId { value: "sid-2".into() }),
-                        user_id: Some(pb::UserId { value: "uid-1".into() }),
-                        channel_id: Some(pb::ChannelId { value: "cid-1".into() }),
-                    })),
+                    kind: Some(pb::screen_share_event::Kind::Stopped(
+                        pb::ScreenShareStopped {
+                            stream_id: Some(pb::StreamId {
+                                value: "sid-2".into(),
+                            }),
+                            user_id: Some(pb::UserId {
+                                value: "uid-1".into(),
+                            }),
+                            channel_id: Some(pb::ChannelId {
+                                value: "cid-1".into(),
+                            }),
+                        },
+                    )),
                 },
             )),
             ..Default::default()
         };
- 
+
         match classify_push(msg) {
-            PushEvent::ScreenShare { event, event_seq: 8 } => {
+            PushEvent::ScreenShare {
+                event,
+                event_seq: 8,
+            } => {
                 assert!(matches!(
                     event.kind,
                     Some(pb::screen_share_event::Kind::Stopped(_))
@@ -1653,7 +1762,7 @@ mod tests {
             other => panic!("wrong variant: {:?}", other),
         }
     }
- 
+
     #[test]
     fn classify_push_screen_share_layer_changed_event() {
         let msg = pb::ServerToClient {
@@ -1663,7 +1772,9 @@ mod tests {
                     at: None,
                     kind: Some(pb::screen_share_event::Kind::LayerChanged(
                         pb::ScreenShareLayerChanged {
-                            stream_id: Some(pb::StreamId { value: "sid-3".into() }),
+                            stream_id: Some(pb::StreamId {
+                                value: "sid-3".into(),
+                            }),
                             active_layer_id: 2,
                         },
                     )),
@@ -1671,16 +1782,17 @@ mod tests {
             )),
             ..Default::default()
         };
- 
+
         match classify_push(msg) {
-            PushEvent::ScreenShare { event, event_seq: 9 } => {
-                match event.kind {
-                    Some(pb::screen_share_event::Kind::LayerChanged(l)) => {
-                        assert_eq!(l.active_layer_id, 2);
-                    }
-                    other => panic!("wrong kind: {:?}", other),
+            PushEvent::ScreenShare {
+                event,
+                event_seq: 9,
+            } => match event.kind {
+                Some(pb::screen_share_event::Kind::LayerChanged(l)) => {
+                    assert_eq!(l.active_layer_id, 2);
                 }
-            }
+                other => panic!("wrong kind: {:?}", other),
+            },
             other => panic!("wrong variant: {:?}", other),
         }
     }

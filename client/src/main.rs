@@ -845,6 +845,8 @@ fn main() -> Result<()> {
         .install_default()
         .expect("Failed to install rustls crypto provider");
 
+    net::dispatcher::validate_screen_share_capability_consistency();
+
     let cfg = Config::load();
 
     // Channels between GUI and backend (crossbeam for sync/async bridging)
@@ -4336,6 +4338,13 @@ async fn connect_and_run_session(
                             }
                             let source = map_share_selection(selection);
                             let probed_caps = screen_share::runtime_probe::probe_media_caps(&source);
+                            if !net::dispatcher::screen_share_supported_for_runtime(&probed_caps) {
+                                let _ = tx_event.send(UiEvent::AppendLog(
+                                    "[video] start share aborted: screen-share is unavailable on this build/runtime".into(),
+                                ));
+                                let _ = tx_event.send(UiEvent::LocalScreenShareStopped);
+                                continue;
+                            }
                             let include_audio = saved_settings.screen_share_capture_audio
                                 && probed_caps.supports_system_audio;
                             if saved_settings.screen_share_capture_audio && !probed_caps.supports_system_audio {
